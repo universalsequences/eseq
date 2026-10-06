@@ -25,7 +25,7 @@ use super::history::{
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
-    BarTransposePatch, GraphNodeProcessChainPatch,
+    BarTransposePatch, GraphNodeProcessChainPatch, GraphOverridePatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -2253,6 +2253,75 @@ impl App {
                 "Edit node process inlet",
                 &merge_key,
                 EditPatch::GraphNodeProcessChain(patch),
+                retained_bytes,
+            )
+            .ok_or(EditError::UnsupportedCommand)?;
+        Ok(EditOutcome::Applied(history_move))
+    }
+
+    /// A host kind setter's graph override edit (kind-bindings spec
+    /// §14.2k): write `after` (one field of graph `manifest`'s overrides, a
+    /// [`crate::graph::GraphOverrideSlot`]) into the current scene's
+    /// overrides and record it. Every edit stages a coalescing gesture keyed
+    /// by the field, as a bar transpose does: the script edit's end finishes
+    /// it at once unless a drag holds it open (`ScriptEdit`), so a drag's
+    /// `set!`s on one field join one entry, which keeps the value from
+    /// before the drag's first (a drag over two fields records two).
+    pub fn apply_graph_override_edit(
+        &mut self,
+        manifest: &crate::graph::GraphManifest,
+        after: crate::graph::GraphOverrideSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let scene = self
+            .state
+            .current_scene_id()
+            .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))?;
+        let merge_key = MergeKey::new(format!("graph:{}:{}", manifest.id, after.address()));
+        let staged_before = self
+            .history
+            .active_gesture_patch(&merge_key)
+            .and_then(|staged| match staged {
+                EditPatch::GraphOverride(staged)
+                    if staged.scene == scene && staged.sequencer_id == manifest.id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            });
+        let current = self
+            .state
+            .edit_current_graph_overrides(|graphs| {
+                let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
+                let current = graph.slot(&after);
+                graph.set_slot(&after);
+                Ok(current)
+            })
+            .map_err(EditError::ReplayFailed)?;
+        let unchanged = current == after;
+        let before = staged_before.unwrap_or(current);
+        if before == after {
+            // A drag back to where it started: nothing to record.
+            self.history.discard_active_gesture_entry(&merge_key);
+            return Ok(if unchanged {
+                EditOutcome::NoOp
+            } else {
+                EditOutcome::AppliedUnrecorded
+            });
+        }
+        let patch = GraphOverridePatch {
+            scene,
+            sequencer_id: manifest.id,
+            before,
+            after,
+        };
+        let retained_bytes = patch.retained_bytes();
+        ensure_coalescing_gesture(self, &merge_key);
+        let history_move = self
+            .history
+            .stage_active_gesture(
+                "Edit graph",
+                &merge_key,
+                EditPatch::GraphOverride(patch),
                 retained_bytes,
             )
             .ok_or(EditError::UnsupportedCommand)?;
@@ -10253,6 +10322,24 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::GraphOverride(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "graph override replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            crate::lisp_host::restore_graph_override(
+                &app.state,
+                patch.scene,
+                patch.sequencer_id,
+                target,
+            )
+            .map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneSlots(patches) => {
             let writes = patches.iter().map(|patch| {
                 let target = match mode {
@@ -10425,7 +10512,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
-        EditPatch::GraphNodeProcessChain(_) => true,
+        EditPatch::GraphNodeProcessChain(_) | EditPatch::GraphOverride(_) => true,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -10854,6 +10941,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
         EditPatch::BarTranspose(patch) => patch.retained_bytes(),
         EditPatch::GraphNodeProcessChain(patch) => patch.retained_bytes(),
+        EditPatch::GraphOverride(patch) => patch.retained_bytes(),
     }
 }
 
@@ -11006,7 +11094,10 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackPresentation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) | EditPatch::GraphNodeProcessChain(_) => {
+        EditPatch::SceneSlot(_)
+        | EditPatch::SceneSlots(_)
+        | EditPatch::GraphNodeProcessChain(_)
+        | EditPatch::GraphOverride(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {

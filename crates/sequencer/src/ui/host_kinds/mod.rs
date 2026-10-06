@@ -56,7 +56,11 @@
 //! instrument device instance id, index), macro mappings (macro instance
 //! id, position). The piano roll's notes are keyed (track instance id,
 //! note id), an id the host allocates per (step, transpose, offset) while a
-//! note sits there and the note setters move with it (`notes`).
+//! note sits there and the note setters move with it (`notes`). Graph
+//! sequencers are positional, kept by sequencer id (replaced on a project
+//! load), their nodes keyed (graph instance id, node index), edges (node
+//! instance id, target index) and params (node or edge instance id, a key
+//! per param name), the last two lazy (`graphs`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -72,8 +76,9 @@
 //! lanes and display, process mapping, key locks, tensors), `variants`
 //! (p-lock variants), `macros` (project and drum rack macros), `lanes`
 //! (process lanes), `presentation` (the browser, the sound palette, the
-//! editor and the app's views, from `ui::presented`) and `notes` (the piano
-//! roll and its notes) the per-kind syncs.
+//! editor and the app's views, from `ui::presented`), `notes` (the piano
+//! roll and its notes) and `graphs` (graph sequencers, active notes) the
+//! per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -82,6 +87,7 @@ use std::sync::LazyLock;
 
 mod arrangement;
 mod devices;
+mod graphs;
 mod lanes;
 mod live;
 mod macros;
@@ -102,6 +108,7 @@ use self::notes::*;
 pub(crate) use self::notes::{NoteKey, NoteShared, NoteSource};
 use arrangement::SongState;
 use devices::*;
+use graphs::*;
 use lanes::*;
 pub(crate) use live::KindsHandles;
 use live::*;
@@ -184,6 +191,10 @@ pub(crate) const MIDI_DEVICE: &str = "eseq.kinds:midi-device";
 pub(crate) const AGENT: &str = "eseq.kinds:agent";
 pub(crate) const NOTE: &str = "eseq.kinds:note";
 pub(crate) const PIANO_ROLL: &str = "eseq.kinds:piano-roll";
+pub(crate) const GRAPH: &str = "eseq.kinds:graph";
+pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
+pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
+pub(crate) const GRAPH_PARAM: &str = "eseq.kinds:graph-param";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +273,62 @@ pub(crate) mod f {
     pub(crate) const TRACK_PROCESSES: FieldKey = (TRACK, "processes");
     pub(crate) const TRACK_LANES: FieldKey = (TRACK, "lanes");
     pub(crate) const TRACK_INSTRUMENT_ID: FieldKey = (TRACK, "instrument-id");
+    pub(crate) const TRACK_ACTIVE_NOTES: FieldKey = (TRACK, "active-notes");
+
+    pub(crate) const GRAPH_INDEX: FieldKey = (GRAPH, "index");
+    pub(crate) const GRAPH_GID: FieldKey = (GRAPH, "gid");
+    pub(crate) const GRAPH_NAME: FieldKey = (GRAPH, "name");
+    pub(crate) const GRAPH_OWNER: FieldKey = (GRAPH, "owner");
+    pub(crate) const GRAPH_VARIABLE: FieldKey = (GRAPH, "variable");
+    pub(crate) const GRAPH_MIN_NODES: FieldKey = (GRAPH, "min-nodes");
+    pub(crate) const GRAPH_MAX_NODES: FieldKey = (GRAPH, "max-nodes");
+    pub(crate) const GRAPH_NODE_COUNT: FieldKey = (GRAPH, "node-count");
+    pub(crate) const GRAPH_RESET_BARS: FieldKey = (GRAPH, "reset-bars");
+    pub(crate) const GRAPH_MAX_POLY: FieldKey = (GRAPH, "max-poly");
+    pub(crate) const GRAPH_MAX_POLY_SELECTION: FieldKey = (GRAPH, "max-poly-selection");
+    pub(crate) const GRAPH_GROUP_TRACE_DECAY: FieldKey = (GRAPH, "group-trace-decay");
+    pub(crate) const GRAPH_GROUP_COUPLING_SCALE: FieldKey = (GRAPH, "group-coupling-scale");
+    pub(crate) const GRAPH_GROUP_EXCITE_FLOOR: FieldKey = (GRAPH, "group-excite-floor");
+    pub(crate) const GRAPH_GROUP_GAIN: FieldKey = (GRAPH, "group-gain");
+    pub(crate) const GRAPH_GROUP_COUPLING: FieldKey = (GRAPH, "group-coupling");
+    pub(crate) const GRAPH_NODES: FieldKey = (GRAPH, "nodes");
+    pub(crate) const GRAPH_ACTIVE: FieldKey = (GRAPH, "active");
+    pub(crate) const GRAPH_BEAT: FieldKey = (GRAPH, "beat");
+    pub(crate) const GRAPH_ENERGY: FieldKey = (GRAPH, "energy");
+    pub(crate) const GRAPH_TRIGGERS: FieldKey = (GRAPH, "triggers");
+    pub(crate) const GRAPH_DAMPENING: FieldKey = (GRAPH, "dampening");
+
+    pub(crate) const GRAPH_NODE_GRAPH: FieldKey = (GRAPH_NODE, "graph");
+    pub(crate) const GRAPH_NODE_INDEX: FieldKey = (GRAPH_NODE, "index");
+    pub(crate) const GRAPH_NODE_RESOLUTION: FieldKey = (GRAPH_NODE, "resolution");
+    pub(crate) const GRAPH_NODE_RESOLUTION_CYCLE: FieldKey = (GRAPH_NODE, "resolution-cycle");
+    pub(crate) const GRAPH_NODE_QUANTIZE: FieldKey = (GRAPH_NODE, "quantize");
+    pub(crate) const GRAPH_NODE_QUANTIZE_CYCLE: FieldKey = (GRAPH_NODE, "quantize-cycle");
+    pub(crate) const GRAPH_NODE_DELAY: FieldKey = (GRAPH_NODE, "delay");
+    pub(crate) const GRAPH_NODE_ROUTE: FieldKey = (GRAPH_NODE, "route");
+    pub(crate) const GRAPH_NODE_GENERATOR: FieldKey = (GRAPH_NODE, "generator");
+    pub(crate) const GRAPH_NODE_RESTART: FieldKey = (GRAPH_NODE, "restart");
+    pub(crate) const GRAPH_NODE_SEED_ROUTE: FieldKey = (GRAPH_NODE, "seed-route");
+    pub(crate) const GRAPH_NODE_SEEDS: FieldKey = (GRAPH_NODE, "seeds");
+    pub(crate) const GRAPH_NODE_SEED_ON_RESET: FieldKey = (GRAPH_NODE, "seed-on-reset");
+    pub(crate) const GRAPH_NODE_GROUP: FieldKey = (GRAPH_NODE, "group");
+    pub(crate) const GRAPH_NODE_PARAMS: FieldKey = (GRAPH_NODE, "params");
+    pub(crate) const GRAPH_NODE_EDGES: FieldKey = (GRAPH_NODE, "edges");
+    pub(crate) const GRAPH_NODE_SOUNDING: FieldKey = (GRAPH_NODE, "sounding");
+
+    pub(crate) const GRAPH_EDGE_FROM: FieldKey = (GRAPH_EDGE, "from");
+    pub(crate) const GRAPH_EDGE_TO: FieldKey = (GRAPH_EDGE, "to");
+    pub(crate) const GRAPH_EDGE_PARAMS: FieldKey = (GRAPH_EDGE, "params");
+
+    pub(crate) const GRAPH_PARAM_NODE: FieldKey = (GRAPH_PARAM, "node");
+    pub(crate) const GRAPH_PARAM_EDGE: FieldKey = (GRAPH_PARAM, "edge");
+    pub(crate) const GRAPH_PARAM_INDEX: FieldKey = (GRAPH_PARAM, "index");
+    pub(crate) const GRAPH_PARAM_NAME: FieldKey = (GRAPH_PARAM, "name");
+    pub(crate) const GRAPH_PARAM_TYPE: FieldKey = (GRAPH_PARAM, "type");
+    pub(crate) const GRAPH_PARAM_MIN: FieldKey = (GRAPH_PARAM, "min");
+    pub(crate) const GRAPH_PARAM_MAX: FieldKey = (GRAPH_PARAM, "max");
+    pub(crate) const GRAPH_PARAM_DEFAULT: FieldKey = (GRAPH_PARAM, "default");
+    pub(crate) const GRAPH_PARAM_VALUE: FieldKey = (GRAPH_PARAM, "value");
 
     pub(crate) const BROWSER_TRACK: FieldKey = (BROWSER, "track");
     pub(crate) const BROWSER_INSTRUMENT_KIND: FieldKey = (BROWSER, "instrument-kind");
@@ -921,6 +988,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
     pub(crate) const PROJECT_NAME: FieldKey = (PROJECT, "name");
     pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
+    pub(crate) const PROJECT_GRAPHS: FieldKey = (PROJECT, "graphs");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -1631,6 +1699,64 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::NOTE_SELECTED, ":bool", Model),
     (f::NOTE_LABEL, ":string", Model),
     (f::NOTE_HIDDEN, ":bool", Model),
+    // Graph sequencers (`graphs`): the graphs, their nodes and registered
+    // parts when the graph key moved (re-derived per graph only when its
+    // manifest, overrides or rack members changed); edges and params
+    // registered on the first read of `n.edges`, `n.params`, `e.params`;
+    // playback, a node's sounding notes and a track's active notes live.
+    (f::TRACK_ACTIVE_NOTES, "(list-of (list-of :number))", Live),
+    (f::PROJECT_GRAPHS, "(list-of graph)", Model),
+    (f::GRAPH_INDEX, ":int", Model),
+    (f::GRAPH_GID, ":int", Model),
+    (f::GRAPH_NAME, ":string", Model),
+    (f::GRAPH_OWNER, "group", Model),
+    (f::GRAPH_VARIABLE, ":bool", Model),
+    (f::GRAPH_MIN_NODES, ":int", Model),
+    (f::GRAPH_MAX_NODES, ":int", Model),
+    (f::GRAPH_NODE_COUNT, ":int", Model),
+    (f::GRAPH_RESET_BARS, ":number", Model),
+    (f::GRAPH_MAX_POLY, ":int", Model),
+    (f::GRAPH_MAX_POLY_SELECTION, ":string", Model),
+    (f::GRAPH_GROUP_TRACE_DECAY, ":number", Model),
+    (f::GRAPH_GROUP_COUPLING_SCALE, ":number", Model),
+    (f::GRAPH_GROUP_EXCITE_FLOOR, ":number", Model),
+    (f::GRAPH_GROUP_GAIN, "(list-of :number)", Model),
+    (f::GRAPH_GROUP_COUPLING, "(list-of :number)", Model),
+    (f::GRAPH_NODES, "(list-of graph-node)", Model),
+    (f::GRAPH_ACTIVE, ":bool", Live),
+    (f::GRAPH_BEAT, ":number", Live),
+    (f::GRAPH_ENERGY, "(list-of :number)", Live),
+    (f::GRAPH_TRIGGERS, "(list-of :number)", Live),
+    (f::GRAPH_DAMPENING, "(list-of (list-of :number))", Live),
+    (f::GRAPH_NODE_GRAPH, "graph", Model),
+    (f::GRAPH_NODE_INDEX, ":int", Model),
+    (f::GRAPH_NODE_RESOLUTION, ":string", Model),
+    (f::GRAPH_NODE_RESOLUTION_CYCLE, "(list-of :string)", Model),
+    (f::GRAPH_NODE_QUANTIZE, ":string", Model),
+    (f::GRAPH_NODE_QUANTIZE_CYCLE, "(list-of :string)", Model),
+    (f::GRAPH_NODE_DELAY, ":int", Model),
+    (f::GRAPH_NODE_ROUTE, "track", Model),
+    (f::GRAPH_NODE_GENERATOR, ":int", Model),
+    (f::GRAPH_NODE_RESTART, ":bool", Model),
+    (f::GRAPH_NODE_SEED_ROUTE, ":bool", Model),
+    (f::GRAPH_NODE_SEEDS, "(list-of track)", Model),
+    (f::GRAPH_NODE_SEED_ON_RESET, ":number", Model),
+    (f::GRAPH_NODE_GROUP, ":int", Model),
+    (f::GRAPH_NODE_PARAMS, "(list-of graph-param)", Model),
+    (f::GRAPH_NODE_EDGES, "(list-of graph-edge)", Model),
+    (f::GRAPH_NODE_SOUNDING, "(list-of (list-of :number))", Live),
+    (f::GRAPH_EDGE_FROM, "graph-node", Model),
+    (f::GRAPH_EDGE_TO, "graph-node", Model),
+    (f::GRAPH_EDGE_PARAMS, "(list-of graph-param)", Model),
+    (f::GRAPH_PARAM_NODE, "graph-node", Model),
+    (f::GRAPH_PARAM_EDGE, "graph-edge", Model),
+    (f::GRAPH_PARAM_INDEX, ":int", Model),
+    (f::GRAPH_PARAM_NAME, ":string", Model),
+    (f::GRAPH_PARAM_TYPE, ":string", Model),
+    (f::GRAPH_PARAM_MIN, ":number", Model),
+    (f::GRAPH_PARAM_MAX, ":number", Model),
+    (f::GRAPH_PARAM_DEFAULT, ":number", Model),
+    (f::GRAPH_PARAM_VALUE, ":number", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -1712,6 +1838,9 @@ pub(super) static BROWSER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFiel
 pub(super) static RETRO_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(RETRO));
 pub(super) static PIANO_ROLL_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(PIANO_ROLL));
+pub(super) static GRAPH_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(GRAPH));
+pub(super) static GRAPH_NODE_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(GRAPH_NODE));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -2044,6 +2173,8 @@ pub(crate) struct HostKinds {
     pub(crate) presented: PresentedState,
     /// The piano roll's focus and notes.
     pub(crate) piano_roll: PianoRollState,
+    /// Graph sequencers: graphs, nodes, edges, params; active notes.
+    pub(crate) graphs: GraphState,
 }
 
 impl HostKinds {
@@ -2121,6 +2252,7 @@ impl HostKinds {
             self.lanes.invalidate(&self.shared);
             self.presented.invalidate();
             self.piano_roll.invalidate();
+            self.graphs.invalidate(&self.shared);
         }
         if self
             .song
@@ -2133,6 +2265,10 @@ impl HostKinds {
         if (self.racks.representatives()).any(|id| !rt.instance_is_live(*id)) {
             // A hot reload dropped drum rack instances.
             self.racks.invalidate();
+        }
+        if (self.graphs.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
+            // A hot reload dropped graph instances.
+            self.graphs.invalidate(&self.shared);
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -2206,6 +2342,7 @@ impl HostKinds {
         self.sync_song_pushed(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
         self.sync_piano_roll(&mut pusher, app);
+        self.sync_graph_model(&mut pusher, app);
         self.sync_presented(&mut pusher, app, &variant_tint);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
@@ -2224,6 +2361,7 @@ impl HostKinds {
         self.sync_group_live(&mut pusher);
         self.sync_cell_live(&mut pusher);
         self.sync_rack_live(&mut pusher);
+        self.sync_graph_live(&mut pusher);
         let singletons = [
             (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
@@ -2306,7 +2444,8 @@ impl HostKinds {
             .chain(self.routes.drain())
             .chain(self.racks.pool.drain())
             .chain(self.macros.drain())
-            .chain(self.lanes.drain());
+            .chain(self.lanes.drain())
+            .chain(self.graphs.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;

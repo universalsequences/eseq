@@ -28,6 +28,18 @@ impl SequencerState {
         self.graph_visualizations.lock().unwrap().clone()
     }
 
+    /// Read graph `id`'s visualization snapshot in place (`None` before the
+    /// scheduler ran the graph), without copying it: the host kinds' live
+    /// graph fields read it every tick while observed.
+    pub fn with_graph_visualization<R>(
+        &self,
+        id: u64,
+        read: impl FnOnce(Option<&GraphVisualizationSnapshot>) -> R,
+    ) -> R {
+        let snapshots = self.graph_visualizations.lock().unwrap();
+        read(snapshots.iter().find(|snapshot| snapshot.id == id))
+    }
+
     /// Per published graph: its id and, per node, the `(note, velocity)`
     /// pairs whose gate is open at audio-clock `sample`, oldest first. Reads only the sounding
     /// windows, so it is cheap enough to poll every UI tick.
@@ -252,6 +264,15 @@ impl SequencerState {
     }
 
     pub fn active_note_activity(&self, track: usize) -> Vec<ActiveNoteActivity> {
+        let mut notes = Vec::new();
+        self.active_note_activity_into(track, &mut notes);
+        notes
+    }
+
+    /// [`Self::active_note_activity`] into `out` (cleared first), so a
+    /// caller polling every tick reuses one buffer.
+    pub fn active_note_activity_into(&self, track: usize, out: &mut Vec<ActiveNoteActivity>) {
+        out.clear();
         let (
             Some(until),
             Some(scheduled_velocities),
@@ -263,30 +284,28 @@ impl SequencerState {
             self.live_note_velocity_bits.get(track),
             self.active_note_trigger_ids.get(track),
         ) else {
-            return Vec::new();
+            return;
         };
         let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
-        (0_u8..=127)
-            .filter_map(|note| {
-                let idx = note as usize;
-                let scheduled_active = until[idx].load(Ordering::Acquire) > rendered;
-                let live_velocity =
-                    f32::from_bits(live_velocities[idx].load(Ordering::Acquire)).clamp(0.0, 1.0);
-                if live_velocity <= 0.0 && !scheduled_active {
-                    return None;
-                }
-                let scheduled_velocity = if scheduled_active {
-                    f32::from_bits(scheduled_velocities[idx].load(Ordering::Relaxed))
-                } else {
-                    0.0
-                };
-                Some(ActiveNoteActivity {
-                    note,
-                    velocity: scheduled_velocity.max(live_velocity).clamp(0.0, 1.0),
-                    trigger_id: trigger_ids[idx].load(Ordering::Acquire),
-                })
+        out.extend((0_u8..=127).filter_map(|note| {
+            let idx = note as usize;
+            let scheduled_active = until[idx].load(Ordering::Acquire) > rendered;
+            let live_velocity =
+                f32::from_bits(live_velocities[idx].load(Ordering::Acquire)).clamp(0.0, 1.0);
+            if live_velocity <= 0.0 && !scheduled_active {
+                return None;
+            }
+            let scheduled_velocity = if scheduled_active {
+                f32::from_bits(scheduled_velocities[idx].load(Ordering::Relaxed))
+            } else {
+                0.0
+            };
+            Some(ActiveNoteActivity {
+                note,
+                velocity: scheduled_velocity.max(live_velocity).clamp(0.0, 1.0),
+                trigger_id: trigger_ids[idx].load(Ordering::Acquire),
             })
-            .collect()
+        }));
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {

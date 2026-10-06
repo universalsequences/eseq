@@ -33,6 +33,19 @@ pub enum NeuralMaxPolySelection {
 }
 
 impl NeuralMaxPolySelection {
+    /// Every policy, in the order the graph panels list them (`as_str`
+    /// names them; `graph-max-poly-selection-options` in `eseq.kinds`).
+    pub const ALL: [Self; 8] = [
+        Self::Deterministic,
+        Self::Propagation,
+        Self::Random,
+        Self::Markov,
+        Self::Loudest,
+        Self::LowestTranspose,
+        Self::HighestTranspose,
+        Self::SeedFirst,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Deterministic => "deterministic",

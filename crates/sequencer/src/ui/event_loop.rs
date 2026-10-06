@@ -81,14 +81,16 @@ pub(super) fn patch_is_only_scene_slots(patch: &app::history::EditPatch) -> bool
 
 /// True when replaying the entry needs no full topology/`ui_epoch` refresh:
 /// scene-slot writes repaint through their targeted invalidation, and node
-/// process-chain edits (eseq-waa9.23) republish the scheduler snapshot, whose
-/// version moves the tick's tracked graph-read sweep, which re-runs exactly
-/// the node bay / *processes* readers of that chain.
+/// process-chain edits (eseq-waa9.23) and graph override edits (host kind
+/// setters) republish the scheduler snapshot, whose version moves the tick's
+/// tracked graph-read sweep, which re-runs exactly the readers of what moved
+/// (the host kinds follow the scenes revision).
 pub(super) fn patch_replays_with_targeted_refresh(patch: &app::history::EditPatch) -> bool {
     match patch {
         app::history::EditPatch::SceneSlot(_)
         | app::history::EditPatch::SceneSlots(_)
-        | app::history::EditPatch::GraphNodeProcessChain(_) => true,
+        | app::history::EditPatch::GraphNodeProcessChain(_)
+        | app::history::EditPatch::GraphOverride(_) => true,
         app::history::EditPatch::Composite(patches) => {
             !patches.is_empty() && patches.iter().all(patch_replays_with_targeted_refresh)
         }

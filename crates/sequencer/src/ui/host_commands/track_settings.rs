@@ -525,19 +525,13 @@ fn set_bar_transpose(
     let bar = bar.integer(0, sequencer::sequencer::BARS_PER_PATTERN - 1)?;
     let limit = f64::from(sequencer::sequencer::BAR_TRANSPOSE_LIMIT);
     let value = SetValue::of(map, "value", "bar transpose").number(-limit, limit)?;
-    let script = super::ScriptEdit::begin(app, ctx);
-    let outcome = script.apply_with(app, |app| {
+    let changed = super::ScriptEdit::run(app, ctx, true, |app| {
         app::edit::apply_bar_transpose_edit(app, track, bar, value as f32)
-    });
-    let changed = matches!(
-        outcome,
-        Ok(app::edit::EditOutcome::Applied(_) | app::edit::EditOutcome::AppliedUnrecorded)
-    );
+    })?;
     if changed {
         bar_transpose_applied(ctx, track);
     }
-    script.end(app, ctx, true, changed);
-    outcome.map(|_| ()).map_err(|error| format!("{error:?}"))
+    Ok(())
 }
 
 pub(super) fn handle(

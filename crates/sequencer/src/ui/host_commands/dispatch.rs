@@ -29,6 +29,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::scene_banks::COMMANDS.contains(&n) => super::scene_banks::handle(name, payload, app, editor, ctx),
         n if super::scene_slots::COMMANDS.contains(&n) => super::scene_slots::handle(name, payload, app, editor, ctx),
         n if super::graph_node_processes::COMMANDS.contains(&n) => super::graph_node_processes::handle(name, payload, app, editor, ctx),
+        n if super::graphs::COMMANDS.contains(&n) => super::graphs::handle(name, payload, app, editor, ctx),
         n if super::song::COMMANDS.contains(&n) => super::song::handle(name, payload, app, editor, ctx),
         n if super::arrangement::COMMANDS.contains(&n) => super::arrangement::handle(name, payload, app, editor, ctx),
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),

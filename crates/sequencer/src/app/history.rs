@@ -67,6 +67,7 @@ pub enum EditPatch {
     TransportParams(TransportParamsPatch),
     BarTranspose(BarTransposePatch),
     GraphNodeProcessChain(GraphNodeProcessChainPatch),
+    GraphOverride(GraphOverridePatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -222,6 +223,25 @@ impl GraphNodeProcessChainPatch {
             })
         }
         std::mem::size_of::<Self>() + chain_bytes(&self.before) + chain_bytes(&self.after)
+    }
+}
+
+/// One graph override field (a node intrinsic, a node or edge param, a
+/// sequencer-level config field or a group matrix cell) before and after a
+/// host kind setter's edit (kind-bindings spec §14.2k). Replay writes the
+/// recorded value back into the scene the edit was made in and leaves every
+/// other field of the graph alone (a node's process chain included).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphOverridePatch {
+    pub scene: SceneId,
+    pub sequencer_id: u64,
+    pub before: crate::graph::GraphOverrideSlot,
+    pub after: crate::graph::GraphOverrideSlot,
+}
+
+impl GraphOverridePatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
     }
 }
 

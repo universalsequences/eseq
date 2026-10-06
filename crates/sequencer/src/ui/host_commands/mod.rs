@@ -11,6 +11,7 @@ mod effects;
 pub(crate) mod export;
 mod file_menu;
 pub(crate) mod graph_node_processes;
+mod graphs;
 pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};
 mod menu_actions;
 pub(crate) mod instances;
@@ -111,6 +112,26 @@ impl ScriptEdit {
         } else {
             apply(app)
         }
+    }
+
+    /// Begin, apply the history edit `apply` makes and end, as one script
+    /// edit; returns whether the model changed.
+    pub(super) fn run(
+        app: &mut app::App,
+        ctx: &mut crate::LoopCtx<'_>,
+        continuous: bool,
+        apply: impl FnOnce(&mut app::App) -> Result<app::edit::EditOutcome, app::edit::EditError>,
+    ) -> Result<bool, String> {
+        let script = Self::begin(app, ctx);
+        let outcome = script.apply_with(app, apply);
+        let changed = matches!(
+            outcome,
+            Ok(app::edit::EditOutcome::Applied(_) | app::edit::EditOutcome::AppliedUnrecorded)
+        );
+        script.end(app, ctx, continuous, changed);
+        outcome
+            .map(|_| changed)
+            .map_err(|error| format!("{error:?}"))
     }
 
     /// Whether a `continuous` edit (a value a drag moves) joins the

@@ -112,6 +112,7 @@ impl HostKinds {
         let steps_bit = TRACK_LIVE.bit(f::TRACK_STEPS);
         let bars_bit = TRACK_LIVE.bit(f::TRACK_BAR_TRANSPOSES);
         let variants_bit = TRACK_LIVE.bit(f::TRACK_VARIANTS);
+        let notes_bit = TRACK_LIVE.bit(f::TRACK_ACTIVE_NOTES);
         let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN) | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
         let mut peaks_observed = false;
         let mut mod_levels_observed = false;
@@ -122,7 +123,8 @@ impl HostKinds {
             if !pusher.sources.track_exists(track) {
                 continue;
             }
-            let observed = pusher.push_live_except(id, &TRACK_LIVE, bars_bit | variants_bit);
+            let observed =
+                pusher.push_live_except(id, &TRACK_LIVE, bars_bit | variants_bit | notes_bit);
             peaks_observed |= observed & peak_bit != 0;
             mod_levels_observed |= observed & mod_bits != 0;
             if observed & bars_bit != 0 {
@@ -134,6 +136,11 @@ impl HostKinds {
                 self.sync_track_variants(pusher, track, id);
             } else {
                 self.panel.track_variants.remove(&id);
+            }
+            if observed & notes_bit != 0 {
+                self.sync_active_notes(pusher, track, id);
+            } else {
+                self.graphs.active_notes.remove(&id);
             }
             let diff = self.steps.entry(id).or_default();
             sync_steps(

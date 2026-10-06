@@ -723,7 +723,7 @@ pub(super) fn neural_energy_display_value(value: f32) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-pub(super) fn graph_energy_display_value(value: f64) -> f64 {
+pub(crate) fn graph_energy_display_value(value: f64) -> f64 {
     let value = value.clamp(0.0, 4.0);
     (value * 100.0).round() / 100.0
 }
@@ -732,11 +732,11 @@ pub(super) fn graph_weight_display_value(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-pub(super) fn neural_trigger_display_value(value: f32) -> f64 {
+pub(crate) fn neural_trigger_display_value(value: f32) -> f64 {
     value.clamp(0.0, 1.0) as f64
 }
 
-pub(super) fn neural_dampening_display_value(value: f32) -> f64 {
+pub(crate) fn neural_dampening_display_value(value: f32) -> f64 {
     let value = value.clamp(0.0, 1.0) as f64;
     (value * 100.0).round() / 100.0
 }

@@ -305,7 +305,12 @@ pub fn register_graph_authoring_natives(
             let sequencer_name = manifest.name.clone();
             state_for_graph_param.edit_current_graph_overrides(|graphs| {
                 let graph = ensure_graph_overrides(graphs, &manifest);
-                upsert_graph_node_param(graph, &manifest.node.name, instance, &param, value);
+                graph.set_slot(&crate::graph::GraphOverrideSlot::NodeParam {
+                    group: manifest.node.name.clone(),
+                    instance,
+                    param: param.clone(),
+                    value: Some(value),
+                });
                 Ok(())
             })?;
             invalidate_graph_reads(
@@ -344,7 +349,13 @@ pub fn register_graph_authoring_natives(
             let (from, to, group) = (edit.from, edit.to, edit.group.clone());
             state_for_graph_edge.edit_current_graph_overrides(|graphs| {
                 let graph = ensure_graph_overrides(graphs, &manifest);
-                upsert_graph_edge_param(graph, edit);
+                graph.set_slot(&crate::graph::GraphOverrideSlot::EdgeParam {
+                    group: edit.group,
+                    from: edit.from,
+                    to: edit.to,
+                    param: edit.param,
+                    value: Some(edit.value),
+                });
                 Ok(())
             })?;
             invalidate_graph_reads(
@@ -715,7 +726,9 @@ fn graph_key_string(value: &EValue) -> Option<String> {
     }
 }
 
-fn resolved_graph_overrides_for_manifest(
+/// The current scene's overrides of `manifest`'s graph, if any (shared with
+/// the host kinds' `set-graph`).
+pub fn resolved_graph_overrides_for_manifest(
     state: &crate::sequencer::SequencerState,
     manifest: &crate::graph::GraphManifest,
 ) -> Option<crate::graph::ProjectGraphOverrides> {
@@ -723,6 +736,18 @@ fn resolved_graph_overrides_for_manifest(
         .current_graph_overrides()
         .into_iter()
         .find(|overrides| manifest.matches_overrides(overrides))
+}
+
+/// The published graph whose sequencer id `id_matches`, if any.
+pub fn published_graph_manifest(
+    state: &crate::sequencer::SequencerState,
+    id_matches: impl Fn(u64) -> bool,
+) -> Option<crate::graph::GraphManifest> {
+    state
+        .published_sequencers()
+        .into_iter()
+        .filter_map(|published| published.graph)
+        .find(|manifest| id_matches(manifest.id))
 }
 
 fn graph_runtime_config_for_current_pattern(
@@ -1238,14 +1263,6 @@ fn parse_group_cell_index(field: &str, prefix: &str) -> Option<usize> {
     Some(row * k + col)
 }
 
-fn group_matrix_cell(cells: Option<&Vec<f64>>, index: usize, default: f64) -> f64 {
-    cells
-        .and_then(|cells| cells.get(index))
-        .copied()
-        .filter(|value| value.is_finite())
-        .unwrap_or(default)
-}
-
 /// Resolve a sequencer-level config field (override-or-manifest) to a UI value.
 /// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap;
 /// `:max-poly-selection` reports the engine enum name; `:node-count` reports the
@@ -1256,24 +1273,40 @@ fn resolved_graph_config_value(
     field: &str,
 ) -> Result<EValue, String> {
     let overrides = resolved_graph_overrides_for_manifest(state, manifest);
+    // Read the count off the same memoized runtime config that `bind-graph`
+    // range-checks node indices against, so one render can never loop over
+    // more rows than it can bind: a panel that sized itself from a fresh
+    // override read while the memo lagged behind an unpublished edit failed
+    // every row past the memo's node list, and the error flood stalled the
+    // tab.
+    let active = || graph_active_node_count(state, manifest);
+    graph_config_field_value(manifest, overrides.as_ref(), active, field)
+}
+
+/// One sequencer-level config field of `manifest` under `overrides`, as
+/// `graph-config-value` reads it (shared with the host kinds' `graph`):
+/// `active` counts the active nodes (`:node-count`).
+pub fn graph_config_field_value(
+    manifest: &crate::graph::GraphManifest,
+    overrides: Option<&crate::graph::ProjectGraphOverrides>,
+    active: impl FnOnce() -> usize,
+    field: &str,
+) -> Result<EValue, String> {
     match field {
         "reset-bars" | "reset-every-bars" => {
             let beats = overrides
-                .as_ref()
                 .and_then(|o| o.reset_every_beats)
                 .unwrap_or(manifest.reset_every_beats);
             Ok(EValue::Number(beats / GRAPH_BEATS_PER_BAR))
         }
         "max-poly" => {
             let value = overrides
-                .as_ref()
                 .and_then(|o| o.max_poly)
                 .unwrap_or(manifest.max_poly);
             Ok(EValue::Number(value as f64))
         }
         "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => {
             let value = overrides
-                .as_ref()
                 .and_then(|o| o.max_poly_selection)
                 .unwrap_or(manifest.max_poly_selection);
             Ok(EValue::String(value.as_str().to_string()))
@@ -1282,46 +1315,37 @@ fn resolved_graph_config_value(
             if !manifest.shape.is_variable_line() {
                 return Err("graph config :node-count requires a variable line shape".to_string());
             }
-            // Read the count off the same memoized runtime config that
-            // `bind-graph` range-checks node indices against, so one render
-            // can never loop over more rows than it can bind: a panel that
-            // sized itself from a fresh override read while the memo lagged
-            // behind an unpublished edit failed every row past the memo's
-            // node list, and the error flood stalled the tab.
-            Ok(EValue::Number(graph_active_node_count(state, manifest) as f64))
+            Ok(EValue::Number(active() as f64))
         }
         "group-trace-decay" => {
             let value = overrides
-                .as_ref()
                 .and_then(|o| o.group_trace_decay)
                 .unwrap_or(crate::graph::GROUP_TRACE_DECAY_DEFAULT);
             Ok(EValue::Number(value))
         }
         "group-coupling-scale" => {
             let value = overrides
-                .as_ref()
                 .and_then(|o| o.group_coupling_scale)
                 .unwrap_or(crate::graph::GROUP_COUPLING_SCALE_DEFAULT);
             Ok(EValue::Number(value))
         }
         "group-excite-floor" => {
             let value = overrides
-                .as_ref()
                 .and_then(|o| o.group_excite_floor)
                 .unwrap_or(crate::graph::GROUP_EXCITE_FLOOR_DEFAULT);
             Ok(EValue::Number(value))
         }
         other => {
             if let Some(index) = parse_group_cell_index(other, "group-gain-") {
-                return Ok(EValue::Number(group_matrix_cell(
-                    overrides.as_ref().and_then(|o| o.group_gain.as_ref()),
+                return Ok(EValue::Number(crate::graph::group_matrix_cell(
+                    overrides.and_then(|o| o.group_gain.as_ref()),
                     index,
                     crate::graph::GROUP_GAIN_DEFAULT,
                 )));
             }
             if let Some(index) = parse_group_cell_index(other, "group-coupling-") {
-                return Ok(EValue::Number(group_matrix_cell(
-                    overrides.as_ref().and_then(|o| o.group_coupling.as_ref()),
+                return Ok(EValue::Number(crate::graph::group_matrix_cell(
+                    overrides.and_then(|o| o.group_coupling.as_ref()),
                     index,
                     crate::graph::GROUP_COUPLING_DEFAULT,
                 )));
@@ -1374,36 +1398,35 @@ fn set_graph_config_value(
     field: &str,
     value: &EValue,
 ) -> Result<(), String> {
-    enum ConfigEdit {
-        ResetEveryBeats(f64),
-        MaxPoly(u32),
-        MaxPolySelection(NeuralMaxPolySelection),
-        NodeCount(u32),
-        GroupGainCell(usize, f64),
-        GroupCouplingCell(usize, f64),
-        GroupTraceDecay(f64),
-        GroupCouplingScale(f64),
-        GroupExciteFloor(f64),
-    }
-
-    let edit = match field {
+    use crate::graph::{GraphConfigField as Config, GraphOverrideSlot, GroupMatrix};
+    let config = |field| GraphOverrideSlot::ConfigField(field);
+    let cell = |matrix, index, value| GraphOverrideSlot::GroupCell {
+        matrix,
+        index,
+        value: Some(value),
+    };
+    let slot = match field {
         "reset-bars" | "reset-every-bars" => {
             let value = graph_number(value)
                 .ok_or_else(|| "graph config :reset-bars expects a numeric value".to_string())?;
-            ConfigEdit::ResetEveryBeats((value * GRAPH_BEATS_PER_BAR).max(0.0))
+            config(Config::ResetEveryBeats(Some(
+                (value * GRAPH_BEATS_PER_BAR).max(0.0),
+            )))
         }
         "max-poly" => {
             let value = graph_number(value)
                 .ok_or_else(|| "graph config :max-poly expects a numeric value".to_string())?;
-            ConfigEdit::MaxPoly(value.max(0.0).round() as u32)
+            config(Config::MaxPoly(Some(value.max(0.0).round() as u32)))
         }
-        "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => {
-            ConfigEdit::MaxPolySelection(parse_neural_max_poly_selection(value)?)
-        }
+        "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => config(
+            Config::MaxPolySelection(Some(parse_neural_max_poly_selection(value)?)),
+        ),
         "node-count" => {
             let value = graph_number(value)
                 .ok_or_else(|| "graph config :node-count expects a numeric value".to_string())?;
-            ConfigEdit::NodeCount(clamp_graph_node_count(manifest, value)?)
+            config(Config::NodeCount(Some(clamp_graph_node_count(
+                manifest, value,
+            )?)))
         }
         "group-trace-decay" => {
             let value = graph_number(value).ok_or_else(|| {
@@ -1412,7 +1435,7 @@ fn set_graph_config_value(
             if !value.is_finite() {
                 return Err("graph config :group-trace-decay expects a finite value".to_string());
             }
-            ConfigEdit::GroupTraceDecay(value.clamp(0.0, 1.0))
+            config(Config::GroupTraceDecay(Some(value.clamp(0.0, 1.0))))
         }
         "group-coupling-scale" => {
             let value = graph_number(value).ok_or_else(|| {
@@ -1421,9 +1444,9 @@ fn set_graph_config_value(
             if !value.is_finite() {
                 return Err("graph config :group-coupling-scale expects a finite value".to_string());
             }
-            ConfigEdit::GroupCouplingScale(
+            config(Config::GroupCouplingScale(Some(
                 value.clamp(0.0, crate::graph::GROUP_COUPLING_SCALE_MAX),
-            )
+            )))
         }
         "group-excite-floor" => {
             let value = graph_number(value).ok_or_else(|| {
@@ -1432,14 +1455,15 @@ fn set_graph_config_value(
             if !value.is_finite() {
                 return Err("graph config :group-excite-floor expects a finite value".to_string());
             }
-            ConfigEdit::GroupExciteFloor(value.clamp(0.0, 1.0))
+            config(Config::GroupExciteFloor(Some(value.clamp(0.0, 1.0))))
         }
         other => {
             if let Some(index) = parse_group_cell_index(other, "group-gain-") {
                 let value = graph_number(value)
                     .filter(|value| value.is_finite())
                     .ok_or_else(|| "graph config group-gain cell expects a number".to_string())?;
-                ConfigEdit::GroupGainCell(
+                cell(
+                    GroupMatrix::Gain,
                     index,
                     value.clamp(crate::graph::GROUP_GAIN_MIN, crate::graph::GROUP_GAIN_MAX),
                 )
@@ -1449,7 +1473,8 @@ fn set_graph_config_value(
                     .ok_or_else(|| {
                         "graph config group-coupling cell expects a number".to_string()
                     })?;
-                ConfigEdit::GroupCouplingCell(
+                cell(
+                    GroupMatrix::Coupling,
                     index,
                     value.clamp(
                         crate::graph::GROUP_COUPLING_MIN,
@@ -1463,35 +1488,7 @@ fn set_graph_config_value(
     };
 
     state.edit_current_graph_overrides(|graphs| {
-        let graph = ensure_graph_overrides(graphs, manifest);
-        match edit {
-            ConfigEdit::ResetEveryBeats(value) => graph.reset_every_beats = Some(value),
-            ConfigEdit::MaxPoly(value) => graph.max_poly = Some(value),
-            ConfigEdit::MaxPolySelection(value) => graph.max_poly_selection = Some(value),
-            ConfigEdit::NodeCount(value) => graph.node_count = Some(value),
-            ConfigEdit::GroupGainCell(index, value) => {
-                let cells = graph
-                    .group_gain
-                    .get_or_insert_with(|| {
-                        vec![crate::graph::GROUP_GAIN_DEFAULT; crate::graph::NEURAL_GROUP_CELLS]
-                    });
-                cells.resize(crate::graph::NEURAL_GROUP_CELLS, crate::graph::GROUP_GAIN_DEFAULT);
-                cells[index] = value;
-            }
-            ConfigEdit::GroupCouplingCell(index, value) => {
-                let cells = graph.group_coupling.get_or_insert_with(|| {
-                    vec![crate::graph::GROUP_COUPLING_DEFAULT; crate::graph::NEURAL_GROUP_CELLS]
-                });
-                cells.resize(
-                    crate::graph::NEURAL_GROUP_CELLS,
-                    crate::graph::GROUP_COUPLING_DEFAULT,
-                );
-                cells[index] = value;
-            }
-            ConfigEdit::GroupTraceDecay(value) => graph.group_trace_decay = Some(value),
-            ConfigEdit::GroupCouplingScale(value) => graph.group_coupling_scale = Some(value),
-            ConfigEdit::GroupExciteFloor(value) => graph.group_excite_floor = Some(value),
-        }
+        ensure_graph_overrides(graphs, manifest).set_slot(&slot);
         Ok(())
     })
 }
@@ -1533,8 +1530,19 @@ fn resolved_graph_seed_from_route(
     manifest: &crate::graph::GraphManifest,
     instance: usize,
 ) -> bool {
+    let overrides = resolved_graph_overrides_for_manifest(state, manifest);
+    graph_seed_follows_route(manifest, overrides.as_ref(), instance)
+}
+
+/// Whether node `instance` of `manifest` seeds from its route under
+/// `overrides` (shared with the host kinds' `graph-node.seed-route`).
+pub fn graph_seed_follows_route(
+    manifest: &crate::graph::GraphManifest,
+    overrides: Option<&crate::graph::ProjectGraphOverrides>,
+    instance: usize,
+) -> bool {
     let mut seed_from = crate::graph::ProjectGraphSeedFrom::from(&manifest.node.seed_from);
-    if let Some(overrides) = resolved_graph_overrides_for_manifest(state, manifest) {
+    if let Some(overrides) = overrides {
         for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
             intrinsic.group == manifest.node.name && intrinsic.instance == instance
         }) {
@@ -1557,6 +1565,18 @@ fn resolved_graph_node_value(
         .nodes
         .get(instance)
         .ok_or_else(|| "graph-node-value node index out of range".to_string())?;
+    let seed_route = || resolved_graph_seed_from_route(state, manifest, instance);
+    graph_node_intrinsic_value(node, seed_route, field)
+}
+
+/// One intrinsic of a resolved node, as `graph-node-value` reads it (shared
+/// with the host kinds' `graph-node`): `seed_route` says whether the node
+/// seeds from its route (`:seed-route`).
+pub fn graph_node_intrinsic_value(
+    node: &crate::graph::GraphNode,
+    seed_route: impl FnOnce() -> bool,
+    field: &str,
+) -> Result<EValue, String> {
     match field {
         "resolution" | "res" => Ok(graph_timebase_value(node.resolution)),
         // Round-robin cycle serialized as a space-separated mini-notation string, e.g.
@@ -1585,13 +1605,9 @@ fn resolved_graph_node_value(
         )),
         "route" => Ok(graph_route_value(node.route, node.gate_target)),
         "seed-from" => Ok(graph_seed_from_value(node.seed_track_mask)),
-        "seed-route" | "seed-from-route" => Ok(EValue::Number(
-            if resolved_graph_seed_from_route(state, manifest, instance) {
-                1.0
-            } else {
-                0.0
-            },
-        )),
+        "seed-route" | "seed-from-route" => {
+            Ok(EValue::Number(if seed_route() { 1.0 } else { 0.0 }))
+        }
         "seed-on-reset" | "reset-seed" => Ok(EValue::Number(node.seed_on_reset)),
         "group" | "grp" => Ok(EValue::Number(node.neural_group as f64)),
         other => Err(format!("graph-node-value unknown field :{other}")),
@@ -1605,16 +1621,36 @@ fn resolved_graph_param_value(
     param: &str,
 ) -> Result<EValue, String> {
     let config = cached_graph_runtime_config(state, manifest);
-    let params = config
-        .node_params
-        .get(instance)
-        .ok_or_else(|| "graph-param-value node index out of range".to_string())?;
-    params
-        .get(param)
-        .copied()
-        .or_else(|| manifest.node.param_default(param))
+    if config.node_params.get(instance).is_none() {
+        return Err("graph-param-value node index out of range".to_string());
+    }
+    graph_node_param_value(manifest, &config, instance, param)
         .map(EValue::Number)
         .ok_or_else(|| format!("graph-param-value unknown param :{param}"))
+}
+
+/// Node `instance`'s `param` in a resolved config, else the prototype's
+/// default (shared with the host kinds' `graph-param.value`).
+pub fn graph_node_param_value(
+    manifest: &crate::graph::GraphManifest,
+    config: &crate::graph::GraphRuntimeConfig,
+    instance: usize,
+    param: &str,
+) -> Option<f64> {
+    (config.node_params.get(instance))
+        .and_then(|params| params.get(param).copied())
+        .or_else(|| manifest.node.param_default(param))
+}
+
+/// An edge param of a resolved edge (shared with the host kinds'
+/// `graph-param.value`).
+pub fn graph_edge_param_value(edge: &crate::graph::GraphEdge, param: &str) -> Option<f64> {
+    match param {
+        "weight" => Some(edge.weight),
+        "dampening" => Some(edge.dampening),
+        "delay" | "delay-steps" => Some(edge.delay_steps as f64),
+        _ => None,
+    }
 }
 
 fn parse_graph_edge_query(
@@ -1710,22 +1746,20 @@ fn resolved_graph_edge_value(
         .iter()
         .find(|edge| edge.from == query.from && edge.to == query.to)
         .ok_or_else(|| "graph-edge-value edge not found".to_string())?;
-    match query.param.as_str() {
-        "weight" => Ok(EValue::Number(edge.weight)),
-        "dampening" => Ok(EValue::Number(edge.dampening)),
-        "delay" | "delay-steps" => Ok(EValue::Number(edge.delay_steps as f64)),
-        other => Err(format!(
-            "graph-edge-value unknown edge param :{} for group {}",
-            other, query.group
-        )),
-    }
+    graph_edge_param_value(edge, &query.param)
+        .map(EValue::Number)
+        .ok_or_else(|| {
+            format!(
+                "graph-edge-value unknown edge param :{} for group {}",
+                query.param, query.group
+            )
+        })
 }
 
 fn resolve_graph_manifest(
     state: &crate::sequencer::SequencerState,
     reference: &EValue,
 ) -> Result<crate::graph::GraphManifest, String> {
-    let published = state.published_sequencers();
     // An instance value (`self`) is its sequencer id (instance-kinds spec §4).
     let instance_id;
     let reference = match reference {
@@ -1738,15 +1772,13 @@ fn resolve_graph_manifest(
     match reference {
         EValue::Number(id) if id.is_finite() && *id >= 0.0 => {
             let id = *id as u64;
-            published
-                .into_iter()
-                .filter_map(|published| published.graph)
-                .find(|manifest| manifest.id == id)
+            published_graph_manifest(state, |manifest| manifest == id)
                 .ok_or_else(|| "graph sequencer id not found".to_string())
         }
         EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => {
             let name = name.trim_start_matches('@').trim_start_matches(':');
-            let candidates: Vec<crate::graph::GraphManifest> = published
+            let candidates: Vec<crate::graph::GraphManifest> = state
+                .published_sequencers()
                 .into_iter()
                 .filter_map(|published| published.graph)
                 .filter(|manifest| manifest.name == name)
@@ -1787,7 +1819,7 @@ fn graph_overrides_for_manifest<'a>(
     overrides.iter().find(|overrides| manifest.matches_overrides(overrides))
 }
 
-fn ensure_graph_overrides<'a>(
+pub fn ensure_graph_overrides<'a>(
     graphs: &'a mut Vec<crate::graph::ProjectGraphOverrides>,
     manifest: &crate::graph::GraphManifest,
 ) -> &'a mut crate::graph::ProjectGraphOverrides {
@@ -1817,20 +1849,9 @@ fn ensure_graph_node_intrinsic<'a>(
     }
     graph
         .node_intrinsics
-        .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
-            group: group.to_string(),
-            instance,
-            resolution: None,
-            delay_steps: None,
-            quantize: None,
-            route: None,
-            seed_from: None,
-            seed_on_reset: None,
-            duration: None,
-            swing: None,
-            neural_group: None,
-            process_chain: None,
-        });
+        .push(crate::graph::ProjectGraphNodeIntrinsicOverride::empty(
+            group, instance,
+        ));
     graph
         .node_intrinsics
         .last_mut()
@@ -2030,31 +2051,6 @@ fn apply_graph_node_edit(
     }
 }
 
-fn upsert_graph_node_param(
-    graph: &mut crate::graph::ProjectGraphOverrides,
-    group: &str,
-    instance: usize,
-    param: &str,
-    value: f64,
-) {
-    if let Some(existing) = graph
-        .node_params
-        .iter_mut()
-        .find(|entry| entry.group == group && entry.instance == instance && entry.param == param)
-    {
-        existing.value = value;
-        return;
-    }
-    graph
-        .node_params
-        .push(crate::graph::ProjectGraphNodeParamOverride {
-            group: group.to_string(),
-            instance,
-            param: param.to_string(),
-            value,
-        });
-}
-
 fn parse_graph_edge_edit(
     manifest: &crate::graph::GraphManifest,
     args: &[EValue],
@@ -2102,27 +2098,6 @@ fn parse_graph_edge_edit(
         param: param.ok_or_else(|| "graph-edge requires an edge param".to_string())?,
         value: value.ok_or_else(|| "graph-edge requires an edge param value".to_string())?,
     })
-}
-
-fn upsert_graph_edge_param(graph: &mut crate::graph::ProjectGraphOverrides, edit: GraphEdgeEdit) {
-    if let Some(existing) = graph.edge_params.iter_mut().find(|entry| {
-        entry.group == edit.group
-            && entry.from == edit.from
-            && entry.to == edit.to
-            && entry.param == edit.param
-    }) {
-        existing.value = edit.value;
-        return;
-    }
-    graph
-        .edge_params
-        .push(crate::graph::ProjectGraphEdgeParamOverride {
-            group: edit.group,
-            from: edit.from,
-            to: edit.to,
-            param: edit.param,
-            value: edit.value,
-        });
 }
 
 fn graph_manifest_to_value(
@@ -2693,11 +2668,7 @@ pub fn restore_graph_node_process_chain(
     node: usize,
     chain: Option<crate::process::TrackProcessChain>,
 ) -> Result<(), String> {
-    let manifest = state
-        .published_sequencers()
-        .into_iter()
-        .filter_map(|published| published.graph)
-        .find(|manifest| manifest.id == sequencer_id)
+    let manifest = published_graph_manifest(state, |id| id == sequencer_id)
         .ok_or_else(|| format!("graph sequencer {sequencer_id} is not loaded"))?;
     if let Some(chain) = &chain {
         ensure_graph_node_expr_classes(state, chain);
@@ -2714,6 +2685,24 @@ pub fn restore_graph_node_process_chain(
         let graph = ensure_graph_overrides(graphs, &manifest);
         let intrinsic = ensure_graph_node_intrinsic(graph, &manifest.node.name, node);
         intrinsic.process_chain = chain;
+        Ok(())
+    })
+}
+
+/// Undo/redo target of a host kind setter's graph override edit
+/// (`GraphOverridePatch`): put `slot`'s value back into sequencer
+/// `sequencer_id`'s overrides in scene `scene` and republish. Errors when the
+/// sequencer or the scene no longer exists.
+pub fn restore_graph_override(
+    state: &crate::sequencer::SequencerState,
+    scene: crate::sequencer::SceneId,
+    sequencer_id: u64,
+    slot: &crate::graph::GraphOverrideSlot,
+) -> Result<(), String> {
+    let manifest = published_graph_manifest(state, |id| id == sequencer_id)
+        .ok_or_else(|| format!("graph sequencer {sequencer_id} is not loaded"))?;
+    state.edit_scene_graph_overrides(scene, |graphs| {
+        ensure_graph_overrides(graphs, &manifest).set_slot(slot);
         Ok(())
     })
 }

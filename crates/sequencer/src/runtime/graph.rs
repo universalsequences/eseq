@@ -35,6 +35,12 @@ use super::grid_clock::next_grid_boundary;
 use crate::neural::NeuralMaxPolySelection;
 use crate::sequencer::Timebase;
 
+mod override_slot;
+pub use override_slot::{
+    graph_group_cells, group_matrix_cell, GraphConfigField, GraphNodeField, GraphOverrideSlot,
+    GroupMatrix,
+};
+
 /// Reference subdivision used to convert a `Timebase` to beats — only affects
 /// `Timebase::Polyrhythm`. Matches the generator/neural convention so all three
 /// clocks agree.

@@ -1,8 +1,9 @@
 //! Piano keyboard activity display, optionally clickable.
 //!
 //! `:notes-by-track` is a list of note-activity lists, indexed by track. Each
-//! activity is a `{:note n :velocity v}` map; bare MIDI-note numbers remain
-//! accepted as full-velocity shorthand.
+//! activity is a `{:note n :velocity v}` map, or a `(note velocity
+//! trigger-id)` row (the host kinds' `track.active-notes`); bare MIDI-note
+//! numbers remain accepted as full-velocity shorthand.
 //! `:track-colors` is the matching list of DAW colors, and the optional
 //! `:tracks` list selects which sources are visible. `:overlap-mode :split`
 //! renders simultaneous sources as bands; `:loudest` chooses the
@@ -178,6 +179,16 @@ fn note_activity(value: &Value) -> Option<(u8, f32, u64)> {
                 .unwrap_or(0.0)
                 .max(0.0)
                 .round() as u64;
+            Some((note as u8, velocity, trigger_id))
+        }
+        Value::List(row) => {
+            let at = |index: usize| row.get(index).and_then(|cell| value_number(&cell.borrow()));
+            let note = at(0)?.round();
+            if !(0.0..=127.0).contains(&note) {
+                return None;
+            }
+            let velocity = at(1).unwrap_or(1.0).clamp(0.0, 1.0) as f32;
+            let trigger_id = at(2).unwrap_or(0.0).max(0.0).round() as u64;
             Some((note as u8, velocity, trigger_id))
         }
         _ => None,
@@ -805,6 +816,37 @@ mod tests {
         );
         assert_eq!(active[64][0].velocity, 0.8);
         assert_eq!(active[67][0].velocity, 0.3);
+    }
+
+    #[test]
+    fn activity_rows_read_like_activity_maps() {
+        let row = |values: &[f64]| list(values.iter().map(|v| Value::Number(*v)).collect());
+        let mut props = props_with_activity();
+        props.insert(
+            "notes-by-track".to_string(),
+            list(vec![
+                list(vec![row(&[60.0, 0.4, 7.0]), row(&[64.0])]),
+                list(vec![row(&[60.0, 0.9, 8.0]), row(&[200.0, 1.0, 1.0])]),
+            ]),
+        );
+        let active = active_note_sources(&props);
+        assert_eq!(
+            active[60][0],
+            ActiveNoteSource {
+                color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                velocity: 0.4,
+                trigger_id: 7,
+            }
+        );
+        assert_eq!((active[60][1].velocity, active[60][1].trigger_id), (0.9, 8));
+        assert_eq!(
+            active[64][0].velocity, 1.0,
+            "a bare (note) row is full velocity"
+        );
+        assert!(
+            active.iter().map(Vec::len).sum::<usize>() == 3,
+            "an out-of-range note is dropped"
+        );
     }
 
     #[test]

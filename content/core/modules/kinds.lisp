@@ -8,10 +8,13 @@
 ;; tensors, p-lock variants, project and drum rack macros and their mappings,
 ;; process classes, the browser's preset files and rack slots, the open sound
 ;; palette's sounds, the editor's macros and assets, Patch Learn's rows, a MIDI
-;; capture's lanes and notes, MIDI inputs; steps on first read of `t.steps`, params (with their
+;; capture's lanes and notes, MIDI inputs, graph sequencers and their nodes;
+;; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
-;; or `t.lanes`, the piano roll's notes on first read of `piano-roll.notes`),
+;; or `t.lanes`, the piano roll's notes on first read of `piano-roll.notes`, a
+;; graph node's edges and params on first read of `n.edges` / `n.params`, an
+;; edge's params on first read of `e.params`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -51,7 +54,10 @@
         browser sound-palette editor learn retro song-export settings agent
         apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
         learn-method-options learn-refine-mode-options
-        piano-roll add-note! delete-notes! pitch-min pitch-max)
+        piano-roll add-note! delete-notes! pitch-min pitch-max
+        graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
+        set-group-coupling! gate-generator! graph-timebase-options graph-quantize-options
+        graph-max-poly-selection-options)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -282,6 +288,34 @@
 (def set-audio-workers-choice (st v) (host-command "audio-set-workers" (dict :choice v :strict true)))
 (def set-midi-device-enabled (d v)
   (host-command "midi-set-enabled" (dict :id d.device-id :enabled v)))
+
+;; Graph sequencers (spec §14.2k): a graph by its sequencer id (gid; a
+;; created instance's id), a node by its index, an edge by its endpoints, a
+;; param by its node or edge and its name, all resolved when the command
+;; lands (a graph that is gone, or a node past the active count, is an
+;; error). Edits go into the current scene's overrides, one undo entry per
+;; field (undo restores that field alone); a drag's set!s on one field join
+;; one entry. Values (spec §14.2c): labels among their options
+;; (case-insensitive), numbers finite and in range, integers whole; anything
+;; else is an error.
+(def graph-edit (g field v &rest more)
+  (host-command "set-graph" (apply merge (dict :graph-id g.gid :field field :value v) more)))
+(def graph-setter (field) (lambda (g v) (graph-edit g field v)))
+(def graph-node-setter (field)
+  (lambda (n v) (graph-edit n.graph field v :node n.index)))
+;; A node's route: a track of the graph's owner (a rack-owned graph's
+;; member), or nil for off.
+(def set-graph-node-route (n t)
+  (graph-edit n.graph "route" nil :node n.index :track-id (if t t.tid nil)))
+;; The tracks a node listens to (empty: off); setting them stops following
+;; the route.
+(def set-graph-node-seeds (n ts)
+  (graph-edit n.graph "seeds" (map (lambda (t) t.tid) ts) :node n.index))
+(def set-graph-param-value (p v)
+  (if p.node
+    (graph-edit p.node.graph "param" v :node p.node.index :param p.name)
+    (graph-edit p.edge.from.graph "edge-param" v
+      :node p.edge.from.index :to p.edge.to.index :param p.name)))
 
 ;; ── Kinds ──
 
@@ -605,6 +639,97 @@
          (name    :string)
          (values  (list-of :number) :doc "Its history on the process's track, one sample per fire (64 at most); empty before the first")))
 
+;; A param of a graph node or edge: (graph-param-named n "threshold"), (nth
+;; e.params 0). Keyed by its owner and its name: a re-evaluated prototype
+;; that reorders its :params keeps each handle on its param, and one that
+;; renames or drops a param leaves that handle stale (never another param's).
+;; Registered on the first read of n.params / e.params.
+(def-kind graph-param
+  :key ((graph-node graph-edge) pname)
+  :host ((node    graph-node :doc "The node whose param it is; nil for an edge's")
+         (edge    graph-edge :doc "The edge whose param it is; nil for a node's")
+         (index   :int    :doc "Position in its owner's params, from 0")
+         (name    :string)
+         (type    :string :doc "float or int")
+         (min     :number)
+         (max     :number)
+         (default :number :doc "The prototype's default")
+         (value   :number :set set-graph-param-value
+                  :doc "The current scene's value (a finite number in min to max; an int param an integer)")))
+
+;; One edge of a graph, from its node: (nth n.edges 2), (graph-edge-to n m).
+;; Keyed by its source node and its target's index; registered on the first
+;; read of n.edges.
+(def-kind graph-edge
+  :key (graph-node index)
+  :host ((from    graph-node :doc "The node it leaves")
+         (to      graph-node :doc "The node it reaches")
+         (params  (list-of graph-param) :doc "The edge set's params (weight, dampening, …)")))
+
+;; One node of a graph: (nth g.nodes 3). Positional (the model's nodes are
+;; numbered): a node-count change adds or drops the last ones.
+(def-kind graph-node
+  :key (graph index)
+  :host ((graph      graph   :doc "The graph it belongs to")
+         (index      :int    :doc "Node index, from 0")
+         (resolution :string :set (graph-node-setter "resolution")
+                     :doc "Its step resolution (the first of its cycle), one of graph-timebase-options")
+         (resolution-cycle (list-of :string) :set (graph-node-setter "resolution-cycle")
+                     :doc "Its round-robin resolutions, one per fire (graph-timebase-options)")
+         (quantize   :string :set (graph-node-setter "quantize")
+                     :doc "Its quantize grid (the first of its cycle), one of graph-quantize-options")
+         (quantize-cycle (list-of :string) :set (graph-node-setter "quantize-cycle")
+                     :doc "Its round-robin quantize grids, one per fire; (off) for none")
+         (delay      :int    :set (graph-node-setter "delay") :doc "Propagation delay in steps (0 or more)")
+         (route      track   :set set-graph-node-route
+                     :doc "The track it plays (a rack-owned graph's member track); nil while off or gating a generator")
+         (generator  :int    :doc "The generator (a jaki instance id) its fires gate or restart, -1 for none (gate-generator!)")
+         (restart    :bool   :doc "Its fires restart the generator rather than gate it")
+         (seed-route :bool   :set (graph-node-setter "seed-route")
+                     :doc "Seeded by its route track (false: by seeds only)")
+         (seeds      (list-of track) :set set-graph-node-seeds
+                     :doc "The tracks that seed it (its route track while seed-route); setting them stops following the route")
+         (seed-on-reset :number :set (graph-node-setter "seed-on-reset")
+                     :doc "Energy it starts with at a reset boundary (0 or more)")
+         (group      :int    :range (0 3) :set (graph-node-setter "group")
+                     :doc "Its neural group, 0-3 (A-D)")
+         (params     (list-of graph-param) :doc "Its behavioral params, in prototype order")
+         (edges      (list-of graph-edge) :doc "Its outgoing edges, by target index")
+         (sounding   (list-of (list-of :number))
+                     :doc "The notes it sounds now, (note velocity) per open gate, oldest first; empty while stopped")))
+
+;; A graph-mode sequencer: a created kind's instance (neural, …) or a
+;; script's def-sequencer. (graph-of self) is an instance's.
+(def-kind graph
+  :key (index)
+  :host ((index      :int    :doc "Position in project.graphs")
+         (gid        :int    :doc "Its sequencer id: the created instance's id (self.id) for an instance's graph")
+         (name       :string)
+         (owner      group   :doc "The drum rack that owns it (its routes are the rack's members), or nil")
+         (variable   :bool   :doc "Its node count can change")
+         (min-nodes  :int)
+         (max-nodes  :int    :doc "Its capacity")
+         (node-count :int    :set (graph-setter "node-count")
+                     :doc "Active nodes (min-nodes to max-nodes; a variable graph's only)")
+         (reset-bars :number :set (graph-setter "reset-bars") :doc "Reset period in bars, 0 for none")
+         (max-poly   :int    :set (graph-setter "max-poly") :doc "Fires kept per boundary (0 or more)")
+         (max-poly-selection :string :set (graph-setter "max-poly-selection")
+                     :doc "Which fires survive past max-poly, one of graph-max-poly-selection-options")
+         (group-trace-decay :number :range (0 1) :set (graph-setter "group-trace-decay"))
+         (group-coupling-scale :number :range (0 2) :set (graph-setter "group-coupling-scale"))
+         (group-excite-floor :number :range (0 1) :set (graph-setter "group-excite-floor"))
+         (group-gain (list-of :number)
+                     :doc "Propagation gain between neural groups, 4x4 row-major: cell (+ (* row 4) col), source row, target column; 0-2; set-group-gain!")
+         (group-coupling (list-of :number)
+                     :doc "Activity coupling between neural groups, 4x4 row-major, -2 to 2; set-group-coupling!")
+         (nodes      (list-of graph-node) :doc "Its active nodes")
+         ;; Playback (the scheduler's visualization of it).
+         (active     :bool   :doc "The scheduler runs it")
+         (beat       :number :doc "Its current beat")
+         (energy     (list-of :number) :doc "Each node's energy, 0-4")
+         (triggers   (list-of :number) :doc "Each node's trigger activity, 0-1")
+         (dampening  (list-of (list-of :number)) :doc "Each edge's live dampening, by from row and to column, 0-1")))
+
 (def-kind track
   :key (index)
   :host ((index     :int    :doc "Position in the track list, from 0")
@@ -673,7 +798,9 @@
          (variants  (list-of variant) :doc "The track's p-lock variants, by label (stamp-variant!)")
          ;; Process lanes.
          (processes (list-of process) :doc "The process chain, in fire order: the project lanes, then the track's own")
-         (lanes     (list-of lane) :doc "Every lane of the chain, in the lane selector's order")))
+         (lanes     (list-of lane) :doc "Every lane of the chain, in the lane selector's order")
+         (active-notes (list-of (list-of :number))
+                    :doc "The notes sounding now, (note velocity trigger-id) per note, ascending; a piano-keyboard's :notes-by-track takes the rows")))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.
@@ -1273,7 +1400,8 @@
          (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
          (macros (list-of macro) :doc "The project's macros, in macro order")
          (name :string :doc "The project's name; empty while unsaved")
-         (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")))
+         (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")
+         (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")))
 
 ;; ── Collections and actions ──
 
@@ -1284,6 +1412,37 @@
 (def groups () project.groups)
 (def routes () project.routes)
 (def macros () project.macros)
+(def graphs () project.graphs)
+
+;; Graph sequencers (spec §14.2k). The graph of a created instance (self) or
+;; of a sequencer id, or nil.
+(def graph-of (x)
+  (let ((id (if (number? x) x x.id)))
+    (first (filter (lambda (g) (= g.gid id)) project.graphs))))
+;; A node's or an edge's param named name, or nil.
+(def graph-param-named (x name)
+  (first (filter (lambda (p) (= p.name name)) x.params)))
+;; Node n's edge to node m (an instance or an index), or nil.
+(def graph-edge-to (n m)
+  (let ((index (if (number? m) m m.index)))
+    (first (filter (lambda (e) (= e.to.index index)) n.edges))))
+;; Set cell (row col) of graph g's group gain (0-2) or coupling (-2 to 2)
+;; matrix: rows are the source group, columns the target group, 0-3; the
+;; cell is (nth g.group-gain (+ (* row 4) col)).
+(def set-group-gain! (g row col v) (graph-edit g "group-gain" v :row row :col col))
+(def set-group-coupling! (g row col v) (graph-edit g "group-coupling" v :row row :col col))
+;; Make node n's fires gate generator id (a generator instance, such as a
+;; jaki, of the graph's owner, never the graph's own instance) instead of
+;; playing a note; :restart true restarts it each fire.
+;; (set! n.route t) routes it back to a track.
+(def gate-generator! (n id &key (restart false))
+  (graph-edit n.graph "generator" id :node n.index :restart restart))
+;; graph-node.resolution / quantize labels (the host checks they match its
+;; own), graph.max-poly-selection's.
+(def graph-timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+(def graph-quantize-options (cons "off" graph-timebase-options))
+(def graph-max-poly-selection-options
+  '("deterministic" "propagation" "random" "markov" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)

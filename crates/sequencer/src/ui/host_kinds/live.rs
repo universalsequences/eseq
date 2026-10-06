@@ -102,6 +102,8 @@ pub(crate) struct KindsShared {
     pub(crate) lanes: LaneShared,
     /// The piano roll's notes: their source, ids and instances (`piano_roll`).
     pub(crate) notes: NoteShared,
+    /// The graphs' sources and registered parts (`graphs`).
+    pub(crate) graphs: GraphShared,
 }
 
 type VariantKey = sequencer::plock_variants::PlockVariantKey;
@@ -390,6 +392,7 @@ pub(super) fn live_value<S: KindStore>(
                 f::TRACK_VARIANTS => {
                     owner_variants(store, sources, shared, (id, id), track, VariantScope::Steps)
                 }
+                f::TRACK_ACTIVE_NOTES => graph_live_value(store, sources, shared, id, key)?,
                 key => {
                     let input = mod_input(&f::TRACK_MOD_IN, key)?;
                     let shared = shared.borrow();
@@ -480,6 +483,7 @@ pub(super) fn live_value<S: KindStore>(
         }
         VARIANT => variant_live_value(store, sources, shared, id, key)?,
         PROCESS | STATE_CELL => lane_live_value(sources, shared, id, key)?,
+        GRAPH | GRAPH_NODE => graph_live_value(store, sources, shared, id, key)?,
         RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {
@@ -730,6 +734,20 @@ pub(super) fn install_reader(
         if field == f::PIANO_ROLL_NOTES.1 && vm.instance_kind(id) == Some(PIANO_ROLL) {
             // A model field, but registered on the first read.
             return cold_piano_roll_notes(vm, &sources, &shared);
+        }
+        if field == f::GRAPH_NODE_PARAMS.1 || field == f::GRAPH_NODE_EDGES.1 {
+            // `n.params`, `n.edges` or `e.params`: model fields, but
+            // registered on the first read.
+            let parts = [
+                f::GRAPH_NODE_PARAMS,
+                f::GRAPH_NODE_EDGES,
+                f::GRAPH_EDGE_PARAMS,
+            ];
+            let kind = vm.instance_kind(id);
+            let key = (parts.into_iter()).find(|key| key.1 == field && Some(key.0) == kind);
+            if let Some(key) = key {
+                return cold_graph_parts(vm, &shared, id, key);
+            }
         }
         let lanes = [f::TRACK_PROCESSES, f::TRACK_LANES];
         if let Some(key) = lanes.into_iter().find(|key| key.1 == field) {
