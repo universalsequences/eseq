@@ -1167,11 +1167,22 @@ pub(crate) fn process_scalar_inlet_names(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
 ) -> Vec<String> {
+    process_inlet_names(slot, def, false)
+}
+
+/// [`process_scalar_inlet_names`], with the class's lane inlets too when
+/// `lanes` (a graph node's slot: nodes have no lanes, so every inlet is a
+/// scalar).
+pub(crate) fn process_inlet_names(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    lanes: bool,
+) -> Vec<String> {
     let mut names = def
         .map(|def| {
             def.inlets
                 .iter()
-                .filter(|inlet| !inlet.lane)
+                .filter(|inlet| lanes || !inlet.lane)
                 .map(|inlet| inlet.name.clone())
                 .collect::<Vec<_>>()
         })

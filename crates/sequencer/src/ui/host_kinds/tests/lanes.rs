@@ -32,7 +32,7 @@ impl Harness {
         h
     }
 
-    fn publish_library(&mut self) {
+    pub(super) fn publish_library(&mut self) {
         let library = sequencer::lisp_host::load_process_library_source();
         self.editor
             .runtime_mut()
@@ -886,4 +886,51 @@ fn a_lane_drag_rebuilds_one_process_and_forked_follows_the_overrides() {
         .push(UiInvalidation::ProcessChain { track: 0 });
     h.sync();
     assert_eq!(h.eval_lanes("prob-lane.forked"), Value::Bool(false));
+}
+
+#[test]
+fn live_fields_follow_a_runtime_id_that_moves_with_the_track() {
+    let mut h = Harness::with_library();
+    h.sync();
+    // Only track 1's processes are registered (no other track's instances
+    // change below).
+    h.eval_lanes(
+        r#"(def t1 (track 1))
+           (def rnd1 (first (filter (lambda (p) (= p.name "rand")) t1.processes)))
+           (def held1 (first rnd1.cells))"#,
+    );
+    h.sync();
+    let rand = h.slot_named(1, "rand");
+    assert!(
+        rand.project_layer,
+        "a project lane: its runtime id follows its track's position"
+    );
+    let at = |track| sequencer::process::track_process_slot_runtime_id(&rand, track).0;
+    // Both ids hold a run error and a scope before the move, so nothing the
+    // scheduler publishes moves when the track does.
+    let errors = std::collections::BTreeMap::from([
+        (at(1), "at 1".to_string()),
+        (at(0), "at 0".to_string()),
+    ]);
+    h.shared.state.publish_process_run_errors(errors);
+    let scope = |values: Vec<f32>| HashMap::from([("held".to_string(), values)]);
+    let scopes = HashMap::from([(at(1), scope(vec![1.0])), (at(0), scope(vec![2.0, 3.0]))]);
+    h.shared.state.publish_process_scope_values(scopes);
+    h.eval_lanes(r#"(effect-buffer "*live*" (label (str rnd1.error (len held1.values))))"#);
+    h.editor.runtime_mut().run_reactive_cycle();
+    h.sync();
+    assert_eq!(
+        h.eval_lanes("(list rnd1.error held1.values)"),
+        h.eval_lanes(r#"(list "at 1" (list 1))"#)
+    );
+    let (rnd1, held1) = (h.lane_instance("rnd1"), h.lane_instance("held1"));
+    // Deleting track 0 moves track 1 to position 0: the same instances,
+    // read under the new runtime id.
+    h.app.delete_track_recorded(0).expect("delete track 0");
+    h.sync();
+    assert!(h.rt().instance_is_live(rnd1) && h.rt().instance_is_live(held1));
+    assert_eq!(
+        h.eval_lanes("(list rnd1.error held1.values)"),
+        h.eval_lanes(r#"(list "at 0" (list 2 3))"#)
+    );
 }

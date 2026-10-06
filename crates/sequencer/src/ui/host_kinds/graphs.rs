@@ -18,7 +18,10 @@
 //! handle on its param, and one that renames or drops a param drops its
 //! instance, which goes stale rather than retarget); both register on the
 //! first read of `n.params`, `n.edges` or `e.params` (the reader hook), like
-//! a device's params, and are then kept current with their graph.
+//! a device's params, and are then kept current with their graph. A node's
+//! process patch (`n.processes`, `process` instances keyed (node instance
+//! id, slot id): `lanes`) registers on its first read too, and syncs with
+//! its graph from the resolved node's chain.
 //!
 //! Feeds: the model fields behind one key ([`GraphKey`]: the published
 //! sequencer version, the scenes revision (every override edit moves it),
@@ -362,11 +365,13 @@ fn node_source<S: KindStore>(
     Some((graph, index as usize, src))
 }
 
-/// `n.params`, `n.edges` or `e.params` read for the first time (the reader
-/// hook): register them from the graph's source. `None` once registered
-/// (the cell holds the list) or when nothing is known about the graph.
+/// `n.params`, `n.edges`, `n.processes` or `e.params` read for the first
+/// time (the reader hook): register them from the graph's source. `None`
+/// once registered (the cell holds the list) or when nothing is known about
+/// the graph.
 pub(super) fn cold_graph_parts<S: KindStore>(
     store: &mut S,
+    sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     id: InstanceId,
     key: FieldKey,
@@ -395,6 +400,14 @@ pub(super) fn cold_graph_parts<S: KindStore>(
             }
             let (graph, index, src) = node_source(store, shared, id)?;
             sync_node_edges(store, shared, (graph, id), index, &src)
+        }
+        f::GRAPH_NODE_PROCESSES => {
+            if shared.borrow().lanes.nodes.contains_key(&id) {
+                return None;
+            }
+            let (_, index, src) = node_source(store, shared, id)?;
+            let chain = &src.config.nodes.get(index)?.process_chain;
+            sync_node_lanes(store, sources, shared, id, Some(chain))?.0
         }
         f::GRAPH_EDGE_PARAMS => {
             if shared.borrow().graphs.edge_params.contains(&id) {
@@ -636,6 +649,8 @@ impl HostKinds {
                 pusher.push(project, f::PROJECT_GRAPHS, listed_instances(&ids));
             }
             if nodes != graphs.nodes {
+                // A dropped node's processes went with it.
+                pusher.shared.borrow_mut().lanes.retain_nodes(&nodes);
                 graphs.nodes = nodes;
                 graphs.node_observed.reset();
             }
@@ -762,12 +777,13 @@ impl HostKinds {
         );
         pusher.push(id, f::GRAPH_NODE_SEED_ON_RESET, number(node.seed_on_reset));
         pusher.push(id, f::GRAPH_NODE_GROUP, number(node.neural_group));
-        let (params, edges) = {
+        let (params, edges, processes) = {
             let shared = pusher.shared.borrow();
             let graphs = &shared.graphs;
             (
                 graphs.node_params.contains(&id),
                 graphs.node_edges.contains(&id),
+                shared.lanes.nodes.contains_key(&id),
             )
         };
         if params {
@@ -779,6 +795,14 @@ impl HostKinds {
         if edges {
             let list = sync_node_edges(&mut *pusher.rt, pusher.shared, (graph, id), index, src);
             pusher.push(id, f::GRAPH_NODE_EDGES, list);
+        }
+        if processes {
+            let chain = Some(&node.process_chain);
+            let synced = sync_node_lanes(&mut *pusher.rt, pusher.sources, pusher.shared, id, chain);
+            if let Some((list, changed)) = synced {
+                pusher.changed |= changed;
+                pusher.push(id, f::GRAPH_NODE_PROCESSES, list);
+            }
         }
     }
 

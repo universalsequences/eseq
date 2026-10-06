@@ -1,10 +1,15 @@
 //! One process chain edit ([`ProcessEdit`]) on one slot of one track, as
 //! one recorded scene-structure entry: shared by `process-history-action`
 //! (whose payload [`process_edit_from_payload`] reads) and the host kinds'
-//! process setters (`edit-process`, kind-bindings spec §14.2h).
+//! process setters (`edit-process`, kind-bindings spec §14.2h); on a graph
+//! node's patch ([`apply_to_node_chain`]) for `edit-process` on a node's
+//! process (§14.2m).
 
 use crate::*;
-use sequencer::process::{ParamTarget, ProcessInstanceId, ProcessLiteral, ProcessPortFanout};
+use sequencer::process::{
+    ParamTarget, ProcessInstanceId, ProcessLiteral, ProcessPortFanout, TrackProcessChain,
+    TrackProcessSlot,
+};
 
 /// One process chain edit.
 pub(super) enum ProcessEdit {
@@ -19,6 +24,8 @@ pub(super) enum ProcessEdit {
     MoveSlot {
         before: Option<ProcessInstanceId>,
     },
+    /// A slot the user adds: a track's roster lane, a node's slot (under
+    /// the id the caller minted).
     AddRosterSlot {
         class_name: String,
     },
@@ -195,6 +202,132 @@ pub(super) fn apply_process_edit(
         Err(_) if unchanged => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// `edit` on slot `instance_id` of a graph node's `chain`, as the legacy
+/// `graph-node-process-*` natives edit it: the chain is the node's own (no
+/// project layer to fork, no roster), so every edit writes the slot itself.
+/// Returns whether the chain changed; a slot, fan-out entry or move target
+/// that is gone is an error.
+pub(super) fn apply_to_node_chain(
+    chain: &mut TrackProcessChain,
+    instance_id: ProcessInstanceId,
+    edit: ProcessEdit,
+) -> Result<bool, String> {
+    fn slot_of(
+        chain: &mut TrackProcessChain,
+        id: ProcessInstanceId,
+    ) -> Result<&mut TrackProcessSlot, String> {
+        (chain.slots.iter_mut())
+            .find(|slot| slot.instance_id == id)
+            .ok_or_else(|| "the process is gone".to_string())
+    }
+    fn fanout_of<'a>(
+        slot: &'a mut TrackProcessSlot,
+        port: &str,
+    ) -> Result<&'a mut Vec<ProcessPortFanout>, String> {
+        (slot.fanout.get_mut(port)).ok_or_else(|| "the fan-out entry is gone".to_string())
+    }
+    let changed = match edit {
+        ProcessEdit::ClearProjectLaneOverride { .. } => {
+            return Err("a node's process has no project lane".to_string());
+        }
+        ProcessEdit::AddRosterSlot { class_name } => {
+            chain
+                .slots
+                .push(TrackProcessSlot::new(instance_id, class_name));
+            true
+        }
+        ProcessEdit::RemoveSlot => {
+            if !chain.remove_slot_and_wires(instance_id) {
+                return Err("the process is gone".to_string());
+            }
+            true
+        }
+        ProcessEdit::MoveSlot { before } => {
+            let at = |chain: &TrackProcessChain, id| {
+                (chain.slots.iter()).position(|slot| slot.instance_id == id)
+            };
+            let from = at(chain, instance_id).ok_or("the process is gone")?;
+            if before.is_some_and(|before| at(chain, before).is_none()) {
+                return Err("the process to move before is gone".to_string());
+            }
+            let slot = chain.slots.remove(from);
+            let to = before.and_then(|before| at(chain, before));
+            let to = to.unwrap_or(chain.slots.len());
+            chain.slots.insert(to, slot);
+            from != to
+        }
+        ProcessEdit::SetInlet { inlet, literal } => {
+            let slot = slot_of(chain, instance_id)?;
+            slot.inlets.insert(inlet, literal.clone()) != Some(literal)
+        }
+        ProcessEdit::SetEnabled(enabled) => {
+            let slot = slot_of(chain, instance_id)?;
+            std::mem::replace(&mut slot.enabled, enabled) != enabled
+        }
+        ProcessEdit::BindPort { port, target } => {
+            let slot = slot_of(chain, instance_id)?;
+            let reconnected = slot.unbound_ports.remove(&port);
+            let bound = slot.bindings.insert(port, Some(target.clone()));
+            reconnected || bound != Some(Some(target))
+        }
+        ProcessEdit::UnbindPort { port } => {
+            let slot = slot_of(chain, instance_id)?;
+            let had_binding = slot.bindings.remove(&port).is_some();
+            slot.unbound_ports.insert(port) | had_binding
+        }
+        ProcessEdit::ClearPortBinding { port } => {
+            let slot = slot_of(chain, instance_id)?;
+            slot.bindings.remove(&port).is_some() | slot.unbound_ports.remove(&port)
+        }
+        ProcessEdit::AddFanout {
+            port,
+            target,
+            lo,
+            hi,
+        } => {
+            let slot = slot_of(chain, instance_id)?;
+            // At the slot's own output range: identity scaling until the
+            // user narrows it.
+            let (low, high) = sequencer::process::process_slot_output_range(slot);
+            let entry = ProcessPortFanout {
+                target,
+                lo: lo.unwrap_or(low),
+                hi: hi.unwrap_or(high),
+            };
+            slot.fanout.entry(port).or_default().push(entry);
+            true
+        }
+        ProcessEdit::SetFanoutRange {
+            port,
+            index,
+            lo,
+            hi,
+        } => {
+            let list = fanout_of(slot_of(chain, instance_id)?, &port)?;
+            let entry = list
+                .get_mut(index)
+                .ok_or_else(|| "the fan-out entry is gone".to_string())?;
+            let was = (entry.lo, entry.hi);
+            entry.lo = lo.unwrap_or(entry.lo);
+            entry.hi = hi.unwrap_or(entry.hi);
+            was != (entry.lo, entry.hi)
+        }
+        ProcessEdit::RemoveFanout { port, index } => {
+            let slot = slot_of(chain, instance_id)?;
+            let list = fanout_of(slot, &port)?;
+            if index >= list.len() {
+                return Err("the fan-out entry is gone".to_string());
+            }
+            list.remove(index);
+            if list.is_empty() {
+                slot.fanout.remove(&port);
+            }
+            true
+        }
+    };
+    Ok(changed)
 }
 
 /// Give `track` (or every track) a zero send to `destination` where it has

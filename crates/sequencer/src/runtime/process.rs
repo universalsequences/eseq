@@ -743,6 +743,24 @@ pub struct TrackProcessSlot {
 }
 
 impl TrackProcessSlot {
+    /// A fresh slot of class `class_name`: enabled, unnamed, on no layer,
+    /// with nothing set, bound or wired.
+    pub fn new(instance_id: ProcessInstanceId, class_name: String) -> Self {
+        Self {
+            instance_id,
+            instance_name: None,
+            class_name,
+            enabled: true,
+            project_layer: false,
+            inlets: BTreeMap::new(),
+            lanes: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            fanout: BTreeMap::new(),
+            unbound_ports: BTreeSet::new(),
+            expr_source: None,
+        }
+    }
+
     /// An `expr` card (docs/expr-process-spec.md §2): the plain class, a
     /// compiled `expr#<hash>` class, or any slot carrying a body.
     pub fn is_expr_card(&self) -> bool {
@@ -777,6 +795,28 @@ fn default_true() -> bool {
 pub struct TrackProcessChain {
     #[serde(default)]
     pub slots: Vec<TrackProcessSlot>,
+}
+
+impl TrackProcessChain {
+    /// Remove slot `id` with every wire and fan-out cable into it (a graph
+    /// node's patch); whether it was there.
+    pub fn remove_slot_and_wires(&mut self, id: ProcessInstanceId) -> bool {
+        let before = self.slots.len();
+        self.slots.retain(|slot| slot.instance_id != id);
+        let into_removed = |target: &ParamTarget| match target {
+            ParamTarget::ProcessInlet { instance_id, .. } => *instance_id == Some(id),
+            _ => false,
+        };
+        for slot in &mut self.slots {
+            slot.bindings
+                .retain(|_, target| !target.as_ref().is_some_and(into_removed));
+            for entries in slot.fanout.values_mut() {
+                entries.retain(|entry| !into_removed(&entry.target));
+            }
+            slot.fanout.retain(|_, entries| !entries.is_empty());
+        }
+        self.slots.len() != before
+    }
 }
 
 /// Forked lanes for one track, keyed by durable project-slot identity and inlet.

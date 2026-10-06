@@ -26,9 +26,22 @@
 //! range; the current value always round-trips. Gestures as
 //! [`super::ScriptEdit`]: lane steps set while the pointer is down join one
 //! undo entry (a drag); every other edit is its own entry.
+//!
+//! A graph node's process (§14.2m) is addressed by its node (`:graph-id`,
+//! the graph's sequencer id, and `:node`, an active node's index) instead
+//! of a track, and edited as the legacy `graph-node-process-*` natives edit
+//! it ([`super::process_edit::apply_to_node_chain`] on the current scene's
+//! node chain), recorded as their history records it
+//! (`EditPatch::GraphNodeProcessChain`, undo restores the node's chain in
+//! the scene it was made in). Its ports bind another process of the node
+//! (wires stay on their node) or a fire payload field
+//! (`GRAPH_NODE_PAYLOAD_FIELDS`); `:all` and lane steps are errors (a node
+//! has no project layer, no lanes). An inlet's `set!`s while the pointer is
+//! down join one entry (the natives' picker drag key).
 
 use super::devices::addressed;
-use super::process_edit::{apply_process_edit, ProcessEdit};
+use super::graphs::Graph;
+use super::process_edit::{apply_process_edit, apply_to_node_chain, ProcessEdit};
 use super::track_settings::{command_track, SetValue};
 use super::ScriptEdit;
 use crate::*;
@@ -60,10 +73,51 @@ fn slot_at<'a>(
     }
 }
 
-/// Whether `target` names the command's own track (`:track-id` at `key`).
-fn on_own_track(map: &Payload, target: &Payload, key: &str) -> bool {
-    let own = map_usize(map, "track-id");
-    own.is_some() && map_usize(target, key) == own
+/// The chain an `edit-process` edits: a track's composed chain, or a
+/// graph node's patch (`:graph-id`, `:node`).
+enum Owner {
+    Track(usize),
+    Node(Graph, usize),
+}
+
+impl Owner {
+    /// The keys of an owner's address (`process-owner` in eseq.kinds).
+    const ADDRESS: [&'static str; 3] = ["track-id", "graph-id", "node"];
+
+    fn of(app: &app::App, map: &Payload) -> Result<Self, String> {
+        if !map.contains_key("graph-id") {
+            return command_track(app, map).map(Self::Track);
+        }
+        let graph = Graph::of(app, map)?;
+        let node = graph.node(map)?;
+        Ok(Self::Node(graph, node))
+    }
+
+    /// Its chain now.
+    fn chain(&self, state: &SequencerState) -> Result<TrackProcessChain, String> {
+        match self {
+            Self::Track(track) => (state.composed_track_process_chain(*track))
+                .ok_or_else(|| "the track is gone".to_string()),
+            Self::Node(graph, node) => Ok(graph.config.nodes[*node].process_chain.clone()),
+        }
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Track(_) => "track",
+            Self::Node(..) => "node",
+        }
+    }
+}
+
+/// Whether `other` (a port target, a move's `before`) names the same owner
+/// as the command (`map`).
+fn same_owner(map: &Payload, other: &Payload) -> bool {
+    let keys = Owner::ADDRESS;
+    keys.iter().any(|key| map.contains_key(*key))
+        && keys
+            .iter()
+            .all(|key| map_number(map, key) == map_number(other, key))
 }
 
 /// A process inlet or lane value under the value rule, or `None` when it
@@ -131,11 +185,26 @@ fn inlet_rule(
     (kind, options, declared)
 }
 
-/// The port `:target` names, resolved now on `track` (whose chain is
+/// The fire payload field a node's port writes for `given` (one of
+/// `GRAPH_NODE_PAYLOAD_FIELDS`, case-insensitively, or a step param
+/// spelling of one).
+fn node_payload_field(given: &str) -> Option<&'static str> {
+    let fields = sequencer::lisp_host::GRAPH_NODE_PAYLOAD_FIELDS;
+    let named = |name: &str| fields.into_iter().find(|f| f.eq_ignore_ascii_case(name));
+    named(given).or_else(|| named(crate::param_words::canonical_step_param_name(given)?))
+}
+
+/// What a node's port takes, for its error.
+fn node_payload_fields() -> String {
+    let fields = sequencer::lisp_host::GRAPH_NODE_PAYLOAD_FIELDS;
+    format!("a fire payload field ({})", fields.join(", "))
+}
+
+/// The port `:target` names, resolved now on `owner` (whose chain is
 /// `chain`; `writer` is the slot binding it).
 fn port_target(
     app: &app::App,
-    track: usize,
+    owner: &Owner,
     chain: &TrackProcessChain,
     writer: &TrackProcessSlot,
     map: &Payload,
@@ -144,22 +213,34 @@ fn port_target(
         return Err("needs a :target".to_string());
     };
     let kind = map_string(&target, "kind").ok_or("the target needs a :kind")?;
-    let own_track = || {
-        on_own_track(map, &target, "track-id")
+    let own = || {
+        same_owner(map, &target)
             .then_some(())
-            .ok_or_else(|| "a port targets its own track".to_string())
+            .ok_or_else(|| format!("a port targets its own {}", owner.noun()))
+    };
+    // A node's port writes its fire payload or its node's processes only.
+    let track = || match owner {
+        Owner::Track(track) => Ok(*track),
+        Owner::Node(..) => Err(format!("a node's port takes no {kind} target")),
     };
     match kind.as_str() {
         "step-param" => {
             let name = SetValue::of(&target, "param", "step param");
-            let param = crate::param_words::canonical_step_param_name(name.name()?)
-                .map_or_else(|| name.fail("one of project.step-param-options"), Ok)?;
+            let given = name.name()?;
+            let param = match owner {
+                Owner::Track(_) => crate::param_words::canonical_step_param_name(given)
+                    .map_or_else(|| name.fail("one of project.step-param-options"), Ok)?,
+                // A fire payload field (`delay` is no step param), by name
+                // or by any step param spelling of one.
+                Owner::Node(..) => node_payload_field(given)
+                    .map_or_else(|| name.fail(&node_payload_fields()), Ok)?,
+            };
             Ok(ParamTarget::StepParam {
                 param: param.to_string(),
             })
         }
         "inlet" => {
-            own_track()?;
+            own()?;
             let reader = slot_at(chain, &target, "proc-id")?;
             let inlet = SetValue::of(&target, "inlet", "inlet").name()?.to_string();
             if reader.project_layer != writer.project_layer {
@@ -175,6 +256,7 @@ fn port_target(
             })
         }
         "param" => {
+            let track = track()?;
             let device = addressed(app, &target)?;
             let track_id = app.track_registry.ids().get(track).copied();
             if device.track_id.is_none() || device.track_id != track_id {
@@ -198,7 +280,8 @@ fn port_target(
             }
         }
         "bus-send" => {
-            own_track()?;
+            track()?;
+            own()?;
             let bus = SetValue::of(&target, "bus-id", "send").id("a bus id")?;
             if !app.buses.iter().any(|known| known.id.0 == bus) {
                 return Err(format!("no bus {bus}"));
@@ -220,14 +303,18 @@ fn fanout_entry<'a>(
         .ok_or_else(|| "the fan-out entry is gone".to_string())
 }
 
-/// What one `edit-process` asks for on `track`: the slot it edits and the
-/// edit, or `None` when the model already is so.
+/// The slot an edit acts on, and the edit (see [`process_request`]).
+type Request = (Option<ProcessInstanceId>, ProcessEdit);
+
+/// What one `edit-process` asks for on `owner`: the slot it edits (`None`
+/// for an add: the new slot's id is minted when it lands) and the edit, or
+/// `None` when the model already is so.
 fn process_request(
     app: &app::App,
-    track: usize,
+    owner: &Owner,
     all: bool,
     map: &Payload,
-) -> Result<Option<(ProcessInstanceId, ProcessEdit)>, String> {
+) -> Result<Option<Request>, String> {
     let op = map_string(map, "op").ok_or("needs an :op")?;
     let state = &app.state;
     if op == "add" {
@@ -235,17 +322,17 @@ fn process_request(
         if !natives::process_class_is_known(state, &class) {
             return Err(format!("no process class '{class}'"));
         }
-        let id = state.next_track_roster_slot_id();
         let edit = ProcessEdit::AddRosterSlot { class_name: class };
-        return Ok(Some((id, edit)));
+        return Ok(Some((None, edit)));
     }
-    let chain = state
-        .composed_track_process_chain(track)
-        .ok_or("the track is gone")?;
+    let chain = owner.chain(state)?;
     let slot = slot_at(&chain, map, "proc-id")?;
     let id = slot.instance_id;
     if all && !slot.project_layer {
-        return Err(":all edits a project lane; this is the track's own".to_string());
+        let own = owner.noun();
+        return Err(format!(
+            ":all edits a project lane; this is the {own}'s own"
+        ));
     }
     let published = || state.published_process_authoring();
     let port = || -> Result<(String, sequencer::process::ProcessPortDef), String> {
@@ -279,8 +366,10 @@ fn process_request(
             let published = published();
             let def = process_slot_def(&published, slot);
             let inlet = process_inlet_def(def, &name);
+            // A node has no lanes: every inlet is a scalar.
+            let lane = slot.lanes.contains_key(&name) || inlet.is_some_and(|i| i.lane);
             let view = process_scalar_inlet_view(slot, def, &name, inlet)
-                .filter(|_| !slot.lanes.contains_key(&name) && !inlet.is_some_and(|i| i.lane))
+                .filter(|_| matches!(owner, Owner::Node(..)) || !lane)
                 .ok_or_else(|| format!("no numeric inlet '{name}'"))?;
             let (kind, options, declared) = inlet_rule(inlet);
             let value = SetValue::of(map, "value", &name);
@@ -324,11 +413,12 @@ fn process_request(
             let at = chain.slots.iter().position(|other| other.instance_id == id);
             let before = match map.get("before").map(|cell| cell.borrow().clone()) {
                 None | Some(Value::Nil) => None,
-                Some(_) => {
-                    if !on_own_track(map, map, "before-track-id") {
-                        return Err("a process moves within its own track".to_string());
+                Some(Value::Map(before)) => {
+                    if !same_owner(map, &before) {
+                        let own = owner.noun();
+                        return Err(format!("a process moves within its own {own}"));
                     }
-                    let before = slot_at(&chain, map, "before")?;
+                    let before = slot_at(&chain, &before, "proc-id")?;
                     if before.project_layer != slot.project_layer {
                         return Err(
                             "a process moves within its layer (project or track lanes)".to_string()
@@ -336,6 +426,7 @@ fn process_request(
                     }
                     Some(before.instance_id)
                 }
+                Some(_) => return Err(":before takes a process address".to_string()),
             };
             let next = at
                 .and_then(|at| chain.slots.get(at + 1))
@@ -348,7 +439,7 @@ fn process_request(
         "remove" => ProcessEdit::RemoveSlot,
         "bind" | "add-fanout" => {
             let (name, def) = port()?;
-            let target = port_target(app, track, &chain, slot, map)?;
+            let target = port_target(app, owner, &chain, slot, map)?;
             if !def.allows_binding_target(&target) {
                 let wants = def
                     .effective_target_kind()
@@ -395,7 +486,7 @@ fn process_request(
         }
         other => return Err(format!("unknown process edit '{other}'")),
     };
-    Ok(Some((id, edit)))
+    Ok(Some((Some(id), edit)))
 }
 
 /// `set-lane-steps!`: `{:inlet :steps :step-tracks :value}`, steps of the
@@ -467,6 +558,78 @@ fn set_lane_steps(
     result
 }
 
+/// Apply `edit` on slot `id` of `track` (see [`apply_process_edit`]).
+fn edit_track_process(
+    app: &mut app::App,
+    ctx: &mut LoopCtx<'_>,
+    track: usize,
+    (id, edit): Request,
+    all: bool,
+) -> Result<(), String> {
+    let id = id.unwrap_or_else(|| app.state.next_track_roster_slot_id());
+    let script = ScriptEdit::begin(app, ctx);
+    let result = script.apply_with(app, |app| apply_process_edit(app, track, id, all, edit));
+    let changed = matches!(result, Ok(true));
+    if changed {
+        ctx.shared
+            .ui_invalidations
+            .push(UiInvalidation::ProcessChain { track });
+    }
+    script.end(app, ctx, false, changed);
+    result.map(|_| ())
+}
+
+/// Apply `edit` on slot `id` of node `node` of `graph`: one recorded node
+/// chain entry (the legacy natives' history), an inlet's joining a drag.
+fn edit_node_process(
+    app: &mut app::App,
+    ctx: &mut LoopCtx<'_>,
+    (graph, node): (&Graph, usize),
+    (id, edit): Request,
+) -> Result<(), String> {
+    let manifest = &graph.manifest;
+    let merge = match (&edit, id) {
+        (ProcessEdit::SetInlet { inlet, .. }, Some(id)) => {
+            Some(sequencer::lisp_host::graph_node_process_inlet_merge_key(
+                manifest.id,
+                node,
+                id.0,
+                inlet,
+            ))
+        }
+        _ => None,
+    };
+    let scene = app.state.current_scene_id().ok_or("no current scene")?;
+    let continuous = merge.is_some();
+    let script = ScriptEdit::begin(app, ctx);
+    let result = script.apply_with(app, |app| {
+        let (changed, before, after) = sequencer::lisp_host::edit_graph_node_process_chain_now(
+            &app.state,
+            manifest,
+            node,
+            |chain, next_id| {
+                let id = id.unwrap_or(ProcessInstanceId(next_id));
+                apply_to_node_chain(chain, id, edit)
+            },
+        )?;
+        if changed {
+            let patch = app::history::GraphNodeProcessChainPatch {
+                scene,
+                sequencer_id: manifest.id,
+                node,
+                before,
+                after,
+            };
+            app.record_applied_graph_node_process_edit(patch, merge)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        Ok(changed)
+    });
+    let changed = matches!(result, Ok(true));
+    script.end(app, ctx, continuous, changed);
+    result.map(|_| ())
+}
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -480,24 +643,21 @@ pub(super) fn handle(
         )));
         return;
     };
-    let result = command_track(app, map).and_then(|track| {
+    let result = Owner::of(app, map).and_then(|owner| {
         if map_string(map, "op").as_deref() == Some("lane-steps") {
-            return set_lane_steps(app, ctx, track, map);
+            return match owner {
+                Owner::Track(track) => set_lane_steps(app, ctx, track, map),
+                Owner::Node(..) => Err("a node's process has no lanes".to_string()),
+            };
         }
         let all = SetValue::of(map, "all", "all").flag_or(false)?;
-        let Some((id, edit)) = process_request(app, track, all, map)? else {
+        let Some(request) = process_request(app, &owner, all, map)? else {
             return Ok(());
         };
-        let script = ScriptEdit::begin(app, ctx);
-        let result = script.apply_with(app, |app| apply_process_edit(app, track, id, all, edit));
-        let changed = matches!(result, Ok(true));
-        if changed {
-            ctx.shared
-                .ui_invalidations
-                .push(UiInvalidation::ProcessChain { track });
+        match &owner {
+            Owner::Track(track) => edit_track_process(app, ctx, *track, request, all),
+            Owner::Node(graph, node) => edit_node_process(app, ctx, (graph, *node), request),
         }
-        script.end(app, ctx, false, changed);
-        result.map(|_| ())
     });
     if let Err(message) = result {
         editor.handle_host_event(HostEvent::Error(format!("{name}: {message}")));

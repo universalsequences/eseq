@@ -14,8 +14,8 @@
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
 ;; or `t.lanes`, the piano roll's notes on first read of `piano-roll.notes`, a
-;; graph node's edges and params on first read of `n.edges` / `n.params`, an
-;; edge's params on first read of `e.params`),
+;; graph node's edges, params and processes on first read of `n.edges` /
+;; `n.params` / `n.processes`, an edge's params on first read of `e.params`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -275,12 +275,19 @@
   (host-command "set-pool-groove" (dict :groove-id pg.groove-id :field "name" :value v)))
 
 ;; Process lanes (spec §14.2h). A process (a slot of a track's composed
-;; chain) is addressed by its track's stable id and its proc-id, its inlets,
+;; chain, or of a graph node's patch) is addressed by its owner (the track's
+;; stable id, or the node's graph id and index) and its proc-id, its inlets,
 ;; ports and fan-out entries by their process and their name or position,
 ;; all resolved when the command lands. Field setters edit this track only
 ;; (a project lane forks for it); the actions take :all true to edit the
-;; shared project slot (every track). One undo entry each.
-(def process-target (p) (dict :track-id p.track.tid :proc-id p.proc-id))
+;; shared project slot (every track; a node's processes have none). One undo
+;; entry each (a node inlet's set!s while the pointer is down join one).
+(def process-owner (x)
+  (if (= x.kind "eseq.kinds:graph-node")
+    (dict :graph-id x.graph.gid :node x.index)
+    (dict :track-id x.tid)))
+(def process-target (p)
+  (merge (process-owner (if p.node p.node p.track)) :proc-id p.proc-id))
 (def port-address (pt) (merge (process-target pt.process) :port pt.name))
 (def fanout-address (fo) (merge (port-address fo.port) :index fo.index))
 (def edit-process (address op &rest more)
@@ -664,17 +671,19 @@
   :host ((classes (list-of process-class) :doc "The library's classes (compiled expr bodies excluded)")))
 
 ;; One process of a track's chain (t.processes): the project lanes every
-;; track runs first, then the track's own. Keyed by its stable id (proc-id),
+;; track runs first, then the track's own; or of a graph node's patch
+;; (n.processes, run on each of its fires). Keyed by its stable id (proc-id),
 ;; so a reorder keeps the instance; a project lane is a process of every
 ;; track (its lanes, inlets and bindings fork per track).
 (def-kind process
-  :key (track proc-id)
-  :host ((track         track  :doc "The track whose chain runs it")
+  :key ((track graph-node) proc-id)
+  :host ((track         track  :doc "The track whose chain runs it; nil for a graph node's")
+         (node          graph-node :doc "The graph node whose patch runs it; nil for a track's")
          (proc-id       :int   :doc "The host's stable process instance id (cell.pid is a pattern's)")
-         (index         :int   :doc "Position in the track's chain, from 0 (fire order)")
+         (index         :int   :doc "Position in its chain, from 0 (fire order)")
          (class         process-class :doc "Its class in the library; nil when the library lacks it, and for an expr card's compiled body (expr#…, never a library class)")
          (class-name    :string)
-         (name          :string :doc "The name shown: its instance name, else its class")
+         (name          :string :doc "The name shown: its instance name, else its class (on a node, the class's node label: transpose for neural-transpose)")
          (instance-name :string :doc "Its own name (prob, grab 2, …); empty when none")
          (project       :bool  :doc "A project lane (shared by every track)")
          (default-lane  :bool  :doc "One of the default project lanes")
@@ -684,15 +693,19 @@
          (doc           :string :doc "Its class's doc (class.doc, also when class is nil)")
          (source-path   :string :doc "Its class's file (class.source-path, also when class is nil); empty when none")
          (target        :string :doc "Where its class's ports write (class.target, also when class is nil)")
-         (lanes         (list-of lane) :doc "Its lane inlets (per-step values), in class order")
-         (inlets        (list-of inlet) :doc "Its other numeric inlets")
+         (lanes         (list-of lane) :doc "Its lane inlets (per-step values), in class order; none on a node")
+         (inlets        (list-of inlet) :doc "Its other numeric inlets (on a node, every numeric inlet: nodes have no lanes)")
          (ports         (list-of port) :doc "Its ports, in class order")
          (in-ports      (list-of :string) :doc "The inlets the patchbay shows as in ports: lanes, gates and wired inlets, in class order")
          (cells         (list-of state-cell) :doc "Its class's state cells (the scope)")
          (expr          :bool  :doc "An expr card")
          (expr-line     :string :doc "An expr card's body as one line; empty otherwise")
          (compile-error :string :doc "Why an expr card's body has no compiled class; empty otherwise")
-         (error         :string :doc "Why its latest run on this track failed; empty when it did not")))
+         (known         :bool  :doc "Its class is loaded (an expr card's compiled body included)")
+         (expr-source   :string :doc "An expr card's stored body; empty otherwise")
+         (promoted-expr :bool  :doc "A library card whose class was promoted from an expr card (edit as expr reopens it)")
+         (as-expr-reason :string :doc "Why it cannot be opened as an expr card; empty for an expr card or a promoted one")
+         (error         :string :doc "Why its latest run on this track (or node) failed; empty when it did not")))
 
 ;; A process's lane: per-step values (t.lanes lists every lane of the track's
 ;; chain, in the lane selector's order). (set-lane-steps! l steps v) edits it.
@@ -828,6 +841,7 @@
                      :doc "Its neural group, 0-3 (A-D)")
          (params     (list-of graph-param) :doc "Its behavioral params, in prototype order")
          (edges      (list-of graph-edge) :doc "Its outgoing edges, by target index")
+         (processes  (list-of process) :doc "Its process patch, in run order (each fire runs it)")
          (sounding   (list-of (list-of :number))
                      :doc "The notes it sounds now, (note velocity) per open gate, oldest first; empty while stopped")))
 
@@ -1781,34 +1795,35 @@
                 :steps (map (lambda (s) s.index) steps)
                 :step-tracks (map (lambda (s) s.track.tid) steps)))
 
-;; Move p before process before of its track and layer (nil: to the end of
-;; its layer). Moving a project lane moves it on every track.
+;; Move p before process before of its track and layer, or of its graph
+;; node (nil: to the end of its layer, or of the node's patch). Moving a
+;; project lane moves it on every track.
 (def move-process! (p before)
-  (edit-process (process-target p) "move"
-                :before (if before before.proc-id nil)
-                :before-track-id (if before before.track.tid nil)))
+  (edit-process (process-target p) "move" :before (if before (process-target before) nil)))
 
-;; Add a process of class c (a process-class) to track t's own lanes.
+;; Add a process of class c (a process-class) to track t's own lanes, or to
+;; graph node t's patch.
 (def add-process! (t c)
-  (edit-process (dict :track-id t.tid) "add" :class c.name))
+  (edit-process (process-owner t) "add" :class c.name))
 
-;; Remove p from its track (a lane the user added, from every scene).
+;; Remove p from its track (a lane the user added, from every scene) or its
+;; graph node.
 (def remove-process! (p)
   (edit-process (process-target p) "remove"))
 
 ;; A port's target: a param of the track's devices, a send of the track, a
 ;; lane or inlet of another process of the track, or a step param's name
-;; (one of project.step-param-options).
+;; (one of project.step-param-options). A graph node's port takes an inlet
+;; of another process of the node, or a fire payload field (transpose,
+;; velocity, duration or delay).
 (def port-target (x)
   (if (string? x)
     (dict :kind "step-param" :param x)
     (match x.kind
       "eseq.kinds:param" (merge (device-target x.device) :kind "param" :param-idx x.index)
       "eseq.kinds:send" (dict :kind "bus-send" :bus-id x.bus.bid :track-id x.track.tid)
-      "eseq.kinds:lane" (dict :kind "inlet" :proc-id x.process.proc-id :inlet x.inlet
-                              :track-id x.process.track.tid)
-      "eseq.kinds:inlet" (dict :kind "inlet" :proc-id x.process.proc-id :inlet x.name
-                               :track-id x.process.track.tid)
+      "eseq.kinds:lane" (merge (process-target x.process) :kind "inlet" :inlet x.inlet)
+      "eseq.kinds:inlet" (merge (process-target x.process) :kind "inlet" :inlet x.name)
       _ (seq-error (str "not a port target: " x)))))
 
 ;; Bind port pt to x (port-target), replacing its binding.

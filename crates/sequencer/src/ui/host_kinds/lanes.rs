@@ -2,7 +2,9 @@
 //! (`process`, `t.processes`; legacy `SEQ.track-process-slots`,
 //! `SEQ.process-slots`), its lanes (`lane`, `t.lanes`; legacy
 //! `SEQ.track-process-lanes`, `SEQ.track-process-lane-values`,
-//! `SEQ.process-lanes`), each process's numeric inlets (`inlet`), ports and
+//! `SEQ.process-lanes`), a graph node's process patch (`process`,
+//! `graph-node.processes`; legacy `graph-node-process-chain`,
+//! `graph-node-lane-patch`), each process's numeric inlets (`inlet`), ports and
 //! their fan-out entries (`port`, `fanout`; with `process.in-ports` the
 //! patchbay, legacy `SEQ.track-lane-patch`), its state cells and their
 //! scope (`state-cell`, legacy `SEQ.track-process-scopes`), its latest run
@@ -17,7 +19,9 @@
 //! fan-out entries (port instance id, index); a process whose class
 //! changes (an expr card's body) gets fresh ones (old handles go stale).
 //! Removing a process drops it; a project load drops the tracks and with
-//! them every process. Classes are positional, the instance kept by the
+//! them every process. A graph node's processes are keyed (node instance
+//! id, slot id) and dropped with their node (a node-count change, the
+//! graph's instance deleted, a project load). Classes are positional, the instance kept by the
 //! class id (`registry::reconcile`), replaced on a project load.
 //!
 //! **Feeds.** A track's processes are registered lazily, on the first read
@@ -34,6 +38,10 @@
 //! those it was composed from; only a track whose inputs differ is synced.
 //! None reads the history revision or the UI epoch; a tick with nothing
 //! moved costs a few loads per registered track and allocates nothing.
+//! A node's processes register on the first read of `n.processes`, then
+//! sync with their graph (`graphs`: every override edit, a node chain edit
+//! included, re-derives its graph) and when the library moved, each time
+//! compared with the chain and library they were last synced from.
 //! A sync composes the chain and compares it (and the overrides' forked
 //! lanes) with the last synced one: unchanged, nothing is pushed; changed
 //! only in some slots' lane values (a lane drag), only those processes'
@@ -42,7 +50,8 @@
 //! The derivations are the legacy publishers' (`process_slot_lane_entries`,
 //! `process_port_view`, `process_port_readers`, `process_scalar_inlet_view`,
 //! `resolve_process_inlet_target`, `process_library_defs`). Live:
-//! `process.error` and `state-cell.values`, kept in `ObservedList`s and
+//! `process.error` and `state-cell.values` (a node's slots under their own
+//! id, the node runner's runtime id), kept in `ObservedList`s and
 //! re-read only when the scheduler's run errors (resp. scope histories)
 //! moved or the observed set did, reading the one cell in place
 //! (`SequencerState::with_process_scope_cell`).
@@ -95,12 +104,84 @@ pub(super) struct TrackLanes {
     cells: Vec<InstanceId>,
 }
 
+/// One graph node whose processes are registered.
+pub(super) struct NodeLanes {
+    /// The library (its version and the class instances' generation) and
+    /// the node's chain they were last synced from; `None` forces a sync.
+    library: Option<(u64, u64)>,
+    chain: TrackProcessChain,
+    /// `n.processes` and their state cells as of that sync.
+    processes: Vec<InstanceId>,
+    cells: Vec<InstanceId>,
+}
+
+/// Whose chain a process runs in.
+#[derive(Clone, Copy)]
+pub(super) enum ProcessOwner {
+    /// A track (its position and instance): its composed chain.
+    Track(usize, InstanceId),
+    /// A graph node instance: its patch, with no layers and no lanes (every
+    /// inlet is a scalar), its slots running under their own ids.
+    Node(InstanceId),
+}
+
+impl ProcessOwner {
+    fn id(self) -> InstanceId {
+        match self {
+            Self::Track(_, id) | Self::Node(id) => id,
+        }
+    }
+
+    /// The `track` field of its processes (and lanes).
+    fn track(self) -> Value {
+        match self {
+            Self::Track(_, id) => Value::Instance(id),
+            Self::Node(_) => Value::Nil,
+        }
+    }
+
+    /// The `node` field of its processes.
+    fn node(self) -> Value {
+        match self {
+            Self::Track(..) => Value::Nil,
+            Self::Node(id) => Value::Instance(id),
+        }
+    }
+
+    /// The id `slot` runs under (its run error and scope).
+    fn runtime_id(self, slot: &TrackProcessSlot) -> u64 {
+        match self {
+            Self::Track(track, _) => {
+                sequencer::process::track_process_slot_runtime_id(slot, track).0
+            }
+            Self::Node(_) => slot.instance_id.0,
+        }
+    }
+
+    /// The name `slot` shows: its instance name, else its class (on a node,
+    /// the class's node label: `transpose` for `neural-transpose`).
+    fn name(self, slot: &TrackProcessSlot) -> String {
+        match (&slot.instance_name, self) {
+            (Some(name), _) => name.clone(),
+            (None, Self::Track(..)) => slot.class_name.clone(),
+            (None, Self::Node(_)) => {
+                sequencer::lisp_host::graph_node_process_label(&slot.class_name)
+            }
+        }
+    }
+}
+
 /// The process lanes' share of [`KindsShared`] (the reader hook's cold
 /// reads and live values use it too).
 #[derive(Default)]
 pub(crate) struct LaneShared {
     /// The tracks whose processes are registered.
     pub(super) tracks: HashMap<InstanceId, TrackLanes>,
+    /// The graph nodes whose processes are registered.
+    pub(super) nodes: HashMap<InstanceId, NodeLanes>,
+    /// Process or state cell instances changed since the live loop's id
+    /// lists were built.
+    relisted: bool,
     /// Each process instance's runtime id on its track (`process.error`),
     /// each state cell's runtime id and name (`state-cell.values`).
     process_runtime: HashMap<InstanceId, u64>,
@@ -126,13 +207,65 @@ impl LaneShared {
     /// processes' and state cells' runtime records.
     pub(super) fn forget_track(&mut self, id: InstanceId) -> Option<TrackLanes> {
         let track = self.tracks.remove(&id)?;
-        for id in &track.processes {
+        self.forget_parts(&track.processes, &track.cells);
+        Some(track)
+    }
+
+    /// Forget the registered graph nodes not in `live` (the graphs'
+    /// nodes: a dropped node's processes went with it).
+    pub(super) fn retain_nodes(&mut self, live: &[InstanceId]) {
+        let gone: Vec<InstanceId> = (self.nodes.keys())
+            .filter(|id| !live.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(node) = self.nodes.remove(&id) {
+                self.forget_parts(&node.processes, &node.cells);
+                self.relisted = true;
+            }
+        }
+    }
+
+    fn forget_parts(&mut self, processes: &[InstanceId], cells: &[InstanceId]) {
+        for id in processes {
             self.process_runtime.remove(id);
         }
-        for id in &track.cells {
+        for id in cells {
             self.state_cells.remove(id);
         }
-        Some(track)
+    }
+
+    /// Record what [`sync_processes`] derived (each process's and state
+    /// cell's runtime record) in place of `previous`'s (its processes and
+    /// state cells, still recorded); returns the processes, lanes and state
+    /// cells. The live loop re-reads (`relisted`) when an instance list or
+    /// a runtime record moved: a project lane's runtime id follows its
+    /// track's position, a named slot's its name.
+    fn record_parts(
+        &mut self,
+        derived: DerivedProcesses,
+        previous: Option<(&[InstanceId], &[InstanceId])>,
+    ) -> (Vec<InstanceId>, Vec<InstanceId>, Vec<InstanceId>) {
+        let runtime_moved = (derived.runtime.iter())
+            .any(|(id, runtime_id)| self.process_runtime.get(id) != Some(runtime_id))
+            || (derived.cells.iter()).any(|(id, runtime_id, name)| {
+                (self.state_cells.get(id))
+                    .is_none_or(|(was_id, was_name)| was_id != runtime_id || was_name != name)
+            });
+        if let Some((processes, cells)) = previous {
+            self.forget_parts(processes, cells);
+        }
+        self.relisted |= runtime_moved;
+        self.process_runtime.extend(derived.runtime);
+        let mut cells = Vec::with_capacity(derived.cells.len());
+        for (id, runtime_id, name) in derived.cells {
+            cells.push(id);
+            self.state_cells.insert(id, (runtime_id, name));
+        }
+        self.relisted |= previous.is_none_or(|(processes, previous_cells)| {
+            processes != derived.processes.as_slice() || previous_cells != cells.as_slice()
+        });
+        (derived.processes, derived.lanes, cells)
     }
 
     /// The published library, fetched again only when its version moved.
@@ -184,6 +317,9 @@ pub(crate) struct LaneState {
     /// `state-cell.values` push; `None` forces one.
     process_live: Option<(u64, u64)>,
     cell_live: Option<(u64, u64)>,
+    /// The library (version, class instances' generation) the registered
+    /// graph nodes were last checked against; `None` forces a check.
+    node_library: Option<(u64, u64)>,
 }
 
 impl LaneState {
@@ -193,9 +329,14 @@ impl LaneState {
         self.global = None;
         self.process_live = None;
         self.cell_live = None;
-        for track in shared.borrow_mut().lanes.tracks.values_mut() {
+        self.node_library = None;
+        let lanes = &mut shared.borrow_mut().lanes;
+        for track in lanes.tracks.values_mut() {
             track.key = None;
             track.pushed = false;
+        }
+        for node in lanes.nodes.values_mut() {
+            node.library = None;
         }
     }
 
@@ -209,15 +350,6 @@ impl LaneState {
         self.authoring = None;
         self.class_ids.drain()
     }
-}
-
-/// What one [`sync_track_lanes`] did.
-#[derive(Default)]
-pub(super) struct LaneSync {
-    /// Anything registered, dropped or pushed.
-    pub(super) changed: bool,
-    /// The track's process or state cell instances changed.
-    pub(super) listed: bool,
 }
 
 fn flag(on: bool) -> Value {
@@ -285,7 +417,8 @@ fn same_forked(a: &ProjectLaneOverrides, b: &ProjectLaneOverrides) -> bool {
 /// [`LaneShared::tracks`]. With `force` false a chain, forked lanes,
 /// position and library unchanged since the last sync pushes nothing, and
 /// one changed only in lane values re-derives those processes' lanes
-/// alone. `None` when the track is gone.
+/// alone. Returns whether anything was registered, dropped or pushed;
+/// `None` when the track is gone.
 pub(super) fn sync_track_lanes<S: KindStore>(
     store: &mut S,
     sources: &KindsHandles,
@@ -293,7 +426,7 @@ pub(super) fn sync_track_lanes<S: KindStore>(
     track: usize,
     track_id: InstanceId,
     force: bool,
-) -> Option<LaneSync> {
+) -> Option<bool> {
     let state = &sources.state;
     let own = state.track_process_chain(track)?;
     let overrides = state.project_lane_overrides(track);
@@ -321,7 +454,7 @@ pub(super) fn sync_track_lanes<S: KindStore>(
                 synced.project = project;
                 synced.own = own;
                 synced.overrides = overrides;
-                return Some(LaneSync::default());
+                return Some(false);
             }
             let lane_values_only = comparable
                 && synced.chain.slots.len() == chain.slots.len()
@@ -334,11 +467,9 @@ pub(super) fn sync_track_lanes<S: KindStore>(
                 synced.own = own;
                 synced.overrides = overrides;
                 drop(guard);
-                let changed = resync_lane_values(store, sources, shared, track, track_id, &was);
-                return Some(LaneSync {
-                    changed,
-                    listed: false,
-                });
+                return Some(resync_lane_values(
+                    store, sources, shared, track, track_id, &was,
+                ));
             }
         }
         (key, project, published, chain)
@@ -348,28 +479,19 @@ pub(super) fn sync_track_lanes<S: KindStore>(
         shared,
         changed: false,
     };
-    let derived = sync_processes(&mut puts, sources, track, track_id, &chain, &published);
+    let owner = ProcessOwner::Track(track, track_id);
+    let derived = sync_processes(&mut puts, sources, owner, &chain, &published);
     let changed = puts.changed;
 
     let mut shared = shared.borrow_mut();
     let lanes_shared = &mut shared.lanes;
     lanes_shared.process_syncs += chain.slots.len() as u64;
-    let previous = lanes_shared.forget_track(track_id);
-    lanes_shared.process_runtime.extend(derived.runtime);
-    let mut cells = Vec::with_capacity(derived.cells.len());
-    for (id, runtime_id, name) in derived.cells {
-        cells.push(id);
-        lanes_shared.state_cells.insert(id, (runtime_id, name));
-    }
-    let (pushed, listed) = match &previous {
-        Some(previous) => (
-            previous.pushed
-                && previous.processes == derived.processes
-                && previous.lanes == derived.lanes,
-            previous.processes != derived.processes || previous.cells != cells,
-        ),
-        None => (false, true),
-    };
+    let previous = lanes_shared.tracks.remove(&track_id);
+    let listed = (previous.as_ref()).map(|was| (was.processes.as_slice(), was.cells.as_slice()));
+    let (processes, lanes, cells) = lanes_shared.record_parts(derived, listed);
+    let pushed = previous.is_some_and(|previous| {
+        previous.pushed && previous.processes == processes && previous.lanes == lanes
+    });
     lanes_shared.tracks.insert(
         track_id,
         TrackLanes {
@@ -380,13 +502,13 @@ pub(super) fn sync_track_lanes<S: KindStore>(
             own,
             overrides,
             chain,
-            processes: derived.processes,
-            lanes: derived.lanes,
+            processes,
+            lanes,
             pushed,
             cells,
         },
     );
-    Some(LaneSync { changed, listed })
+    Some(changed)
 }
 
 /// The lane values of the slots of `track`'s synced chain that differ from
@@ -441,12 +563,12 @@ struct DerivedProcesses {
     cells: Vec<(InstanceId, u64, String)>,
 }
 
-/// Register and push every process of `track`'s composed `chain`.
+/// Register and push every process of `owner`'s `chain` (a track's
+/// composed chain, a node's patch).
 fn sync_processes<S: KindStore>(
     puts: &mut Puts<'_, S>,
     sources: &KindsHandles,
-    track: usize,
-    track_id: InstanceId,
+    owner: ProcessOwner,
     chain: &TrackProcessChain,
     published: &PublishedProcessAuthoringSnapshot,
 ) -> DerivedProcesses {
@@ -463,11 +585,12 @@ fn sync_processes<S: KindStore>(
         .collect();
     let (ids, registered) = reconcile_children(
         puts.store,
-        track_id,
+        owner.id(),
         PROCESS,
         &wanted,
         |store, id, proc_id| {
-            store.push(id, f::PROCESS_TRACK, Value::Instance(track_id));
+            store.push(id, f::PROCESS_TRACK, owner.track());
+            store.push(id, f::PROCESS_NODE, owner.node());
             store.push(id, f::PROCESS_PROC_ID, number(proc_id as f64));
         },
     );
@@ -488,7 +611,12 @@ fn sync_processes<S: KindStore>(
             wired.extend(readers.into_iter().map(|(_, index, inlet)| (index, inlet)));
         }
     }
-    let entries = process_lane_entries_for_chain(state, track, chain, published);
+    let entries = match owner {
+        ProcessOwner::Track(track, _) => {
+            process_lane_entries_for_chain(state, track, chain, published)
+        }
+        ProcessOwner::Node(_) => Vec::new(),
+    };
     let shared = puts.shared;
     let lane_shared = shared.borrow();
     let classes = &lane_shared.lanes.classes;
@@ -511,7 +639,7 @@ fn sync_processes<S: KindStore>(
         }
         derived.processes.push(id);
         let class = classes.get(&slot.class_name).copied();
-        put_process(puts, id, slot_index, slot, def, class);
+        put_process(puts, id, owner, (slot_index, slot), def, class);
         let in_ports = def.map_or_else(Vec::new, |def| {
             (def.inlets.iter())
                 .filter(|inlet| {
@@ -528,10 +656,11 @@ fn sync_processes<S: KindStore>(
         let slot_entries: Vec<&ProcessLaneUiEntry> = (entries.iter())
             .filter(|entry| entry.slot_index == slot_index)
             .collect();
-        let lane_ids = sync_lanes(puts, id, track_id, &slot_entries, first);
+        let lane_ids = sync_lanes(puts, id, owner, &slot_entries, first);
         derived.lanes.extend(lane_ids.iter().copied());
         puts.put(id, f::PROCESS_LANES, instance_list(lane_ids));
-        let inlet_ids = sync_inlets(puts, id, slot, def);
+        let node = matches!(owner, ProcessOwner::Node(_));
+        let inlet_ids = sync_inlets(puts, id, slot, def, node);
         puts.put(id, f::PROCESS_INLETS, instance_list(inlet_ids));
         let target_process = |target: &sequencer::process::ParamTarget| {
             resolve_process_inlet_target(chain, slot, target)
@@ -540,8 +669,8 @@ fn sync_processes<S: KindStore>(
         let port_ids = sync_ports(puts, id, slot, def, &target_process);
         puts.put(id, f::PROCESS_PORTS, instance_list(port_ids));
 
-        // State cells (the scope), under the slot's runtime id on this track.
-        let runtime_id = sequencer::process::track_process_slot_runtime_id(slot, track).0;
+        // State cells (the scope), under the slot's runtime id.
+        let runtime_id = owner.runtime_id(slot);
         derived.runtime.push((id, runtime_id));
         let cells = sync_cells(puts, id, def);
         puts.put(
@@ -557,12 +686,12 @@ fn sync_processes<S: KindStore>(
     derived
 }
 
-/// A process's own fields.
+/// A process's own fields (`slot` at `slot_index` in its chain).
 fn put_process<S: KindStore>(
     puts: &mut Puts<'_, S>,
     id: InstanceId,
-    slot_index: usize,
-    slot: &TrackProcessSlot,
+    owner: ProcessOwner,
+    (slot_index, slot): (usize, &TrackProcessSlot),
     def: Option<&PublishedProcessDef>,
     class: Option<InstanceId>,
 ) {
@@ -570,8 +699,7 @@ fn put_process<S: KindStore>(
     puts.put(id, f::PROCESS_CLASS_REF, instance_or_nil(class));
     puts.put(id, f::PROCESS_CLASS_NAME, text(&slot.class_name));
     let instance_name = slot.instance_name.as_deref().unwrap_or("");
-    let name = slot.instance_name.as_deref().unwrap_or(&slot.class_name);
-    puts.put(id, f::PROCESS_NAME, text(name));
+    puts.put(id, f::PROCESS_NAME, Value::String(owner.name(slot)));
     puts.put(id, f::PROCESS_INSTANCE_NAME, text(instance_name));
     puts.put(id, f::PROCESS_PROJECT, flag(slot.project_layer));
     let default_lane = sequencer::process::is_default_lane_slot(slot);
@@ -592,19 +720,27 @@ fn put_process<S: KindStore>(
     puts.put(id, f::PROCESS_EXPR_LINE, Value::String(line));
     let error = slot.expr_compile_error(def.is_some()).unwrap_or_default();
     puts.put(id, f::PROCESS_COMPILE_ERROR, Value::String(error));
+    puts.put(id, f::PROCESS_KNOWN, flag(def.is_some()));
+    let source = slot.expr_source.as_deref().unwrap_or("");
+    puts.put(id, f::PROCESS_EXPR_SOURCE, text(source));
+    let (promoted, reason) = sequencer::lisp_host::process_slot_as_expr(slot, def);
+    puts.put(id, f::PROCESS_PROMOTED_EXPR, flag(promoted));
+    let reason = reason.unwrap_or_default();
+    puts.put(id, f::PROCESS_AS_EXPR_REASON, Value::String(reason));
 }
 
-/// A process's lanes, one per entry, the first at `first` in `t.lanes`.
+/// A process's lanes, one per entry, the first at `first` in `t.lanes`
+/// (none on a node).
 fn sync_lanes<S: KindStore>(
     puts: &mut Puts<'_, S>,
     id: InstanceId,
-    track_id: InstanceId,
+    owner: ProcessOwner,
     entries: &[&ProcessLaneUiEntry],
     first: usize,
 ) -> Vec<InstanceId> {
     let lane_ids = indexed_children(puts.store, id, LANE, entries.len(), |store, lane, at| {
         store.push(lane, f::LANE_PROCESS, Value::Instance(id));
-        store.push(lane, f::LANE_TRACK, Value::Instance(track_id));
+        store.push(lane, f::LANE_TRACK, owner.track());
         store.push(lane, f::LANE_INDEX, number(at as f64));
     });
     for (offset, (lane, entry)) in lane_ids.iter().zip(entries).enumerate() {
@@ -635,14 +771,15 @@ fn put_lane<S: KindStore>(
     puts.put(lane, f::LANE_VALUES, numbers(&entry.values));
 }
 
-/// A process's numeric inlets.
+/// A process's numeric inlets (with its lane inlets on a node's: `lanes`).
 fn sync_inlets<S: KindStore>(
     puts: &mut Puts<'_, S>,
     id: InstanceId,
     slot: &TrackProcessSlot,
     def: Option<&PublishedProcessDef>,
+    lanes: bool,
 ) -> Vec<InstanceId> {
-    let views: Vec<(String, ProcessInletView)> = process_scalar_inlet_names(slot, def)
+    let views: Vec<(String, ProcessInletView)> = process_inlet_names(slot, def, lanes)
         .into_iter()
         .filter_map(|name| {
             let view = process_scalar_inlet_view(slot, def, &name, process_inlet_def(def, &name))?;
@@ -793,6 +930,75 @@ pub(super) fn cold_track_lanes<S: KindStore>(
     listed(&shared)
 }
 
+/// Graph node `node`'s processes as `chain` (its patch; `None`: as last
+/// synced, for a library change) says: registers the missing ones and their
+/// parts, drops the gone ones, pushes what changed and records the node in
+/// [`LaneShared::nodes`]. Returns `n.processes` and whether anything was
+/// registered, dropped or pushed; `None` when the chain and the library are
+/// those of the last sync (or the node was never synced and no chain is
+/// given).
+pub(super) fn sync_node_lanes<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    node: InstanceId,
+    chain: Option<&TrackProcessChain>,
+) -> Option<(Value, bool)> {
+    let state = &sources.state;
+    let library = |lanes: &LaneShared| {
+        let version = state.published_process_authoring_version();
+        (version, lanes.classes_generation)
+    };
+    let chain = {
+        let lanes = &shared.borrow().lanes;
+        let synced = lanes.nodes.get(&node);
+        let current = synced.is_some_and(|synced| synced.library == Some(library(lanes)));
+        match (chain, synced) {
+            (Some(chain), Some(synced)) if current && synced.chain == *chain => return None,
+            (Some(chain), _) => chain.clone(),
+            (None, Some(_)) if current => return None,
+            (None, Some(synced)) => synced.chain.clone(),
+            (None, None) => return None,
+        }
+    };
+    // A chain that arrived before its expr bodies were compiled (a project
+    // load, a copy) compiles them now, as the legacy read does (which can
+    // move the library: read after).
+    sequencer::lisp_host::ensure_graph_node_expr_classes(state, &chain);
+    let (library, published) = {
+        let lanes = &mut shared.borrow_mut().lanes;
+        (library(lanes), lanes.published(state))
+    };
+    let mut puts = Puts {
+        store,
+        shared,
+        changed: false,
+    };
+    let derived = sync_processes(
+        &mut puts,
+        sources,
+        ProcessOwner::Node(node),
+        &chain,
+        &published,
+    );
+    let changed = puts.changed;
+    let mut shared = shared.borrow_mut();
+    let lanes = &mut shared.lanes;
+    lanes.process_syncs += chain.slots.len() as u64;
+    let previous = lanes.nodes.remove(&node);
+    let listed = (previous.as_ref()).map(|was| (was.processes.as_slice(), was.cells.as_slice()));
+    let (processes, _, cells) = lanes.record_parts(derived, listed);
+    let list = instance_list(processes.iter().copied());
+    let record = NodeLanes {
+        library: Some(library),
+        chain,
+        processes,
+        cells,
+    };
+    lanes.nodes.insert(node, record);
+    Some((list, changed))
+}
+
 /// One live field of a process (`error`) or a state cell (`values`).
 pub(super) fn lane_live_value(
     sources: &KindsHandles,
@@ -833,8 +1039,9 @@ fn class_ids(defs: &[&PublishedProcessDef]) -> Vec<u64> {
 
 impl HostKinds {
     /// The process syncs (see the module docs): the library, the global
-    /// triggers, the tracks registered or newly observed, then the id lists
-    /// the live loop reads.
+    /// triggers, the tracks registered or newly observed, and the
+    /// registered graph nodes the library moved under (their chains sync
+    /// with their graph, `sync_graph_model`).
     pub(super) fn sync_lane_model(&mut self, pusher: &mut Pusher<'_>) {
         if (self.lanes.representatives()).any(|id| !pusher.rt.instance_is_live(*id)) {
             // A hot reload dropped process instances.
@@ -854,16 +1061,15 @@ impl HostKinds {
         (self.lanes.track_observed).refresh(pusher.rt, &names, || {
             tracks.iter().flatten().copied().collect()
         });
-        let mut listed = false;
         {
-            let mut shared = shared.borrow_mut();
-            let gone: Vec<InstanceId> = (shared.lanes.tracks.keys())
+            let lanes = &mut shared.borrow_mut().lanes;
+            let gone: Vec<InstanceId> = (lanes.tracks.keys())
                 .filter(|id| !pusher.rt.instance_is_live(**id))
                 .copied()
                 .collect();
             for id in gone {
-                shared.lanes.forget_track(id);
-                listed = true;
+                lanes.forget_track(id);
+                lanes.relisted = true;
             }
         }
         self.check_lane_globals(pusher);
@@ -885,13 +1091,12 @@ impl HostKinds {
             if !due || !pusher.sources.track_exists(position) {
                 continue;
             }
-            let Some(sync) =
+            let Some(changed) =
                 sync_track_lanes(&mut *pusher.rt, pusher.sources, shared, position, id, false)
             else {
                 continue;
             };
-            pusher.changed |= sync.changed;
-            listed |= sync.listed;
+            pusher.changed |= changed;
             let (processes, lanes) = {
                 let mut shared = shared.borrow_mut();
                 let track = shared.lanes.tracks.get_mut(&id).expect("just synced");
@@ -904,20 +1109,23 @@ impl HostKinds {
                     instance_list(track.lanes.iter().copied()),
                 )
             };
-            listed = true;
             pusher.push(id, f::TRACK_PROCESSES, processes);
             pusher.push(id, f::TRACK_LANES, lanes);
         }
-        if listed {
-            let shared = shared.borrow();
-            let tracks = shared.lanes.tracks.values();
-            let processes = tracks.clone().flat_map(|t| t.processes.iter().copied());
-            self.lanes.process_ids = processes.collect();
-            self.lanes.cell_ids = tracks.flat_map(|t| t.cells.iter().copied()).collect();
-            self.lanes.process_observed.reset();
-            self.lanes.cell_observed.reset();
-            self.lanes.process_live = None;
-            self.lanes.cell_live = None;
+        // Registered nodes sync with their graph; here only when the library
+        // moved (each from the chain it last synced).
+        let library = (authoring, shared.borrow().lanes.classes_generation);
+        if self.lanes.node_library == Some(library) {
+            return;
+        }
+        self.lanes.node_library = Some(library);
+        let nodes: Vec<InstanceId> = shared.borrow().lanes.nodes.keys().copied().collect();
+        for node in nodes {
+            let synced = sync_node_lanes(&mut *pusher.rt, pusher.sources, shared, node, None);
+            if let Some((processes, changed)) = synced {
+                pusher.changed |= changed;
+                pusher.push(node, f::GRAPH_NODE_PROCESSES, processes);
+            }
         }
     }
 
@@ -995,9 +1203,28 @@ impl HostKinds {
 
     /// `process.error` of the observed processes when the scheduler's run
     /// errors moved, `state-cell.values` of the observed cells when its
-    /// scope histories did, or either observed set did.
+    /// scope histories did, or either observed set did. The id lists are
+    /// rebuilt when a track's or a node's instances changed.
     pub(super) fn sync_lane_live(&mut self, pusher: &mut Pusher<'_>) {
         let lanes = &mut self.lanes;
+        let mut shared = pusher.shared.borrow_mut();
+        if std::mem::take(&mut shared.lanes.relisted) {
+            let tracks = shared.lanes.tracks.values();
+            let nodes = shared.lanes.nodes.values();
+            let owners = (tracks.map(|t| (&t.processes, &t.cells)))
+                .chain(nodes.map(|n| (&n.processes, &n.cells)));
+            lanes.process_ids.clear();
+            lanes.cell_ids.clear();
+            for (processes, cells) in owners {
+                lanes.process_ids.extend_from_slice(processes);
+                lanes.cell_ids.extend_from_slice(cells);
+            }
+            lanes.process_observed.reset();
+            lanes.cell_observed.reset();
+            lanes.process_live = None;
+            lanes.cell_live = None;
+        }
+        drop(shared);
         let (processes, cells) = (&lanes.process_ids, &lanes.cell_ids);
         (lanes.process_observed).refresh(pusher.rt, &PROCESS_LIVE.names, || processes.clone());
         (lanes.cell_observed).refresh(pusher.rt, &STATE_CELL_LIVE.names, || cells.clone());

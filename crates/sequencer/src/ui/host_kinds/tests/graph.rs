@@ -1,5 +1,6 @@
 //! Stage 7g: graph sequencers (graphs, nodes, edges, params, playback,
-//! active notes), their setters, identity and observed gating.
+//! active notes), their setters, identity and observed gating; 7g-2: a
+//! node's process patch (`n.processes`) and its setters.
 
 use super::*;
 use sequencer::graph::{GraphSoundingNote, GraphVisualizationEdge, GraphVisualizationSnapshot};
@@ -7,7 +8,10 @@ use sequencer::graph::{GraphSoundingNote, GraphVisualizationEdge, GraphVisualiza
 const REFER_GRAPH: &str = "(import eseq.kinds :refer (track tracks project graphs graph-of \
                            graph-param-named graph-edge-to set-group-gain! set-group-coupling! \
                            gate-generator! graph-timebase-options graph-quantize-options \
-                           graph-max-poly-selection-options))";
+                           graph-max-poly-selection-options process-library \
+                           set-process-enabled! set-inlet! move-process! add-process! \
+                           remove-process! bind-port! add-fanout! unbind-port! clear-port! \
+                           remove-fanout!))";
 
 const NEURAL: &str = "alez/neural:neural";
 
@@ -848,4 +852,333 @@ fn graph_params_keep_their_handles_by_name_across_re_evaluation() {
         h.eval_graph(r#"(list "gamma" "alpha" "delta")"#)
     );
     assert_eq!(h.graph_instance("(nth n0.params 1)"), pa);
+}
+
+/// Node 2 of `nn`'s patch built through the legacy natives (rand wired into
+/// cmp's `a`, fanned out into mask's `prob`; node 1 one prob slot), and
+/// the kinds' handles on them.
+const NODE_PATCH: &str = r#"(def rand-id (graph-node-process-add nn 2 "lane-rand"))
+    (def cmp-id (graph-node-process-add nn 2 "lane-cmp"))
+    (def mask-id (graph-node-process-add nn 2 "prob-mask"))
+    (graph-node-process-wire nn 2 rand-id :wire cmp-id :a)
+    (graph-node-process-fanout-add nn 2 rand-id :wire mask-id :prob)
+    (def prob-id (graph-node-process-add nn 1 "lane-prob"))"#;
+
+const NODE_HANDLES: &str = r#"(def g (graph-of nn)) (def n1 (nth g.nodes 1)) (def n2 (nth g.nodes 2))
+    (def part (lambda (xs name) (first (filter (lambda (x) (= x.name name)) xs))))
+    (def rnd (nth n2.processes 0)) (def cmp (nth n2.processes 1)) (def mask (nth n2.processes 2))
+    (def lo (part rnd.inlets "lo")) (def roll (part rnd.inlets "roll"))
+    (def out (part rnd.ports "out")) (def wire (part rnd.ports "wire"))"#;
+
+impl Harness {
+    /// A `neural` instance `nn` with the library published and
+    /// [`NODE_PATCH`] built.
+    fn node_patch() -> Self {
+        let mut h = Self::new();
+        h.publish_library();
+        h.neural("nn");
+        h.eval_graph(NODE_PATCH);
+        // The natives' history entries land with the host commands.
+        h.graph_drain();
+        h
+    }
+
+    /// Node `node`'s chain as the legacy native reads it.
+    fn node_chain(&mut self, node: usize) -> Vec<Value> {
+        items(&self.eval_graph(&format!("(graph-node-process-chain nn {node})")))
+    }
+}
+
+#[test]
+fn node_processes_read_like_the_legacy_node_patch() {
+    let mut h = Harness::node_patch();
+    // Nothing reads a node's processes: none is registered.
+    let registered = |h: &Harness| h.frame.host_kinds.shared.borrow().lanes.nodes.len();
+    assert_eq!(registered(&h), 0);
+    h.eval_graph(NODE_HANDLES);
+    h.sync();
+    assert_eq!(registered(&h), 1, "only the node read");
+    let legacy = h.node_chain(2);
+    assert_eq!(
+        h.eval_graph("(len n2.processes)"),
+        number(legacy.len() as f64)
+    );
+    for (index, slot) in legacy.iter().enumerate() {
+        let p = format!("(nth n2.processes {index})");
+        assert_eq!(
+            h.eval_graph(&format!(
+                "(let ((p {p})) (list p.proc-id p.class-name p.name p.enabled p.expr p.known \
+                                      p.promoted-expr p.as-expr-reason p.index (= p.node n2) p.track \
+                                      (len p.lanes)))"
+            )),
+            list_value([
+                get(slot, "instance-id"),
+                get(slot, "class"),
+                get(slot, "label"),
+                get(slot, "enabled"),
+                get(slot, "expr"),
+                get(slot, "known"),
+                get(slot, "promoted-expr"),
+                get(slot, "as-expr-reason"),
+                number(index as f64),
+                Value::Bool(true),
+                Value::Nil,
+                number(0.0),
+            ]),
+            "{p}"
+        );
+        // Every inlet is a scalar on a node (the class's lane inlets too).
+        let defs = items(&get(slot, "inlet-defs"));
+        let inlets = h.eval_graph(&format!(
+            "(let ((p {p})) (map (lambda (i) (list i.name i.type i.value i.options)) p.inlets))"
+        ));
+        let expected = defs.iter().map(|def| {
+            let options = match get(def, "options") {
+                Value::Nil => list_value([]),
+                options => options,
+            };
+            list_value([
+                get(def, "name"),
+                get(def, "kind"),
+                get(def, "value"),
+                options,
+            ])
+        });
+        assert_eq!(inlets, list_value(expected), "{p}.inlets");
+    }
+    assert_eq!(
+        h.eval_graph("(map (lambda (i) i.name) rnd.inlets)"),
+        h.eval_graph(r#"(list "roll" "lo" "hi" "whole" "hold")"#)
+    );
+    // The wiring: the primary wire and the fan-out cable resolve to the
+    // node's processes; the in ports are the legacy lane patch's.
+    assert_eq!(
+        h.eval_graph(
+            "(let ((fo (first wire.fanout)))
+               (list (= wire.target-process cmp) wire.target-inlet wire.connectable out.mappable \
+                     (len wire.fanout) (= fo.target-process mask) fo.target-inlet))"
+        ),
+        h.eval_graph(r#"(list true "a" true true 1 true "prob")"#)
+    );
+    let in_ports = items(&h.eval_graph("(graph-node-lane-patch nn 2)"))
+        .iter()
+        .map(|entry| {
+            list_value(
+                items(&get(entry, "in-ports"))
+                    .iter()
+                    .map(|p| get(p, "name")),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        h.eval_graph("(map (lambda (p) p.in-ports) n2.processes)"),
+        list_value(in_ports)
+    );
+    assert_eq!(
+        h.eval_graph("(map (lambda (c) c.name) rnd.cells)"),
+        h.eval_graph(r#"(list "held")"#)
+    );
+    // A node's process belongs to no track's chain.
+    assert_eq!(
+        h.eval_graph("(let ((t (track 0))) (len (filter (lambda (p) (= p rnd)) t.processes)))"),
+        number(0.0)
+    );
+
+    // Legacy edits flow into the kinds at the next sync, on the same
+    // instances.
+    let rnd = h.graph_instance("rnd");
+    h.eval_graph("(graph-node-process-enable nn 2 rand-id false)");
+    h.eval_graph("(graph-node-process-inlet nn 2 rand-id :lo 3)");
+    h.eval_graph("(graph-node-process-move nn 2 mask-id -2)");
+    h.sync();
+    assert_eq!(
+        h.eval_graph("(list rnd.enabled lo.value rnd.index mask.index)"),
+        h.eval_graph("(list false 3 1 0)")
+    );
+    assert_eq!(h.graph_instance("(nth n2.processes 1)"), rnd);
+    // Removing a slot drops its instance and the cables into it.
+    let mask = h.graph_instance("mask");
+    h.eval_graph("(graph-node-process-remove nn 2 mask-id)");
+    h.sync();
+    assert!(!h.rt().instance_is_live(mask));
+    assert_eq!(h.eval_graph("(len wire.fanout)"), number(0.0));
+
+    // The latest run error of a slot reads under its own id (the node
+    // runner's).
+    let rand_id = num(h.eval_graph("rand-id")) as u64;
+    let errors = std::collections::BTreeMap::from([(rand_id, "boom".to_string())]);
+    h.shared.state.publish_process_run_errors(errors);
+    h.sync();
+    assert_eq!(h.eval_graph("rnd.error"), s("boom"));
+}
+
+#[test]
+fn node_process_setters_record_the_node_chain_and_follow_the_value_rule() {
+    let mut h = Harness::node_patch();
+    h.eval_graph(NODE_HANDLES);
+    h.sync();
+    let entries = h.app.history.undo_len();
+    let set = |h: &mut Harness, code: &str| {
+        h.eval_graph(code);
+        h.graph_drain();
+    };
+    set(&mut h, "(set! rnd.enabled false)");
+    assert_eq!(get(&h.node_chain(2)[0], "enabled"), Value::Bool(false));
+    assert_eq!(h.app.history.undo_len(), entries + 1, "one entry");
+    // The current value is no edit.
+    set(&mut h, "(set-process-enabled! rnd false)");
+    assert_eq!(h.app.history.undo_len(), entries + 1);
+    set(&mut h, "(set! lo.value -5)");
+    // A gate takes a bool too (set! itself takes the field's :number).
+    set(&mut h, "(set-inlet! roll false)");
+    assert_eq!(
+        h.eval_graph("(list lo.value roll.value)"),
+        h.eval_graph("(list -5 0)")
+    );
+    set(&mut h, "(bind-port! out \"Vel\")");
+    assert_eq!(h.eval_graph("out.target-step-param"), s("velocity"));
+    assert_eq!(
+        get(&items(&get(&h.node_chain(2)[0], "ports"))[0], "mapped-to"),
+        s("velocity")
+    );
+    // `delay` is a payload field, not a step param.
+    set(&mut h, "(bind-port! out \"delay\")");
+    assert_eq!(h.eval_graph("out.target-step-param"), s("delay"));
+    assert_eq!(
+        get(&items(&get(&h.node_chain(2)[0], "ports"))[0], "mapped-to"),
+        s("delay")
+    );
+    set(&mut h, "(bind-port! wire (part mask.inlets \"prob\"))");
+    assert_eq!(
+        h.eval_graph("(list (= wire.target-process mask) wire.target-inlet)"),
+        h.eval_graph(r#"(list true "prob")"#)
+    );
+    set(&mut h, "(add-fanout! wire (part cmp.inlets \"a\"))");
+    assert_eq!(h.eval_graph("(len wire.fanout)"), number(2.0));
+    set(&mut h, "(let ((fo (nth wire.fanout 1))) (set! fo.hi 7))");
+    assert_eq!(
+        h.eval_graph("(let ((fo (nth wire.fanout 1))) fo.hi)"),
+        number(7.0)
+    );
+    set(&mut h, "(remove-fanout! (first wire.fanout))");
+    assert_eq!(
+        h.eval_graph(
+            "(let ((fo (first wire.fanout))) (list (len wire.fanout) (= fo.target-process cmp)))"
+        ),
+        h.eval_graph("(list 1 true)")
+    );
+    set(&mut h, "(unbind-port! wire)");
+    assert_eq!(
+        h.eval_graph("(list wire.disconnected wire.target-process)"),
+        h.eval_graph("(list true nil)")
+    );
+    set(&mut h, "(clear-port! wire)");
+    assert_eq!(h.eval_graph("wire.disconnected"), Value::Bool(false));
+    // Structure: add (a fresh node slot id), move, remove.
+    set(
+        &mut h,
+        r#"(add-process! n2 (first (filter (lambda (c) (= c.name "lane-acc")) process-library.classes)))"#,
+    );
+    h.eval_graph("(def acc (nth n2.processes 3))");
+    assert_eq!(h.eval_graph("acc.class-name"), s("lane-acc"));
+    assert!(
+        num(h.eval_graph("acc.proc-id")) >= (1u64 << 45) as f64,
+        "the node band"
+    );
+    let acc = h.graph_instance("acc");
+    set(&mut h, "(move-process! acc rnd)");
+    assert_eq!(
+        h.eval_graph("(list acc.index rnd.index)"),
+        h.eval_graph("(list 0 1)")
+    );
+    assert_eq!(
+        h.graph_instance("(first n2.processes)"),
+        acc,
+        "a move keeps the instance"
+    );
+    set(&mut h, "(move-process! acc nil)");
+    assert_eq!(h.eval_graph("acc.index"), number(3.0));
+    set(&mut h, "(remove-process! acc)");
+    assert!(!h.rt().instance_is_live(acc));
+    let edited = h.app.history.undo_len();
+    assert_eq!(edited, entries + 15, "one entry per edit");
+
+    // The value rule, and a node's own scope: errors that record nothing.
+    h.graph_rejects("(set! lo.value 200)", "a number from -128 to 128");
+    h.graph_rejects("(set! roll.value 2)", "from 0 to 1");
+    h.graph_rejects("(bind-port! out \"retrig\")", "a fire payload field");
+    h.graph_rejects("(set-inlet! lo 1 :all true)", ":all edits a project lane");
+    h.eval_graph(r#"(def prob (first n1.processes)) (def prob-in (part prob.inlets "prob"))"#);
+    h.graph_rejects("(bind-port! wire prob-in)", "a port targets its own node");
+    h.graph_rejects(
+        "(move-process! rnd prob)",
+        "a process moves within its own node",
+    );
+    h.graph_rejects(
+        "(let ((t (track 0)) (p (first t.processes))) (bind-port! wire (first p.lanes)))",
+        "a port targets its own node",
+    );
+    assert_eq!(h.app.history.undo_len(), edited);
+
+    // Undo restores the node's chain one entry at a time.
+    h.graph_undo();
+    assert_eq!(h.eval_graph("(len n2.processes)"), number(4.0));
+    for _ in 0..14 {
+        h.graph_undo();
+    }
+    assert_eq!(h.app.history.undo_len(), entries);
+    assert_eq!(
+        h.eval_graph("(list rnd.enabled lo.value (= wire.target-process cmp) (len wire.fanout))"),
+        h.eval_graph("(list true 0 true 1)")
+    );
+    h.graph_redo();
+    assert_eq!(h.eval_graph("rnd.enabled"), Value::Bool(false));
+
+    // An inlet drag's set!s join one entry, as the legacy picker's.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for v in [1.0, 2.0, 3.0] {
+        set(&mut h, &format!("(set! lo.value {v})"));
+    }
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 1, "one drag entry");
+    h.graph_undo();
+    assert_eq!(
+        h.eval_graph("lo.value"),
+        number(0.0),
+        "the value before the drag"
+    );
+}
+
+#[test]
+fn node_processes_sync_with_their_node_and_go_with_it() {
+    let mut h = Harness::node_patch();
+    h.eval_graph(NODE_HANDLES);
+    h.sync();
+    let process_syncs = |h: &Harness| h.frame.host_kinds.shared.borrow().lanes.process_syncs;
+    let synced = process_syncs(&h);
+    // Idle ticks, an edit to another node's chain, a param edit: no node's
+    // processes re-derive.
+    for _ in 0..3 {
+        h.sync();
+    }
+    h.eval_graph("(graph-node-process-enable nn 1 prob-id false)");
+    h.eval_graph("(graph-param nn 2 :threshold 1.5)");
+    h.sync();
+    assert_eq!(process_syncs(&h), synced, "node 2's chain did not move");
+    // Its own chain moving re-derives it once.
+    h.eval_graph("(graph-node-process-enable nn 2 cmp-id false)");
+    h.sync();
+    h.sync();
+    assert_eq!(process_syncs(&h), synced + 3);
+    let rnd = h.graph_instance("rnd");
+    // A node-count change dropping the node drops its processes.
+    h.eval_graph("(set! g.node-count 2)");
+    h.graph_drain();
+    assert!(
+        !h.rt().instance_is_live(rnd),
+        "the node's processes go with it"
+    );
+    assert!(h.frame.host_kinds.shared.borrow().lanes.nodes.is_empty());
 }

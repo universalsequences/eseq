@@ -2289,6 +2289,26 @@ fn promoted_expr_reason(def: &crate::process::PublishedProcessDef) -> String {
     )
 }
 
+/// Whether `slot` (of class `def`; `None` when the library lacks it) is a
+/// library card whose class was promoted from an expr card (spec §8: "edit
+/// as expr" can reopen it), and why it cannot be opened as an expr card
+/// (`None` for an expr card or a promoted one): a node slot's
+/// `:promoted-expr` / `:as-expr-reason`, the host kinds'
+/// `process.promoted-expr` / `as-expr-reason`.
+pub fn process_slot_as_expr(
+    slot: &crate::process::TrackProcessSlot,
+    def: Option<&crate::process::PublishedProcessDef>,
+) -> (bool, Option<String>) {
+    let expr = super::expr_process::is_expr_slot(slot);
+    let promoted = !expr && def.and_then(promoted_expr_source).is_some();
+    let reason = match def {
+        _ if expr || promoted => None,
+        Some(def) => Some(promoted_expr_reason(def)),
+        None => Some(format!("{} is not loaded", graph_node_process_label(&slot.class_name))),
+    };
+    (promoted, reason)
+}
+
 /// `{:ok :error …}` for the promote natives: `:ok` is true without an
 /// error; each extra field is a string or nil.
 fn promote_result_value(error: Option<&str>, fields: &[(&str, Option<String>)]) -> EValue {
@@ -2413,18 +2433,11 @@ fn graph_node_process_slot_value(
         "expr-source".to_string(),
         lisp_value(slot.expr_source.clone().map(EValue::String).unwrap_or(EValue::Nil)),
     );
-    // A library card whose class was promoted from an expr card (spec §8):
-    // "edit as expr" can reopen it. `:as-expr-reason` says why not otherwise.
-    let promoted = !super::expr_process::is_expr_slot(slot)
-        && def.as_ref().and_then(promoted_expr_source).is_some();
+    let (promoted, reason) = process_slot_as_expr(slot, def.as_ref());
     map.insert("promoted-expr".to_string(), lisp_bool(promoted));
     map.insert(
         "as-expr-reason".to_string(),
-        lisp_value(match (&def, promoted || super::expr_process::is_expr_slot(slot)) {
-            (_, true) => EValue::Nil,
-            (Some(def), false) => EValue::String(promoted_expr_reason(def)),
-            (None, false) => EValue::String(format!("{} is not loaded", graph_node_process_label(&slot.class_name))),
-        }),
+        lisp_value(reason.map(EValue::String).unwrap_or(EValue::Nil)),
     );
     let error = slot.expr_compile_error(def.is_some())
         .or_else(|| state.process_run_error(slot.instance_id.0));
@@ -2536,7 +2549,7 @@ fn graph_node_process_slot_value(
 /// Compile the class of every expr slot in `chain` that has none yet
 /// (a chain that arrived by kit load, instance copy or project load before
 /// `sync_expr_process_classes`). Idempotent and cheap once registered.
-fn ensure_graph_node_expr_classes(
+pub fn ensure_graph_node_expr_classes(
     state: &crate::sequencer::SequencerState,
     chain: &crate::process::TrackProcessChain,
 ) {
@@ -2607,6 +2620,38 @@ fn edit_graph_node_process_chain_recorded<R>(
     merge: Option<String>,
     edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
 ) -> Result<R, String> {
+    let (result, before, after) =
+        edit_graph_node_process_chain_now(state, manifest, instance, edit)?;
+    invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Process(instance));
+    if before != after {
+        if let Some(scene) = state.current_scene_id() {
+            enqueue_graph_node_process_history(ctx, scene, manifest.id, instance, &before, &after, merge);
+        }
+    }
+    Ok(result)
+}
+
+/// A node chain before and after an edit (`None`: the node has none).
+pub type GraphNodeProcessChainEdit<R> = (
+    R,
+    Option<crate::process::TrackProcessChain>,
+    Option<crate::process::TrackProcessChain>,
+);
+
+/// Edit node `instance`'s process chain of graph `manifest` in the current
+/// scene's overrides: `edit` gets the chain (empty when the node has none)
+/// and the next free node slot id, and returns `Err` to reject (nothing
+/// changes). Returns its result with the chain before and after; a slot id
+/// the edit minted is claimed (never minted again this session). Records
+/// nothing and invalidates no read: shared by the `graph-node-process-*`
+/// natives (which do both) and the host kinds' `edit-process` (whose
+/// history entry the host records).
+pub fn edit_graph_node_process_chain_now<R>(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
+) -> Result<GraphNodeProcessChainEdit<R>, String> {
     let (result, before, after) = state.edit_current_graph_overrides(|graphs| {
         let next_id = next_graph_node_process_id(graphs);
         let graph = ensure_graph_overrides(graphs, manifest);
@@ -2617,13 +2662,32 @@ fn edit_graph_node_process_chain_recorded<R>(
         node.process_chain = if chain.slots.is_empty() { None } else { Some(chain) };
         Ok((result, before, node.process_chain.clone()))
     })?;
-    invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Process(instance));
-    if before != after {
-        if let Some(scene) = state.current_scene_id() {
-            enqueue_graph_node_process_history(ctx, scene, manifest.id, instance, &before, &after, merge);
-        }
+    let band = GRAPH_NODE_PROCESS_ID_BASE..crate::process::TRACK_ROSTER_INSTANCE_ID_BASE;
+    let ids = after
+        .iter()
+        .flat_map(|chain| &chain.slots)
+        .map(|slot| slot.instance_id.0);
+    for id in ids.filter(|id| band.contains(id)) {
+        claim_graph_node_process_id(id);
     }
-    Ok(result)
+    Ok((result, before, after))
+}
+
+/// The fire payload fields a node slot's mappable port can write (its
+/// step params: the port's writes add to or set them before emit).
+pub const GRAPH_NODE_PAYLOAD_FIELDS: [&str; 4] = ["transpose", "velocity", "duration", "delay"];
+
+/// The merge key of a drag on inlet `inlet` of slot `slot` of node `node`
+/// of graph `sequencer_id`: its edits stage one history entry until the
+/// pointer is released (the natives' pickers and the host kinds' setter
+/// share it, so neither splits the other's drag).
+pub fn graph_node_process_inlet_merge_key(
+    sequencer_id: u64,
+    node: usize,
+    slot: u64,
+    inlet: &str,
+) -> String {
+    format!("graph-node-process-inlet:{sequencer_id}:{node}:{slot}:{inlet}")
 }
 
 fn enqueue_graph_node_process_history(
@@ -2958,22 +3022,12 @@ fn register_graph_node_process_natives(
                 return Err(format!("graph-node-process-add: unknown process class {class_name:?}"));
             }
             let id = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, next_id| {
-                chain.slots.push(crate::process::TrackProcessSlot {
-                    instance_id: crate::process::ProcessInstanceId(next_id),
-                    instance_name: None,
-                    class_name: class_name.clone(),
-                    enabled: true,
-                    project_layer: false,
-                    inlets: Default::default(),
-                    lanes: Default::default(),
-                    fanout: Default::default(),
-                    unbound_ports: Default::default(),
-                    expr_source: None,
-                    bindings: Default::default(),
-                });
+                chain.slots.push(crate::process::TrackProcessSlot::new(
+                    crate::process::ProcessInstanceId(next_id),
+                    class_name.clone(),
+                ));
                 Ok(next_id)
             })?;
-            claim_graph_node_process_id(id);
             ctx.set_status(format!("node {instance}: added {class_name}"));
             Ok(EValue::Number(id as f64))
         },
@@ -2988,22 +3042,7 @@ fn register_graph_node_process_natives(
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-remove", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-remove")?;
             edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
-                let before = chain.slots.len();
-                chain.slots.retain(|slot| slot.instance_id != id);
-                let targets_removed = |target: &crate::process::ParamTarget| {
-                    matches!(target, crate::process::ParamTarget::ProcessInlet { instance_id: Some(i), .. } if *i == id)
-                };
-                for slot in &mut chain.slots {
-                    slot.bindings
-                        .retain(|_, target| !target.as_ref().is_some_and(targets_removed));
-                    // Fan-out cables into the removed slot go too, as
-                    // `graph-node-process-fanout-remove` would drop them.
-                    for entries in slot.fanout.values_mut() {
-                        entries.retain(|entry| !targets_removed(&entry.target));
-                    }
-                    slot.fanout.retain(|_, entries| !entries.is_empty());
-                }
-                if chain.slots.len() == before {
+                if !chain.remove_slot_and_wires(id) {
                     return Err(format!("graph-node-process-remove: no slot {}", id.0));
                 }
                 Ok(())
@@ -3076,7 +3115,7 @@ fn register_graph_node_process_natives(
             let literal = crate::process::ProcessLiteral::from_value(value)?;
             // A picker drag writes one value per pointer event; the merge key
             // folds the whole gesture into one undo step.
-            let merge = format!("graph-node-process-inlet:{}:{instance}:{}:{inlet}", manifest.id, id.0);
+            let merge = graph_node_process_inlet_merge_key(manifest.id, instance, id.0, &inlet);
             edit_graph_node_process_chain_recorded(ctx, &st, &manifest, instance, Some(merge), |chain, _| {
                 let slot = chain
                     .slots
@@ -3289,10 +3328,10 @@ fn register_graph_node_process_natives(
                 Some(value) => {
                     let name = graph_key_string(value)
                         .ok_or_else(|| "graph-node-process-map expects :transpose, :velocity, :duration or nil".to_string())?;
-                    match name.as_str() {
-                        "transpose" | "velocity" | "duration" | "delay" => Some(name),
-                        other => return Err(format!("graph-node-process-map: {other:?} is not a payload field")),
+                    if !GRAPH_NODE_PAYLOAD_FIELDS.contains(&name.as_str()) {
+                        return Err(format!("graph-node-process-map: {name:?} is not a payload field"));
                     }
+                    Some(name)
                 }
             };
             let st_inner = Arc::clone(&st);

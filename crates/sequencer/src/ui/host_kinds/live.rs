@@ -875,18 +875,20 @@ pub(super) fn install_reader(
             // A model field, but registered on the first read.
             return cold_piano_roll_notes(vm, &sources, &shared);
         }
-        if field == f::GRAPH_NODE_PARAMS.1 || field == f::GRAPH_NODE_EDGES.1 {
-            // `n.params`, `n.edges` or `e.params`: model fields, but
-            // registered on the first read.
-            let parts = [
-                f::GRAPH_NODE_PARAMS,
-                f::GRAPH_NODE_EDGES,
-                f::GRAPH_EDGE_PARAMS,
-            ];
+        let parts = [
+            f::GRAPH_NODE_PARAMS,
+            f::GRAPH_NODE_EDGES,
+            f::GRAPH_NODE_PROCESSES,
+            f::GRAPH_EDGE_PARAMS,
+        ];
+        if parts.iter().any(|key| key.1 == field) {
+            // `n.params`, `n.edges`, `n.processes` or `e.params`: model
+            // fields, but registered on the first read (`t.processes` is a
+            // track's, below).
             let kind = vm.instance_kind(id);
             let key = (parts.into_iter()).find(|key| key.1 == field && Some(key.0) == kind);
             if let Some(key) = key {
-                return cold_graph_parts(vm, &shared, id, key);
+                return cold_graph_parts(vm, &sources, &shared, id, key);
             }
         }
         let lanes = [f::TRACK_PROCESSES, f::TRACK_LANES];

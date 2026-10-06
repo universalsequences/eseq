@@ -42,15 +42,16 @@ type Payload = HashMap<String, Rc<RefCell<Value>>>;
 type Request = Result<Option<(GraphOverrideSlot, bool)>, String>;
 
 /// The graph `:graph-id` names now, with the current scene's overrides of
-/// it and its resolved config.
-struct Graph {
-    manifest: GraphManifest,
+/// it and its resolved config (`edit-process` addresses a node's patch by
+/// it too).
+pub(super) struct Graph {
+    pub(super) manifest: GraphManifest,
     overrides: Option<ProjectGraphOverrides>,
-    config: GraphRuntimeConfig,
+    pub(super) config: GraphRuntimeConfig,
 }
 
 impl Graph {
-    fn of(app: &app::App, map: &Payload) -> Result<Self, String> {
+    pub(super) fn of(app: &app::App, map: &Payload) -> Result<Self, String> {
         let gid = match SetValue::of(map, "graph-id", "graph-id").value() {
             Value::Number(gid) if gid.is_finite() => *gid,
             _ => return Err("needs a :graph-id".to_string()),
@@ -69,7 +70,7 @@ impl Graph {
     }
 
     /// The active node `:node` names.
-    fn node(&self, map: &Payload) -> Result<usize, String> {
+    pub(super) fn node(&self, map: &Payload) -> Result<usize, String> {
         let count = self.config.nodes.len();
         let node = SetValue::of(map, "node", "node");
         match count {

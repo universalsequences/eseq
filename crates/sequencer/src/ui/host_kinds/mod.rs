@@ -60,7 +60,9 @@
 //! sequencers are positional, kept by sequencer id (replaced on a project
 //! load), their nodes keyed (graph instance id, node index), edges (node
 //! instance id, target index) and params (node or edge instance id, a key
-//! per param name), the last two lazy (`graphs`).
+//! per param name), the last two lazy (`graphs`); a node's process patch
+//! is `process` instances keyed (node instance id, slot id), lazy like a
+//! track's processes (`lanes`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -324,6 +326,7 @@ pub(crate) mod f {
     pub(crate) const GRAPH_NODE_GROUP: FieldKey = (GRAPH_NODE, "group");
     pub(crate) const GRAPH_NODE_PARAMS: FieldKey = (GRAPH_NODE, "params");
     pub(crate) const GRAPH_NODE_EDGES: FieldKey = (GRAPH_NODE, "edges");
+    pub(crate) const GRAPH_NODE_PROCESSES: FieldKey = (GRAPH_NODE, "processes");
     pub(crate) const GRAPH_NODE_SOUNDING: FieldKey = (GRAPH_NODE, "sounding");
 
     pub(crate) const GRAPH_EDGE_FROM: FieldKey = (GRAPH_EDGE, "from");
@@ -558,6 +561,7 @@ pub(crate) mod f {
     pub(crate) const LIBRARY_CLASSES: FieldKey = (PROCESS_LIBRARY, "classes");
 
     pub(crate) const PROCESS_TRACK: FieldKey = (PROCESS, "track");
+    pub(crate) const PROCESS_NODE: FieldKey = (PROCESS, "node");
     pub(crate) const PROCESS_PROC_ID: FieldKey = (PROCESS, "proc-id");
     pub(crate) const PROCESS_INDEX: FieldKey = (PROCESS, "index");
     pub(crate) const PROCESS_CLASS_REF: FieldKey = (PROCESS, "class");
@@ -579,6 +583,10 @@ pub(crate) mod f {
     pub(crate) const PROCESS_EXPR: FieldKey = (PROCESS, "expr");
     pub(crate) const PROCESS_EXPR_LINE: FieldKey = (PROCESS, "expr-line");
     pub(crate) const PROCESS_COMPILE_ERROR: FieldKey = (PROCESS, "compile-error");
+    pub(crate) const PROCESS_KNOWN: FieldKey = (PROCESS, "known");
+    pub(crate) const PROCESS_EXPR_SOURCE: FieldKey = (PROCESS, "expr-source");
+    pub(crate) const PROCESS_PROMOTED_EXPR: FieldKey = (PROCESS, "promoted-expr");
+    pub(crate) const PROCESS_AS_EXPR_REASON: FieldKey = (PROCESS, "as-expr-reason");
     pub(crate) const PROCESS_ERROR: FieldKey = (PROCESS, "error");
 
     pub(crate) const LANE_PROCESS: FieldKey = (LANE, "process");
@@ -1579,7 +1587,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PROJECT_MACROS, "(list-of macro)", Model),
     // Process lanes (`lanes`): a track's processes registered on the first
     // read of `processes` or `lanes`, then synced behind the track's lane
-    // key; the classes when the library's version moved.
+    // key; the classes when the library's version moved. A graph node's
+    // (`graph-node.processes`) with its graph's sync, and again when the
+    // library moved.
     (f::TRACK_PROCESSES, "(list-of process)", Model),
     (f::TRACK_LANES, "(list-of lane)", Model),
     (f::CLASS_INDEX, ":int", Model),
@@ -1591,6 +1601,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::CLASS_PORTS, "(list-of :string)", Model),
     (f::LIBRARY_CLASSES, "(list-of process-class)", Model),
     (f::PROCESS_TRACK, "track", Model),
+    (f::PROCESS_NODE, "graph-node", Model),
     (f::PROCESS_PROC_ID, ":int", Model),
     (f::PROCESS_INDEX, ":int", Model),
     (f::PROCESS_CLASS_REF, "process-class", Model),
@@ -1612,6 +1623,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PROCESS_EXPR, ":bool", Model),
     (f::PROCESS_EXPR_LINE, ":string", Model),
     (f::PROCESS_COMPILE_ERROR, ":string", Model),
+    (f::PROCESS_KNOWN, ":bool", Model),
+    (f::PROCESS_EXPR_SOURCE, ":string", Model),
+    (f::PROCESS_PROMOTED_EXPR, ":bool", Model),
+    (f::PROCESS_AS_EXPR_REASON, ":string", Model),
     // The scheduler's run errors and scope histories: re-read while
     // observed, when their versions moved.
     (f::PROCESS_ERROR, ":string", Live),
@@ -1921,6 +1936,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GRAPH_NODE_GROUP, ":int", Model),
     (f::GRAPH_NODE_PARAMS, "(list-of graph-param)", Model),
     (f::GRAPH_NODE_EDGES, "(list-of graph-edge)", Model),
+    (f::GRAPH_NODE_PROCESSES, "(list-of process)", Model),
     (f::GRAPH_NODE_SOUNDING, "(list-of (list-of :number))", Live),
     (f::GRAPH_EDGE_FROM, "graph-node", Model),
     (f::GRAPH_EDGE_TO, "graph-node", Model),

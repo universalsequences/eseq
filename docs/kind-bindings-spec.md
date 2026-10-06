@@ -2710,10 +2710,10 @@ Built (7c):
   range the class does not declare, such as the ±1 hint around a float,
   is not enforced); the current value always round-trips (a lane's when
   every named step holds it). A fan-out bound is any finite number.
-- **Not covered.** A graph node's process slots (the node bay's scopes and
-  run errors, legacy `SEQ.process-scope-cells` and the node half of
-  `SEQ.process-run-errors`): eseq-0l17.45, with the graph-node kinds
-  (eseq-0l17.33). A class's ports are listed by name
+- **Not covered.** A graph node's process slots are `process` instances
+  since 7g-2 (§14.2m); the node bay's scopes and run errors (legacy
+  `SEQ.process-scope-cells` and the node half of `SEQ.process-run-errors`)
+  are eseq-0l17.45. A class's ports are listed by name
   (`process-class.ports`); a process's ports carry the rest.
 
 ### 14.2i Built in stage 7f (eseq-0l17.32)
@@ -3109,9 +3109,9 @@ Built (7g):
   index is a view derivation); the route color strips
   (`gvr-route-color-field`, `ggm-route-color-field`) are a view derivation
   from `n.route.color`. `bind-graph-node-notes` is `n.sounding`.
-- **Not covered:** a node's process patch as `process` instances
-  (eseq-0l17.49, then the node bay's scopes and run errors,
-  eseq-0l17.45); the native neural engine's networks
+- **Not covered:** the node bay's scopes and run errors (eseq-0l17.45; a
+  node's process patch is built in 7g-2, §14.2m); the native neural
+  engine's networks
   (`SEQ.neural-networks`, `neural-*-matrix`, the neuron selection;
   eseq-0l17.50); event streams (the graph's event history, node events,
   deltas and group traces; `SEQ.track-events`, `track-event-current-beat`;
@@ -3313,6 +3313,105 @@ Built (7b-5):
 - **Not ported:** the view (`content/ui/effects/builtin/filter-table.lisp`
   still reads the fx dict's `:editor`); eseq-0l17.14 ports it.
 
+### 14.2m Built in stage 7g-2 (eseq-0l17.49)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `process` | `((track graph-node) proc-id)` (was `(track proc-id)`) | `node graph-node` (nil for a track's; `track` is nil for a node's), `known :bool` (its class is loaded), `expr-source :string` (an expr card's body; empty otherwise), `promoted-expr :bool`, `as-expr-reason :string` (empty for an expr card or a promoted one) |
+| `graph-node` | `(graph index)` | `processes (list-of process)` (lazy; then Model) |
+
+The part kinds (`inlet`, `port`, `fanout`, `state-cell`; `lane`, none on a
+node) are unchanged: a node's process carries them as a track's does. The
+setters and actions of §14.2h take a node's processes too:
+`process.enabled`, `inlet.value`, `fanout.lo` / `hi`, `move-process!`,
+`(add-process! n c)` (`n` a graph node), `remove-process!`, `bind-port!`,
+`add-fanout!`, `unbind-port!`, `clear-port!`, `remove-fanout!`; their
+`edit-process` address is the process's owner (`process-owner`: `:track-id`,
+or `:graph-id` and `:node`) and its `:proc-id`, a port target's and a
+move's `before` the target process's address (`process-target`; `before`
+was `:before` / `:before-track-id`).
+
+Built (7g-2):
+
+- **A node's patch is processes.** `n.processes` is the node's chain as its
+  graph's runtime config resolves it (`GraphNode::process_chain`: the
+  current scene's override), in run order. A node process derives through
+  the track processes' code (`host_kinds/lanes.rs`, over a
+  `ProcessOwner`): `name` is its instance name, else the class's node label
+  (`graph_node_process_label`, the legacy slot's `:label`); a node has no
+  layers and no lanes, so `p.lanes` is empty and `p.inlets` lists every
+  numeric inlet, the class's lane inlets included (`process_inlet_names`,
+  the legacy `:inlet-defs`); `in-ports`, ports, fan-out and their wiring are
+  the track derivations over the node's chain (the legacy
+  `graph-node-lane-patch`'s in ports and readers); `promoted-expr` and
+  `as-expr-reason` are the legacy slot's (`process_slot_as_expr`, shared
+  with `graph-node-process-chain`), computed for a track's processes too.
+  The node bay's cable ids are view derivations (as the track patchbay's):
+  `graph-node-patch-namespace` stays a native.
+- **Identity.** A node's process is keyed (node instance id, slot id): a
+  reorder keeps it, a removed slot's goes stale, and the node's go with
+  their node (a node-count change, the graph's instance deleted, a project
+  load). The slot ids are the node band's (`1 << 45` up), never a track's.
+- **Feeds.** Registered on the first read of `n.processes` (the reader
+  hook, `cold_graph_parts`), then synced with their graph: every override
+  edit (a chain edit included) re-derives its graph, and the node's
+  processes are re-derived only when its chain or the library (version,
+  class instances) differs from the last sync (`sync_node_lanes`, the
+  record in `LaneShared::nodes`); the lane tick re-syncs registered nodes,
+  from the chain they last synced, only when the library (its version and
+  the class instances' generation) moved since it last checked (an idle
+  tick allocates nothing). A chain about to sync whose expr bodies are not
+  compiled yet compiles them first, as the legacy read does
+  (`ensure_graph_node_expr_classes`; the library is read after). A node the
+  graph sync drops (a node-count change, the graph gone) is forgotten in
+  that same sync (`LaneShared::retain_nodes`). The live loop's id lists
+  (`process.error`, `state-cell.values`) include a node's processes, whose
+  runtime id is the slot's own id (the node runner's), so `error` and the
+  scopes read through the same machinery; eseq-0l17.45 ports the node
+  bay's readers to them. The live loop re-reads (its lists rebuilt, its
+  last pushes forgotten) when a track's or a node's instances changed or
+  any process's or state cell's runtime record did, with the same
+  instances: a project lane's runtime id follows its track's position, a
+  named slot's its name.
+- **Setters.** `edit-process` resolves a node address as `set-graph` does
+  (the graph by sequencer id, an active node by index, `host_commands::graphs::Graph`)
+  and the process by its `:proc-id` in the node's current chain; a gone
+  graph, node or process is an error. A node's process edits its own slot
+  (`process_edit::apply_to_node_chain`, the legacy natives' semantics: no
+  project fork, removing a slot drops the wires and fan-out into it,
+  `TrackProcessChain::remove_slot_and_wires`), in the current scene's
+  overrides through `lisp_host::edit_graph_node_process_chain_now` (shared
+  with the natives; a minted node slot id is claimed there), recorded as
+  the natives' history records it (`App::record_applied_graph_node_process_edit`,
+  `EditPatch::GraphNodeProcessChain`: the node's chain before and after,
+  undo and redo restore it into the scene it was made in). Each edit is one
+  entry; an inlet's `set!`s while the pointer is down join one, under the
+  natives' picker key (`graph_node_process_inlet_merge_key`), so a kinds
+  drag and a legacy picker drag never split each other. Values follow
+  §14.2h's rule (an inlet a number of its type in its declared range, a
+  gate 0 or 1 or a bool; the current value is no edit). A node's port takes
+  another process of its node (wires stay on their node: a target or a
+  `before` on another node or track is an error) or a fire payload field
+  (`transpose`, `velocity`, `duration`, `delay`:
+  `GRAPH_NODE_PAYLOAD_FIELDS`, shared with `graph-node-process-map`: by
+  name, case-insensitively, or by any step param spelling of one; `delay`
+  is no step param, stored as the payload field itself); a param or send
+  target, `:all` and lane steps are errors. An add's slot id is minted when it lands (the node band's next,
+  inside the override edit; a track's next roster id), and it takes the
+  classes `graph-node-process-add` takes (the library's and the default
+  lane classes). Legacy `graph-node-process-*` edits reach the kinds at the
+  next sync; a kind setter reaches the legacy tracked reads through the
+  tick's graph read sweep.
+- **Not covered:** the expr card actions (commit a body, promote to My
+  processes, edit as expr, rebind a class: `graph-node-process-expr-set`,
+  `-promote`, `-edit-as-expr`, `-rebind-class` and the promote check) stay
+  natives addressed by (graph, node, `proc-id`): they return a result the
+  view shows at once, which a host command cannot. A track's expr cards
+  have no kind action either. The node picker's class list (node labels,
+  hidden classes: `graph-node-process-classes`) is a view derivation from
+  `process-library.classes` and `GRAPH_NODE_HIDDEN_PROCESS_CLASSES` (not
+  published).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3337,7 +3436,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7e-3 | eseq-0l17.48 | model note ids (handles kept through undo and legacy edits) | — |
 | 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 (built) | `graph`, `graph-node`, `graph-edge`, `graph-param` (the GRAPH namespace, graph playback), `project.graphs`, `track.active-notes` | .13 .14 .20 |
-| 7g-2 | eseq-0l17.49 | a graph node's process patch as `process` instances | .20 (and .45) |
+| 7g-2 | eseq-0l17.49 (built) | a graph node's process patch as `process` instances (`graph-node.processes`), its setters through `edit-process` | .20 (and .45) |
 | 7g-3 | eseq-0l17.50 | the native neural engine's networks and neuron selection | .20 |
 | 7g-4 | eseq-0l17.51 | event streams: graph event history, deltas, group traces; track events | .20 |
 | 7g-5 | eseq-0l17.52 | generator marks (alez.jaki) | .20 |
@@ -3463,8 +3562,8 @@ builds the field name.
 | `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28) | .14 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | selection.track.lanes → lane | built (.29) | .11 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | process-library.classes → process-class | built (.29) | .11 .20 |
-| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (a track slot's, live); a graph node slot's: .45 (after .49) | built (.29), .45 | .11 |
-| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes (the node bay; slots as instances: .49) | .45 | .11 .20 |
+| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (a track slot's, live); a graph node slot's (n.processes, .49: read under the slot's id): .45 | built (.29), .45 | .11 |
+| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes: state-cell.values of n.processes (slots as instances: built .49) | .45 | .11 .20 |
 | `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29) | .14 |
 | `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | t.processes: p.in-ports, port.target-process / target-inlet, fanout.target-process (cable ids derived in the view) | built (.29) | .11 |
 | `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29) | .11 .20 |

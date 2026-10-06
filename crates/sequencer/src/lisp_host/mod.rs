@@ -84,13 +84,15 @@ pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) ->
 
 // -- eseqlisp: live-coding / sequencing natives --
 pub use eseq::graph_authoring::{
-    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_NODE_PROCESS_HISTORY_COMMAND,
+    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_NODE_PAYLOAD_FIELDS, GRAPH_NODE_PROCESS_HISTORY_COMMAND,
     GRAPH_READ_REACTIVE_NAMESPACE, GraphNodeProcessReminter, graph_node_lane_patch_namespace,
     queue_graph_read_invalidations, register_graph_authoring_natives,
     restore_graph_node_process_chain, ensure_graph_overrides, graph_config_field_value,
     graph_edge_param_value, graph_node_intrinsic_value, graph_node_param_value,
     graph_seed_follows_route, published_graph_manifest, resolved_graph_overrides_for_manifest,
-    restore_graph_override,
+    restore_graph_override, edit_graph_node_process_chain_now, ensure_graph_node_expr_classes,
+    graph_node_process_inlet_merge_key, graph_node_process_label,
+    process_slot_as_expr,
 };
 pub use eseq::graph_manifest::{
     current_graph_owner_rack, graph_instance_id, graph_mode_present, parse_graph_manifest,
