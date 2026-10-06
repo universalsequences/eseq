@@ -117,21 +117,6 @@ pub(crate) fn instrument_key_locks(
     InstrumentKeyLocks { by_param, notes }
 }
 
-/// The panel header's sound-binding label (takes spec 16.6): the bound
-/// sound's identity only — the patch name, or the binding label
-/// (`Take 2 · bars 0–2` / `Pattern 2 (scene)`) when no palette entry
-/// resolves. Deliberately *not* `App::sound_binding_badge`, which appends
-/// the reverse referent index ("— used by Scene 1, Take 2, …"): that list
-/// grows without bound and carries nothing the header needs.
-fn sound_binding_label(app: &app::App, track: usize) -> Option<String> {
-    let target = app.palette_target_or_binding(track, None);
-    app.sound_palette_entries(track, target)
-        .into_iter()
-        .find(|entry| entry.is_current)
-        .map(|entry| entry.name)
-        .or_else(|| app.track_binding_label(track))
-}
-
 /// Slice sensitivity as the sampler panel resolves it. Marker indices in
 /// `edit-sampler-slice` payloads address the list this panel rendered, so the
 /// host command has to reach the same value — p-lock and descriptor-tail
@@ -184,6 +169,155 @@ pub(crate) fn sampler_slice_sensitivity(
     )
 }
 
+/// The playback start and end a track sampler shows at `step` (stored,
+/// 0-1 of the sample): the step's p-lock, else its own. Shared by the
+/// sampler panel, its selection-time fields and the host kinds'
+/// `device.start-time` / `end-time`.
+pub(crate) fn sampler_selection(
+    slot: &sequencer::effects::EffectSlotState,
+    step: Option<usize>,
+) -> (f32, f32) {
+    let at = |param| {
+        step.and_then(|step| slot.plocks.get(step, param))
+            .unwrap_or_else(|| slot.defaults.get(param))
+    };
+    use sequencer::instruments::sampler::{SLOT_PARAM_END, SLOT_PARAM_START};
+    (at(SLOT_PARAM_START), at(SLOT_PARAM_END))
+}
+
+/// The registered sample a sampler's waveform draws, loading (and
+/// registering) it on first use; `None` without a path or when it fails to
+/// load (reported). Shared by the sampler panels and the host kinds'
+/// `device.sample-buffer`.
+pub(crate) fn sampler_waveform_sample(
+    path: Option<&Path>,
+    what: &str,
+) -> Option<Arc<eseqlisp::audio::sample::SampleBuffer>> {
+    let path = path?;
+    match load_waveform_sample(path) {
+        Ok(sample) => Some(sample),
+        Err(error) => {
+            eprintln!(
+                "{what}: failed to register sample {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// A sampler's slice markers in seconds, every candidate, and whether the
+/// slice `sensitivity` keeps each (1 or 0, as `slice-active` reads them;
+/// with `edits` applied); none outside slice mode (`slice_mode` 1) or
+/// before the sample is analysed. Shared by the sampler panels and the host
+/// kinds' `device.slices` / `slice-active`.
+pub(crate) fn sampler_slices(
+    app: &app::App,
+    buffer_id: i32,
+    slice_mode: f32,
+    sensitivity: f32,
+    edits: Option<&sequencer::analysis::SamplerSliceEdits>,
+) -> (Vec<f64>, Vec<f64>) {
+    if slice_mode.round() != 1.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(table) = app.sample_analysis.cache().table(buffer_id) else {
+        return (Vec::new(), Vec::new());
+    };
+    // Sensitivity deactivates markers rather than removing them, so the
+    // panel renders every candidate and carries a parallel active flag.
+    let (frames, active) = table.with_edits(edits).slice_markers(sensitivity);
+    let rate = table.sample_rate.max(1) as f64;
+    let seconds = frames
+        .into_iter()
+        .map(|frame| frame as f64 / rate)
+        .collect();
+    let active = (active.into_iter())
+        .map(|on| if on { 1.0 } else { 0.0 })
+        .collect();
+    (seconds, active)
+}
+
+/// A sample's analysis as the sampler panel shows it.
+pub(crate) struct SamplerAnalysis {
+    /// `none`, `pending`, `ready` or `failed`.
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    /// (bpm, confidence) once ready.
+    pub(crate) tempo: Option<(f64, f64)>,
+    /// The first downbeat and the onsets, in seconds.
+    pub(crate) downbeat: Option<f64>,
+    pub(crate) onsets: Vec<f64>,
+}
+
+impl SamplerAnalysis {
+    /// Buffer `buffer_id`'s analysis (the cache's entry). Shared by the
+    /// sampler panel and the host kinds' `device.analysis-*`.
+    pub(crate) fn of(app: &app::App, buffer_id: i32) -> Self {
+        use sequencer::analysis::AnalysisEntry;
+        let rate = app.graph.sample_rate.max(1) as f64;
+        let mut analysis = Self {
+            status: "none",
+            message: String::new(),
+            tempo: None,
+            downbeat: None,
+            onsets: Vec::new(),
+        };
+        let Some(entry) = app.sample_analysis.cache().get(buffer_id) else {
+            return analysis;
+        };
+        match entry.as_ref() {
+            AnalysisEntry::Pending => {
+                analysis.status = "pending";
+                analysis.message = "Analyzing...".to_string();
+            }
+            AnalysisEntry::Ready(result) => {
+                analysis.status = "ready";
+                analysis.message = format!("{:.1} BPM", result.bpm);
+                analysis.tempo = Some((result.bpm as f64, result.bpm_confidence as f64));
+                analysis.downbeat = result.downbeat_frame.map(|frame| frame as f64 / rate);
+                analysis.onsets = (result.onsets_frames.iter())
+                    .map(|frame| *frame as f64 / rate)
+                    .collect();
+            }
+            AnalysisEntry::Failed(error) => {
+                analysis.status = "failed";
+                analysis.message = error.clone();
+            }
+        }
+        analysis
+    }
+}
+
+/// The name an instrument panel shows for `track`'s instrument (its
+/// `name`): the engine's, else Modulator or Instrument.
+fn instrument_panel_name(app: &app::App, track: usize) -> String {
+    let modulator = app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Modulator);
+    current_custom_instrument_name(app, track).unwrap_or_else(|| {
+        if modulator {
+            "Modulator".to_string()
+        } else {
+            "Instrument".to_string()
+        }
+    })
+}
+
+/// The instrument panel header's `display-name` for `track`'s instrument:
+/// a drum rack's track name (Rack when none), Sampler for a sampler (whose
+/// panel carries none), else the panel's name without its folder or pin.
+/// Shared with the rack panel and the host kinds' `device.display-name`.
+pub(crate) fn instrument_panel_display_name(app: &app::App, track: usize) -> String {
+    use sequencer::sequencer::InstrumentType;
+    match app.graph.track_instrument_types.get(track) {
+        Some(InstrumentType::Rack) => (app.tracks.get(track))
+            .map(|name| instrument_display_name(name))
+            .unwrap_or_else(|| "Rack".to_string()),
+        Some(InstrumentType::Sampler) => "Sampler".to_string(),
+        _ => instrument_display_name(&instrument_panel_name(app, track)),
+    }
+}
+
 pub(crate) fn build_sampler_panel_value(
     app: &app::App,
     track: usize,
@@ -206,18 +340,7 @@ pub(crate) fn build_sampler_panel_value(
     // Look up the pre-registered SampleBuffer and pass its Value map directly
     // to the Lisp side, so the waveform widget can use it without re-loading.
     let sampler_path = app.sampler_path_for_track(track);
-    let registered_sample = sampler_path.as_ref().and_then(|path| {
-        match load_waveform_sample(path) {
-            Ok(sample) => Some(sample),
-            Err(error) => {
-                eprintln!(
-                    "waveform: failed to register sample {}: {error}",
-                    path.display()
-                );
-                None
-            }
-        }
-    });
+    let registered_sample = sampler_waveform_sample(sampler_path.as_deref(), "waveform");
     let buffer_value = registered_sample.as_ref().map(|s| s.to_value());
     let sample_duration = registered_sample
         .as_ref()
@@ -612,99 +735,53 @@ pub(crate) fn build_sampler_panel_value(
         plock_step,
         sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
     )
-    .unwrap_or(0.0)
-    .round();
-    let mut slice_active_values: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let slice_values: Vec<Rc<RefCell<Value>>> = app
-        .sample_analysis
-        .cache()
-        .table(buffer_id)
-        .map(|table| {
-            let frames: Vec<u32> = if slice_mode == 1.0 {
-                let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step)
-                    .unwrap_or(0.5);
-                let edits = slot.sampler_slice_edits.read().unwrap();
-                // Sensitivity deactivates markers rather than removing them, so
-                // the panel renders every candidate and carries a parallel
-                // active flag for colouring.
-                let (frames, active) = table
-                    .with_edits(app.sampler_slice_edits_for_track(track, edits.as_ref()))
-                    .slice_markers(sensitivity);
-                slice_active_values = active
-                    .into_iter()
-                    .map(|active| {
-                        Rc::new(RefCell::new(Value::Number(if active { 1.0 } else { 0.0 })))
-                    })
-                    .collect();
-                frames
-            } else {
-                Vec::new()
-            };
-            frames
-                .into_iter()
-                .map(|frame| {
-                    Rc::new(RefCell::new(Value::Number(
-                        frame as f64 / table.sample_rate.max(1) as f64,
-                    )))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let analysis_entry = app.sample_analysis.cache().get(buffer_id);
-    let mut analysis_status = "none".to_string();
-    let mut analysis_message = String::new();
-    let mut onset_values: Vec<Rc<RefCell<Value>>> = Vec::new();
-    if let Some(entry) = analysis_entry {
-        match entry.as_ref() {
-            sequencer::analysis::AnalysisEntry::Pending => {
-                analysis_status = "pending".to_string();
-                analysis_message = "Analyzing...".to_string();
-            }
-            sequencer::analysis::AnalysisEntry::Ready(result) => {
-                analysis_status = "ready".to_string();
-                analysis_message = format!("{:.1} BPM", result.bpm);
-                panel_map.insert(
-                    "analysis-bpm".to_string(),
-                    Rc::new(RefCell::new(Value::Number(result.bpm as f64))),
-                );
-                panel_map.insert(
-                    "analysis-confidence".to_string(),
-                    Rc::new(RefCell::new(Value::Number(result.bpm_confidence as f64))),
-                );
-                if let Some(frame) = result.downbeat_frame {
-                    let seconds = frame as f64 / app.graph.sample_rate.max(1) as f64;
-                    panel_map.insert(
-                        "downbeat-time".to_string(),
-                        Rc::new(RefCell::new(Value::Number(seconds))),
-                    );
-                }
-                onset_values = result
-                    .onsets_frames
-                    .iter()
-                    .map(|frame| {
-                        Rc::new(RefCell::new(Value::Number(
-                            *frame as f64 / app.graph.sample_rate.max(1) as f64,
-                        )))
-                    })
-                    .collect();
-            }
-            sequencer::analysis::AnalysisEntry::Failed(error) => {
-                analysis_status = "failed".to_string();
-                analysis_message = error.clone();
-            }
-        }
+    .unwrap_or(0.0);
+    let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step).unwrap_or(0.5);
+    let (slices, slice_active) = {
+        let edits = slot.sampler_slice_edits.read().unwrap();
+        let edits = app.sampler_slice_edits_for_track(track, edits.as_ref());
+        sampler_slices(app, buffer_id, slice_mode, sensitivity, edits)
+    };
+    let slice_values: Vec<Rc<RefCell<Value>>> = slices
+        .into_iter()
+        .map(|seconds| Rc::new(RefCell::new(Value::Number(seconds))))
+        .collect();
+    let slice_active_values: Vec<Rc<RefCell<Value>>> = slice_active
+        .into_iter()
+        .map(|active| Rc::new(RefCell::new(Value::Number(active))))
+        .collect();
+    let analysis = SamplerAnalysis::of(app, buffer_id);
+    if let Some((bpm, confidence)) = analysis.tempo {
+        panel_map.insert(
+            "analysis-bpm".to_string(),
+            Rc::new(RefCell::new(Value::Number(bpm))),
+        );
+        panel_map.insert(
+            "analysis-confidence".to_string(),
+            Rc::new(RefCell::new(Value::Number(confidence))),
+        );
+    }
+    if let Some(seconds) = analysis.downbeat {
+        panel_map.insert(
+            "downbeat-time".to_string(),
+            Rc::new(RefCell::new(Value::Number(seconds))),
+        );
     }
     panel_map.insert(
         "analysis-status".to_string(),
-        Rc::new(RefCell::new(Value::String(analysis_status))),
+        Rc::new(RefCell::new(Value::String(analysis.status.to_string()))),
     );
     panel_map.insert(
         "analysis-message".to_string(),
-        Rc::new(RefCell::new(Value::String(analysis_message))),
+        Rc::new(RefCell::new(Value::String(analysis.message))),
     );
     panel_map.insert(
         "onsets".to_string(),
-        Rc::new(RefCell::new(Value::List(onset_values))),
+        Rc::new(RefCell::new(Value::List(
+            (analysis.onsets.into_iter())
+                .map(|seconds| Rc::new(RefCell::new(Value::Number(seconds))))
+                .collect(),
+        ))),
     );
     debug_assert_eq!(slice_active_values.len(), slice_values.len());
     panel_map.insert(
@@ -757,12 +834,7 @@ pub(crate) fn build_sampler_panel_value(
     );
     // Start/end as seconds for the waveform selection overlay.
     // Raw stored values are 0.0-1.0 normalized; multiply by duration.
-    let start_raw = plock_step
-        .and_then(|step| slot.plocks.get(step, 2))
-        .unwrap_or_else(|| slot.defaults.get(2));
-    let end_raw = plock_step
-        .and_then(|step| slot.plocks.get(step, 3))
-        .unwrap_or_else(|| slot.defaults.get(3));
+    let (start_raw, end_raw) = sampler_selection(slot, plock_step);
     panel_map.insert(
         "start-time".to_string(),
         Rc::new(RefCell::new(Value::Number(
@@ -793,7 +865,7 @@ pub(crate) fn build_sampler_panel_value(
     // take-recording case, so they carry the badge too.
     panel_map.insert(
         "sound-binding".to_string(),
-        Rc::new(RefCell::new(match sound_binding_label(app, track) {
+        Rc::new(RefCell::new(match app.sound_binding_label(track) {
             Some(label) => Value::String(label),
             None => Value::Nil,
         })),
@@ -1422,13 +1494,7 @@ fn build_instrument_panel_entries(
         .get(track)
         .copied()
         .unwrap_or(sequencer::sequencer::InstrumentType::Custom);
-    let instrument_name = current_custom_instrument_name(app, track).unwrap_or_else(|| {
-        if instrument_type == sequencer::sequencer::InstrumentType::Modulator {
-            "Modulator".to_string()
-        } else {
-            "Instrument".to_string()
-        }
-    });
+    let instrument_name = instrument_panel_name(app, track);
     let instrument_type_name = match instrument_type {
         sequencer::sequencer::InstrumentType::Empty => "empty",
         sequencer::sequencer::InstrumentType::Sampler => "sampler",
@@ -1470,7 +1536,7 @@ fn build_instrument_panel_entries(
     // SEQ.* read breaks the *fx* buffer's evaluation.
     panel_map.insert(
         "sound-binding".to_string(),
-        Rc::new(RefCell::new(match sound_binding_label(app, track) {
+        Rc::new(RefCell::new(match app.sound_binding_label(track) {
             Some(label) => Value::String(label),
             None => Value::Nil,
         })),

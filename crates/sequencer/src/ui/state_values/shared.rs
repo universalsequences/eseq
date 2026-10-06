@@ -190,25 +190,28 @@ pub(super) fn insert_param_ui_metadata(
         return;
     }
     if let Some(options) = &metadata.asset_options {
-        let mut option_map = HashMap::new();
-        insert_string_prop(&mut option_map, "tensor", &options.tensor);
-        insert_string_prop(&mut option_map, "file", &options.file);
-        option_map.insert(
-            "key".to_string(),
-            Rc::new(RefCell::new(Value::Keyword(options.key.clone()))),
-        );
-        if let Some(asset_base) = &options.asset_base {
-            insert_string_prop(
-                &mut option_map,
-                "asset-base",
-                asset_base.to_string_lossy(),
-            );
-        }
         map.insert(
             "options".to_string(),
-            Rc::new(RefCell::new(Value::Map(option_map))),
+            Rc::new(RefCell::new(param_asset_options_value(options))),
         );
     }
+}
+
+/// An unresolved options reference as the UI's degrade path reads it
+/// (`:tensor`, `:file`, `:key`, `:asset-base`). Shared by the legacy param
+/// maps (`options`) and the host kinds' `param.asset-options`.
+pub(crate) fn param_asset_options_value(options: &sequencer::effects::ParamAssetOptions) -> Value {
+    let mut option_map = HashMap::new();
+    insert_string_prop(&mut option_map, "tensor", &options.tensor);
+    insert_string_prop(&mut option_map, "file", &options.file);
+    option_map.insert(
+        "key".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(options.key.clone()))),
+    );
+    if let Some(asset_base) = &options.asset_base {
+        insert_string_prop(&mut option_map, "asset-base", asset_base.to_string_lossy());
+    }
+    Value::Map(option_map)
 }
 
 pub(super) fn instrument_slot_param_value(

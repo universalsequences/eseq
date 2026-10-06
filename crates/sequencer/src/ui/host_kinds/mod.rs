@@ -50,11 +50,11 @@
 //! the rack's own); pool grooves are positional, the instance kept by
 //! groove id across reorders and replaced on a project load. A param's
 //! modulation lanes are keyed (param instance id, lane), a device's tensors
-//! (device instance id, index), p-lock variants (track or instrument device
-//! instance id, label index); project macros are positional, kept by macro
-//! id (replaced on a project load), a drum rack's macros keyed (rack
-//! instrument device instance id, index), macro mappings (macro instance
-//! id, position). The piano roll's notes are keyed (track instance id,
+//! and fixed modulators (device instance id, index), p-lock variants (track
+//! or instrument device instance id, label index); project macros are
+//! positional, kept by macro id (replaced on a project load), a drum rack's
+//! macros keyed (rack instrument device instance id, index), macro mappings
+//! (macro instance id, position). The piano roll's notes are keyed (track instance id,
 //! note id), an id the host allocates per (step, transpose, offset) while a
 //! note sits there and the note setters move with it (`notes`). Graph
 //! sequencers are positional, kept by sequencer id (replaced on a project
@@ -74,7 +74,9 @@
 //! `racks` (drum rack pads, rack clips, grooves), `devices` (devices
 //! beyond the track chain), `panel` (the device panel extras: modulation
 //! lanes and display, process mapping, key locks, tensors), `variants`
-//! (p-lock variants), `macros` (project and drum rack macros), `lanes`
+//! (p-lock variants), `macros` (project and drum rack macros), `media` (the
+//! device panel's media: fixed modulators, the modulator envelope, effect
+//! tables, sampler media), `lanes`
 //! (process lanes), `presentation` (the browser, the sound palette, the
 //! editor and the app's views, from `ui::presented`), `notes` (the piano
 //! roll and its notes) and `graphs` (graph sequencers, active notes) the
@@ -91,6 +93,7 @@ mod graphs;
 mod lanes;
 mod live;
 mod macros;
+mod media;
 mod mixer;
 mod notes;
 mod panel;
@@ -113,6 +116,7 @@ use lanes::*;
 pub(crate) use live::KindsHandles;
 use live::*;
 use macros::*;
+use media::*;
 pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
 use panel::*;
@@ -195,6 +199,7 @@ pub(crate) const GRAPH: &str = "eseq.kinds:graph";
 pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
 pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
 pub(crate) const GRAPH_PARAM: &str = "eseq.kinds:graph-param";
+pub(crate) const MODULATOR: &str = "eseq.kinds:modulator";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -750,6 +755,7 @@ pub(crate) mod f {
     pub(crate) const STEP_PLOCKED: FieldKey = (STEP, "plocked");
     pub(crate) const STEP_LOCK_KIND: FieldKey = (STEP, "lock-kind");
     pub(crate) const STEP_VARIANT_COLOR: FieldKey = (STEP, "variant-color");
+    pub(crate) const STEP_VARIANT: FieldKey = (STEP, "variant");
 
     pub(crate) const SEND_TRACK: FieldKey = (SEND, "track");
     pub(crate) const SEND_BUS: FieldKey = (SEND, "bus");
@@ -855,6 +861,35 @@ pub(crate) mod f {
     pub(crate) const DEVICE_SOLOED_DISPLAY: FieldKey = (DEVICE, "soloed-display");
     pub(crate) const DEVICE_SOLOED_LOCKED: FieldKey = (DEVICE, "soloed-locked");
     pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
+    pub(crate) const DEVICE_DISPLAY_NAME: FieldKey = (DEVICE, "display-name");
+    pub(crate) const DEVICE_SOUND_BINDING: FieldKey = (DEVICE, "sound-binding");
+    pub(crate) const DEVICE_METER: FieldKey = (DEVICE, "meter");
+    pub(crate) const DEVICE_MODULATORS: FieldKey = (DEVICE, "modulators");
+    pub(crate) const DEVICE_MODULATOR_PHASE: FieldKey = (DEVICE, "modulator-phase");
+    pub(crate) const DEVICE_MODULATOR_LEVEL: FieldKey = (DEVICE, "modulator-level");
+    pub(crate) const DEVICE_TABLE_NAME: FieldKey = (DEVICE, "table-name");
+    pub(crate) const DEVICE_TABLE_OPTIONS: FieldKey = (DEVICE, "table-options");
+    pub(crate) const DEVICE_TABLE_MODE: FieldKey = (DEVICE, "table-mode");
+    pub(crate) const DEVICE_TABLE_ENGINE: FieldKey = (DEVICE, "table-engine");
+    pub(crate) const DEVICE_TABLE_DATA_KEY: FieldKey = (DEVICE, "table-data-key");
+    pub(crate) const DEVICE_IR_NAME: FieldKey = (DEVICE, "ir-name");
+    pub(crate) const DEVICE_SAMPLE_BUFFER: FieldKey = (DEVICE, "sample-buffer");
+    pub(crate) const DEVICE_SAMPLE_DURATION: FieldKey = (DEVICE, "sample-duration");
+    pub(crate) const DEVICE_START_TIME: FieldKey = (DEVICE, "start-time");
+    pub(crate) const DEVICE_END_TIME: FieldKey = (DEVICE, "end-time");
+    pub(crate) const DEVICE_SLICES: FieldKey = (DEVICE, "slices");
+    pub(crate) const DEVICE_SLICE_ACTIVE: FieldKey = (DEVICE, "slice-active");
+    pub(crate) const DEVICE_ONSETS: FieldKey = (DEVICE, "onsets");
+    pub(crate) const DEVICE_ANALYSIS_STATUS: FieldKey = (DEVICE, "analysis-status");
+    pub(crate) const DEVICE_ANALYSIS_MESSAGE: FieldKey = (DEVICE, "analysis-message");
+    pub(crate) const DEVICE_ANALYSIS_BPM: FieldKey = (DEVICE, "analysis-bpm");
+    pub(crate) const DEVICE_ANALYSIS_CONFIDENCE: FieldKey = (DEVICE, "analysis-confidence");
+    pub(crate) const DEVICE_DOWNBEAT_TIME: FieldKey = (DEVICE, "downbeat-time");
+
+    pub(crate) const MODULATOR_DEVICE: FieldKey = (MODULATOR, "device");
+    pub(crate) const MODULATOR_INDEX: FieldKey = (MODULATOR, "index");
+    pub(crate) const MODULATOR_SLOT: FieldKey = (MODULATOR, "slot");
+    pub(crate) const MODULATOR_LABEL: FieldKey = (MODULATOR, "label");
 
     pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
     pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
@@ -885,6 +920,11 @@ pub(crate) mod f {
     pub(crate) const PARAM_PROCESS_CLAMPED: FieldKey = (PARAM, "process-clamped");
     pub(crate) const PARAM_KEY_LOCKS: FieldKey = (PARAM, "key-locks");
     pub(crate) const PARAM_STEP_LOCKS: FieldKey = (PARAM, "step-locks");
+    pub(crate) const PARAM_GROUP: FieldKey = (PARAM, "group");
+    pub(crate) const PARAM_ENV: FieldKey = (PARAM, "env");
+    pub(crate) const PARAM_ROLE: FieldKey = (PARAM, "role");
+    pub(crate) const PARAM_DISPLAY_NAME: FieldKey = (PARAM, "display-name");
+    pub(crate) const PARAM_ASSET_OPTIONS: FieldKey = (PARAM, "asset-options");
 
     pub(crate) const MOD_TARGET_PARAM: FieldKey = (MOD_TARGET, "param");
     pub(crate) const MOD_TARGET_INDEX: FieldKey = (MOD_TARGET, "index");
@@ -926,6 +966,8 @@ pub(crate) mod f {
     pub(crate) const MACRO_MORPH_PARAMS: FieldKey = (MACRO, "morph-params");
     pub(crate) const MACRO_STEAL_PATTERNS: FieldKey = (MACRO, "steal-patterns");
     pub(crate) const MACRO_QUANTIZE: FieldKey = (MACRO, "quantize");
+    pub(crate) const MACRO_TRACKS: FieldKey = (MACRO, "tracks");
+    pub(crate) const MACRO_DIFF_COUNT: FieldKey = (MACRO, "diff-count");
 
     pub(crate) const RACK_MACRO_DEVICE: FieldKey = (RACK_MACRO, "device");
     pub(crate) const RACK_MACRO_INDEX: FieldKey = (RACK_MACRO, "index");
@@ -1195,6 +1237,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STEP_PLOCKED, ":bool", Live),
     (f::STEP_LOCK_KIND, ":int", Live),
     (f::STEP_VARIANT_COLOR, ":rgb", Live),
+    // From the p-lock render (`vid`), the instance of the track's variants.
+    (f::STEP_VARIANT, "variant", Live),
     (f::SEND_TRACK, "track", Model),
     (f::SEND_BUS, "bus", Model),
     (f::SEND_AMOUNT, ":number", Live),
@@ -1243,6 +1287,41 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_SOLOED_DISPLAY, ":bool", Live),
     (f::DEVICE_SOLOED_LOCKED, ":bool", Live),
     (f::DEVICE_CHOKE, ":int", Live),
+    // The panel header (`DeviceModel`): pushed with the device's model
+    // fields; `modulators` registered with its descriptor (`panel`).
+    (f::DEVICE_DISPLAY_NAME, ":string", Model),
+    // Computed while observed (`devices::sync_sound_bindings`).
+    (f::DEVICE_SOUND_BINDING, ":string", Model),
+    (f::DEVICE_METER, ":any", Model),
+    (f::DEVICE_MODULATORS, "(list-of modulator)", Model),
+    // The meter cache's modulator envelope (`KindsShared::modulator_phases`).
+    (f::DEVICE_MODULATOR_PHASE, ":number", Live),
+    (f::DEVICE_MODULATOR_LEVEL, ":number", Live),
+    // The effect node's table and IR registries (`media::table_field`).
+    (f::DEVICE_TABLE_NAME, ":string", Live),
+    (f::DEVICE_TABLE_OPTIONS, "(list-of :string)", Live),
+    (f::DEVICE_TABLE_MODE, ":string", Live),
+    (f::DEVICE_TABLE_ENGINE, ":string", Live),
+    (f::DEVICE_TABLE_DATA_KEY, ":string", Live),
+    (f::DEVICE_IR_NAME, ":string", Live),
+    // A sampler's media (`media`): computed from the `App` only while
+    // observed, when their key moved (start and end every tick, compared).
+    (f::DEVICE_SAMPLE_BUFFER, ":any", Model),
+    (f::DEVICE_SAMPLE_DURATION, ":number", Model),
+    (f::DEVICE_START_TIME, ":number", Model),
+    (f::DEVICE_END_TIME, ":number", Model),
+    (f::DEVICE_SLICES, "(list-of :number)", Model),
+    (f::DEVICE_SLICE_ACTIVE, "(list-of :number)", Model),
+    (f::DEVICE_ONSETS, "(list-of :number)", Model),
+    (f::DEVICE_ANALYSIS_STATUS, ":string", Model),
+    (f::DEVICE_ANALYSIS_MESSAGE, ":string", Model),
+    (f::DEVICE_ANALYSIS_BPM, ":number", Model),
+    (f::DEVICE_ANALYSIS_CONFIDENCE, ":number", Model),
+    (f::DEVICE_DOWNBEAT_TIME, ":number", Model),
+    (f::MODULATOR_DEVICE, "device", Model),
+    (f::MODULATOR_INDEX, ":int", Model),
+    (f::MODULATOR_SLOT, ":int", Model),
+    (f::MODULATOR_LABEL, ":string", Model),
     (f::PARAM_DEVICE, "device", Model),
     (f::PARAM_INDEX, ":int", Model),
     (f::PARAM_NAME, ":string", Model),
@@ -1273,6 +1352,12 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_PROCESS_CLAMPED, ":bool", Live),
     (f::PARAM_KEY_LOCKS, "(list-of (list-of :number))", Live),
     (f::PARAM_STEP_LOCKS, "(list-of (list-of :number))", Live),
+    // The descriptor's UI metadata, pushed at registration.
+    (f::PARAM_GROUP, ":string", Model),
+    (f::PARAM_ENV, ":string", Model),
+    (f::PARAM_ROLE, ":string", Model),
+    (f::PARAM_DISPLAY_NAME, ":string", Model),
+    (f::PARAM_ASSET_OPTIONS, ":any", Model),
     (f::MOD_TARGET_PARAM, "param", Model),
     (f::MOD_TARGET_INDEX, ":int", Model),
     (f::MOD_TARGET_SOURCE, "param", Model),
@@ -1313,6 +1398,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::MACRO_MORPH_PARAMS, ":bool", Model),
     (f::MACRO_STEAL_PATTERNS, ":bool", Model),
     (f::MACRO_QUANTIZE, ":string", Model),
+    (f::MACRO_TRACKS, "(list-of track)", Model),
+    // Recomputed while observed, when the UI epoch, the history or the
+    // scenes moved (`macros::sync_scene_diffs`).
+    (f::MACRO_DIFF_COUNT, ":int", Model),
     (f::RACK_MACRO_DEVICE, "device", Model),
     (f::RACK_MACRO_INDEX, ":int", Model),
     (f::RACK_MACRO_KEY, ":string", Model),
@@ -2217,6 +2306,8 @@ pub(crate) struct HostKinds {
     panel: PanelState,
     /// Project and drum rack macros.
     pub(crate) macros: MacroState,
+    /// The observed sampler media.
+    pub(crate) media: MediaState,
     /// Process lanes: the library's classes, the tracks' processes.
     pub(crate) lanes: LaneState,
     /// The browser, the sound palette, the editor and the app's views.
@@ -2248,6 +2339,13 @@ impl HostKinds {
     /// Like [`Self::wants_peaks`], for the mod port levels.
     pub(crate) fn wants_mod_levels(&self) -> bool {
         self.track_mod_levels_observed || self.bus_mod_levels_observed
+    }
+
+    /// Whether a modulator track's instrument's `modulator-phase` or
+    /// `-level` was observed at the last sync: the tick then keeps the
+    /// modulator envelopes polled with the fx panel hidden.
+    pub(crate) fn wants_modulator_meters(&self) -> bool {
+        self.panel.modulator_meters_observed
     }
 
     /// One sync: schema check (on change), registry and model fields (on a
@@ -2299,6 +2397,8 @@ impl HostKinds {
             self.racks.invalidate();
             self.devices.invalidate();
             self.macros.invalidate();
+            self.media.invalidate();
+            self.panel.table_options.clear();
             self.lanes.invalidate(&self.shared);
             self.presented.invalidate();
             self.piano_roll.invalidate();
@@ -2382,6 +2482,8 @@ impl HostKinds {
         }
         self.sync_device_model(&mut pusher, app);
         self.refresh_sampler_playheads(&mut pusher, app);
+        self.sync_sampler_media(&mut pusher, app);
+        self.sync_sound_bindings(&mut pusher, app);
         self.sync_macro_model(&mut pusher, app);
         self.sync_lane_model(&mut pusher);
         self.sync_cell_model(&mut pusher, app);

@@ -15,6 +15,10 @@ pub(crate) struct KindsShared {
     /// The last meter level of each track position (`t.peak`; the tick
     /// copies the meter cache, pruned to the track count).
     peaks: Vec<f64>,
+    /// A modulator instrument's envelope phase and level by track position
+    /// (`device.modulator-phase`, `-level`), copied like `peaks`.
+    pub(super) modulator_phases: Vec<f64>,
+    pub(super) modulator_levels: Vec<f64>,
     /// Bus meter levels by bus position (`b.peak`), the master pair
     /// (`master.peak-l`/`-r`) and the audio load (`engine.cpu-load`), copied
     /// by the tick like `peaks`.
@@ -88,6 +92,12 @@ pub(crate) struct KindsShared {
     pub(super) process_bound_sends: PlockCache<usize, HashSet<u64>>,
     pub(super) variants: PlockCache<(usize, VariantScope), VariantSnapshot>,
     pub(super) send_locks: PlockCache<usize, HashSet<BusId>>,
+    /// The table asset list (`device.table-options`, built from the asset
+    /// stems) and the key it was listed under; how many listings that took
+    /// and how many times an observer was pushed it, for tests.
+    pub(super) table_options: Option<(TableOptionsKey, Value)>,
+    pub(crate) table_listings: u64,
+    pub(crate) table_option_pushes: u64,
     /// The scheduler's last send writes (`send.process-value`), copied
     /// when their version moves.
     process_sends: Option<(u64, Rc<ProcessSends>)>,
@@ -170,6 +180,16 @@ impl KindsShared {
         mod_display: bool,
     ) {
         copy_prefix(&mut self.peaks, meters.tracks, app.tracks.len());
+        copy_prefix(
+            &mut self.modulator_phases,
+            meters.modulator_phases,
+            app.tracks.len(),
+        );
+        copy_prefix(
+            &mut self.modulator_levels,
+            meters.modulator_levels,
+            app.tracks.len(),
+        );
         copy_prefix(&mut self.bus_peaks, meters.buses, app.buses.len());
         self.master_peaks = meters.master;
         self.cpu_load = meters.cpu_load;
@@ -518,6 +538,12 @@ pub(super) fn live_value<S: KindStore>(
                         .get(step)?
                         .field(key)?
                 }
+                f::STEP_VARIANT => {
+                    let vid = track_plock_render(sources, shared, track)
+                        .get(step)?
+                        .variant;
+                    step_variant(store, sources, shared, (parent, track), vid)
+                }
                 _ => number(sources.step_param(track, step, step_param_named(key.1)?)),
             }
         }
@@ -571,6 +597,9 @@ pub(super) fn live_value<S: KindStore>(
                 }
                 f::DEVICE_VARIANTS => device_variants(store, sources, shared, id, &device),
                 key if is_strip_field(key) => device_strip_field(sources, shared, &device, key)?,
+                f::DEVICE_MODULATOR_PHASE => number(device_modulator_meter(shared, &device, true)),
+                f::DEVICE_MODULATOR_LEVEL => number(device_modulator_meter(shared, &device, false)),
+                key if is_table_field(key) => table_field(sources, shared, &device, key)?,
                 _ => return None,
             }
         }

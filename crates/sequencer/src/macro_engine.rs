@@ -80,6 +80,26 @@ pub enum StealQuantize {
     Bar,
 }
 
+impl StealQuantize {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Sixteenth, Self::Bar];
+
+    /// The labels the macro panels show and set, in [`Self::ALL`] order.
+    pub const LABELS: [&'static str; 3] = ["off", "sixteenth", "bar"];
+
+    pub fn label(self) -> &'static str {
+        Self::LABELS[self as usize]
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        let index = Self::LABELS.iter().position(|known| *known == label)?;
+        Self::from_index(index)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneMacroConfig {
     pub target_scene: usize,
@@ -87,6 +107,14 @@ pub struct SceneMacroConfig {
     pub steal_patterns: bool,
     pub quantize: StealQuantize,
     pub track_mask: Option<Vec<bool>>,
+}
+
+impl SceneMacroConfig {
+    /// Whether the macro acts on track position `track`: every track while
+    /// the mask names none.
+    pub fn covers_track(&self, track: usize) -> bool {
+        (self.track_mask.as_ref()).is_none_or(|mask| mask.get(track).copied().unwrap_or(false))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

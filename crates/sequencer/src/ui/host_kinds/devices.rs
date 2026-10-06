@@ -291,13 +291,88 @@ fn push_device(
     pusher.push(id, f::DEVICE_SLOT, number(model.device.chain_slot() as f64));
     pusher.push(id, f::DEVICE_DID, number(model.did as f64));
     pusher.push(id, f::DEVICE_ROLE, text(model.device.role()));
+    let display_name = match model.device {
+        // The instrument panel header's (shared with it).
+        DeviceSlot::Instrument => instrument_panel_display_name(app, owner),
+        DeviceSlot::RackSlot(_) => instrument_display_name(&model.name),
+        _ => model.name.clone(),
+    };
     pusher.push(id, f::DEVICE_TYPE, Value::String(model.kind));
     pusher.push(id, f::DEVICE_NAME, Value::String(model.name));
     pusher.push(id, f::DEVICE_ENABLED, Value::Bool(model.enabled));
     pusher.push(id, f::DEVICE_CONTAINER, instance_or_nil(model.container));
     pusher.push(id, f::DEVICE_VOICES, number(model.voices as f64));
+    pusher.push(id, f::DEVICE_DISPLAY_NAME, Value::String(display_name));
+    if model.device != DeviceSlot::Instrument {
+        // A track instrument's is computed while observed
+        // (`HostKinds::sync_sound_bindings`).
+        pusher.push(id, f::DEVICE_SOUND_BINDING, Value::String(String::new()));
+    }
+    pusher.push(id, f::DEVICE_METER, device_meter(app, owner, model.device));
     let desc = (model.desc, model.sampler);
     HostKinds::sync_device_source(pusher, app, id, owner, model.device, desc)
+}
+
+impl HostKinds {
+    /// Each observed track instrument's `sound-binding`
+    /// (`App::sound_binding_label`, which takes the scenes lock): recomputed
+    /// at each model sync (the legacy panels' at each rebuild) or when it
+    /// starts being observed; an unobserved one keeps its last value ("" from
+    /// its registration). Any other device's is empty, pushed with its model
+    /// fields.
+    pub(super) fn sync_sound_bindings(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let devices = all_device_ids(&self.device_ids, &self.devices);
+        let panel = &mut self.panel;
+        let names = [f::DEVICE_SOUND_BINDING.1];
+        (panel.sound_binding_observed).refresh(&*pusher.rt, &names, || devices.collect());
+        let entries = &panel.sound_binding_observed.entries;
+        if panel.sound_bindings.len() > entries.len() {
+            (panel.sound_bindings).retain(|id, _| entries.iter().any(|(entry, ..)| entry == id));
+        }
+        let syncs = pusher.shared.borrow().model_syncs;
+        for &(id, ..) in entries {
+            if panel.sound_bindings.insert(id, syncs) == Some(syncs) {
+                continue;
+            }
+            let owner = match pusher.shared.borrow().devices.get(&id) {
+                Some(source) if source.device == DeviceSlot::Instrument => source.owner,
+                _ => continue,
+            };
+            let label = app.sound_binding_label(owner).unwrap_or_default();
+            pusher.push(id, f::DEVICE_SOUND_BINDING, Value::String(label));
+        }
+    }
+}
+
+/// `device.meter`: the selector a `device-meter` takes for the device's
+/// output (the legacy panel dicts' `:meter`), by its family and position
+/// (`owner`: its track's, or its bus's); nil for a MIDI effect.
+fn device_meter(app: &app::App, owner: usize, device: DeviceSlot) -> Value {
+    let index = ("index", owner as f64);
+    match device {
+        DeviceSlot::Instrument => device_meter_value("track", &[index]),
+        DeviceSlot::Effect(slot) => {
+            device_meter_value("track-effect", &[index, ("slot", slot as f64)])
+        }
+        DeviceSlot::RackSlot(slot) => {
+            device_meter_value("rack-slot", &[index, ("rack-slot", slot as f64)])
+        }
+        DeviceSlot::RackEffect { rack_slot, slot } => device_meter_value(
+            "rack-effect",
+            &[
+                index,
+                ("rack-slot", rack_slot as f64),
+                ("slot", slot as f64),
+            ],
+        ),
+        DeviceSlot::BusEffect(slot) => app.buses.get(owner).map_or(Value::Nil, |bus| {
+            device_meter_value(
+                "bus-effect",
+                &[("id", bus.id.0 as f64), ("slot", slot as f64)],
+            )
+        }),
+        DeviceSlot::MidiFx(_) => Value::Nil,
+    }
 }
 
 /// The placeholder lookup [`reconcile_devices`] takes for the devices

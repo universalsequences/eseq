@@ -22,7 +22,7 @@
 //! error that changes nothing. Gestures as [`super::ScriptEdit`]: a numeric
 //! field's `set!`s while the pointer is down join one entry per field.
 
-use super::track_settings::{command_track, value_id, SetValue};
+use super::track_settings::{command_track, SetValue};
 use crate::*;
 use sequencer::graph::{
     GraphConfigField, GraphManifest, GraphNodeField, GraphOverrideSlot, GraphRuntimeConfig,
@@ -279,16 +279,10 @@ fn graph_request(app: &app::App, graph: &Graph, map: &Payload) -> Request {
             graph.node_field(node, GraphNodeField::SeedFrom(Some(seed)), false)
         }
         "seeds" => {
-            let Value::List(items) = value.value() else {
-                return value.fail("a list of tracks");
-            };
-            let mut seeds = Vec::with_capacity(items.len());
-            for item in items {
-                let tid = value_id(&item.borrow()).ok_or("seeds takes tracks")?;
-                let track = live_track_index(app, sequencer::sequencer::TrackId(tid))
-                    .ok_or("the track is gone")?;
-                seeds.push(graph.route_index(app, track)?);
-            }
+            let seeds: Result<Vec<_>, _> = (value.tracks(app)?.into_iter())
+                .map(|track| graph.route_index(app, track))
+                .collect();
+            let mut seeds = seeds?;
             seeds.sort_unstable();
             seeds.dedup();
             if seeds.iter().any(|seed| *seed >= 128) {

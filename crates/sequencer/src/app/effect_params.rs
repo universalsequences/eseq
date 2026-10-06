@@ -784,11 +784,7 @@ impl App {
         }
         let mut mappings = Vec::new();
         for track in 0..self.tracks.len() {
-            if config
-                .track_mask
-                .as_ref()
-                .is_some_and(|mask| !mask.get(track).copied().unwrap_or(false))
-            {
+            if !config.covers_track(track) {
                 continue;
             }
             self.state

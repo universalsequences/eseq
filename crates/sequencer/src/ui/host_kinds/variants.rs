@@ -131,6 +131,27 @@ pub(super) fn owner_variants<S: KindStore>(
     instance_list(ids.into_iter().flatten().collect::<Vec<_>>())
 }
 
+/// `step.variant`: step variant `vid` of `track` (track instance
+/// `track_id`), registering the track's variants when it is not yet; nil
+/// for none.
+pub(super) fn step_variant<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    (track_id, track): (InstanceId, usize),
+    vid: Option<u64>,
+) -> Value {
+    let Some(vid) = vid else {
+        return Value::Nil;
+    };
+    if let Some(id) = store.keyed(VARIANT, &[track_id, vid]) {
+        return Value::Instance(id);
+    }
+    let owner = (track_id, track_id);
+    owner_variants(store, sources, shared, owner, track, VariantScope::Steps);
+    instance_or_nil(store.keyed(VARIANT, &[track_id, vid]))
+}
+
 /// Where an owner's variant registry is: its track position and scope.
 fn owner_registry<S: KindStore>(
     store: &S,

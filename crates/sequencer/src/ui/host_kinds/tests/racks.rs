@@ -130,15 +130,6 @@ impl Harness {
     }
 }
 
-fn get(value: &Value, key: &str) -> Value {
-    match value {
-        Value::Map(map) => map
-            .get(key)
-            .map_or(Value::Nil, |cell| cell.borrow().clone()),
-        other => panic!("not a map: {other:?}"),
-    }
-}
-
 fn list(value: Value) -> Vec<Value> {
     match value {
         Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),

@@ -361,14 +361,7 @@ pub(crate) fn build_macros_value(app: &app::App) -> Value {
                     Value::Number(config.target_scene as f64),
                     Value::Bool(config.morph_params),
                     Value::Bool(config.steal_patterns),
-                    Value::String(
-                        match config.quantize {
-                            sequencer::macro_engine::StealQuantize::Off => "off",
-                            sequencer::macro_engine::StealQuantize::Sixteenth => "sixteenth",
-                            sequencer::macro_engine::StealQuantize::Bar => "bar",
-                        }
-                        .to_string(),
-                    ),
+                    Value::String(config.quantize.label().to_string()),
                     config
                         .track_mask
                         .as_ref()

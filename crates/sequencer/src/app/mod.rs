@@ -3985,10 +3985,7 @@ impl App {
         edits: Option<&'a crate::analysis::SamplerSliceEdits>,
     ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
         let path = self.sampler_path_for_track(track);
-        crate::analysis::edits_for_sample(
-            edits,
-            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
-        )
+        crate::analysis::edits_for_sample_path(edits, path.as_deref())
     }
 
     pub fn sampler_slice_edits_for_sample<'a>(
@@ -3998,10 +3995,7 @@ impl App {
         sample_name: &str,
     ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
         let path = self.sample_path_for_buffer(buffer_id, sample_name);
-        crate::analysis::edits_for_sample(
-            edits,
-            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
-        )
+        crate::analysis::edits_for_sample_path(edits, path.as_deref())
     }
 
     pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {

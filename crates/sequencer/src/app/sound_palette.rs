@@ -13,6 +13,12 @@ use crate::sequencer::{
 use super::sound_binding::BoundSource;
 use super::App;
 
+/// A Patch's palette name: its own, else `Patch N`.
+fn patch_name(meta: Option<&crate::sequencer::SoundEntityMeta>, patch: PatchId) -> String {
+    meta.map(|meta| meta.name.clone())
+        .unwrap_or_else(|| format!("Patch {}", patch.0 + 1))
+}
+
 /// The per-track sound color set (§17.11), indexed by
 /// `SoundEntityMeta::color`. Same visual family as the p-lock
 /// `VARIANT_PALETTE` (the palette mirrors that UI's language), extended to
@@ -413,6 +419,28 @@ impl App {
         Ok(format!("Cleaned up {removed} unused entit(ies)"))
     }
 
+    /// The bound sound's identity, as the panel header's badge shows it
+    /// (takes spec 16.6): the current palette entry's name (the palette's
+    /// own `is_current` row), else the binding's label (`Take 2 · bars
+    /// 0–2` / `Pattern 2 (scene)`); `None` when unbound. Reads one entry,
+    /// not the palette's diff over every Patch. Deliberately not
+    /// [`Self::sound_binding_badge`], whose reverse referent index ("— used
+    /// by Scene 1, Take 2, …") grows without bound. Shared by the
+    /// instrument panels and the host kinds' `device.sound-binding`.
+    pub fn sound_binding_label(&self, track: usize) -> Option<String> {
+        let target = self.palette_target_or_binding(track, None);
+        let current = self.resolve_palette_target(track, target).ok();
+        let named = current.and_then(|resolved| {
+            let patch = resolved.current.patch;
+            self.state.with_project_scenes(|scenes| {
+                let pool = scenes.track_pools.get(track)?;
+                (pool.sounds.patches.contains_key(&patch))
+                    .then(|| patch_name(pool.sounds.patch_meta.get(&patch), patch))
+            })
+        });
+        named.or_else(|| self.track_binding_label(track))
+    }
+
     /// The palette overlay's rows for `track` (§17.6): every Patch in the
     /// track's pool, ordered by id, with display metadata and the reverse
     /// referent index. `target` marks which entry `is_current`.
@@ -511,9 +539,7 @@ impl App {
                     PaletteEntry {
                         patch,
                         mix: paired_mix.get(&patch).copied(),
-                        name: meta
-                            .map(|meta| meta.name.clone())
-                            .unwrap_or_else(|| format!("Patch {}", patch.0 + 1)),
+                        name: patch_name(meta, patch),
                         color: meta.and_then(|meta| meta.color),
                         referents: if names.is_empty() {
                             // The track sound is never "unused": the carrier

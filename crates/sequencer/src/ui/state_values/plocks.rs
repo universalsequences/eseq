@@ -1466,6 +1466,10 @@ pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> V
 pub(crate) struct PlockVariantStepRender {
     pub(crate) kind: u8,
     pub(crate) color: [f32; 3],
+    /// The step variant the step plays (kind 2), by its label's place in
+    /// the A, B, … order (`plock_variants::label_sort_index`: the host
+    /// kinds' variant `vid`).
+    pub(crate) vid: Option<u64>,
 }
 
 pub(crate) fn plock_variant_step_render_values(
@@ -1481,6 +1485,9 @@ pub(crate) fn plock_variant_step_render_values(
                 PlockVariantStepRender {
                     kind: 2,
                     color: super::track_and_mixer::themed_variant_rgb(assignment.color),
+                    vid: Some(
+                        sequencer::plock_variants::label_sort_index(&assignment.label) as u64,
+                    ),
                 }
             } else if sequencer::plock_variants::live_track_has_seq_lock(
                 state.as_ref(),
@@ -1490,11 +1497,13 @@ pub(crate) fn plock_variant_step_render_values(
                 PlockVariantStepRender {
                     kind: 1,
                     color: SEQ_ONLY_COLOR,
+                    vid: None,
                 }
             } else {
                 PlockVariantStepRender {
                     kind: 0,
                     color: [0.0, 0.0, 0.0],
+                    vid: None,
                 }
             }
         })

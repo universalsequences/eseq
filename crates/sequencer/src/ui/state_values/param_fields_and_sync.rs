@@ -343,13 +343,23 @@ pub(super) fn set_rack_value_field_updates(
     })
 }
 
-pub(super) fn rack_slot_sample_duration(app: &app::App, slot: &sequencer::sequencer::RackSlotSnapshot) -> f64 {
-    let Some((buffer_id, sample_name, _)) = slot.sample_id.as_ref() else {
-        return 1.0;
-    };
+/// A rack slot sampler's sample path: its buffer's, else its sample name's.
+/// Shared with the host kinds' rack slot media.
+pub(crate) fn rack_slot_sample_path<'a>(
+    app: &'a app::App,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+) -> Option<&'a PathBuf> {
+    let (buffer_id, sample_name, _) = slot.sample_id.as_ref()?;
     app.sample_buffer_path_registry
         .get(buffer_id)
         .or_else(|| app.sample_path_registry.get(sample_name))
+}
+
+pub(super) fn rack_slot_sample_duration(
+    app: &app::App,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+) -> f64 {
+    rack_slot_sample_path(app, slot)
         .and_then(|path| {
             eseqlisp::audio::sample::get_registered_sample(&path.display().to_string())
         })
@@ -760,12 +770,7 @@ pub(crate) fn sync_sampler_selection_time_fields(
     let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
         return false;
     };
-    let start_raw = display_step
-        .and_then(|step| slot.plocks.get(step, 2))
-        .unwrap_or_else(|| slot.defaults.get(2));
-    let end_raw = display_step
-        .and_then(|step| slot.plocks.get(step, 3))
-        .unwrap_or_else(|| slot.defaults.get(3));
+    let (start_raw, end_raw) = sampler_selection(slot, display_step);
     let start = start_raw as f64 * sample_duration;
     let end = end_raw as f64 * sample_duration;
     let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(

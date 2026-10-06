@@ -5,10 +5,11 @@
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices
 ;; (a track's chain, MIDI effects and drum rack slots, a bus's effects),
 ;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves,
-;; tensors, p-lock variants, project and drum rack macros and their mappings,
-;; process classes, the browser's preset files and rack slots, the open sound
-;; palette's sounds, the editor's macros and assets, Patch Learn's rows, a MIDI
-;; capture's lanes and notes, MIDI inputs, graph sequencers and their nodes;
+;; tensors, fixed modulators, p-lock variants, project and drum rack macros
+;; and their mappings, process classes, the browser's preset files and rack
+;; slots, the open sound palette's sounds, the editor's macros and assets,
+;; Patch Learn's rows, a MIDI capture's lanes and notes, MIDI inputs, graph
+;; sequencers and their nodes;
 ;; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
@@ -222,6 +223,13 @@
 ;; rack's device and its index, a mapping by its macro and its position.
 (def macro-setter (field)
   (lambda (m v) (host-command "set-macro" (dict :macro-id m.mid :field field :value v))))
+;; A scene macro's scene by its position, its tracks by their stable ids.
+(def set-macro-target-scene (m s)
+  (host-command "set-macro"
+    (dict :macro-id m.mid :field "target-scene" :value (if s s.index nil))))
+(def set-macro-tracks (m ts)
+  (host-command "set-macro"
+    (dict :macro-id m.mid :field "tracks" :value (map (lambda (t) t.tid) ts))))
 (def rack-macro-setter (field)
   (lambda (rm v)
     (host-command "set-rack-macro"
@@ -354,7 +362,8 @@
          ;; P-lock display (any family: device params, sends, step params, …).
          (plocked       :bool :doc "Some p-lock lands on this step")
          (lock-kind     :int  :doc "lock-none, lock-seq (sequencer-only locks) or lock-variant (a p-lock variant)")
-         (variant-color :rgb  :doc "The step's p-lock variant color (gray for sequencer-only locks)")))
+         (variant-color :rgb  :doc "The step's p-lock variant color (gray for sequencer-only locks)")
+         (variant variant :doc "The step variant the step plays (one of its track's variants); nil when it plays none")))
 
 ;; One track's send to one bus (not the main mix): (nth t.sends 0).
 (def-kind send
@@ -399,6 +408,12 @@
          (section :string :doc "main, mod (a modulation lane's own param), source (a modulation source's setting, of source mod-slot) or hidden (host plumbing)")
          (mod-slot :int   :doc "The modulation source (1-4) a source param sets; 0 otherwise")
          (visible :bool   :doc "Shown: false for a hidden param and for a source param its source's type does not use")
+         ;; The descriptor's UI metadata (spec §14.2l): empty when it has none.
+         (group   :string :doc "The section a param grid groups it under")
+         (env     :string :doc "The envelope it belongs to (an ADSR editor's)")
+         (role    :string :doc "Its role in that envelope (attack, decay, …)")
+         (display-name :string :doc "The name the instrument's source spells it (name is the host id)")
+         (asset-options :any :doc "An options reference that did not resolve: (dict :tensor :file :key …); nil otherwise (a resolved one is options)")
          ;; Modulation and process display.
          (mod-targets (list-of mod-target) :doc "The modulation lanes onto this param")
          (mod-offset :number :doc "How far modulation moves value now (display units); 0 while unmodulated or not sampled")
@@ -460,10 +475,19 @@
          (value :number :range (0 1) :set (macro-setter "value")
                 :doc "A performance control: setting it is not an undo entry")
          (mappings (list-of macro-mapping))
-         (target-scene scene :doc "A scene macro's scene; nil for a mapped one")
-         (morph-params :bool)
-         (steal-patterns :bool)
-         (quantize :string :doc "A scene macro's steal quantization (off, sixteenth, bar); empty for a mapped one")))
+         ;; A scene macro's config (spec §14.2l): each set! is one undo
+         ;; entry; a mapped macro reads nil / false / empty and takes none.
+         (target-scene scene :set set-macro-target-scene
+                       :doc "A scene macro's scene; nil for a mapped one")
+         (morph-params :bool :set (macro-setter "morph-params")
+                       :doc "A scene macro morphs the params that differ in its scene")
+         (steal-patterns :bool :set (macro-setter "steal-patterns")
+                         :doc "A scene macro launches its scene's patterns")
+         (quantize :string :set (macro-setter "quantize")
+                   :doc "A scene macro's steal quantization (off, sixteenth, bar); empty for a mapped one")
+         (tracks (list-of track) :set set-macro-tracks
+                 :doc "The tracks a scene macro acts on (every track while it names none); empty for a mapped one")
+         (diff-count :int :doc "How many params differ between now and a scene macro's scene (what it morphs); 0 for a mapped one. Computed while observed (an unobserved scene macro's reads its last value, nil before)")))
 
 ;; A drum rack's macro: (nth d.macros 0) of the rack's instrument device.
 (def-kind rack-macro
@@ -548,7 +572,46 @@
          (soloed-display :bool :doc "The solo shown")
          (soloed-locked :bool :doc "soloed-display comes from a p-lock")
          (choke :int :range (0 16) :set (device-setter "choke")
-                :doc "A rack slot's choke group, 0 for none (no p-locks)")))
+                :doc "A rack slot's choke group, 0 for none (no p-locks)")
+         ;; The panel header and its meters (spec §14.2l).
+         (display-name :string :doc "The name the panel header shows: an instrument's or rack slot's without its folder or pin (a drum rack's track name, Sampler for a sampler), else name")
+         (sound-binding :string :doc "A track instrument's bound sound (the header badge): the patch name, else the binding's (Take 2 · bars 0-2, Pattern 2); empty when unbound or for any other device. Computed while observed (an unobserved one reads its last value, empty before)")
+         (meter :any :doc "The device's output meter selector, a device-meter's :source (names the device, not a node); nil for a MIDI effect")
+         (modulators (list-of modulator) :doc "An instrument's fixed modulation sources (its descriptor's); empty otherwise")
+         (modulator-phase :number :doc "A modulator instrument's envelope phase; 0 for any other device")
+         (modulator-level :number :doc "A modulator instrument's output level; 0 for any other device")
+         ;; Effect tables (a Filter Table's, a Convolution Reverb's).
+         (table-name :string :doc "A Filter Table's loaded table (No table when none); empty for any other device")
+         (table-options (list-of :string) :doc "A Filter Table's loadable tables (the table asset stems); empty for any other device")
+         (table-mode :string :doc "A Filter Table's table analysis mode; empty when none or for any other device")
+         (table-engine :string :doc "A Filter Table's engine; empty for any other device")
+         (table-data-key :string :doc "A Filter Table's prepared table (a table viewer's data key); empty while none is prepared")
+         (ir-name :string :doc "A Convolution Reverb's impulse response (No IR when none); empty for any other device")
+         ;; A sampler's media (a track's sampler instrument, a sampler rack
+         ;; slot); any other device reads the defaults each doc names.
+         ;; Computed only while observed: by value, an unobserved one reads
+         ;; its last value, the defaults before it was ever observed.
+         (sample-buffer :any :doc "The sample a waveform draws (its :buffer); nil when none is loaded")
+         (sample-duration :number :doc "The sample's length in seconds; 1 when none is loaded")
+         (start-time :number :doc "The playback start shown (start at the displayed step), in seconds; 0 when no sampler")
+         (end-time :number :doc "The playback end shown, in seconds; 0 when no sampler")
+         (slices (list-of :number) :doc "The slice markers in slice mode, in seconds (every candidate); empty otherwise")
+         (slice-active (list-of :number) :doc "Per slice marker, 1 where the slice sensitivity keeps it, else 0 (a waveform's :slice-active)")
+         (onsets (list-of :number) :doc "The analysis' onsets, in seconds; empty until ready")
+         (analysis-status :string :doc "The sample analysis: none, pending, ready or failed")
+         (analysis-message :string :doc "What the analysis says (Analyzing..., 120.0 BPM, the failure); empty when none")
+         (analysis-bpm :number :doc "The detected tempo; 0 until ready")
+         (analysis-confidence :number :doc "How sure the tempo is, 0-1; 0 until ready")
+         (downbeat-time :number :doc "The first downbeat, in seconds; -1 when none")))
+
+;; A fixed modulation source of an instrument (its descriptor's modulators):
+;; (nth d.modulators 0).
+(def-kind modulator
+  :key (device index)
+  :host ((device device)
+         (index  :int)
+         (slot   :int    :doc "The modulation source (1-4) it is")
+         (label  :string :doc "The name the panel shows")))
 
 ;; A process class of the library (process-library.classes): what
 ;; (add-process! t c) adds.

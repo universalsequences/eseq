@@ -58,9 +58,7 @@ impl Harness {
     }
 
     fn lane_undo(&mut self) {
-        app::edit::undo(&mut self.app);
-        self.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
-        self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        self.undo();
         self.sync();
     }
 
@@ -99,22 +97,6 @@ impl Harness {
             Value::Instance(id) => id,
             other => panic!("{code}: not an instance: {other:?}"),
         }
-    }
-}
-
-fn get(value: &Value, key: &str) -> Value {
-    match value {
-        Value::Map(map) => map
-            .get(key)
-            .map_or(Value::Nil, |cell| cell.borrow().clone()),
-        _ => Value::Nil,
-    }
-}
-
-fn items(value: &Value) -> Vec<Value> {
-    match value {
-        Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
-        _ => Vec::new(),
     }
 }
 

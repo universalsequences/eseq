@@ -214,6 +214,8 @@ impl Harness {
             overloaded: self.frame.cpu_overload.displayed(),
             pad_triggers: &self.frame.rack_pad_triggers,
             mod_display: &self.meters.cached_mod_display_values,
+            modulator_phases: &self.meters.cached_modulator_phases,
+            modulator_levels: &self.meters.cached_modulator_levels,
         };
         self.frame
             .host_kinds
@@ -329,6 +331,62 @@ fn s(text: &str) -> Value {
     Value::String(text.to_string())
 }
 
+/// A map's field (nil when absent or not a map).
+pub(super) fn get(value: &Value, key: &str) -> Value {
+    match value {
+        Value::Map(map) => map
+            .get(key)
+            .map_or(Value::Nil, |cell| cell.borrow().clone()),
+        _ => Value::Nil,
+    }
+}
+
+/// A list's items (none when not a list).
+pub(super) fn items(value: &Value) -> Vec<Value> {
+    match value {
+        Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+impl Harness {
+    /// Undo the last entry, with the resync the undo command's epoch bump
+    /// brings.
+    pub(super) fn undo(&mut self) {
+        app::edit::undo(&mut self.app);
+        self.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+        self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `code` (evaluated with `refer` heading it) reports an error
+    /// containing `expected`; with `records_nothing`, it also adds no
+    /// history entry.
+    pub(super) fn rejects_in(
+        &mut self,
+        refer: &str,
+        code: &str,
+        expected: &str,
+        records_nothing: bool,
+    ) {
+        self.editor.minibuffer = None;
+        let before = self.app.history.undo_len();
+        let source = format!("{refer}\n{code}");
+        self.editor
+            .runtime_mut()
+            .eval_str(&source)
+            .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+        self.drain();
+        assert!(self.error().contains(expected), "{code}: {}", self.error());
+        if records_nothing {
+            assert_eq!(
+                self.app.history.undo_len(),
+                before,
+                "{code} changed nothing"
+            );
+        }
+    }
+}
+
 /// Every kind the stage-7 tests read.
 const REFER_ALL: &str = "(import eseq.kinds :refer (track tracks buses groups transport \
                          selection master engine device-param lock-param! unlock-param! \
@@ -384,6 +442,7 @@ mod lanes;
 mod mixer;
 mod mixer_view;
 mod panel;
+mod panel_extras;
 mod params;
 mod piano_roll;
 mod racks;

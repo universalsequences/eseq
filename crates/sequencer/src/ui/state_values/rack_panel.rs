@@ -548,23 +548,15 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             .sample_id
             .clone()
             .unwrap_or_else(|| (-1, raw_name.clone(), app.graph.sample_rate.max(1)));
-        let sampler_path = app
-            .sample_buffer_path_registry
-            .get(&buffer_id)
-            .cloned()
-            .or_else(|| app.sample_path_registry.get(&sample_name).cloned());
-        let registered_sample = sampler_path.as_ref().and_then(|path| {
-            match load_waveform_sample(path) {
-                Ok(sample) => Some(sample),
-                Err(error) => {
-                    eprintln!(
-                        "rack waveform: failed to register sample {}: {error}",
-                        path.display()
-                    );
-                    None
-                }
-            }
-        });
+        // A slot with no sample yet by its name, as ever.
+        let sampler_path = rack_slot_sample_path(app, slot)
+            .or_else(|| {
+                app.sample_path_registry
+                    .get(&sample_name)
+                    .filter(|_| slot.sample_id.is_none())
+            })
+            .cloned();
+        let registered_sample = sampler_waveform_sample(sampler_path.as_deref(), "rack waveform");
         let sample_duration = registered_sample
             .as_ref()
             .map(|sample| sample.duration_seconds)
@@ -572,8 +564,11 @@ pub(super) fn build_selected_rack_slot_instrument_value(
         if let Some(buffer_value) = registered_sample.as_ref().map(|sample| sample.to_value()) {
             panel_map.insert("buffer".to_string(), value_cell(buffer_value));
         }
-        let start_raw = rack_slot_param_value(rack, slot_idx, slot, &desc, 2, selected_step);
-        let end_raw = rack_slot_param_value(rack, slot_idx, slot, &desc, 3, selected_step);
+        use sequencer::instruments::sampler::{
+            SLOT_PARAM_END, SLOT_PARAM_SLICE_MODE, SLOT_PARAM_SLICE_SENSITIVITY, SLOT_PARAM_START,
+        };
+        let param = |idx| rack_slot_param_value(rack, slot_idx, slot, &desc, idx, selected_step);
+        let (start_raw, end_raw) = (param(SLOT_PARAM_START), param(SLOT_PARAM_END));
         panel_map.insert(
             "start-time".to_string(),
             value_cell(Value::Number(start_raw as f64 * sample_duration)),
@@ -596,61 +591,23 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             "duration".to_string(),
             value_cell(Value::Number(sample_duration)),
         );
-        let slice_mode = rack_slot_param_value(
-            rack,
-            slot_idx,
-            slot,
-            &desc,
-            sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
-            selected_step,
-        )
-        .round();
-        let mut slice_active: Vec<Rc<RefCell<Value>>> = Vec::new();
-        let slices: Vec<Rc<RefCell<Value>>> = app
-            .sample_analysis
-            .cache()
-            .table(buffer_id)
-            .map(|table| {
-                let frames: Vec<u32> = if slice_mode == 1.0 {
-                    let sensitivity = rack_slot_param_value(
-                        rack,
-                        slot_idx,
-                        slot,
-                        &desc,
-                        sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
-                        selected_step,
-                    );
-                    // Sensitivity deactivates markers rather than removing
-                    // them; the parallel flag list carries which are live.
-                    let (frames, active) = table
-                        .with_edits(sequencer::analysis::edits_for_sample(
-                            slot.instrument_slot.sampler_slice_edits.as_ref(),
-                            sampler_path
-                                .as_ref()
-                                .map(|path| path.to_string_lossy())
-                                .as_deref(),
-                        ))
-                        .slice_markers(sensitivity);
-                    slice_active = active
-                        .into_iter()
-                        .map(|active| {
-                            value_cell(Value::Number(if active { 1.0 } else { 0.0 }))
-                        })
-                        .collect();
-                    frames
-                } else {
-                    Vec::new()
-                };
-                frames
-                    .into_iter()
-                    .map(|frame| {
-                        value_cell(Value::Number(
-                            frame as f64 / table.sample_rate.max(1) as f64,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let edits = sequencer::analysis::edits_for_sample_path(
+            slot.instrument_slot.sampler_slice_edits.as_ref(),
+            sampler_path.as_deref(),
+        );
+        let (slices, slice_active) = sampler_slices(
+            app,
+            buffer_id,
+            param(SLOT_PARAM_SLICE_MODE),
+            param(SLOT_PARAM_SLICE_SENSITIVITY),
+            edits,
+        );
+        let numbers = |values: Vec<f64>| -> Vec<Rc<RefCell<Value>>> {
+            (values.into_iter())
+                .map(|value| value_cell(Value::Number(value)))
+                .collect()
+        };
+        let (slices, slice_active) = (numbers(slices), numbers(slice_active));
         debug_assert_eq!(slice_active.len(), slices.len());
         panel_map.insert("slices".to_string(), value_cell(Value::List(slices)));
         panel_map.insert("slice-active".to_string(), value_cell(Value::List(slice_active)));
@@ -995,45 +952,9 @@ pub(super) fn build_rack_slot_effect_value(
                 || sequencer::effects::dgen_builtin::contains(&descriptor.name),
         )),
     );
+    // A rack effect's panel carries a Filter Table's fields (no IR name).
     if descriptor.name == sequencer::effects::filter_table::NAME {
-        let node_id = snapshot.node_id as i32;
-        insert_string_prop(
-            &mut effect,
-            "table-name",
-            sequencer::effects::filter_table::table_name_for(node_id)
-                .unwrap_or_else(|| "No table".to_string()),
-        );
-        effect.insert(
-            "table-options".to_string(),
-            value_cell(Value::List(
-                sequencer::effects::filter_table_asset::list_asset_stems()
-                    .into_iter()
-                    .map(|stem| value_cell(Value::String(stem)))
-                    .collect(),
-            )),
-        );
-        if let Some(mode_label) = sequencer::effects::filter_table::table_ref_for(node_id)
-            .and_then(|reference| {
-                sequencer::effects::filter_table::decode_table_ref(&reference).1
-            })
-            .map(|mode| mode.label().to_string())
-        {
-            insert_string_prop(&mut effect, "table-mode", mode_label);
-        }
-        insert_string_prop(
-            &mut effect,
-            "table-engine",
-            sequencer::effects::filter_table::engine_for(node_id)
-                .display_name()
-                .to_string(),
-        );
-        if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
-            insert_string_prop(
-                &mut effect,
-                "table-data-key",
-                sequencer::effects::filter_table::visualization_key(node_id),
-            );
-        }
+        EffectTableFields::of(&descriptor.name, snapshot.node_id as i32).insert_into(&mut effect);
     }
     effect.insert("params".to_string(), value_cell(Value::List(params)));
     effect.insert(
@@ -1397,10 +1318,7 @@ pub(super) fn build_rack_panel_value(
     insert_string_prop(
         &mut panel_map,
         "display-name",
-        app.tracks
-            .get(track)
-            .map(|name| instrument_display_name(name))
-            .unwrap_or_else(|| "Rack".to_string()),
+        instrument_panel_display_name(app, track),
     );
     // Presence flag: the browser uses this to tell "a rack panel is open"
     // from "no rack panel", which is all the old `:routing` string ever meant.

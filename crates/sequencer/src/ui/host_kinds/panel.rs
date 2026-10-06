@@ -141,6 +141,16 @@ impl Pusher<'_> {
             self.push(id, key, numbers(values));
         }
     }
+
+    /// Push a list-of-numbers model field; allocates only when the cell
+    /// differs (and counts nothing).
+    pub(super) fn put_numbers(&mut self, id: InstanceId, key: FieldKey, values: &[f64]) {
+        let same =
+            (self.rt.instance_field(id, key.1)).is_ok_and(|cell| same_numbers(&cell, values));
+        if !same {
+            self.push(id, key, numbers(values));
+        }
+    }
 }
 
 /// Which cells of a tensor a read fills.
@@ -218,7 +228,7 @@ pub(super) fn tensor_live_value(
 
 /// The graph node of an effect device (whose modulation sample is keyed by
 /// node); `None` for the other families or an empty slot.
-fn effect_node(sources: &KindsHandles, device: &DeviceSource) -> Option<u32> {
+pub(super) fn effect_node(sources: &KindsHandles, device: &DeviceSource) -> Option<u32> {
     let owner = device.owner;
     let node = match device.device {
         DeviceSlot::Effect(slot) => {
@@ -539,6 +549,18 @@ pub(crate) struct PanelState {
     /// `device.mod-phases`) of a device the sample covers ([`mod_sampled`])
     /// was observed at the last sync.
     pub(super) mod_display_observed: bool,
+    /// Whether a modulator track's instrument's `modulator-phase` or
+    /// `-level` was observed at the last sync
+    /// (`HostKinds::wants_modulator_meters`).
+    pub(super) modulator_meters_observed: bool,
+    /// Per device observing `table-options`, the cache key of the list
+    /// last pushed (`None`: the empty list of a device that is no Filter
+    /// Table).
+    pub(super) table_options: HashMap<InstanceId, Option<TableOptionsKey>>,
+    /// The devices observing `sound-binding`, and per one the model sync
+    /// count its value was computed at (`HostKinds::sync_sound_bindings`).
+    pub(super) sound_binding_observed: ObservedList,
+    pub(super) sound_bindings: HashMap<InstanceId, u64>,
     /// The tensor cells read for the observed fields (reused per tick).
     tensor_cells: Vec<f32>,
 }

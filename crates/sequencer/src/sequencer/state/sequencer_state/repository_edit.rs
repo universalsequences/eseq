@@ -36,7 +36,18 @@ impl SequencerState {
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<BusPatternSnapshot> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, scene_idx + 1, default_snapshot);
+        // Only a fill writes: a read that fills nothing leaves the scenes'
+        // revision alone (the host kinds' model gate reads it).
+        let fills = !default_snapshot.is_empty()
+            && (scenes.scenes.iter().take(scene_idx + 1))
+                .any(|scene| scene.bus_patterns.is_empty());
+        if fills {
+            Self::ensure_scene_bus_patterns_len_locked(
+                &mut scenes,
+                scene_idx + 1,
+                default_snapshot,
+            );
+        }
         scenes
             .scenes
             .get(scene_idx)

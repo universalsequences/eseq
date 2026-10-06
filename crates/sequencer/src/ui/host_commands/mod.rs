@@ -243,10 +243,13 @@ pub(crate) fn handle_macro_host_command(
                 return Ignored;
             };
             let quantize = map_string(map, "quantize")
-                .map(|value| match value.as_str() {
-                    "off" => sequencer::macro_engine::StealQuantize::Off,
-                    "sixteenth" | "1/16" => sequencer::macro_engine::StealQuantize::Sixteenth,
-                    _ => sequencer::macro_engine::StealQuantize::Bar,
+                .map(|value| {
+                    use sequencer::macro_engine::StealQuantize;
+                    // Lenient, as ever: `1/16` too, anything unknown a bar.
+                    match value.as_str() {
+                        "1/16" => StealQuantize::Sixteenth,
+                        label => StealQuantize::from_label(label).unwrap_or(StealQuantize::Bar),
+                    }
                 })
                 .unwrap_or(existing.quantize);
             let bool_value = |key: &str, fallback: bool| {

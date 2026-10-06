@@ -50,13 +50,10 @@ pub(super) fn handle(
         let Some(slot) = rack.slots.get(slot_idx) else {
             return;
         };
-        let Some((buffer_id, sample_name, _)) = slot.sample_id.as_ref() else {
+        let Some((buffer_id, ..)) = slot.sample_id.as_ref() else {
             return;
         };
-        let path = app
-            .sample_buffer_path_registry
-            .get(buffer_id)
-            .or_else(|| app.sample_path_registry.get(sample_name));
+        let path = state_values::rack_slot_sample_path(app, slot);
         let Some(hash) = path.and_then(|path| {
             sequencer::analysis::sample_path_hash(&path.to_string_lossy())
         }) else {

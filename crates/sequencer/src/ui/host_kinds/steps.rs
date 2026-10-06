@@ -12,10 +12,11 @@ struct StepBits {
     /// Per [`STEP_VALUES`] field: its bit and its parameter (`None` for
     /// `held`).
     values: [(u32, Option<StepParam>); STEP_VALUES.len()],
-    /// `plocked`, `lock-kind` and `variant-color`.
+    /// `plocked`, `lock-kind`, `variant-color` and `variant`.
     plocked: u32,
     lock_kind: u32,
     variant_color: u32,
+    variant: u32,
 }
 
 static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
@@ -26,6 +27,7 @@ static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
     plocked: STEP_LIVE.bit(f::STEP_PLOCKED),
     lock_kind: STEP_LIVE.bit(f::STEP_LOCK_KIND),
     variant_color: STEP_LIVE.bit(f::STEP_VARIANT_COLOR),
+    variant: STEP_LIVE.bit(f::STEP_VARIANT),
 });
 
 /// The step selection as of the last sync, so `step.selected` is
@@ -224,7 +226,7 @@ pub(super) fn sync_steps(
     }
     // The p-lock render: a whole-track scan (cached per track), so only
     // when the track's p-locks may have moved (or it starts being observed).
-    let plock_bits = bits.plocked | bits.lock_kind | bits.variant_color;
+    let plock_bits = bits.plocked | bits.lock_kind | bits.variant_color | bits.variant;
     let plock_key = pusher.sources.plock_key(track);
     if union & plock_bits == 0 {
         diff.plocks.clear();
@@ -245,7 +247,27 @@ pub(super) fn sync_steps(
             if fresh || previous.color != now.color {
                 changes[step] |= bits.variant_color;
             }
+            if fresh || previous.variant != now.variant {
+                changes[step] |= bits.variant;
+            }
             *previous = now;
+        }
+        let reconciled =
+            pusher.shared.borrow().variant_owners.get(&track_id) == Some(&Some(plock_key));
+        if union & bits.variant != 0 && !reconciled {
+            // The track's variant instances as its registry is now (a
+            // variant gone since drops its instance first), so `variant`
+            // never names a stale one.
+            let (sources, shared) = (pusher.sources, pusher.shared);
+            let owner = (track_id, track_id);
+            owner_variants(
+                &mut *pusher.rt,
+                sources,
+                shared,
+                owner,
+                track,
+                VariantScope::Steps,
+            );
         }
     }
     diff.primed = true;
@@ -264,6 +286,12 @@ pub(super) fn sync_steps(
             }
             // The render is a whole-track scan: push the one just made.
             match diff.plocks.get(step) {
+                Some(render) if bit == bits.variant => {
+                    // The track's variants were reconciled with the render.
+                    let variant = (render.variant)
+                        .and_then(|vid| pusher.rt.keyed_instance(VARIANT, &[track_id, vid]));
+                    pusher.push_computed(id, *key, instance_or_nil(variant));
+                }
                 Some(render) if bit & plock_bits != 0 => {
                     if let Some(value) = render.field(*key) {
                         pusher.push_computed(id, *key, value);

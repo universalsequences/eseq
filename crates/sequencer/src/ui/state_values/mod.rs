@@ -37,7 +37,7 @@ pub(crate) use project_state::*;
 use rack_panel::*;
 pub(crate) use rack_panel::{
     rack_effect_param_display, rack_macro_mapping_display_metadata,
-    rack_slot_instrument_param_display,
+    rack_slot_instrument_param_display, rack_slot_param_value,
 };
 pub(crate) use rack_groove_fields::*;
 pub(crate) use shared::*;

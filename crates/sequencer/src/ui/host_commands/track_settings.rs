@@ -217,6 +217,24 @@ impl<'a> SetValue<'a> {
         }
     }
 
+    /// A list of tracks (track ids), as their positions in `app`: each must
+    /// still be live.
+    pub(super) fn tracks(&self, app: &app::App) -> Result<Vec<usize>, String> {
+        let Value::List(items) = &self.value else {
+            return self.fail("a list of tracks");
+        };
+        let mut tracks = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(tid) = value_id(&item.borrow()) else {
+                return self.fail("a list of tracks");
+            };
+            let track = live_track_index(app, sequencer::sequencer::TrackId(tid))
+                .ok_or("the track is gone")?;
+            tracks.push(track);
+        }
+        Ok(tracks)
+    }
+
     /// An integer in `min..=max`.
     pub(super) fn integer(&self, min: usize, max: usize) -> Result<usize, String> {
         match self.value {

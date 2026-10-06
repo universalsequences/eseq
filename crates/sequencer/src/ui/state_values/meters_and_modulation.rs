@@ -88,12 +88,19 @@ pub(crate) fn read_track_peak_levels(
 /// keeps its dicts. The live-audio poller resolves it to the current output
 /// node every pass.
 pub(crate) fn device_meter_source(kind: &str, fields: &[(&str, f64)]) -> Rc<RefCell<Value>> {
+    value_cell(device_meter_value(kind, fields))
+}
+
+/// A device output meter's selector (a `device-meter`'s `:source`): its
+/// family and position. Shared by the panel dicts' `:meter` and the host
+/// kinds' `device.meter`.
+pub(crate) fn device_meter_value(kind: &str, fields: &[(&str, f64)]) -> Value {
     let mut map = HashMap::new();
     map.insert("kind".to_string(), value_cell(Value::String(kind.to_string())));
     for (key, value) in fields {
         map.insert(key.to_string(), value_cell(Value::Number(*value)));
     }
-    value_cell(Value::Map(map))
+    Value::Map(map)
 }
 
 pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {

@@ -84,17 +84,26 @@ impl DeviceDescriptor {
         &self.desc.tensor_params
     }
 
-    /// Whether `desc` describes the same params, lanes and tensors.
+    /// Whether `desc` describes the same device: its name, params (with
+    /// their UI metadata), lanes, tensors and fixed modulators.
     fn same(&self, desc: Option<&EffectDescriptor>, sampler_depths: bool) -> bool {
         let mine = &self.desc;
         let Some(desc) = desc else {
             return mine.params.is_empty()
                 && mine.instrument_modulation_targets.is_empty()
-                && mine.tensor_params.is_empty();
+                && mine.tensor_params.is_empty()
+                && mine.instrument_modulators.is_empty();
         };
+        // The name too: another effect is another device (its table and
+        // IR fields follow the name).
         self.sampler_depths == sampler_depths
+            && mine.name == desc.name
             && same_params(&mine.params, &desc.params)
             && mine.tensor_params == desc.tensor_params
+            && (mine.instrument_modulators.len()) == desc.instrument_modulators.len()
+            && (mine.instrument_modulators.iter())
+                .zip(&desc.instrument_modulators)
+                .all(|(a, b)| a.slot == b.slot && a.label == b.label)
             && (mine.instrument_modulation_targets.len())
                 == desc.instrument_modulation_targets.len()
             && (mine.instrument_modulation_targets.iter())
@@ -103,9 +112,11 @@ impl DeviceDescriptor {
     }
 }
 
-/// Whether two descriptor param lists describe the same params.
+/// Whether two descriptor param lists describe the same params (their UI
+/// metadata included: `param.group`, … are pushed at registration).
 fn same_params(a: &[ParamDescriptor], b: &[ParamDescriptor]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_shape(b))
+    a.len() == b.len()
+        && (a.iter().zip(b)).all(|(a, b)| a.same_shape(b) && a.ui_metadata == b.ui_metadata)
 }
 
 fn same_target(a: &InstrumentModulationTarget, b: &InstrumentModulationTarget) -> bool {
@@ -128,11 +139,21 @@ fn param_type(pdesc: &ParamDescriptor) -> &'static str {
 }
 
 /// The descriptor (model) fields of a param, in display units, with its
-/// panel placement ([`PanelSection`]).
-fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 10] {
+/// panel placement ([`PanelSection`]) and UI metadata (as the legacy
+/// `insert_param_ui_metadata`: an unresolved options reference only where
+/// no option labels resolved).
+fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 15] {
     let user = |stored| number(DeviceSlot::to_user(pdesc, stored));
     let options = param_enum_labels(pdesc).into_iter().map(Value::String);
     let section = PanelSection::of(pdesc);
+    let metadata = pdesc.ui_metadata.as_ref();
+    let meta = |read: fn(&sequencer::effects::ParamUiMetadata) -> &Option<String>| {
+        Value::String(metadata.and_then(|m| read(m).clone()).unwrap_or_default())
+    };
+    let asset_options = metadata
+        .and_then(|metadata| metadata.asset_options.as_ref())
+        .filter(|_| !matches!(pdesc.kind, ParamKind::Enum { .. }))
+        .map_or(Value::Nil, param_asset_options_value);
     [
         (f::PARAM_NAME, Value::String(pdesc.name.clone())),
         (f::PARAM_MIN, user(pdesc.min)),
@@ -147,6 +168,11 @@ fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 10] {
         (f::PARAM_LABEL, Value::String(section.label(pdesc))),
         (f::PARAM_SECTION, text(section.name())),
         (f::PARAM_MOD_SLOT, number(section.mod_slot(pdesc) as f64)),
+        (f::PARAM_GROUP, meta(|m| &m.group)),
+        (f::PARAM_ENV, meta(|m| &m.env)),
+        (f::PARAM_ROLE, meta(|m| &m.role)),
+        (f::PARAM_DISPLAY_NAME, meta(|m| &m.display_name)),
+        (f::PARAM_ASSET_OPTIONS, asset_options),
     ]
 }
 
@@ -528,12 +554,14 @@ pub(super) fn device_delete_target(sources: &KindsHandles, device: &DeviceSource
     sources.active_delete_target.lock().unwrap().as_ref() == Some(&target)
 }
 
-/// One step's p-lock render (`plocked`, `lock-kind`, `variant-color`).
+/// One step's p-lock render (`plocked`, `lock-kind`, `variant-color`, and
+/// the `vid` of the step variant it plays, `variant`).
 #[derive(Clone, Copy, Default, PartialEq)]
 pub(super) struct StepPlockRender {
     pub(super) plocked: bool,
     pub(super) kind: u8,
     pub(super) color: [f32; 3],
+    pub(super) variant: Option<u64>,
 }
 
 impl StepPlockRender {
@@ -603,6 +631,7 @@ pub(super) fn track_plock_render(
             plocked: mask[step / 64] & (1u64 << (step % 64)) != 0,
             kind: render.kind,
             color: render.color,
+            variant: render.vid,
         })
         .collect();
     let mut shared = shared.borrow_mut();
@@ -694,6 +723,17 @@ impl HostKinds {
             _ => None,
         };
         let existing = pusher.shared.borrow().devices.get(&device_id).cloned();
+        if existing.is_none() {
+            // A device just registered reads the defaults of the fields
+            // computed only while observed (the no-media ones, no sound
+            // binding) until they are.
+            push_all_media_defaults(pusher, device_id);
+            pusher.push(
+                device_id,
+                f::DEVICE_SOUND_BINDING,
+                Value::String(String::new()),
+            );
+        }
         let same_desc = existing
             .as_ref()
             .is_some_and(|source| source.desc.same(desc, sampler_depths));
@@ -726,6 +766,7 @@ impl HostKinds {
         };
         let doomed: Vec<InstanceId> = (pusher.rt.keyed_children_of_kind(device_id, PARAM))
             .chain(pusher.rt.keyed_children_of_kind(device_id, TENSOR))
+            .chain(pusher.rt.keyed_children_of_kind(device_id, MODULATOR))
             .map(|(id, _)| id)
             .collect();
         for id in doomed {
@@ -733,6 +774,7 @@ impl HostKinds {
             pusher.changed = true;
         }
         sync_device_tensors(pusher, device_id, &source);
+        sync_device_modulators(pusher, device_id, &source);
         if existing.is_none() {
             return false;
         }
@@ -790,12 +832,18 @@ impl HostKinds {
         (self.device_observed).refresh(pusher.rt, &DEVICE_OBSERVED, || devices.collect());
         let bits = DeviceBits::get();
         let mut mod_display = false;
+        let mut modulator_meters = false;
         for index in 0..self.device_observed.entries.len() {
             let (id, mut mask, seen) = self.device_observed.entries[index];
             let Some(source) = pusher.shared.borrow().devices.get(&id).cloned() else {
                 continue;
             };
             mod_display |= mask & bits.mod_phases != 0 && mod_sampled(pusher.sources, &source);
+            // Only a modulator track's instrument reads the envelopes.
+            modulator_meters |= mask & (bits.modulator_phase | bits.modulator_level) != 0
+                && source.device == DeviceSlot::Instrument
+                && (pusher.rt.instance_field(id, f::DEVICE_TYPE.1))
+                    .is_ok_and(|kind| matches!(kind, Value::String(kind) if kind == "modulator"));
             if mask & bits.plock_keyed != 0 {
                 let key = pusher.sources.plock_key(source.owner);
                 if seen == Some(key) {
@@ -819,6 +867,11 @@ impl HostKinds {
             }
         }
         self.devices.push_strips(pusher);
+        // `table-options` is pushed again once a device observes it anew.
+        let observed = &self.device_observed.entries;
+        (self.panel.table_options).retain(|id, _| {
+            (observed.iter()).any(|(entry, mask, _)| entry == id && mask & bits.table_options != 0)
+        });
         // Rebuilt from the registered devices' params only when the observer
         // epoch moved: a tick between costs work in proportion to the
         // observed params.
@@ -869,6 +922,7 @@ impl HostKinds {
             );
         }
         self.panel.mod_display_observed = mod_display;
+        self.panel.modulator_meters_observed = modulator_meters;
     }
 
     /// One observed device's live fields in `mask`.
@@ -911,6 +965,17 @@ impl HostKinds {
             pusher.push_computed(id, f::DEVICE_VARIANTS, variants);
             self.panel.variant_observed.reset();
         }
+        if mask & bits.modulator_phase != 0 {
+            let phase = device_modulator_meter(shared, source, true);
+            pusher.push_computed(id, f::DEVICE_MODULATOR_PHASE, number(phase));
+        }
+        if mask & bits.modulator_level != 0 {
+            let level = device_modulator_meter(shared, source, false);
+            pusher.push_computed(id, f::DEVICE_MODULATOR_LEVEL, number(level));
+        }
+        if mask & bits.tables != 0 {
+            self.push_table_fields(pusher, id, source, mask & bits.tables);
+        }
     }
 }
 
@@ -925,6 +990,11 @@ struct DeviceBits {
     plock_keyed: u32,
     /// The strip fields' ([`strip_keys`]).
     strips: u32,
+    modulator_phase: u32,
+    modulator_level: u32,
+    /// The effect table fields' ([`table_keys`]), `table-options`'s.
+    tables: u32,
+    table_options: u32,
 }
 
 impl DeviceBits {
@@ -941,6 +1011,10 @@ impl DeviceBits {
                 variants,
                 plock_keyed: key_locked_notes | variants,
                 strips: DEVICE_LIVE.bits(&strip_keys().collect::<Vec<_>>()),
+                modulator_phase: DEVICE_LIVE.bit(f::DEVICE_MODULATOR_PHASE),
+                modulator_level: DEVICE_LIVE.bit(f::DEVICE_MODULATOR_LEVEL),
+                tables: DEVICE_LIVE.bits(&table_keys().collect::<Vec<_>>()),
+                table_options: DEVICE_LIVE.bit(f::DEVICE_TABLE_OPTIONS),
             }
         });
         &BITS

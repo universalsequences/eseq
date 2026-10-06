@@ -1,7 +1,9 @@
 //! The host kinds' device panel setters (kind-bindings spec §14.2g):
 //! `set-device-tensor` (`set-tensor-cell!`), `stamp-variant`
 //! (`stamp-variant!`), `stamp-key-variant` (`stamp-key-variant!`),
-//! `set-macro` (a project macro's `name` and `value`), `set-rack-macro` (a
+//! `set-macro` (a project macro's `name` and `value`, a scene macro's
+//! `target-scene`, `morph-params`, `steal-patterns`, `quantize` and
+//! `tracks`), `set-rack-macro` (a
 //! drum rack macro's `name` and `base`) and `set-macro-mapping` (a
 //! mapping's `min`, `max` and `curve`).
 //!
@@ -13,9 +15,9 @@
 //! a label among its options, a name; anything else is an error that
 //! changes nothing. Setters are absolute (each acts only where the model
 //! differs: steps or keys already playing the variant are left alone) and
-//! go through the legacy edits: tensor cells, variant stamps and project
-//! macro names and mappings through their history commands (one undo entry
-//! each; a tensor drag's `set!`s join one, as `ScriptEdit`), a project
+//! go through the legacy edits: tensor cells, variant stamps, project macro
+//! names, scene configs and mappings through their history commands (one
+//! undo entry each; a tensor drag's `set!`s join one, as `ScriptEdit`), a project
 //! macro's value as the macro panel's performance control (no undo entry),
 //! and a rack macro's name, value and mappings through the rack panel's
 //! (unrecorded) edits, with their legacy refreshes.
@@ -242,13 +244,24 @@ fn project_macro(app: &app::App, map: &Payload) -> Result<(u32, usize), String> 
     Ok((id, at))
 }
 
-/// `set-macro` (`:macro-id`, `:field` `name` or `value`, `:value`).
+/// `set-macro` (`:macro-id`, `:field` `name`, `value` or a scene macro's
+/// config field, `:value`).
 fn macro_edit(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Result<(), String> {
     let (id, at) = project_macro(app, map)?;
     let (field, value) = SetValue::field(map)?;
     let current = &app.macro_engine.macros()[at];
-    let command = match field.as_str() {
-        "name" => {
+    let command = match (SceneField::of(&field), field.as_str()) {
+        (Some(scene), _) => {
+            use sequencer::macro_engine::MacroKind;
+            let MacroKind::Scene(config) = &current.kind else {
+                return Err(format!("a mapped macro has no {field}"));
+            };
+            let Some(config) = scene_config_edit(app, config, scene, &value)? else {
+                return Ok(());
+            };
+            app::AppCommand::MacroSceneConfig { id, config }
+        }
+        (None, "name") => {
             let name = value.name()?;
             if current.name == name {
                 return Ok(());
@@ -258,14 +271,14 @@ fn macro_edit(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Resul
                 name: name.to_string(),
             }
         }
-        "value" => {
+        (None, "value") => {
             let value = value.number(0.0, 1.0)? as f32;
             if current.value == value {
                 return Ok(());
             }
             app::AppCommand::MacroSetValue { id, value }
         }
-        other => return Err(format!("a macro has no settable field {other}")),
+        (None, other) => return Err(format!("a macro has no settable field {other}")),
     };
     let script = ScriptEdit::begin(app, ctx);
     let changed = script.apply(app, command);
@@ -275,6 +288,68 @@ fn macro_edit(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Resul
     }
     script.end(app, ctx, false, changed);
     Ok(())
+}
+
+/// A scene macro's config field (`set-macro`).
+#[derive(Clone, Copy)]
+enum SceneField {
+    TargetScene,
+    MorphParams,
+    StealPatterns,
+    Quantize,
+    Tracks,
+}
+
+impl SceneField {
+    fn of(field: &str) -> Option<Self> {
+        Some(match field {
+            "target-scene" => Self::TargetScene,
+            "morph-params" => Self::MorphParams,
+            "steal-patterns" => Self::StealPatterns,
+            "quantize" => Self::Quantize,
+            "tracks" => Self::Tracks,
+            _ => return None,
+        })
+    }
+}
+
+/// Scene macro `config` with `field` set to `value` (the value rule: a
+/// scene's position, a bool, a quantization label, a list of track ids);
+/// `None` when it already holds it.
+fn scene_config_edit(
+    app: &app::App,
+    config: &sequencer::macro_engine::SceneMacroConfig,
+    field: SceneField,
+    value: &SetValue<'_>,
+) -> Result<Option<sequencer::macro_engine::SceneMacroConfig>, String> {
+    use sequencer::macro_engine::StealQuantize;
+    let mut next = config.clone();
+    match field {
+        SceneField::TargetScene => {
+            let scenes = app.state.scene_count();
+            next.target_scene = value.integer(0, scenes.saturating_sub(1))?;
+        }
+        SceneField::MorphParams => next.morph_params = value.flag()?,
+        SceneField::StealPatterns => next.steal_patterns = value.flag()?,
+        SceneField::Quantize => {
+            let index = value.choice(&StealQuantize::LABELS)?;
+            next.quantize = StealQuantize::from_index(index).ok_or("no such quantization")?;
+        }
+        SceneField::Tracks => {
+            let mut mask = vec![false; app.tracks.len()];
+            for track in value.tracks(app)? {
+                mask[track] = true;
+            }
+            // The tracks it acts on now: the same set is a no-op, so the
+            // list a view reads (every track while unmasked) sets back.
+            let same = (0..mask.len()).all(|track| config.covers_track(track) == mask[track]);
+            if same {
+                return Ok(None);
+            }
+            next.track_mask = Some(mask);
+        }
+    }
+    Ok((next != *config).then_some(next))
 }
 
 /// A drum rack macro named by its rack's `device-target` and `:macro`.

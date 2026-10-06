@@ -442,6 +442,19 @@ pub(crate) fn sync_reactive_tick(
         if fx_visible && (meter_polled || !was_visible.fx) {
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
                 read_modulator_display_values(app.graph.lg, &app);
+        } else if !fx_visible
+            && ctx.frame.host_kinds.wants_modulator_meters()
+            && (meter_polled
+                || ctx.meters.cached_modulator_phases.len()
+                    != (app.graph.track_node_ids.len()).min(app.graph.track_instrument_types.len()))
+        {
+            // An observed host-kinds `device.modulator-phase` / `-level`
+            // with the fx panel hidden: keep them polled at the meter
+            // cadence.
+            (
+                ctx.meters.cached_modulator_phases,
+                ctx.meters.cached_modulator_levels,
+            ) = read_modulator_display_values(app.graph.lg, &app);
         }
         // The mixer shows the mod port levels; with it hidden, an observed
         // host-kinds level keeps them polled at the meter cadence.
@@ -1989,6 +2002,8 @@ pub(crate) fn sync_reactive_tick(
         overloaded: ctx.frame.cpu_overload.displayed(),
         pad_triggers: &ctx.frame.rack_pad_triggers,
         mod_display: &ctx.meters.cached_mod_display_values,
+        modulator_phases: &ctx.meters.cached_modulator_phases,
+        modulator_levels: &ctx.meters.cached_modulator_levels,
     };
     if ctx
         .frame

@@ -24,45 +24,12 @@ impl Harness {
             .unwrap_or(Value::Nil)
     }
 
-    /// `code` reports an error containing `expected`.
-    fn rejects_7b3(&mut self, code: &str, expected: &str) {
-        self.editor.minibuffer = None;
-        self.eval_panel(code);
-        self.drain();
-        assert!(self.error().contains(expected), "{code}: {}", self.error());
-    }
-
-    /// Undo the last entry, with the resync the undo command's epoch bump
-    /// brings.
-    fn undo(&mut self) {
-        app::edit::undo(&mut self.app);
-        self.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
-        self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
-    }
-
     fn panel_scans(&self) -> u64 {
         self.frame.host_kinds.shared.borrow().panel_scans
     }
 
     fn sampler_refreshes(&self) -> u64 {
         self.frame.host_kinds.shared.borrow().sampler_refreshes
-    }
-}
-
-/// A map's field.
-fn get(value: &Value, key: &str) -> Value {
-    match value {
-        Value::Map(map) => map
-            .get(key)
-            .map_or(Value::Nil, |cell| cell.borrow().clone()),
-        _ => Value::Nil,
-    }
-}
-
-fn items(value: &Value) -> Vec<Value> {
-    match value {
-        Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
-        _ => Vec::new(),
     }
 }
 
@@ -464,8 +431,18 @@ fn base_note_sets_through_history_and_rejects_bad_values() {
     h.sync();
     assert_eq!(offset(&h), 0.0);
     assert_eq!(h.slot("note"), 0.0);
-    h.rejects_7b3("(set! inst.base-note 60)", "from -48 to 48");
-    h.rejects_7b3("(set! flt.base-note 3)", "has no base note");
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! inst.base-note 60)",
+        "from -48 to 48",
+        false,
+    );
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! flt.base-note 3)",
+        "has no base note",
+        false,
+    );
     assert_eq!(offset(&h), 0.0);
 }
 
@@ -554,11 +531,23 @@ fn tensors_register_with_their_device_and_set_through_history() {
     );
     assert_eq!(h.slot("shown"), 0.0);
     // The value rule.
-    h.rejects_7b3("(set-tensor-cell! mask 4 0.5)", "an integer from 0 to 3");
-    h.rejects_7b3("(set-tensor-cell! mask 0 1.5)", "a number from 0 to 1");
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
+        "(set-tensor-cell! mask 4 0.5)",
+        "an integer from 0 to 3",
+        false,
+    );
+    h.rejects_in(
+        REFER_PANEL,
+        "(set-tensor-cell! mask 0 1.5)",
+        "a number from 0 to 1",
+        false,
+    );
+    h.rejects_in(
+        REFER_PANEL,
         "(set-tensor-cell! (dict :device flt :index 0) 0 0.5)",
         "no such tensor",
+        false,
     );
     // A descriptor change replaces the tensors: old handles go stale.
     h.eval_panel("(def old-mask mask)");
@@ -591,9 +580,11 @@ fn tensors_register_with_their_device_and_set_through_history() {
     h.sync();
     assert_eq!(h.eval_panel("(len inst.tensors)"), Value::Number(2.0));
     let before = h.app.history.undo_len();
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
         "(set-tensor-cell! (nth inst.tensors 1) 0 0.5)",
         "the tensor has no cells",
+        false,
     );
     assert_eq!(h.app.history.undo_len(), before);
 }
@@ -674,13 +665,17 @@ fn step_variants_list_the_chips_and_stamp_through_history() {
     h.sync();
     assert_eq!(h.filter_slot(slot).plocks.get(7, CUTOFF), None);
     assert_eq!(h.filter_slot(slot).plocks.get(6, CUTOFF), Some(800.0));
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
         r#"(stamp-variant! t0 (list (nth t0.steps 1)) (dict :label "Z"))"#,
         "the track has no variant Z",
+        false,
     );
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
         "(let ((t1 (track 1))) (stamp-variant! t0 (list (nth t1.steps 1)) a))",
         "steps must be steps of the track",
+        false,
     );
     // The registry is read once per p-lock key.
     let scans = h.panel_scans();
@@ -756,13 +751,17 @@ fn key_lock_variants_list_their_keys_and_stamp_through_history() {
     h.sync();
     assert_eq!(key_lock(&h, 60), Some(0.5));
     assert_eq!(key_lock(&h, 64), None);
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
         "(stamp-key-variant! flt (list 60) kv)",
         "has no key-lock variants",
+        false,
     );
-    h.rejects_7b3(
+    h.rejects_in(
+        REFER_PANEL,
         "(stamp-key-variant! inst (list 200) kv)",
         "200 is no MIDI note",
+        false,
     );
 }
 
@@ -854,8 +853,13 @@ fn project_macros_read_set_and_keep_their_identity() {
         h.eval_panel("(list m.name mm.curve)"),
         h.eval_panel(r#"(list "Sweep" "linear")"#)
     );
-    h.rejects_7b3("(set! mm.max 99999)", "a number from 20 to 20000");
-    h.rejects_7b3(r#"(set! mm.curve "wobbly")"#, "one of");
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! mm.max 99999)",
+        "a number from 20 to 20000",
+        false,
+    );
+    h.rejects_in(REFER_PANEL, r#"(set! mm.curve "wobbly")"#, "one of", false);
     // Every curve the kind shows sets back (log-domain included).
     let undo_len = h.app.history.undo_len();
     h.eval_panel(r#"(set! mm.curve "log-domain")"#);
@@ -890,7 +894,12 @@ fn project_macros_read_set_and_keep_their_identity() {
         assert_eq!(RackMacroCurve::from_label(curve.label()), Some(curve));
     }
     assert_eq!(RackMacroCurve::from_label("log-domain"), None);
-    h.rejects_7b3(r#"(set! m.name "  ")"#, "a non-empty name");
+    h.rejects_in(
+        REFER_PANEL,
+        r#"(set! m.name "  ")"#,
+        "a non-empty name",
+        false,
+    );
     // Identity: a second macro, then the first deleted: the second keeps
     // its instance (re-keyed).
     let second = create(&mut h, "Other");
@@ -1016,9 +1025,19 @@ fn rack_macros_read_set_and_map_onto_the_slot_params() {
     h.eval_panel("(set! rm.base 0.5)");
     h.drain_and_sync();
     assert_eq!(h.frame.host_kinds.macros.rack_syncs, syncs);
-    h.rejects_7b3("(set! rm.base 2)", "a number from 0 to 1");
-    h.rejects_7b3(r#"(set! rmm.curve "wobbly")"#, "one of");
-    h.rejects_7b3("(set! rmm.max 300)", "a number from 0 to 100");
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! rm.base 2)",
+        "a number from 0 to 1",
+        false,
+    );
+    h.rejects_in(REFER_PANEL, r#"(set! rmm.curve "wobbly")"#, "one of", false);
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! rmm.max 300)",
+        "a number from 0 to 100",
+        false,
+    );
     // A bound outside the target's range (an older mapping) sets back as
     // it reads: the no-op comes before the range check.
     assert!(h.app.set_rack_macro_mapping_range(2, id, 0, 0.0, 2.0));

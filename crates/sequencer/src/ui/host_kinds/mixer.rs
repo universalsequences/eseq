@@ -23,6 +23,12 @@ pub(crate) struct KindsMeters<'a> {
     /// `device.mod-phases`): the tick polls it while the fx panel shows or
     /// a kind field observes it (`HostKinds::wants_mod_display`).
     pub(crate) mod_display: &'a ModDisplayValues,
+    /// A modulator instrument's envelope phase and level by track position
+    /// (0 for any other track; `device.modulator-phase`, `-level`): the tick
+    /// polls them while the fx panel shows or one is observed
+    /// (`HostKinds::wants_modulator_meters`).
+    pub(crate) modulator_phases: &'a [f64],
+    pub(crate) modulator_levels: &'a [f64],
 }
 
 /// No modulation sample, for [`KindsMeters::default`].
@@ -50,6 +56,8 @@ impl Default for KindsMeters<'_> {
             overloaded: false,
             pad_triggers: &[],
             mod_display: &NO_MOD_DISPLAY,
+            modulator_phases: &[],
+            modulator_levels: &[],
         }
     }
 }

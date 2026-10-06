@@ -51,6 +51,92 @@ fn filter_table_editor_value(node_id: i32) -> Option<Value> {
     Some(Value::Map(map))
 }
 
+/// A Filter Table's or a Convolution Reverb's table fields, from its effect
+/// node's registries; each `None` where the effect has none (`mode` and
+/// `data_key` also until set or prepared). Shared by the legacy effect panel
+/// dicts and the host kinds' `device.table-*` / `ir-name` (which cache
+/// `table-options` themselves).
+#[derive(Default)]
+pub(crate) struct EffectTableFields {
+    /// A Filter Table's `table-name`, `table-mode`, `table-engine` and
+    /// `table-data-key`.
+    pub(crate) name: Option<String>,
+    pub(crate) mode: Option<String>,
+    pub(crate) engine: Option<String>,
+    pub(crate) data_key: Option<String>,
+    /// A Convolution Reverb's `ir-name`.
+    pub(crate) ir_name: Option<String>,
+}
+
+impl EffectTableFields {
+    /// Whether an effect named `desc_name` has table fields.
+    pub(crate) fn applies(desc_name: &str) -> bool {
+        use sequencer::effects::{conv_reverb, filter_table};
+        desc_name == filter_table::NAME || desc_name == conv_reverb::NAME
+    }
+
+    /// The table fields of effect `desc_name` at graph node `node_id`.
+    pub(crate) fn of(desc_name: &str, node_id: i32) -> Self {
+        use sequencer::effects::{conv_reverb, filter_table};
+        if desc_name == conv_reverb::NAME {
+            let ir_name = conv_reverb::ir_name_for(node_id).unwrap_or_else(|| "No IR".to_string());
+            return Self {
+                ir_name: Some(ir_name),
+                ..Self::default()
+            };
+        }
+        if desc_name != filter_table::NAME {
+            return Self::default();
+        }
+        let reference = filter_table::table_ref_for(node_id);
+        Self {
+            name: Some(
+                filter_table::table_name_for(node_id).unwrap_or_else(|| "No table".to_string()),
+            ),
+            mode: (reference.as_deref())
+                .and_then(|reference| filter_table::decode_table_ref(reference).1)
+                .map(|mode| mode.label().to_string()),
+            engine: Some(filter_table::engine_for(node_id).display_name().to_string()),
+            data_key: (filter_table::prepared_table_for(node_id).is_some())
+                .then(|| filter_table::visualization_key(node_id)),
+            ir_name: None,
+        }
+    }
+
+    /// Whether these are a Filter Table's (it lists `table-options`).
+    pub(crate) fn is_table(&self) -> bool {
+        self.name.is_some()
+    }
+
+    /// Insert the present fields into a legacy panel dict, with a Filter
+    /// Table's `table-options` listed.
+    pub(crate) fn insert_into(self, map: &mut HashMap<String, Rc<RefCell<Value>>>) {
+        if self.is_table() {
+            map.insert(
+                "table-options".to_string(),
+                value_cell(Value::List(
+                    sequencer::effects::filter_table_asset::list_asset_stems()
+                        .into_iter()
+                        .map(|stem| value_cell(Value::String(stem)))
+                        .collect(),
+                )),
+            );
+        }
+        let fields = [
+            ("ir-name", self.ir_name),
+            ("table-name", self.name),
+            ("table-mode", self.mode),
+            ("table-engine", self.engine),
+            ("table-data-key", self.data_key),
+        ];
+        for (key, value) in fields {
+            if let Some(value) = value {
+                map.insert(key.to_string(), value_cell(Value::String(value)));
+            }
+        }
+    }
+}
+
 /// Build a Lisp Value::List of effect slot maps for a track.
 /// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
 pub(crate) fn build_effects_value(
@@ -205,57 +291,8 @@ pub(crate) fn build_effects_value(
                     &[("index", track as f64), ("slot", slot_idx as f64)],
                 ),
             );
-            if desc.name == sequencer::effects::conv_reverb::NAME {
-                let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
-                    .unwrap_or_else(|| "No IR".to_string());
-                slot_map.insert(
-                    "ir-name".to_string(),
-                    Rc::new(RefCell::new(Value::String(name))),
-                );
-            } else if desc.name == sequencer::effects::filter_table::NAME {
-                let name = sequencer::effects::filter_table::table_name_for(node_id)
-                    .unwrap_or_else(|| "No table".to_string());
-                slot_map.insert(
-                    "table-name".to_string(),
-                    Rc::new(RefCell::new(Value::String(name))),
-                );
-                slot_map.insert(
-                    "table-options".to_string(),
-                    Rc::new(RefCell::new(Value::List(
-                        sequencer::effects::filter_table_asset::list_asset_stems()
-                            .into_iter()
-                            .map(|stem| Rc::new(RefCell::new(Value::String(stem))))
-                            .collect(),
-                    ))),
-                );
-                if let Some(mode_label) =
-                    sequencer::effects::filter_table::table_ref_for(node_id)
-                        .and_then(|reference| {
-                            sequencer::effects::filter_table::decode_table_ref(&reference).1
-                        })
-                        .map(|mode| mode.label().to_string())
-                {
-                    slot_map.insert(
-                        "table-mode".to_string(),
-                        Rc::new(RefCell::new(Value::String(mode_label))),
-                    );
-                }
-                slot_map.insert(
-                    "table-engine".to_string(),
-                    Rc::new(RefCell::new(Value::String(
-                        sequencer::effects::filter_table::engine_for(node_id)
-                            .display_name()
-                            .to_string(),
-                    ))),
-                );
-                if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
-                    slot_map.insert(
-                        "table-data-key".to_string(),
-                        Rc::new(RefCell::new(Value::String(
-                            sequencer::effects::filter_table::visualization_key(node_id),
-                        ))),
-                    );
-                }
+            EffectTableFields::of(&desc.name, node_id).insert_into(&mut slot_map);
+            if desc.name == sequencer::effects::filter_table::NAME {
                 if let Some(editor) = filter_table_editor_value(node_id) {
                     slot_map.insert("editor".to_string(), Rc::new(RefCell::new(editor)));
                 }
@@ -1087,57 +1124,8 @@ pub(crate) fn build_bus_effects_value_for_selection(
                             &[("id", bus.id.0 as f64), ("slot", slot_idx as f64)],
                         ),
                     );
-                    if desc.name == sequencer::effects::conv_reverb::NAME {
-                        let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
-                            .unwrap_or_else(|| "No IR".to_string());
-                        slot_map.insert(
-                            "ir-name".to_string(),
-                            Rc::new(RefCell::new(Value::String(name))),
-                        );
-                    } else if desc.name == sequencer::effects::filter_table::NAME {
-                        let name = sequencer::effects::filter_table::table_name_for(node_id)
-                            .unwrap_or_else(|| "No table".to_string());
-                        slot_map.insert(
-                            "table-name".to_string(),
-                            Rc::new(RefCell::new(Value::String(name))),
-                        );
-                        slot_map.insert(
-                            "table-options".to_string(),
-                            Rc::new(RefCell::new(Value::List(
-                                sequencer::effects::filter_table_asset::list_asset_stems()
-                                    .into_iter()
-                                    .map(|stem| Rc::new(RefCell::new(Value::String(stem))))
-                                    .collect(),
-                            ))),
-                        );
-                        if let Some(mode_label) =
-                            sequencer::effects::filter_table::table_ref_for(node_id)
-                                .and_then(|reference| {
-                                    sequencer::effects::filter_table::decode_table_ref(&reference).1
-                                })
-                                .map(|mode| mode.label().to_string())
-                        {
-                            slot_map.insert(
-                                "table-mode".to_string(),
-                                Rc::new(RefCell::new(Value::String(mode_label))),
-                            );
-                        }
-                        slot_map.insert(
-                            "table-engine".to_string(),
-                            Rc::new(RefCell::new(Value::String(
-                                sequencer::effects::filter_table::engine_for(node_id)
-                                    .display_name()
-                                    .to_string(),
-                            ))),
-                        );
-                        if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
-                            slot_map.insert(
-                                "table-data-key".to_string(),
-                                Rc::new(RefCell::new(Value::String(
-                                    sequencer::effects::filter_table::visualization_key(node_id),
-                                ))),
-                            );
-                        }
+                    EffectTableFields::of(&desc.name, node_id).insert_into(&mut slot_map);
+                    if desc.name == sequencer::effects::filter_table::NAME {
                         if let Some(editor) = filter_table_editor_value(node_id) {
                             slot_map
                                 .insert("editor".to_string(), Rc::new(RefCell::new(editor)));

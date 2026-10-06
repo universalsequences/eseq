@@ -170,6 +170,14 @@ pub fn edits_for_sample<'a>(
     edits.filter(|item| item.sample_hash == hash)
 }
 
+/// [`edits_for_sample`] for the sample at `path`.
+pub fn edits_for_sample_path<'a>(
+    edits: Option<&'a SamplerSliceEdits>,
+    path: Option<&std::path::Path>,
+) -> Option<&'a SamplerSliceEdits> {
+    edits_for_sample(edits, path.map(|path| path.to_string_lossy()).as_deref())
+}
+
 /// Stable identity for "the sample these manual slice edits were authored
 /// against".
 ///

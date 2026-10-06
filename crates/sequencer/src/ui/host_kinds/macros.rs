@@ -19,7 +19,10 @@
 //! (a macro drag moves no counter). The racks' macros sync when the rack
 //! revision (any rack edit) or the inputs moved, skipping a rack whose
 //! macro names and mappings did not change (a macro knob drag does no
-//! sync). None reads the history revision. A rack macro's value, base and
+//! sync). None reads the history revision, but an observed scene macro's
+//! `diff-count` (a walk of every track's scene target) is recomputed when
+//! the UI epoch, the history or the scenes moved (an unobserved one costs a
+//! query). A rack macro's value, base and
 //! lock flags are live (an [`ObservedList`]): one rack lock per tick fills
 //! every observed field, `has-locks` recomputed only when its track's
 //! [`PlockKey`] moved.
@@ -29,7 +32,7 @@
 //! mappings after it (each then names the mapping now at its position).
 
 use super::*;
-use sequencer::macro_engine::{Macro, MacroKind, StealQuantize};
+use sequencer::macro_engine::{Macro, MacroKind};
 use sequencer::sequencer::{RackMacroMapping, RackMacroTarget};
 
 /// What macro targets resolve through: compared in place every tick (no
@@ -108,6 +111,12 @@ pub(crate) struct MacroState {
     inputs: Option<MacroInputs>,
     /// Values last pushed, by macro position.
     values: Vec<f32>,
+    /// The (UI epoch, history revision, scenes revision) the scene macros'
+    /// `diff-count` was last computed under ([`HostKinds::sync_scene_diffs`]),
+    /// and the macros observing it that were pushed it under that key (an
+    /// unobserved one leaves, so it is pushed again once observed).
+    diff_key: Option<(usize, u64, u64)>,
+    diff_pushed: HashSet<InstanceId>,
     /// The rack revision of the last rack sync, and per track position the
     /// rack's macro names and mappings as of it.
     rack_revision: Option<u64>,
@@ -122,6 +131,8 @@ pub(crate) struct MacroState {
     pub(crate) syncs: u64,
     pub(crate) rack_syncs: u64,
     pub(crate) rack_live_locks: u64,
+    /// Scene macro `diff-count` passes, for tests.
+    pub(crate) diff_syncs: u64,
 }
 
 impl MacroState {
@@ -131,6 +142,7 @@ impl MacroState {
         self.inputs = None;
         self.rack_revision = None;
         self.values.clear();
+        self.diff_pushed.clear();
     }
 
     /// Instances whose loss (a hot reload) means a full sync.
@@ -229,8 +241,59 @@ impl HostKinds {
         if structure_moved || inputs_moved {
             self.sync_project_macros(pusher, app);
             self.macros.seen = Some(macros.to_vec());
+            self.macros.diff_pushed.clear();
         }
         self.sync_macro_values(pusher, macros);
+        self.sync_scene_diffs(pusher, app);
+    }
+
+    /// Each observed scene macro's `diff-count`
+    /// (`App::scene_macro_diff_count`, the legacy `SEQ.macros`' own): a walk
+    /// of every track's scene target, so only when the UI epoch (the legacy
+    /// publisher's gate), the history or the scenes moved, the macros were
+    /// re-synced or it starts being observed. An unobserved one costs a
+    /// query.
+    fn sync_scene_diffs(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let macros = app.macro_engine.macros();
+        let state = &mut self.macros;
+        let rt = &*pusher.rt;
+        let observes = |id: InstanceId| rt.host_fields_observed(id, &[f::MACRO_DIFF_COUNT.1]) != 0;
+        let scene_macros = || {
+            (state.instances.iter().zip(macros)).filter_map(|(id, definition)| {
+                match &definition.kind {
+                    MacroKind::Scene(config) => Some(((*id)?, config)),
+                    MacroKind::Mapped => None,
+                }
+            })
+        };
+        if !scene_macros().any(|(id, _)| observes(id)) {
+            state.diff_pushed.clear();
+            return;
+        }
+        let key = (
+            pusher.sources.ui_epoch.load(Ordering::Relaxed),
+            app.history.current_revision(),
+            app.state.project_scenes_revision(),
+        );
+        let mut pushed = std::mem::take(&mut state.diff_pushed);
+        if state.diff_key != Some(key) {
+            state.diff_key = Some(key);
+            pushed.clear();
+        }
+        pushed.retain(|id| observes(*id));
+        let mut counts = Vec::new();
+        for (id, config) in scene_macros() {
+            if observes(id) && pushed.insert(id) {
+                counts.push((id, app.scene_macro_diff_count(config)));
+            }
+        }
+        state.diff_pushed = pushed;
+        if !counts.is_empty() {
+            state.diff_syncs += 1;
+        }
+        for (id, count) in counts {
+            pusher.push(id, f::MACRO_DIFF_COUNT, number(count as f64));
+        }
     }
 
     /// The project macros' instances and structure fields (the values are
@@ -263,12 +326,19 @@ impl HostKinds {
             pusher.push(id, f::MACRO_MORPH_PARAMS, Value::Bool(morph));
             let steal = scene.is_some_and(|config| config.steal_patterns);
             pusher.push(id, f::MACRO_STEAL_PATTERNS, Value::Bool(steal));
-            let quantize = scene.map_or("", |config| match config.quantize {
-                StealQuantize::Off => "off",
-                StealQuantize::Sixteenth => "sixteenth",
-                StealQuantize::Bar => "bar",
-            });
+            let quantize = scene.map_or("", |config| config.quantize.label());
             pusher.push(id, f::MACRO_QUANTIZE, text(quantize));
+            // Every track while the mask names none (`track_mask` None).
+            let tracks = scene.map_or_else(Vec::new, |config| {
+                (self.track_ids.iter().enumerate())
+                    .filter(|(track, _)| config.covers_track(*track))
+                    .filter_map(|(_, id)| *id)
+                    .collect()
+            });
+            pusher.push(id, f::MACRO_TRACKS, instance_list(tracks));
+            if scene.is_none() {
+                pusher.push(id, f::MACRO_DIFF_COUNT, number(0));
+            }
             let models = definition
                 .mappings
                 .iter()
