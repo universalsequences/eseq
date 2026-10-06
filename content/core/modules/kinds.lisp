@@ -5,9 +5,11 @@
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices
 ;; (a track's chain, MIDI effects and drum rack slots, a bus's effects),
 ;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves,
-;; tensors, p-lock variants, project and drum rack macros and their mappings;
-;; steps on first read of `t.steps`, params (with their modulation lanes) on
-;; first read of `d.params`),
+;; tensors, p-lock variants, project and drum rack macros and their mappings,
+;; process classes; steps on first read of `t.steps`, params (with their
+;; modulation lanes) on first read of `d.params`, a track's processes (and
+;; their lanes, inlets, ports and state cells) on first read of `t.processes`
+;; or `t.lanes`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -39,11 +41,15 @@
         pad-role-options groove-scale-options
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
-        duplicate-groove! delete-groove! save-groove-to-library!)
+        duplicate-groove! delete-groove! save-groove-to-library!
+        process-library set-process-enabled! set-inlet! set-lane-steps! move-process!
+        add-process! remove-process! bind-port! add-fanout! unbind-port! clear-port!
+        remove-fanout!)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
-;; the host owns (scales, step sync resolutions, accumulators, track outputs)
-;; are `project` fields: project.fts-options, project.sync-options, ….
+;; the host owns (scales, step sync resolutions, accumulators, track outputs,
+;; the step params a process port writes) are `project` fields:
+;; project.fts-options, project.sync-options, project.step-param-options, ….
 (def mute-group-options '("Off" "1" "2" "3" "4" "5" "6" "7" "8"))
 (def accum-mode-options '("rtz" "clip" "rvtz" "rvbp"))
 (def tuning-root-options '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
@@ -222,6 +228,28 @@
             :track-id pq.pad.track.tid :field field :value v))))
 (def set-pool-groove-name (pg v)
   (host-command "set-pool-groove" (dict :groove-id pg.groove-id :field "name" :value v)))
+
+;; Process lanes (spec §14.2h). A process (a slot of a track's composed
+;; chain) is addressed by its track's stable id and its proc-id, its inlets,
+;; ports and fan-out entries by their process and their name or position,
+;; all resolved when the command lands. Field setters edit this track only
+;; (a project lane forks for it); the actions take :all true to edit the
+;; shared project slot (every track). One undo entry each.
+(def process-target (p) (dict :track-id p.track.tid :proc-id p.proc-id))
+(def port-address (pt) (merge (process-target pt.process) :port pt.name))
+(def fanout-address (fo) (merge (port-address fo.port) :index fo.index))
+(def edit-process (address op &rest more)
+  (host-command "edit-process" (apply merge address :op op more)))
+(def fanout-setter (op)
+  (lambda (fo v) (edit-process (fanout-address fo) op :value v)))
+
+;; Run (or bypass) p; :all true sets the shared project lane for every track.
+(def set-process-enabled! (p v &key (all false))
+  (edit-process (process-target p) "enabled" :value v :all all))
+
+;; Set inlet i to v; :all true sets the shared project lane's.
+(def set-inlet! (i v &key (all false))
+  (edit-process (process-target i.process) "inlet" :inlet i.name :value v :all all))
 
 ;; ── Kinds ──
 
@@ -417,6 +445,132 @@
          (variants (list-of variant) :doc "A track instrument's key-lock variants (stamp-key-variant!)")
          (macros (list-of rack-macro) :doc "A drum rack's macros (on its instrument device); empty otherwise")))
 
+;; A process class of the library (process-library.classes): what
+;; (add-process! t c) adds.
+(def-kind process-class
+  :key (index)
+  :host ((index       :int    :doc "Position in the library, from 0")
+         (name        :string :doc "The class name (def-process)")
+         (doc         :string)
+         (source-path :string :doc "The file defining it; empty when none")
+         (target      :string :doc "Where its ports write, as the library lists them")
+         (lane-count  :int    :doc "Its lane inlets (per-step values)")
+         (ports       (list-of :string) :doc "Its port names")))
+
+;; The process library.
+(def-kind process-library
+  :key ()
+  :host ((classes (list-of process-class) :doc "The library's classes (compiled expr bodies excluded)")))
+
+;; One process of a track's chain (t.processes): the project lanes every
+;; track runs first, then the track's own. Keyed by its stable id (proc-id),
+;; so a reorder keeps the instance; a project lane is a process of every
+;; track (its lanes, inlets and bindings fork per track).
+(def-kind process
+  :key (track proc-id)
+  :host ((track         track  :doc "The track whose chain runs it")
+         (proc-id       :int   :doc "The host's stable process instance id (cell.pid is a pattern's)")
+         (index         :int   :doc "Position in the track's chain, from 0 (fire order)")
+         (class         process-class :doc "Its class in the library; nil when the library lacks it, and for an expr card's compiled body (expr#…, never a library class)")
+         (class-name    :string)
+         (name          :string :doc "The name shown: its instance name, else its class")
+         (instance-name :string :doc "Its own name (prob, grab 2, …); empty when none")
+         (project       :bool  :doc "A project lane (shared by every track)")
+         (default-lane  :bool  :doc "One of the default project lanes")
+         (roster        :bool  :doc "A lane the user added to this track")
+         (enabled       :bool  :set set-process-enabled!
+                        :doc "Runs (false bypasses it; on a project lane, for this track only: set-process-enabled! with :all for every track)")
+         (doc           :string :doc "Its class's doc (class.doc, also when class is nil)")
+         (source-path   :string :doc "Its class's file (class.source-path, also when class is nil); empty when none")
+         (target        :string :doc "Where its class's ports write (class.target, also when class is nil)")
+         (lanes         (list-of lane) :doc "Its lane inlets (per-step values), in class order")
+         (inlets        (list-of inlet) :doc "Its other numeric inlets")
+         (ports         (list-of port) :doc "Its ports, in class order")
+         (in-ports      (list-of :string) :doc "The inlets the patchbay shows as in ports: lanes, gates and wired inlets, in class order")
+         (cells         (list-of state-cell) :doc "Its class's state cells (the scope)")
+         (expr          :bool  :doc "An expr card")
+         (expr-line     :string :doc "An expr card's body as one line; empty otherwise")
+         (compile-error :string :doc "Why an expr card's body has no compiled class; empty otherwise")
+         (error         :string :doc "Why its latest run on this track failed; empty when it did not")))
+
+;; A process's lane: per-step values (t.lanes lists every lane of the track's
+;; chain, in the lane selector's order). (set-lane-steps! l steps v) edits it.
+(def-kind lane
+  :key (process index)
+  :host ((process     process :doc "The process whose lane inlet it is")
+         (track       track)
+         (index       :int    :doc "Position among its process's lanes (p.lanes), from 0")
+         (position    :int    :doc "Position in t.lanes, from 0")
+         (inlet       :string :doc "The lane inlet's name")
+         (label       :string :doc "The selector's long label")
+         (short-label :string :doc "The selector's short label (a default lane's name)")
+         (type        :string :doc "float, int, gate, track, field, any or enum")
+         (min         :number :doc "The values' range (a slot's lo/hi when it has them)")
+         (max         :number)
+         (default     :number :doc "A step's value when none is set")
+         (decimals    :int)
+         (forked      :bool   :doc "A project lane this track has its own values for")
+         (values      (list-of :number) :doc "One value per step slot (256)")))
+
+;; A process's numeric inlet (not a lane): (nth p.inlets 0).
+(def-kind inlet
+  :key (process index)
+  :host ((process  process)
+         (index    :int    :doc "Position in p.inlets, from 0")
+         (name     :string)
+         (type     :string :doc "float, int, gate, track, field, any or enum")
+         (options  (list-of :string) :doc "An enum inlet's labels, by value; empty otherwise")
+         (value    :number :set set-inlet!
+                   :doc "Its value on this track (an enum's option index; set-inlet! with :all for every track)")
+         (default  :number :doc "The class default")
+         (min      :number :doc "Its range (the class's, else a hint around value)")
+         (max      :number)
+         (decimals :int)
+         (doc      :string)))
+
+;; A process's port: where it writes. (bind-port! pt x), (add-fanout! pt x),
+;; (unbind-port! pt), (clear-port! pt).
+(def-kind port
+  :key (process index)
+  :host ((process      process)
+         (index        :int    :doc "Position in p.ports, from 0")
+         (name         :string)
+         (label        :string :doc "default for the unnamed default port, else name")
+         (hint         :string :doc "The class's target hint; empty when none")
+         (target       :string :doc "What it writes, as the strip labels it (unbound when nothing)")
+         (status       :string :doc "bound (a binding), hint (follows the class hint) or unbound")
+         (manual       :bool   :doc "Has its own binding")
+         (disconnected :bool   :doc "Disconnected outright: writes nothing (clear-port! reconnects)")
+         (mappable     :bool   :doc "Takes parameter targets (a param, a send, a step param)")
+         (connectable  :bool   :doc "Takes another process's inlet (a lane or an inlet)")
+         (bindable     :bool)
+         (target-kind  :string :doc "The kind of target it takes; empty for any")
+         (target-process process :doc "The process its binding wires into (same layer), or nil")
+         (target-inlet :string :doc "That process's inlet; empty when not wired")
+         (target-step-param :string :doc "The step param it is bound to; empty when none")
+         (fanout       (list-of fanout) :doc "Its extra scaled targets")))
+
+;; An extra scaled target of a port: (nth pt.fanout 0). Positional: removing
+;; one retargets the handles after it.
+(def-kind fanout
+  :key (port index)
+  :host ((port   port)
+         (index  :int    :doc "Position in pt.fanout, from 0")
+         (target :string :doc "What it writes, as the strip labels it")
+         (target-process process :doc "The process inlet it wires into (same layer), or nil")
+         (target-inlet :string)
+         (target-step-param :string)
+         (lo     :number :set (fanout-setter "fanout-lo") :doc "The target value at the port's low end")
+         (hi     :number :set (fanout-setter "fanout-hi") :doc "… and at its high end")))
+
+;; A process's state cell (its scope): (nth p.cells 0).
+(def-kind state-cell
+  :key (process index)
+  :host ((process process)
+         (index   :int    :doc "Position in p.cells, from 0")
+         (name    :string)
+         (values  (list-of :number) :doc "Its history on the process's track, one sample per fire (64 at most); empty before the first")))
+
 (def-kind track
   :key (index)
   :host ((index     :int    :doc "Position in the track list, from 0")
@@ -481,7 +635,10 @@
          (latched   :bool   :set set-track-latched
                     :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")
          (pad       pad     :doc "The drum rack pad this member track backs, or nil")
-         (variants  (list-of variant) :doc "The track's p-lock variants, by label (stamp-variant!)")))
+         (variants  (list-of variant) :doc "The track's p-lock variants, by label (stamp-variant!)")
+         ;; Process lanes.
+         (processes (list-of process) :doc "The process chain, in fire order: the project lanes, then the track's own")
+         (lanes     (list-of lane) :doc "Every lane of the chain, in the lane selector's order")))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.
@@ -784,6 +941,7 @@
          (sync-options (list-of :string) :doc "step.sync labels, by value")
          (accumulator-options (list-of :string) :doc "Built-in and script accumulators, for track.accumulator")
          (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")
+         (step-param-options (list-of :string) :doc "The step params a process port may write (bind-port! pt name)")
          (groove-pool (list-of pool-groove) :doc "The project's grooves, in pool order")
          (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
          (macros (list-of macro) :doc "The project's macros, in macro order")))
@@ -961,3 +1119,62 @@
 (def delete-groove! (pg) (host-command "delete-rack-groove" (dict :groove-id pg.groove-id)))
 (def save-groove-to-library! (pg)
   (host-command "save-groove-to-library" (dict :groove-id pg.groove-id)))
+
+;; ── Process lanes ──
+
+;; Set lane l to v on steps (step instances of l's track); a drag's set!s
+;; join one undo entry.
+(def set-lane-steps! (l steps v)
+  (edit-process (process-target l.process) "lane-steps" :inlet l.inlet :value v
+                :steps (map (lambda (s) s.index) steps)
+                :step-tracks (map (lambda (s) s.track.tid) steps)))
+
+;; Move p before process before of its track and layer (nil: to the end of
+;; its layer). Moving a project lane moves it on every track.
+(def move-process! (p before)
+  (edit-process (process-target p) "move"
+                :before (if before before.proc-id nil)
+                :before-track-id (if before before.track.tid nil)))
+
+;; Add a process of class c (a process-class) to track t's own lanes.
+(def add-process! (t c)
+  (edit-process (dict :track-id t.tid) "add" :class c.name))
+
+;; Remove p from its track (a lane the user added, from every scene).
+(def remove-process! (p)
+  (edit-process (process-target p) "remove"))
+
+;; A port's target: a param of the track's devices, a send of the track, a
+;; lane or inlet of another process of the track, or a step param's name
+;; (one of project.step-param-options).
+(def port-target (x)
+  (if (string? x)
+    (dict :kind "step-param" :param x)
+    (match x.kind
+      "eseq.kinds:param" (merge (device-target x.device) :kind "param" :param-idx x.index)
+      "eseq.kinds:send" (dict :kind "bus-send" :bus-id x.bus.bid :track-id x.track.tid)
+      "eseq.kinds:lane" (dict :kind "inlet" :proc-id x.process.proc-id :inlet x.inlet
+                              :track-id x.process.track.tid)
+      "eseq.kinds:inlet" (dict :kind "inlet" :proc-id x.process.proc-id :inlet x.name
+                               :track-id x.process.track.tid)
+      _ (seq-error (str "not a port target: " x)))))
+
+;; Bind port pt to x (port-target), replacing its binding.
+(def bind-port! (pt x &key (all false))
+  (edit-process (port-address pt) "bind" :target (port-target x) :all all))
+
+;; Add x as an extra scaled target of pt (at the port's own range).
+(def add-fanout! (pt x &key (all false))
+  (edit-process (port-address pt) "add-fanout" :target (port-target x) :all all))
+
+;; Disconnect pt: it writes nothing (its binding and class hint muted).
+(def unbind-port! (pt &key (all false))
+  (edit-process (port-address pt) "unbind" :all all))
+
+;; Drop pt's own binding (it follows its class hint again).
+(def clear-port! (pt &key (all false))
+  (edit-process (port-address pt) "clear" :all all))
+
+;; Remove fan-out entry fo.
+(def remove-fanout! (fo &key (all false))
+  (edit-process (fanout-address fo) "remove-fanout" :all all))

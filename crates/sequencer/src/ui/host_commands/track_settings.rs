@@ -112,6 +112,11 @@ impl<'a> SetValue<'a> {
         Ok((field, value))
     }
 
+    /// The value as given.
+    pub(super) fn value(&self) -> &Value {
+        &self.value
+    }
+
     pub(super) fn fail<T>(&self, wants: &str) -> Result<T, String> {
         Err(format!("{} takes {wants}, not {:?}", self.what, self.value))
     }
@@ -166,6 +171,14 @@ impl<'a> SetValue<'a> {
             .iter()
             .position(|option| option.eq_ignore_ascii_case(label))
             .map_or_else(|| self.fail(&format!("one of {options:?}")), Ok)
+    }
+
+    /// Any finite number.
+    pub(super) fn finite(&self) -> Result<f64, String> {
+        match self.value {
+            Value::Number(value) if value.is_finite() => Ok(value),
+            _ => self.fail("a finite number"),
+        }
     }
 
     /// A finite number of at least `min` (a beat: `from(0.0)`).

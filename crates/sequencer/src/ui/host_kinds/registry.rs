@@ -26,6 +26,8 @@ pub(super) trait KindStore {
     }
     fn drop_id(&mut self, id: InstanceId);
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value);
+    /// A field's value in its cell (without asking the reader hook).
+    fn field(&self, id: InstanceId, name: &str) -> Option<Value>;
     /// A Lisp global's value (the step cursor), read without evaluating.
     fn global(&self, name: &str) -> Option<Value>;
 }
@@ -59,6 +61,9 @@ impl KindStore for VM {
     }
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value) {
         report_push(self.set_instance_field(id, key.1, value), key);
+    }
+    fn field(&self, id: InstanceId, name: &str) -> Option<Value> {
+        self.instance_field(id, name).ok()
     }
     fn global(&self, name: &str) -> Option<Value> {
         self.global_value(name)
@@ -94,6 +99,9 @@ impl KindStore for Runtime {
     }
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value) {
         report_push(self.set_instance_field(id, key.1, value), key);
+    }
+    fn field(&self, id: InstanceId, name: &str) -> Option<Value> {
+        self.instance_field(id, name).ok()
     }
     fn global(&self, name: &str) -> Option<Value> {
         self.global_value(name)
@@ -163,6 +171,31 @@ pub(super) fn drop_children_past<S: KindStore>(
     !doomed.is_empty()
 }
 
+/// Push `value` into `id`'s `key` unless the cell holds it (or a schema
+/// mismatch skips it); returns whether it was pushed.
+pub(super) fn put<S: KindStore>(
+    store: &mut S,
+    shared: &RefCell<KindsShared>,
+    id: InstanceId,
+    key: FieldKey,
+    value: Value,
+) -> bool {
+    {
+        let shared = shared.borrow();
+        if !shared.skip.is_empty() && shared.skip.contains(&key) {
+            return false;
+        }
+    }
+    if store
+        .field(id, key.1)
+        .is_some_and(|current| current == value)
+    {
+        return false;
+    }
+    store.push(id, key, value);
+    true
+}
+
 /// Pushes during one sync: compares with the cell first.
 pub(super) struct Pusher<'a> {
     pub(super) rt: &'a mut Runtime,
@@ -173,21 +206,7 @@ pub(super) struct Pusher<'a> {
 
 impl Pusher<'_> {
     pub(super) fn push(&mut self, id: InstanceId, key: FieldKey, value: Value) {
-        {
-            let shared = self.shared.borrow();
-            if !shared.skip.is_empty() && shared.skip.contains(&key) {
-                return;
-            }
-        }
-        if self
-            .rt
-            .instance_field(id, key.1)
-            .is_ok_and(|current| current == value)
-        {
-            return;
-        }
-        report_push(self.rt.set_instance_field(id, key.1, value), key);
-        self.changed = true;
+        self.changed |= put(&mut *self.rt, self.shared, id, key, value);
     }
 
     /// Push a live field value computed outside [`live_value`], counting it

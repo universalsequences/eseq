@@ -78,6 +78,7 @@ use std::sync::LazyLock;
 
 mod arrangement;
 mod devices;
+mod lanes;
 mod live;
 mod macros;
 mod mixer;
@@ -93,6 +94,7 @@ mod variants;
 
 use arrangement::SongState;
 use devices::*;
+use lanes::*;
 pub(crate) use live::KindsHandles;
 use live::*;
 use macros::*;
@@ -143,6 +145,14 @@ pub(crate) const VARIANT: &str = "eseq.kinds:variant";
 pub(crate) const MACRO: &str = "eseq.kinds:macro";
 pub(crate) const RACK_MACRO: &str = "eseq.kinds:rack-macro";
 pub(crate) const MACRO_MAPPING: &str = "eseq.kinds:macro-mapping";
+pub(crate) const PROCESS: &str = "eseq.kinds:process";
+pub(crate) const PROCESS_CLASS: &str = "eseq.kinds:process-class";
+pub(crate) const PROCESS_LIBRARY: &str = "eseq.kinds:process-library";
+pub(crate) const LANE: &str = "eseq.kinds:lane";
+pub(crate) const INLET: &str = "eseq.kinds:inlet";
+pub(crate) const PORT: &str = "eseq.kinds:port";
+pub(crate) const FANOUT: &str = "eseq.kinds:fanout";
+pub(crate) const STATE_CELL: &str = "eseq.kinds:state-cell";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +228,100 @@ pub(crate) mod f {
     pub(crate) const TRACK_PAD: FieldKey = (TRACK, "pad");
     pub(crate) const TRACK_MIDI_DEVICES: FieldKey = (TRACK, "midi-devices");
     pub(crate) const TRACK_VARIANTS: FieldKey = (TRACK, "variants");
+    pub(crate) const TRACK_PROCESSES: FieldKey = (TRACK, "processes");
+    pub(crate) const TRACK_LANES: FieldKey = (TRACK, "lanes");
+
+    pub(crate) const CLASS_INDEX: FieldKey = (PROCESS_CLASS, "index");
+    pub(crate) const CLASS_NAME: FieldKey = (PROCESS_CLASS, "name");
+    pub(crate) const CLASS_DOC: FieldKey = (PROCESS_CLASS, "doc");
+    pub(crate) const CLASS_SOURCE_PATH: FieldKey = (PROCESS_CLASS, "source-path");
+    pub(crate) const CLASS_TARGET: FieldKey = (PROCESS_CLASS, "target");
+    pub(crate) const CLASS_LANE_COUNT: FieldKey = (PROCESS_CLASS, "lane-count");
+    pub(crate) const CLASS_PORTS: FieldKey = (PROCESS_CLASS, "ports");
+    pub(crate) const LIBRARY_CLASSES: FieldKey = (PROCESS_LIBRARY, "classes");
+
+    pub(crate) const PROCESS_TRACK: FieldKey = (PROCESS, "track");
+    pub(crate) const PROCESS_PROC_ID: FieldKey = (PROCESS, "proc-id");
+    pub(crate) const PROCESS_INDEX: FieldKey = (PROCESS, "index");
+    pub(crate) const PROCESS_CLASS_REF: FieldKey = (PROCESS, "class");
+    pub(crate) const PROCESS_CLASS_NAME: FieldKey = (PROCESS, "class-name");
+    pub(crate) const PROCESS_NAME: FieldKey = (PROCESS, "name");
+    pub(crate) const PROCESS_INSTANCE_NAME: FieldKey = (PROCESS, "instance-name");
+    pub(crate) const PROCESS_PROJECT: FieldKey = (PROCESS, "project");
+    pub(crate) const PROCESS_DEFAULT_LANE: FieldKey = (PROCESS, "default-lane");
+    pub(crate) const PROCESS_ROSTER: FieldKey = (PROCESS, "roster");
+    pub(crate) const PROCESS_ENABLED: FieldKey = (PROCESS, "enabled");
+    pub(crate) const PROCESS_DOC: FieldKey = (PROCESS, "doc");
+    pub(crate) const PROCESS_SOURCE_PATH: FieldKey = (PROCESS, "source-path");
+    pub(crate) const PROCESS_TARGET: FieldKey = (PROCESS, "target");
+    pub(crate) const PROCESS_LANES: FieldKey = (PROCESS, "lanes");
+    pub(crate) const PROCESS_INLETS: FieldKey = (PROCESS, "inlets");
+    pub(crate) const PROCESS_PORTS: FieldKey = (PROCESS, "ports");
+    pub(crate) const PROCESS_IN_PORTS: FieldKey = (PROCESS, "in-ports");
+    pub(crate) const PROCESS_CELLS: FieldKey = (PROCESS, "cells");
+    pub(crate) const PROCESS_EXPR: FieldKey = (PROCESS, "expr");
+    pub(crate) const PROCESS_EXPR_LINE: FieldKey = (PROCESS, "expr-line");
+    pub(crate) const PROCESS_COMPILE_ERROR: FieldKey = (PROCESS, "compile-error");
+    pub(crate) const PROCESS_ERROR: FieldKey = (PROCESS, "error");
+
+    pub(crate) const LANE_PROCESS: FieldKey = (LANE, "process");
+    pub(crate) const LANE_TRACK: FieldKey = (LANE, "track");
+    pub(crate) const LANE_INDEX: FieldKey = (LANE, "index");
+    pub(crate) const LANE_POSITION: FieldKey = (LANE, "position");
+    pub(crate) const LANE_INLET: FieldKey = (LANE, "inlet");
+    pub(crate) const LANE_LABEL: FieldKey = (LANE, "label");
+    pub(crate) const LANE_SHORT_LABEL: FieldKey = (LANE, "short-label");
+    pub(crate) const LANE_TYPE: FieldKey = (LANE, "type");
+    pub(crate) const LANE_MIN: FieldKey = (LANE, "min");
+    pub(crate) const LANE_MAX: FieldKey = (LANE, "max");
+    pub(crate) const LANE_DEFAULT: FieldKey = (LANE, "default");
+    pub(crate) const LANE_DECIMALS: FieldKey = (LANE, "decimals");
+    pub(crate) const LANE_FORKED: FieldKey = (LANE, "forked");
+    pub(crate) const LANE_VALUES: FieldKey = (LANE, "values");
+
+    pub(crate) const INLET_PROCESS: FieldKey = (INLET, "process");
+    pub(crate) const INLET_INDEX: FieldKey = (INLET, "index");
+    pub(crate) const INLET_NAME: FieldKey = (INLET, "name");
+    pub(crate) const INLET_TYPE: FieldKey = (INLET, "type");
+    pub(crate) const INLET_OPTIONS: FieldKey = (INLET, "options");
+    pub(crate) const INLET_VALUE: FieldKey = (INLET, "value");
+    pub(crate) const INLET_DEFAULT: FieldKey = (INLET, "default");
+    pub(crate) const INLET_MIN: FieldKey = (INLET, "min");
+    pub(crate) const INLET_MAX: FieldKey = (INLET, "max");
+    pub(crate) const INLET_DECIMALS: FieldKey = (INLET, "decimals");
+    pub(crate) const INLET_DOC: FieldKey = (INLET, "doc");
+
+    pub(crate) const PORT_PROCESS: FieldKey = (PORT, "process");
+    pub(crate) const PORT_INDEX: FieldKey = (PORT, "index");
+    pub(crate) const PORT_NAME: FieldKey = (PORT, "name");
+    pub(crate) const PORT_LABEL: FieldKey = (PORT, "label");
+    pub(crate) const PORT_HINT: FieldKey = (PORT, "hint");
+    pub(crate) const PORT_TARGET: FieldKey = (PORT, "target");
+    pub(crate) const PORT_STATUS: FieldKey = (PORT, "status");
+    pub(crate) const PORT_MANUAL: FieldKey = (PORT, "manual");
+    pub(crate) const PORT_DISCONNECTED: FieldKey = (PORT, "disconnected");
+    pub(crate) const PORT_MAPPABLE: FieldKey = (PORT, "mappable");
+    pub(crate) const PORT_CONNECTABLE: FieldKey = (PORT, "connectable");
+    pub(crate) const PORT_BINDABLE: FieldKey = (PORT, "bindable");
+    pub(crate) const PORT_TARGET_KIND: FieldKey = (PORT, "target-kind");
+    pub(crate) const PORT_TARGET_PROCESS: FieldKey = (PORT, "target-process");
+    pub(crate) const PORT_TARGET_INLET: FieldKey = (PORT, "target-inlet");
+    pub(crate) const PORT_TARGET_STEP_PARAM: FieldKey = (PORT, "target-step-param");
+    pub(crate) const PORT_FANOUT: FieldKey = (PORT, "fanout");
+
+    pub(crate) const FANOUT_PORT: FieldKey = (FANOUT, "port");
+    pub(crate) const FANOUT_INDEX: FieldKey = (FANOUT, "index");
+    pub(crate) const FANOUT_TARGET: FieldKey = (FANOUT, "target");
+    pub(crate) const FANOUT_TARGET_PROCESS: FieldKey = (FANOUT, "target-process");
+    pub(crate) const FANOUT_TARGET_INLET: FieldKey = (FANOUT, "target-inlet");
+    pub(crate) const FANOUT_TARGET_STEP_PARAM: FieldKey = (FANOUT, "target-step-param");
+    pub(crate) const FANOUT_LO: FieldKey = (FANOUT, "lo");
+    pub(crate) const FANOUT_HI: FieldKey = (FANOUT, "hi");
+
+    pub(crate) const STATE_CELL_PROCESS: FieldKey = (STATE_CELL, "process");
+    pub(crate) const STATE_CELL_INDEX: FieldKey = (STATE_CELL, "index");
+    pub(crate) const STATE_CELL_NAME: FieldKey = (STATE_CELL, "name");
+    pub(crate) const STATE_CELL_VALUES: FieldKey = (STATE_CELL, "values");
 
     pub(crate) const PAD_GROUP: FieldKey = (PAD, "group");
     pub(crate) const PAD_TRACK: FieldKey = (PAD, "track");
@@ -570,6 +674,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_SYNC_OPTIONS: FieldKey = (PROJECT, "sync-options");
     pub(crate) const PROJECT_ACCUMULATOR_OPTIONS: FieldKey = (PROJECT, "accumulator-options");
     pub(crate) const PROJECT_OUTPUT_OPTIONS: FieldKey = (PROJECT, "output-options");
+    pub(crate) const PROJECT_STEP_PARAM_OPTIONS: FieldKey = (PROJECT, "step-param-options");
     pub(crate) const PROJECT_GROOVE_POOL: FieldKey = (PROJECT, "groove-pool");
     pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
     pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
@@ -978,9 +1083,102 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PROJECT_SYNC_OPTIONS, "(list-of :string)", Model),
     (f::PROJECT_ACCUMULATOR_OPTIONS, "(list-of :string)", Model),
     (f::PROJECT_OUTPUT_OPTIONS, "(list-of bus)", Model),
+    (f::PROJECT_STEP_PARAM_OPTIONS, "(list-of :string)", Model),
     (f::PROJECT_GROOVE_POOL, "(list-of pool-groove)", Model),
     (f::PROJECT_GROOVE_LIBRARY, "(list-of library-groove)", Model),
     (f::PROJECT_MACROS, "(list-of macro)", Model),
+    // Process lanes (`lanes`): a track's processes registered on the first
+    // read of `processes` or `lanes`, then synced behind the track's lane
+    // key; the classes when the library's version moved.
+    (f::TRACK_PROCESSES, "(list-of process)", Model),
+    (f::TRACK_LANES, "(list-of lane)", Model),
+    (f::CLASS_INDEX, ":int", Model),
+    (f::CLASS_NAME, ":string", Model),
+    (f::CLASS_DOC, ":string", Model),
+    (f::CLASS_SOURCE_PATH, ":string", Model),
+    (f::CLASS_TARGET, ":string", Model),
+    (f::CLASS_LANE_COUNT, ":int", Model),
+    (f::CLASS_PORTS, "(list-of :string)", Model),
+    (f::LIBRARY_CLASSES, "(list-of process-class)", Model),
+    (f::PROCESS_TRACK, "track", Model),
+    (f::PROCESS_PROC_ID, ":int", Model),
+    (f::PROCESS_INDEX, ":int", Model),
+    (f::PROCESS_CLASS_REF, "process-class", Model),
+    (f::PROCESS_CLASS_NAME, ":string", Model),
+    (f::PROCESS_NAME, ":string", Model),
+    (f::PROCESS_INSTANCE_NAME, ":string", Model),
+    (f::PROCESS_PROJECT, ":bool", Model),
+    (f::PROCESS_DEFAULT_LANE, ":bool", Model),
+    (f::PROCESS_ROSTER, ":bool", Model),
+    (f::PROCESS_ENABLED, ":bool", Model),
+    (f::PROCESS_DOC, ":string", Model),
+    (f::PROCESS_SOURCE_PATH, ":string", Model),
+    (f::PROCESS_TARGET, ":string", Model),
+    (f::PROCESS_LANES, "(list-of lane)", Model),
+    (f::PROCESS_INLETS, "(list-of inlet)", Model),
+    (f::PROCESS_PORTS, "(list-of port)", Model),
+    (f::PROCESS_IN_PORTS, "(list-of :string)", Model),
+    (f::PROCESS_CELLS, "(list-of state-cell)", Model),
+    (f::PROCESS_EXPR, ":bool", Model),
+    (f::PROCESS_EXPR_LINE, ":string", Model),
+    (f::PROCESS_COMPILE_ERROR, ":string", Model),
+    // The scheduler's run errors and scope histories: re-read while
+    // observed, when their versions moved.
+    (f::PROCESS_ERROR, ":string", Live),
+    (f::LANE_PROCESS, "process", Model),
+    (f::LANE_TRACK, "track", Model),
+    (f::LANE_INDEX, ":int", Model),
+    (f::LANE_POSITION, ":int", Model),
+    (f::LANE_INLET, ":string", Model),
+    (f::LANE_LABEL, ":string", Model),
+    (f::LANE_SHORT_LABEL, ":string", Model),
+    (f::LANE_TYPE, ":string", Model),
+    (f::LANE_MIN, ":number", Model),
+    (f::LANE_MAX, ":number", Model),
+    (f::LANE_DEFAULT, ":number", Model),
+    (f::LANE_DECIMALS, ":int", Model),
+    (f::LANE_FORKED, ":bool", Model),
+    (f::LANE_VALUES, "(list-of :number)", Model),
+    (f::INLET_PROCESS, "process", Model),
+    (f::INLET_INDEX, ":int", Model),
+    (f::INLET_NAME, ":string", Model),
+    (f::INLET_TYPE, ":string", Model),
+    (f::INLET_OPTIONS, "(list-of :string)", Model),
+    (f::INLET_VALUE, ":number", Model),
+    (f::INLET_DEFAULT, ":number", Model),
+    (f::INLET_MIN, ":number", Model),
+    (f::INLET_MAX, ":number", Model),
+    (f::INLET_DECIMALS, ":int", Model),
+    (f::INLET_DOC, ":string", Model),
+    (f::PORT_PROCESS, "process", Model),
+    (f::PORT_INDEX, ":int", Model),
+    (f::PORT_NAME, ":string", Model),
+    (f::PORT_LABEL, ":string", Model),
+    (f::PORT_HINT, ":string", Model),
+    (f::PORT_TARGET, ":string", Model),
+    (f::PORT_STATUS, ":string", Model),
+    (f::PORT_MANUAL, ":bool", Model),
+    (f::PORT_DISCONNECTED, ":bool", Model),
+    (f::PORT_MAPPABLE, ":bool", Model),
+    (f::PORT_CONNECTABLE, ":bool", Model),
+    (f::PORT_BINDABLE, ":bool", Model),
+    (f::PORT_TARGET_KIND, ":string", Model),
+    (f::PORT_TARGET_PROCESS, "process", Model),
+    (f::PORT_TARGET_INLET, ":string", Model),
+    (f::PORT_TARGET_STEP_PARAM, ":string", Model),
+    (f::PORT_FANOUT, "(list-of fanout)", Model),
+    (f::FANOUT_PORT, "port", Model),
+    (f::FANOUT_INDEX, ":int", Model),
+    (f::FANOUT_TARGET, ":string", Model),
+    (f::FANOUT_TARGET_PROCESS, "process", Model),
+    (f::FANOUT_TARGET_INLET, ":string", Model),
+    (f::FANOUT_TARGET_STEP_PARAM, ":string", Model),
+    (f::FANOUT_LO, ":number", Model),
+    (f::FANOUT_HI, ":number", Model),
+    (f::STATE_CELL_PROCESS, "process", Model),
+    (f::STATE_CELL_INDEX, ":int", Model),
+    (f::STATE_CELL_NAME, ":string", Model),
+    (f::STATE_CELL_VALUES, "(list-of :number)", Live),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -1055,6 +1253,9 @@ pub(super) static TENSOR_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveField
 pub(super) static VARIANT_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(VARIANT));
 pub(super) static RACK_MACRO_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(RACK_MACRO));
+pub(super) static PROCESS_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PROCESS));
+pub(super) static STATE_CELL_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(STATE_CELL));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -1364,6 +1565,8 @@ pub(crate) struct HostKinds {
     panel: PanelState,
     /// Project and drum rack macros.
     pub(crate) macros: MacroState,
+    /// Process lanes: the library's classes, the tracks' processes.
+    pub(crate) lanes: LaneState,
 }
 
 impl HostKinds {
@@ -1438,6 +1641,7 @@ impl HostKinds {
             self.racks.invalidate();
             self.devices.invalidate();
             self.macros.invalidate();
+            self.lanes.invalidate(&self.shared);
         }
         if self
             .song
@@ -1513,6 +1717,7 @@ impl HostKinds {
         self.sync_device_model(&mut pusher, app);
         self.refresh_sampler_playheads(&mut pusher, app);
         self.sync_macro_model(&mut pusher, app);
+        self.sync_lane_model(&mut pusher);
         self.sync_cell_model(&mut pusher, app);
         self.sync_rack_clips(&mut pusher, app);
         self.sync_rack_model(&mut pusher, app);
@@ -1531,6 +1736,7 @@ impl HostKinds {
         self.sync_tensor_live(&mut pusher);
         self.sync_variant_live(&mut pusher);
         self.sync_rack_macro_live(&mut pusher);
+        self.sync_lane_live(&mut pusher);
         self.sync_bus_live(&mut pusher);
         self.sync_route_live(&mut pusher);
         self.sync_group_live(&mut pusher);
@@ -1615,7 +1821,8 @@ impl HostKinds {
             .chain(self.groups.drain())
             .chain(self.routes.drain())
             .chain(self.racks.pool.drain())
-            .chain(self.macros.drain());
+            .chain(self.macros.drain())
+            .chain(self.lanes.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;

@@ -324,6 +324,7 @@ impl Harness {
 
 mod arrangement;
 mod devices;
+mod lanes;
 mod mixer;
 mod panel;
 mod params;

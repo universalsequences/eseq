@@ -328,7 +328,7 @@ fn value_symbol_name(value: &Value) -> Option<String> {
 /// A process class a track lane may be built from: one of the always-on
 /// default lane classes, or a `def-process` in the project's authoring
 /// snapshot (the process library).
-fn process_class_is_known(state: &Arc<SequencerState>, class_name: &str) -> bool {
+pub(super) fn process_class_is_known(state: &Arc<SequencerState>, class_name: &str) -> bool {
     sequencer::process::DEFAULT_LANE_CLASSES.contains(&class_name)
         || state
             .published_process_authoring()
@@ -363,11 +363,8 @@ fn process_slot_port_def(
     else {
         return None;
     };
-    state
-        .published_process_authoring()
-        .defs
-        .iter()
-        .find(|def| def.name == slot.class_name)
+    let published = state.published_process_authoring();
+    process_slot_def(&published, slot)
         .and_then(|def| def.ports.iter().find(|port| port.name == port_name))
         .cloned()
 }
@@ -419,27 +416,7 @@ pub(super) fn param_target_from_value(
         "instrument" | "instrument-param" => {
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "instrument process target must include :param-idx".to_string())?;
-            let slot =
-                state.pattern.instrument_slots.get(track).ok_or_else(|| {
-                    format!("instrument slot for track {} is not loaded", track + 1)
-                })?;
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            require_slot_param_index(param_idx, num_params, || {
-                format!("instrument track {}", track + 1)
-            })?;
-            let (_effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(instrument_descriptors.get(track), param_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "instrument process target must include :param for track {} param index {param_idx}",
-                        track + 1
-                    )
-                })?;
-            Ok(sequencer::process::ParamTarget::InstrumentParam {
-                param,
-                param_id: slot.param_node_id(param_idx),
-            })
+            instrument_process_target(state, track, param_idx, process_target_param_name(value))
         }
         "effect" | "effect-param" | "audio-fx" | "audio-effect" => {
             let slot_idx = value_number_field(value, "slot-idx")
@@ -447,50 +424,11 @@ pub(super) fn param_target_from_value(
                 .ok_or_else(|| "effect process target must include :slot-idx".to_string())?;
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "effect process target must include :param-idx".to_string())?;
-            let slot = state
-                .pattern
-                .effect_chains
-                .get(track)
-                .and_then(|chain| chain.get(slot_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "effect slot for track {} slot {} is not loaded",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            require_slot_param_index(param_idx, num_params, || {
-                format!("effect track {} slot {}", track + 1, slot_idx + 1)
-            })?;
-            let (effect_descriptors, _instrument_descriptors) = state.scratch_runtime_descriptors();
-            let desc = effect_descriptors
-                .get(track)
-                .and_then(|descs| descs.get(slot_idx));
-            let effect = process_target_effect_name(value)
-                .or_else(|| desc.map(|desc| desc.name.clone()))
-                .ok_or_else(|| {
-                    format!(
-                        "effect process target must include :effect for track {} slot {}",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(desc, param_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "effect process target must include :param for track {} slot {} param index {param_idx}",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            Ok(sequencer::process::ParamTarget::EffectParam {
-                slot: slot_idx,
-                effect,
-                param,
-                param_id: slot.param_node_id(param_idx),
-            })
+            let names = (
+                process_target_effect_name(value),
+                process_target_param_name(value),
+            );
+            effect_process_target(state, track, slot_idx, param_idx, names)
         }
         "midi-fx" | "midi-fx-param" | "midi-effect" => {
             let slot_idx = value_number_field(value, "slot-idx")
@@ -498,32 +436,11 @@ pub(super) fn param_target_from_value(
                 .ok_or_else(|| "midi-fx process target must include :slot-idx".to_string())?;
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "midi-fx process target must include :param-idx".to_string())?;
-            let chain_fx_name = state
-                .pattern
-                .track_params
-                .get(track)
-                .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
-                .ok_or_else(|| {
-                    format!(
-                        "MIDI-FX slot {} is not loaded on track {}",
-                        slot_idx + 1,
-                        track + 1
-                    )
-                })?;
-            let fx = value_string_field(value, "fx").unwrap_or(chain_fx_name);
-            let desc = sequencer::lisp_host::load_midi_fx_descriptor(&fx)
-                .ok_or_else(|| format!("MIDI-FX descriptor for {fx} is not loaded"))?;
-            require_slot_param_index(param_idx, desc.params.len(), || format!("MIDI-FX {fx}"))?;
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(Some(&desc), param_idx))
-                .ok_or_else(|| {
-                    format!("midi-fx process target must include :param for {fx} param index {param_idx}")
-                })?;
-            Ok(sequencer::process::ParamTarget::MidiFxParam {
-                slot: slot_idx,
-                fx: desc.name,
-                param,
-            })
+            let names = (
+                value_string_field(value, "fx"),
+                process_target_param_name(value),
+            );
+            midi_fx_process_target(state, track, slot_idx, param_idx, names)
         }
         "process-inlet" | "process_inlet" => {
             let process = value_string_field(value, "process")
@@ -548,16 +465,142 @@ pub(super) fn param_target_from_value(
             let bus = value_number_field(value, "bus-id")
                 .or_else(|| value_number_field(value, "bus_id"))
                 .ok_or_else(|| "bus-send process target must include :bus-id".to_string())?;
-            if bus as u64 == sequencer::sequencer::MIX_BUS_ID {
-                return Err("the mix bus has no send".to_string());
-            }
-            Ok(sequencer::process::ParamTarget::BusSend { bus: bus as u64 })
+            bus_send_process_target(bus as u64)
         }
         "bus-effect" | "bus-fx" => {
             Err("bus FX process-port bindings are not supported".to_string())
         }
         other => Err(format!("unknown process target kind :{other}")),
     }
+}
+
+/// A param of `track`'s instrument as a process target; `param` names it,
+/// else its descriptor does.
+pub(super) fn instrument_process_target(
+    state: &SequencerState,
+    track: usize,
+    param_idx: usize,
+    param: Option<String>,
+) -> Result<sequencer::process::ParamTarget, String> {
+    let slot = (state.pattern.instrument_slots.get(track))
+        .ok_or_else(|| format!("instrument slot for track {} is not loaded", track + 1))?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    require_slot_param_index(param_idx, num_params, || {
+        format!("instrument track {}", track + 1)
+    })?;
+    let (_effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
+    let param = param
+        .or_else(|| descriptor_param_name(instrument_descriptors.get(track), param_idx))
+        .ok_or_else(|| {
+            format!(
+                "instrument process target must include :param for track {} param index {param_idx}",
+                track + 1
+            )
+        })?;
+    Ok(sequencer::process::ParamTarget::InstrumentParam {
+        param,
+        param_id: slot.param_node_id(param_idx),
+    })
+}
+
+/// A param of the effect in `track`'s chain slot `slot_idx` as a process
+/// target; `(effect, param)` name them, else the descriptor does.
+pub(super) fn effect_process_target(
+    state: &SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    (effect, param): (Option<String>, Option<String>),
+) -> Result<sequencer::process::ParamTarget, String> {
+    let slot = state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+        .ok_or_else(|| {
+            format!(
+                "effect slot for track {} slot {} is not loaded",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    require_slot_param_index(param_idx, num_params, || {
+        format!("effect track {} slot {}", track + 1, slot_idx + 1)
+    })?;
+    let (effect_descriptors, _instrument_descriptors) = state.scratch_runtime_descriptors();
+    let desc = effect_descriptors
+        .get(track)
+        .and_then(|descs| descs.get(slot_idx));
+    let effect = effect
+        .or_else(|| desc.map(|desc| desc.name.clone()))
+        .ok_or_else(|| {
+            format!(
+                "effect process target must include :effect for track {} slot {}",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    let param = param
+        .or_else(|| descriptor_param_name(desc, param_idx))
+        .ok_or_else(|| {
+            format!(
+                "effect process target must include :param for track {} slot {} param index {param_idx}",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    Ok(sequencer::process::ParamTarget::EffectParam {
+        slot: slot_idx,
+        effect,
+        param,
+        param_id: slot.param_node_id(param_idx),
+    })
+}
+
+/// A param of the MIDI effect in `track`'s slot `slot_idx` as a process
+/// target; `(fx, param)` name them, else the chain and descriptor do.
+pub(super) fn midi_fx_process_target(
+    state: &SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    (fx, param): (Option<String>, Option<String>),
+) -> Result<sequencer::process::ParamTarget, String> {
+    let chain_fx_name = state
+        .pattern
+        .track_params
+        .get(track)
+        .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+        .ok_or_else(|| {
+            format!(
+                "MIDI-FX slot {} is not loaded on track {}",
+                slot_idx + 1,
+                track + 1
+            )
+        })?;
+    let fx = fx.unwrap_or(chain_fx_name);
+    let desc = sequencer::lisp_host::load_midi_fx_descriptor(&fx)
+        .ok_or_else(|| format!("MIDI-FX descriptor for {fx} is not loaded"))?;
+    require_slot_param_index(param_idx, desc.params.len(), || format!("MIDI-FX {fx}"))?;
+    let param = param
+        .or_else(|| descriptor_param_name(Some(&desc), param_idx))
+        .ok_or_else(|| {
+            format!("midi-fx process target must include :param for {fx} param index {param_idx}")
+        })?;
+    Ok(sequencer::process::ParamTarget::MidiFxParam {
+        slot: slot_idx,
+        fx: desc.name,
+        param,
+    })
+}
+
+/// A send to bus `bus` as a process target (the mix bus has none).
+pub(super) fn bus_send_process_target(bus: u64) -> Result<sequencer::process::ParamTarget, String> {
+    if bus == sequencer::sequencer::MIX_BUS_ID {
+        return Err("the mix bus has no send".to_string());
+    }
+    Ok(sequencer::process::ParamTarget::BusSend { bus })
 }
 
 fn nonnegative_usize_arg(name: &str, value: f64) -> Result<usize, String> {

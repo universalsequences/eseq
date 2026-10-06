@@ -113,6 +113,22 @@ const STEP_WORDS: [(StepParam, &str); 10] = [
     (StepParam::RetrigRate, "retrig-rate"),
 ];
 
+/// The step params a process port may write, by their canonical
+/// `step-param` target names (`project.step-param-options`).
+pub(crate) fn step_param_target_names() -> impl Iterator<Item = &'static str> {
+    (STEP_WORDS.iter())
+        .filter(|(param, name)| step_param_from_target_name(name) == Some(*param))
+        .map(|(_, name)| *name)
+}
+
+/// The canonical `step-param` target name of the step param `name` names
+/// (any spelling `step_param_from_target_name` accepts), if it is one a
+/// process port may write.
+pub(crate) fn canonical_step_param_name(name: &str) -> Option<&'static str> {
+    let param = step_param_from_target_name(name)?;
+    step_param_target_names().find(|known| step_param_from_target_name(known) == Some(param))
+}
+
 struct CachedTrack {
     fingerprint: u64,
     words: Rc<DynWords>,

@@ -6,29 +6,29 @@ use super::*;
 pub(crate) const PROCESS_LANE_MODE_OFFSET: usize = 9;
 
 #[derive(Clone, Debug)]
-pub(super) struct ProcessLaneUiEntry {
-    instance_id: sequencer::process::ProcessInstanceId,
-    slot_index: usize,
-    class_name: String,
-    inlet_name: String,
-    label: String,
-    short_label: String,
-    kind: String,
-    min: f32,
-    max: f32,
-    default: f32,
-    decimals: u8,
-    target: String,
-    map_ports: Vec<Value>,
-    values: Vec<f32>,
-    project: bool,
-    forked: bool,
-    instance_name: Option<String>,
-    default_lane: bool,
+pub(crate) struct ProcessLaneUiEntry {
+    pub(crate) instance_id: sequencer::process::ProcessInstanceId,
+    pub(crate) slot_index: usize,
+    pub(crate) class_name: String,
+    pub(crate) inlet_name: String,
+    pub(crate) label: String,
+    pub(crate) short_label: String,
+    pub(crate) kind: String,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    pub(crate) default: f32,
+    pub(crate) decimals: u8,
+    pub(crate) target: String,
+    pub(crate) map_ports: Vec<Value>,
+    pub(crate) values: Vec<f32>,
+    pub(crate) project: bool,
+    pub(crate) forked: bool,
+    pub(crate) instance_name: Option<String>,
+    pub(crate) default_lane: bool,
     /// A slot the user added to this track through the patch bay's + box
     /// (eseq-53y7): named per track, so the lane dropdown lists it under
     /// that instance name instead of the numbered class/inlet form.
-    roster: bool,
+    pub(crate) roster: bool,
 }
 
 pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -39,7 +39,7 @@ pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral)
     }
 }
 
-pub(super) fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'static str {
+pub(crate) fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'static str {
     match kind {
         sequencer::process::ProcessInletKind::Float => "float",
         sequencer::process::ProcessInletKind::Int => "int",
@@ -475,7 +475,7 @@ pub(super) fn process_target_kind_label(kind: Option<sequencer::process::Process
         .unwrap_or_default()
 }
 
-pub(super) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
+pub(crate) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
     match ports {
         [] => String::new(),
         [port] if port.name == sequencer::process::DEFAULT_PROCESS_PORT => {
@@ -496,10 +496,12 @@ pub(super) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) 
     }
 }
 
-pub(super) fn process_slot_ports_value(
+/// A slot's ports: its class's, then any port a binding names that the
+/// class does not declare (a stale or script binding), as fixed ports.
+pub(crate) fn process_slot_port_defs(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
-) -> Value {
+) -> Vec<sequencer::process::ProcessPortDef> {
     let mut ports = def.map(|def| def.ports.clone()).unwrap_or_default();
     for name in slot.bindings.keys() {
         if !ports.iter().any(|port| &port.name == name) {
@@ -511,8 +513,15 @@ pub(super) fn process_slot_ports_value(
             });
         }
     }
+    ports
+}
+
+pub(super) fn process_slot_ports_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Value {
     list_value(
-        ports
+        process_slot_port_defs(slot, def)
             .into_iter()
             .map(|port| process_port_value(slot, &port)),
     )
@@ -532,18 +541,48 @@ pub(super) fn process_mappable_port_values(
     .unwrap_or_default()
 }
 
-pub(super) fn process_port_value(
-    slot: &sequencer::process::TrackProcessSlot,
+/// What a slot's port shows (`SEQ.track-process-slots :ports`, the host
+/// kinds' `port`): its binding, status and capabilities.
+pub(crate) struct ProcessPortView<'a> {
+    pub(crate) hint: String,
+    /// The bound target's label (the hint's when it follows the hint;
+    /// `unbound` when disconnected or without one).
+    pub(crate) target_label: String,
+    /// `bound`, `hint` or `unbound`.
+    pub(crate) status: &'static str,
+    pub(crate) manual: bool,
+    /// Disconnected outright (`unbound_ports`): writes nothing.
+    pub(crate) disconnected: bool,
+    pub(crate) bindable: bool,
+    pub(crate) target_kind: String,
+    /// The manual binding, when there is one.
+    pub(crate) binding: Option<&'a sequencer::process::ParamTarget>,
+    pub(crate) fanout: &'a [sequencer::process::ProcessPortFanout],
+}
+
+impl ProcessPortView<'_> {
+    pub(crate) fn clearable(&self) -> bool {
+        self.manual || self.disconnected
+    }
+
+    /// A port that writes somewhere (manual or hint) can be disconnected.
+    pub(crate) fn disconnectable(&self) -> bool {
+        !self.disconnected && self.status != "unbound"
+    }
+}
+
+pub(crate) fn process_port_view<'a>(
+    slot: &'a sequencer::process::TrackProcessSlot,
     port: &sequencer::process::ProcessPortDef,
-) -> Value {
+) -> ProcessPortView<'a> {
     let binding = slot.bindings.get(&port.name);
     let disconnected = slot.unbound_ports.contains(&port.name);
     let manual = matches!(binding, Some(Some(_)));
-    let hint_label = process_target_hint_label(port.target.as_ref());
+    let hint = process_target_hint_label(port.target.as_ref());
     let target_label = match binding {
         _ if disconnected => "unbound".to_string(),
         Some(Some(target)) => process_param_target_label(target),
-        _ if !hint_label.is_empty() => hint_label.clone(),
+        _ if !hint.is_empty() => hint.clone(),
         _ => "unbound".to_string(),
     };
     let status = match binding {
@@ -557,100 +596,120 @@ pub(super) fn process_port_value(
             .and_then(|binding| binding.as_ref())
             .map(process_param_target_is_bindable)
             .unwrap_or(true);
+    ProcessPortView {
+        hint,
+        target_label,
+        status,
+        manual,
+        disconnected,
+        bindable,
+        target_kind: process_target_kind_label(port.effective_target_kind()),
+        binding: binding.and_then(Option::as_ref),
+        fanout: slot
+            .fanout
+            .get(&port.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    }
+}
+
+/// The wired lane's instance id of a process-inlet target, if any.
+pub(crate) fn param_target_instance_id(
+    target: &sequencer::process::ParamTarget,
+) -> Option<sequencer::process::ProcessInstanceId> {
+    match target {
+        sequencer::process::ParamTarget::ProcessInlet {
+            instance_id: Some(id),
+            ..
+        } => Some(*id),
+        _ => None,
+    }
+}
+
+/// The inlet a process-inlet target names, if it is one.
+pub(crate) fn param_target_inlet(target: &sequencer::process::ParamTarget) -> Option<&str> {
+    match target {
+        sequencer::process::ParamTarget::ProcessInlet { inlet, .. } => Some(inlet),
+        _ => None,
+    }
+}
+
+/// The step param a target names, if it is one.
+pub(crate) fn param_target_step_param(target: &sequencer::process::ParamTarget) -> Option<&str> {
+    match target {
+        sequencer::process::ParamTarget::StepParam { param } => Some(param),
+        _ => None,
+    }
+}
+
+pub(super) fn process_port_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    port: &sequencer::process::ProcessPortDef,
+) -> Value {
+    let view = process_port_view(slot, port);
+    let id_value = |target: Option<&sequencer::process::ParamTarget>| {
+        target
+            .and_then(param_target_instance_id)
+            .map_or(Value::Nil, |id| Value::Number(id.0 as f64))
+    };
+    let step_param_value = |target: Option<&sequencer::process::ParamTarget>| {
+        target
+            .and_then(param_target_step_param)
+            .map_or(Value::Nil, |param| Value::String(param.to_string()))
+    };
     map_value([
         ("name", Value::String(port.name.clone())),
         (
             "label",
-            Value::String(if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
-                "default".to_string()
-            } else {
-                port.name.clone()
-            }),
+            Value::String(process_port_label(&port.name).to_string()),
         ),
-        ("hint", Value::String(hint_label)),
-        ("target", Value::String(target_label)),
-        ("status", Value::String(status.to_string())),
-        ("manual", Value::Bool(manual)),
-        ("clearable", Value::Bool(manual || disconnected)),
-        // A port that writes somewhere (manual or hint) can be disconnected.
-        ("disconnectable", Value::Bool(!disconnected && status != "unbound")),
+        ("hint", Value::String(view.hint.clone())),
+        ("target", Value::String(view.target_label.clone())),
+        ("status", Value::String(view.status.to_string())),
+        ("manual", Value::Bool(view.manual)),
+        ("clearable", Value::Bool(view.clearable())),
+        ("disconnectable", Value::Bool(view.disconnectable())),
         ("mappable", Value::Bool(port.is_mappable())),
         ("connectable", Value::Bool(port.is_connectable())),
-        ("bindable", Value::Bool(bindable)),
-        (
-            "target-kind",
-            Value::String(process_target_kind_label(port.effective_target_kind())),
-        ),
+        ("bindable", Value::Bool(view.bindable)),
+        ("target-kind", Value::String(view.target_kind.clone())),
         // Structured view of a manual binding for UI that names the target
         // itself (the lane strip): the wired lane's instance id and inlet, or
         // the step param name. Nil when the port follows its hint or is unbound.
-        (
-            "target-instance-id",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::ProcessInlet {
-                    instance_id: Some(id),
-                    ..
-                })) => Value::Number(id.0 as f64),
-                _ => Value::Nil,
-            },
-        ),
+        ("target-instance-id", id_value(view.binding)),
         (
             "target-inlet",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::ProcessInlet { inlet, .. })) => {
-                    Value::String(inlet.clone())
-                }
-                _ => Value::Nil,
-            },
+            view.binding
+                .and_then(param_target_inlet)
+                .map_or(Value::Nil, |inlet| Value::String(inlet.to_string())),
         ),
-        (
-            "target-step-param",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::StepParam { param })) => {
-                    Value::String(param.clone())
-                }
-                _ => Value::Nil,
-            },
-        ),
+        ("target-step-param", step_param_value(view.binding)),
         (
             "fanout",
-            list_value(
-                slot.fanout
-                    .get(&port.name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[])
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        map_value([
-                            ("index", Value::Number(index as f64)),
-                            ("target", Value::String(process_param_target_label(&entry.target))),
-                            (
-                                "target-step-param",
-                                match &entry.target {
-                                    sequencer::process::ParamTarget::StepParam { param } => {
-                                        Value::String(param.clone())
-                                    }
-                                    _ => Value::Nil,
-                                },
-                            ),
-                            (
-                                "target-instance-id",
-                                match &entry.target {
-                                    sequencer::process::ParamTarget::ProcessInlet {
-                                        instance_id: Some(id),
-                                        ..
-                                    } => Value::Number(id.0 as f64),
-                                    _ => Value::Nil,
-                                },
-                            ),
-                            ("lo", Value::Number(entry.lo as f64)),
-                            ("hi", Value::Number(entry.hi as f64)),
-                        ])
-                    }),
-            ),
+            list_value(view.fanout.iter().enumerate().map(|(index, entry)| {
+                map_value([
+                    ("index", Value::Number(index as f64)),
+                    (
+                        "target",
+                        Value::String(process_param_target_label(&entry.target)),
+                    ),
+                    ("target-step-param", step_param_value(Some(&entry.target))),
+                    ("target-instance-id", id_value(Some(&entry.target))),
+                    ("lo", Value::Number(entry.lo as f64)),
+                    ("hi", Value::Number(entry.hi as f64)),
+                ])
+            })),
         ),
     ])
+}
+
+/// A port's label: `default` for the unnamed default port.
+pub(crate) fn process_port_label(name: &str) -> &str {
+    if name == sequencer::process::DEFAULT_PROCESS_PORT {
+        "default"
+    } else {
+        name
+    }
 }
 
 pub(super) fn process_name_initials(name: &str) -> String {
@@ -711,7 +770,7 @@ pub(super) fn process_inlet_range(
     }
 }
 
-pub(super) fn process_lane_entries_for_track(
+pub(crate) fn process_lane_entries_for_track(
     state: &Arc<SequencerState>,
     track: usize,
 ) -> Vec<ProcessLaneUiEntry> {
@@ -719,104 +778,122 @@ pub(super) fn process_lane_entries_for_track(
         return Vec::new();
     };
     let published = state.published_process_authoring();
+    process_lane_entries_for_chain(state, track, &chain, &published)
+}
+
+/// The lane entries of `track`'s composed `chain` (one per lane inlet of
+/// each slot, in chain order): what `SEQ.track-process-lanes` lists and the
+/// host kinds' `lane`s show.
+pub(crate) fn process_lane_entries_for_chain(
+    state: &SequencerState,
+    track: usize,
+    chain: &sequencer::process::TrackProcessChain,
+    published: &sequencer::process::PublishedProcessAuthoringSnapshot,
+) -> Vec<ProcessLaneUiEntry> {
     let mut entries = Vec::new();
     for (slot_index, slot) in chain.slots.iter().enumerate() {
-        let def = published
-            .defs
-            .iter()
-            .find(|def| def.name == slot.class_name);
-        let mut lane_names = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| inlet.lane)
-                    .map(|inlet| inlet.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for name in slot.lanes.keys() {
-            if !lane_names.iter().any(|entry| entry == name) {
-                lane_names.push(name.clone());
-            }
-        }
-        for inlet_name in lane_names {
-            let inlet =
-                def.and_then(|def| def.inlets.iter().find(|entry| entry.name == inlet_name));
-            let default = slot
-                .inlets
-                .get(&inlet_name)
-                .and_then(process_literal_as_f32)
-                .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
-                .unwrap_or(0.0);
-            let (mut min, mut max) = process_inlet_range(def, inlet, default);
-            // A slot with lo/hi knobs (the default accumulators and
-            // generators) ranges its value lane over them, so the sliders
-            // and number picker span what the lane can actually output.
-            let is_gate = inlet
-                .is_some_and(|entry| matches!(entry.kind, sequencer::process::ProcessInletKind::Gate));
-            if !is_gate {
-                if let (Some(lo), Some(hi)) = (
-                    slot.inlets.get("lo").and_then(process_literal_as_f32),
-                    slot.inlets.get("hi").and_then(process_literal_as_f32),
-                ) {
-                    if hi > lo {
-                        min = lo;
-                        max = hi;
-                    }
-                }
-            }
-            let lane = slot.lanes.get(&inlet_name);
-            let values = (0..MAX_STEPS)
-                .map(|step| {
-                    lane.map(|lane| lane.value_at(step, default))
-                        .unwrap_or(default)
-                })
-                .collect::<Vec<_>>();
-            let map_ports = process_mappable_port_values(slot, def);
-            let default_lane = sequencer::process::is_default_lane_slot(slot);
-            let roster = sequencer::process::is_track_roster_slot(slot);
-            // Default lanes read like the builtin step params: the instance
-            // name alone ("prob", "acc A"), never "N class/inlet".
-            let (label, short_label) = match slot.instance_name.as_deref() {
-                Some(name) if default_lane => (name.to_string(), name.to_string()),
-                _ => (
-                    format!("{} / {}", slot.class_name, inlet_name),
-                    process_short_label(&slot.class_name, &inlet_name),
-                ),
-            };
-            entries.push(ProcessLaneUiEntry {
-                instance_id: slot.instance_id,
-                slot_index,
-                class_name: slot.class_name.clone(),
-                inlet_name: inlet_name.clone(),
-                label,
-                short_label,
-                kind: inlet
-                    .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
-                    .unwrap_or_else(|| "float".to_string()),
-                min,
-                max,
-                default,
-                decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
-                target: def
-                    .map(|def| process_ports_label(&def.ports))
-                    .unwrap_or_default(),
-                map_ports,
-                values,
-                project: slot.project_layer,
-                forked: slot.project_layer
-                    && state.has_project_process_lane_override(
-                        track,
-                        slot.instance_id,
-                        &inlet_name,
-                    ),
-                instance_name: slot.instance_name.clone(),
-                default_lane,
-                roster,
-            });
-        }
+        let def = process_slot_def(published, slot);
+        process_slot_lane_entries(state, track, slot_index, slot, def, &mut entries);
     }
     entries
+}
+
+/// The lane entries of one slot (at `slot_index` of `track`'s composed
+/// chain), appended to `entries`: its class's lane inlets, then any lane the
+/// slot holds that the class does not declare.
+pub(crate) fn process_slot_lane_entries(
+    state: &SequencerState,
+    track: usize,
+    slot_index: usize,
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    entries: &mut Vec<ProcessLaneUiEntry>,
+) {
+    let mut lane_names = def
+        .map(|def| {
+            def.inlets
+                .iter()
+                .filter(|inlet| inlet.lane)
+                .map(|inlet| inlet.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in slot.lanes.keys() {
+        if !lane_names.iter().any(|entry| entry == name) {
+            lane_names.push(name.clone());
+        }
+    }
+    for inlet_name in lane_names {
+        let inlet = process_inlet_def(def, &inlet_name);
+        let default = slot
+            .inlets
+            .get(&inlet_name)
+            .and_then(process_literal_as_f32)
+            .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
+            .unwrap_or(0.0);
+        let (mut min, mut max) = process_inlet_range(def, inlet, default);
+        // A slot with lo/hi knobs (the default accumulators and
+        // generators) ranges its value lane over them, so the sliders
+        // and number picker span what the lane can actually output.
+        let is_gate = inlet
+            .is_some_and(|entry| matches!(entry.kind, sequencer::process::ProcessInletKind::Gate));
+        if !is_gate {
+            if let (Some(lo), Some(hi)) = (
+                slot.inlets.get("lo").and_then(process_literal_as_f32),
+                slot.inlets.get("hi").and_then(process_literal_as_f32),
+            ) {
+                if hi > lo {
+                    min = lo;
+                    max = hi;
+                }
+            }
+        }
+        let lane = slot.lanes.get(&inlet_name);
+        let values = (0..MAX_STEPS)
+            .map(|step| {
+                lane.map(|lane| lane.value_at(step, default))
+                    .unwrap_or(default)
+            })
+            .collect::<Vec<_>>();
+        let map_ports = process_mappable_port_values(slot, def);
+        let default_lane = sequencer::process::is_default_lane_slot(slot);
+        let roster = sequencer::process::is_track_roster_slot(slot);
+        // Default lanes read like the builtin step params: the instance
+        // name alone ("prob", "acc A"), never "N class/inlet".
+        let (label, short_label) = match slot.instance_name.as_deref() {
+            Some(name) if default_lane => (name.to_string(), name.to_string()),
+            _ => (
+                format!("{} / {}", slot.class_name, inlet_name),
+                process_short_label(&slot.class_name, &inlet_name),
+            ),
+        };
+        entries.push(ProcessLaneUiEntry {
+            instance_id: slot.instance_id,
+            slot_index,
+            class_name: slot.class_name.clone(),
+            inlet_name: inlet_name.clone(),
+            label,
+            short_label,
+            kind: inlet
+                .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
+                .unwrap_or_else(|| "float".to_string()),
+            min,
+            max,
+            default,
+            decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
+            target: def
+                .map(|def| process_ports_label(&def.ports))
+                .unwrap_or_default(),
+            map_ports,
+            values,
+            project: slot.project_layer,
+            forked: slot.project_layer
+                && state.has_project_process_lane_override(track, slot.instance_id, &inlet_name),
+            instance_name: slot.instance_name.clone(),
+            default_lane,
+            roster,
+        });
+    }
 }
 
 pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
@@ -1010,12 +1087,31 @@ pub(super) fn process_scalar_inlet_value(
         .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
 }
 
-pub(super) fn process_scalar_inlet_entry_value(
+/// What a slot's scalar (non-lane) inlet shows (`SEQ.track-process-slots
+/// :inlets`, the host kinds' `inlet`): its value (the slot's literal, else
+/// the class default), range and options.
+pub(crate) struct ProcessInletView {
+    pub(crate) kind: &'static str,
+    /// An enum inlet's option labels (the value is the option index).
+    pub(crate) options: Vec<String>,
+    pub(crate) value: f32,
+    pub(crate) default: f32,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    /// Whether the class declares `min`/`max` (else the range is a display
+    /// hint around the value).
+    pub(crate) declared_range: bool,
+    pub(crate) decimals: u8,
+    pub(crate) doc: String,
+}
+
+/// A numeric inlet's view; `None` for an inlet holding no number.
+pub(crate) fn process_scalar_inlet_view(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
     inlet_name: &str,
     inlet: Option<&sequencer::process::PublishedProcessInletDef>,
-) -> Option<Value> {
+) -> Option<ProcessInletView> {
     let value = process_scalar_inlet_value(slot, inlet, inlet_name)?;
     let default = inlet
         .and_then(|entry| process_literal_as_f32(&entry.default))
@@ -1024,42 +1120,94 @@ pub(super) fn process_scalar_inlet_entry_value(
     // Enum inlets carry their option labels so the strip can render a
     // dropdown; the value stays the option index.
     let options = match inlet.map(|entry| &entry.kind) {
-        Some(sequencer::process::ProcessInletKind::Enum(options)) => options
-            .iter()
-            .map(|label| Value::String(label.clone()))
-            .collect::<Vec<_>>(),
+        Some(sequencer::process::ProcessInletKind::Enum(options)) => options.clone(),
         _ => Vec::new(),
     };
+    Some(ProcessInletView {
+        kind: inlet
+            .map(|entry| process_inlet_kind_name(&entry.kind))
+            .unwrap_or("float"),
+        options,
+        value,
+        default,
+        min,
+        max,
+        declared_range: inlet.is_some_and(|entry| entry.min.is_some() && entry.max.is_some()),
+        decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
+        doc: inlet
+            .and_then(|entry| entry.doc.clone())
+            .unwrap_or_default(),
+    })
+}
+
+pub(super) fn process_scalar_inlet_entry_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    inlet_name: &str,
+    inlet: Option<&sequencer::process::PublishedProcessInletDef>,
+) -> Option<Value> {
+    let view = process_scalar_inlet_view(slot, def, inlet_name, inlet)?;
     Some(map_value([
         ("name", Value::String(inlet_name.to_string())),
         ("label", Value::String(inlet_name.to_string())),
-        ("options", list_value(options)),
         (
-            "kind",
-            Value::String(
-                inlet
-                    .map(|entry| process_inlet_kind_name(&entry.kind))
-                    .unwrap_or("float")
-                    .to_string(),
+            "options",
+            list_value(
+                view.options
+                    .iter()
+                    .map(|label| Value::String(label.clone())),
             ),
         ),
-        ("value", Value::Number(value as f64)),
-        ("default", Value::Number(default as f64)),
-        ("min", Value::Number(min as f64)),
-        ("max", Value::Number(max as f64)),
-        (
-            "decimals",
-            Value::Number(process_inlet_decimals(inlet.map(|entry| &entry.kind)) as f64),
-        ),
-        (
-            "doc",
-            Value::String(
-                inlet
-                    .and_then(|entry| entry.doc.clone())
-                    .unwrap_or_default(),
-            ),
-        ),
+        ("kind", Value::String(view.kind.to_string())),
+        ("value", Value::Number(view.value as f64)),
+        ("default", Value::Number(view.default as f64)),
+        ("min", Value::Number(view.min as f64)),
+        ("max", Value::Number(view.max as f64)),
+        ("decimals", Value::Number(view.decimals as f64)),
+        ("doc", Value::String(view.doc)),
     ]))
+}
+
+/// A slot's scalar inlet names: its class's non-lane inlets, then any
+/// literal the slot holds that the class does not declare.
+pub(crate) fn process_scalar_inlet_names(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Vec<String> {
+    let mut names = def
+        .map(|def| {
+            def.inlets
+                .iter()
+                .filter(|inlet| !inlet.lane)
+                .map(|inlet| inlet.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in slot.inlets.keys() {
+        if !names.iter().any(|entry| entry == name) && !slot.lanes.contains_key(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// The declaration of inlet `name` on class `def`.
+pub(crate) fn process_inlet_def<'a>(
+    def: Option<&'a sequencer::process::PublishedProcessDef>,
+    name: &str,
+) -> Option<&'a sequencer::process::PublishedProcessInletDef> {
+    def?.inlets.iter().find(|inlet| inlet.name == name)
+}
+
+/// The class definition of `slot` in the published library.
+pub(crate) fn process_slot_def<'a>(
+    published: &'a sequencer::process::PublishedProcessAuthoringSnapshot,
+    slot: &sequencer::process::TrackProcessSlot,
+) -> Option<&'a sequencer::process::PublishedProcessDef> {
+    published
+        .defs
+        .iter()
+        .find(|def| def.name == slot.class_name)
 }
 
 pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usize) -> Value {
@@ -1068,28 +1216,13 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
     };
     let published = state.published_process_authoring();
     list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
-        let def = published
-            .defs
-            .iter()
-            .find(|def| def.name == slot.class_name);
-        let mut scalar_names = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| !inlet.lane)
-                    .map(|inlet| inlet.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for name in slot.inlets.keys() {
-            if !scalar_names.iter().any(|entry| entry == name) && !slot.lanes.contains_key(name) {
-                scalar_names.push(name.clone());
-            }
-        }
-        let inlet_values = scalar_names.into_iter().filter_map(|name| {
-            let inlet = def.and_then(|def| def.inlets.iter().find(|entry| entry.name == name));
-            process_scalar_inlet_entry_value(slot, def, &name, inlet)
-        });
+        let def = process_slot_def(&published, slot);
+        let inlet_values = process_scalar_inlet_names(slot, def)
+            .into_iter()
+            .filter_map(|name| {
+                let inlet = process_inlet_def(def, &name);
+                process_scalar_inlet_entry_value(slot, def, &name, inlet)
+            });
         map_value([
             ("slot-index", Value::Number(slot_index as f64)),
             ("instance-id", Value::Number(slot.instance_id.0 as f64)),
@@ -1149,6 +1282,66 @@ pub(crate) fn lane_patch_port_id(track: usize, slot_index: usize, ordinal: usize
     (track * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
 }
 
+/// The chain slot a writer's process-inlet `target` lands on, with the
+/// inlet: wiring stays within a layer, as the scheduler resolves it
+/// (`resolve_process_inlet_target` in the scheduler): a project slot drives
+/// project slots. Shared by the lane patchbay and the host kinds' ports.
+pub(crate) fn resolve_process_inlet_target<'a>(
+    chain: &sequencer::process::TrackProcessChain,
+    writer: &sequencer::process::TrackProcessSlot,
+    target: &'a sequencer::process::ParamTarget,
+) -> Option<(usize, &'a str)> {
+    let sequencer::process::ParamTarget::ProcessInlet {
+        process,
+        inlet,
+        instance_id,
+    } = target
+    else {
+        return None;
+    };
+    let index = chain.slots.iter().position(|slot| {
+        slot.project_layer == writer.project_layer
+            && slot.class_name == *process
+            && instance_id.is_none_or(|id| slot.instance_id == id)
+    })?;
+    Some((index, inlet))
+}
+
+/// The process inlets `slot`'s port `port` writes (the patchbay's cables):
+/// its primary binding unless disconnected (fan-out index `None`), then its
+/// fan-out entries, each resolved on `chain` (within the writer's layer) to
+/// (fan-out index, chain index, inlet).
+pub(crate) fn process_port_readers<'a>(
+    chain: &sequencer::process::TrackProcessChain,
+    slot: &'a sequencer::process::TrackProcessSlot,
+    port: &str,
+) -> Vec<(Option<usize>, usize, &'a str)> {
+    let primary = (!slot.unbound_ports.contains(port))
+        .then(|| slot.bindings.get(port).and_then(Option::as_ref))
+        .flatten();
+    let fanout = slot.fanout.get(port).into_iter().flatten();
+    let targets = (primary.map(|target| (None, target)).into_iter()).chain(
+        fanout
+            .enumerate()
+            .map(|(index, entry)| (Some(index), &entry.target)),
+    );
+    targets
+        .filter_map(|(fanout_index, target)| {
+            let (index, inlet) = resolve_process_inlet_target(chain, slot, target)?;
+            Some((fanout_index, index, inlet))
+        })
+        .collect()
+}
+
+/// Whether the patchbay shows `inlet` as an in port: a lane, a gate, or an
+/// inlet a cable already writes (`wired`).
+pub(crate) fn lane_patch_in_port(
+    inlet: &sequencer::process::PublishedProcessInletDef,
+    wired: bool,
+) -> bool {
+    inlet.lane || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate) || wired
+}
+
 /// `SEQ.track-lane-patch`: per track, one entry per composed chain slot in
 /// fire order, with the cable-level view the lane patchbay draws
 /// (docs/default-process-lanes-spec.md, patchbay). Each slot lists its
@@ -1162,29 +1355,7 @@ pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: u
         return list_value(Vec::<Value>::new());
     };
     let published = state.published_process_authoring();
-    let def_for = |slot: &sequencer::process::TrackProcessSlot| {
-        published.defs.iter().find(|def| def.name == slot.class_name)
-    };
-    // Wiring stays within a layer, as the scheduler resolves it
-    // (`resolve_process_inlet_target`): a project slot drives project slots.
-    let resolve = |writer: &sequencer::process::TrackProcessSlot,
-                   target: &sequencer::process::ParamTarget|
-     -> Option<(usize, String)> {
-        let sequencer::process::ParamTarget::ProcessInlet {
-            process,
-            inlet,
-            instance_id,
-        } = target
-        else {
-            return None;
-        };
-        let index = chain.slots.iter().position(|slot| {
-            slot.project_layer == writer.project_layer
-                && slot.class_name == *process
-                && instance_id.is_none_or(|id| slot.instance_id == id)
-        })?;
-        Some((index, inlet.clone()))
-    };
+    let def_for = |slot: &sequencer::process::TrackProcessSlot| process_slot_def(&published, slot);
 
     struct Reader {
         slot_index: usize,
@@ -1207,34 +1378,23 @@ pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: u
             .unwrap_or_default();
         for (ordinal, port) in connectable.iter().enumerate() {
             let port_id = lane_patch_port_id(track, slot_index, ordinal);
-            let mut readers = Vec::new();
             // A new cable fills the primary binding when nothing holds it;
             // otherwise it becomes a fan-out entry on the port.
             let primary_free = slot.unbound_ports.contains(&port.name)
                 || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
-            if !slot.unbound_ports.contains(&port.name) {
-                if let Some(Some(target)) = slot.bindings.get(&port.name) {
-                    if let Some((index, inlet)) = resolve(slot, target) {
-                        readers.push(Reader {
-                            slot_index: index,
-                            inlet,
-                            source: "primary",
-                            fanout_index: None,
-                        });
-                    }
-                }
-            }
-            let fanout = slot.fanout.get(&port.name).map(Vec::as_slice).unwrap_or(&[]);
-            for (fanout_index, entry) in fanout.iter().enumerate() {
-                if let Some((index, inlet)) = resolve(slot, &entry.target) {
-                    readers.push(Reader {
-                        slot_index: index,
-                        inlet,
-                        source: "fanout",
-                        fanout_index: Some(fanout_index),
-                    });
-                }
-            }
+            let readers: Vec<Reader> = process_port_readers(&chain, slot, &port.name)
+                .into_iter()
+                .map(|(fanout_index, index, inlet)| Reader {
+                    slot_index: index,
+                    inlet: inlet.to_string(),
+                    source: if fanout_index.is_some() {
+                        "fanout"
+                    } else {
+                        "primary"
+                    },
+                    fanout_index,
+                })
+                .collect();
             for reader in &readers {
                 in_writers
                     .entry((reader.slot_index, reader.inlet.clone()))
@@ -1253,9 +1413,10 @@ pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: u
                 def.inlets
                     .iter()
                     .filter(|inlet| {
-                        inlet.lane
-                            || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate)
-                            || in_writers.contains_key(&(slot_index, inlet.name.clone()))
+                        lane_patch_in_port(
+                            inlet,
+                            in_writers.contains_key(&(slot_index, inlet.name.clone())),
+                        )
                     })
                     .enumerate()
                     .map(|(ordinal, inlet)| {
@@ -1358,16 +1519,22 @@ pub(crate) fn build_all_track_lane_patch_value(
     list_value((0..track_count).map(|track| build_track_lane_patch_value(state, track)))
 }
 
-pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
-    let published = state.published_process_authoring();
-    // Compiled expr bodies (`expr#<hash>`) are reached through the plain
-    // `expr` card, never offered as classes (docs/expr-process-spec.md §2.1).
-    let defs: Vec<&sequencer::process::PublishedProcessDef> = published
+/// The library's classes (`SEQ.process-library`, the host kinds'
+/// `process-class`): compiled expr bodies (`expr#<hash>`) are reached
+/// through the plain `expr` card, never offered as classes
+/// (docs/expr-process-spec.md §2.1).
+pub(crate) fn process_library_defs(
+    published: &sequencer::process::PublishedProcessAuthoringSnapshot,
+) -> impl Iterator<Item = &sequencer::process::PublishedProcessDef> {
+    published
         .defs
         .iter()
         .filter(|def| !sequencer::process::is_expr_process_class(&def.name))
-        .collect();
-    list_value(defs.into_iter().map(|def| {
+}
+
+pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
+    let published = state.published_process_authoring();
+    list_value(process_library_defs(&published).map(|def| {
         map_value([
             ("name", Value::String(def.name.clone())),
             ("label", Value::String(def.name.clone())),
@@ -1384,13 +1551,7 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
                         ("name", Value::String(port.name.clone())),
                         (
                             "label",
-                            Value::String(
-                                if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
-                                    "default".to_string()
-                                } else {
-                                    port.name.clone()
-                                },
-                            ),
+                            Value::String(process_port_label(&port.name).to_string()),
                         ),
                         (
                             "hint",
@@ -1428,7 +1589,7 @@ pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> V
             let runtime_id =
                 sequencer::process::track_process_slot_runtime_id(slot, track).0;
             let cells = scopes.get(&runtime_id)?;
-            let def = published.defs.iter().find(|def| def.name == slot.class_name);
+            let def = process_slot_def(&published, slot);
             let primary = def
                 .and_then(|def| def.state.first().map(|cell| cell.name.clone()))
                 .or_else(|| cells.keys().next().cloned())?;

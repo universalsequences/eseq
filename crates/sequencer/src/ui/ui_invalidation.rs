@@ -316,11 +316,52 @@ pub(crate) enum BrowserInvalidation {
 pub(crate) struct UiInvalidationQueue {
     pending: Mutex<BTreeSet<UiInvalidation>>,
     /// P-lock revisions for readers that do not drain the queue (the host
-    /// kinds' step p-lock render and `has-locks`): `plocks_all` moves on an
-    /// invalidation that may move every track's p-locks, `plocks_track[t]`
-    /// on one that may move track `t`'s ([`UiInvalidation::plock_scope`]).
-    plocks_all: AtomicU64,
-    plocks_track: [AtomicU64; sequencer::sequencer::MAX_TRACKS],
+    /// kinds' step p-lock render and `has-locks`): moved by an invalidation
+    /// that may move a track's p-locks ([`UiInvalidation::plock_scope`]).
+    plocks: TrackGenerations,
+    /// Process chain revisions, likewise (the host kinds' process lanes):
+    /// moved by an invalidation that may move a track's process chain or
+    /// lane values ([`UiInvalidation::process_scope`]).
+    processes: TrackGenerations,
+}
+
+/// Per-track revisions: `all` moves on an invalidation that may move every
+/// track's, `tracks[t]` on one that may move track `t`'s.
+#[derive(Debug)]
+struct TrackGenerations {
+    all: AtomicU64,
+    tracks: [AtomicU64; sequencer::sequencer::MAX_TRACKS],
+}
+
+impl Default for TrackGenerations {
+    fn default() -> Self {
+        Self {
+            all: AtomicU64::new(0),
+            tracks: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl TrackGenerations {
+    /// Track `track`'s revision.
+    fn of(&self, track: usize) -> u64 {
+        let all = self.all.load(Ordering::Relaxed);
+        let own = self
+            .tracks
+            .get(track)
+            .map_or(0, |generation| generation.load(Ordering::Relaxed));
+        all.wrapping_add(own)
+    }
+
+    /// Move the revisions `scope` names (a track past the array moves all).
+    fn bump(&self, scope: Option<PlockScope>) {
+        let generation = match scope {
+            Some(PlockScope::AllTracks) => &self.all,
+            Some(PlockScope::Track(track)) => self.tracks.get(track).unwrap_or(&self.all),
+            None => return,
+        };
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Which tracks' p-locks an invalidation may have moved.
@@ -387,14 +428,32 @@ impl UiInvalidation {
             _ => return None,
         })
     }
+
+    /// The tracks whose process chain (slots, lanes, inlets, bindings) this
+    /// invalidation may have moved; `None` for one that cannot.
+    pub(crate) fn process_scope(&self) -> Option<PlockScope> {
+        use PlockScope::{AllTracks, Track};
+        Some(match self {
+            Self::Full(_)
+            | Self::ProjectState
+            | Self::Pattern(PatternInvalidation::AllTracks)
+            | Self::TrackTopology(TrackTopologyInvalidation::TracksAddedRemovedOrReordered) => {
+                AllTracks
+            }
+            Self::Pattern(PatternInvalidation::WholeTrack { track })
+            | Self::ProcessLaneValues { track }
+            | Self::ProcessChain { track } => Track(*track),
+            _ => return None,
+        })
+    }
 }
 
 impl Default for UiInvalidationQueue {
     fn default() -> Self {
         Self {
             pending: Mutex::default(),
-            plocks_all: AtomicU64::new(0),
-            plocks_track: std::array::from_fn(|_| AtomicU64::new(0)),
+            plocks: TrackGenerations::default(),
+            processes: TrackGenerations::default(),
         }
     }
 }
@@ -407,29 +466,19 @@ impl UiInvalidationQueue {
     /// Track `track`'s p-lock revision: moves whenever an invalidation that
     /// may move its p-locks is pushed ([`UiInvalidation::plock_scope`]).
     pub(crate) fn plock_generation(&self, track: usize) -> u64 {
-        let all = self.plocks_all.load(Ordering::Relaxed);
-        let own = self
-            .plocks_track
-            .get(track)
-            .map_or(0, |generation| generation.load(Ordering::Relaxed));
-        all.wrapping_add(own)
+        self.plocks.of(track)
+    }
+
+    /// Track `track`'s process chain revision: moves whenever an
+    /// invalidation that may move its process chain is pushed
+    /// ([`UiInvalidation::process_scope`]).
+    pub(crate) fn process_generation(&self, track: usize) -> u64 {
+        self.processes.of(track)
     }
 
     pub(crate) fn push(&self, invalidation: UiInvalidation) {
-        match invalidation.plock_scope() {
-            Some(PlockScope::AllTracks) => {
-                self.plocks_all.fetch_add(1, Ordering::Relaxed);
-            }
-            Some(PlockScope::Track(track)) => match self.plocks_track.get(track) {
-                Some(generation) => {
-                    generation.fetch_add(1, Ordering::Relaxed);
-                }
-                None => {
-                    self.plocks_all.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            None => {}
-        }
+        self.plocks.bump(invalidation.plock_scope());
+        self.processes.bump(invalidation.process_scope());
         let mut pending = self.pending.lock().unwrap();
         if matches!(invalidation, UiInvalidation::Full(_)) {
             pending.clear();

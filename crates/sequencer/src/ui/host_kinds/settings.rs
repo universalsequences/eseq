@@ -123,7 +123,8 @@ fn push_tuning(pusher: &mut Pusher<'_>, id: InstanceId, scale: usize, tuning: &T
 }
 
 /// The project's option lists as last pushed (`project.accumulator-options`,
-/// `output-options`; the fixed `fts-options` and `sync-options` once).
+/// `output-options`; the fixed `fts-options`, `sync-options` and
+/// `step-param-options` once).
 #[derive(Default)]
 pub(super) struct ProjectOptions {
     /// Whether the lists were pushed since the last schema change.
@@ -218,8 +219,8 @@ impl HostKinds {
     }
 
     /// `project.accumulator-options`, pushed when the list changed (and the
-    /// fixed `fts-options` and `sync-options` once). Returns whether the
-    /// accumulator list changed.
+    /// fixed `fts-options`, `sync-options` and `step-param-options` once).
+    /// Returns whether the accumulator list changed.
     pub(super) fn sync_accumulator_options(
         &mut self,
         pusher: &mut Pusher<'_>,
@@ -238,6 +239,9 @@ impl HostKinds {
             pusher.push(project, f::PROJECT_FTS_OPTIONS, fts);
             let sync = list_value(sync_labels().map(Value::String));
             pusher.push(project, f::PROJECT_SYNC_OPTIONS, sync);
+            let step_params = crate::param_words::step_param_target_names();
+            let step_params = list_value(step_params.map(|name| Value::String(name.to_string())));
+            pusher.push(project, f::PROJECT_STEP_PARAM_OPTIONS, step_params);
             options.pushed = true;
         }
         let list = list_value(accumulators.iter().cloned().map(Value::String));

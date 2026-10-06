@@ -97,6 +97,9 @@ pub(crate) struct KindsShared {
     pub(crate) panel_scans: u64,
     pub(crate) variant_current_scans: u64,
     pub(crate) sampler_refreshes: u64,
+    /// The process lanes' registered tracks, runtime ids, classes and
+    /// caches (`lanes`).
+    pub(crate) lanes: LaneShared,
 }
 
 type VariantKey = sequencer::plock_variants::PlockVariantKey;
@@ -471,6 +474,7 @@ pub(super) fn live_value<S: KindStore>(
             tensor_live_value(sources, &device, index as usize, key)?
         }
         VARIANT => variant_live_value(store, sources, shared, id, key)?,
+        PROCESS | STATE_CELL => lane_live_value(sources, shared, id, key)?,
         RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {
@@ -707,6 +711,13 @@ pub(super) fn install_reader(
         if field == f::DEVICE_PARAMS.1 && vm.instance_kind(id) == Some(DEVICE) {
             // A model field, but registered on the first read.
             return cold_device_params(vm, &shared, id);
+        }
+        let lanes = [f::TRACK_PROCESSES, f::TRACK_LANES];
+        if let Some(key) = lanes.into_iter().find(|key| key.1 == field) {
+            if vm.instance_kind(id) == Some(TRACK) {
+                // Model fields, but registered on the first read.
+                return cold_track_lanes(vm, &sources, &shared, id, key);
+            }
         }
         if !LIVE_KEYS.iter().any(|(_, live)| *live == field) {
             return None;

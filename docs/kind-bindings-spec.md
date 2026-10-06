@@ -357,7 +357,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -1018,6 +1018,10 @@ its instance and field.
    placement, modulation lanes and display, process mapping, key locks,
    the base note, tensors, p-lock variants, project and rack macros, the
    neural selection's override (§14.2g).
+   Built (stage 7c, eseq-0l17.29): process lanes: a track's processes
+   (`process`), their lanes, inlets, ports, fan-out entries and state
+   cells, the process library (`process-class`, `process-library`) and
+   `track.processes` / `track.lanes` (§14.2h).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1087,9 +1091,10 @@ selection extras 54). View-local singleton kinds: 17. Removed: 10. Kept
   `delete-target-version` and the `*-view-generation` counters are removed:
   collections and instance identity replace them.
 - **Option lists.** Lists the host owns or derives (the scales, the step
-  sync resolutions, the accumulators, the track outputs) are `project`
-  fields the host publishes (`project.fts-options`, `sync-options`,
-  `accumulator-options`, `output-options`); short fixed enums
+  sync resolutions, the accumulators, the track outputs, the step params
+  a process port writes) are `project` fields the host publishes
+  (`project.fts-options`, `sync-options`, `accumulator-options`,
+  `output-options`, since 7c `step-param-options`); short fixed enums
   (`mute-group-options`, `accum-mode-options`, `tuning-root-options`, …)
   are `eseq.kinds` constants the schema tests hold to the host's (7i).
 - **`THEME` stays** (theme namespace, not host model state).
@@ -2008,6 +2013,161 @@ Built (7b-3):
   `:doc` included) ends it, and the module fails to compile with no
   message.
 
+### 14.2h Built in stage 7c (eseq-0l17.29)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `process` | `(track proc-id)` | `track track`, `proc-id :int` (the stable `ProcessInstanceId`; not `pid`, which `cell` uses for a pattern id), `index :int` (chain position, fire order), `class process-class` (nil: not in the library, and for an expr card's compiled `expr#…` body, never a library class), `class-name`, `name` (the instance name, else the class), `instance-name :string` (empty: none), `project`, `default-lane`, `roster :bool`, `enabled :bool` [x], `doc`, `source-path`, `target :string` (the class's `doc` / `source-path` / `target`, kept so a process whose `class` is nil still shows them), `lanes (list-of lane)`, `inlets (list-of inlet)`, `ports (list-of port)`, `in-ports (list-of :string)`, `cells (list-of state-cell)`, `expr :bool`, `expr-line`, `compile-error :string`, `error :string` (L) |
+| `lane` | `(process index)` | `process process`, `track track`, `index :int` (position in `p.lanes`), `position :int` (position in `t.lanes`), `inlet`, `label`, `short-label`, `type :string`, `min`, `max`, `default :number`, `decimals :int`, `forked :bool`, `values (list-of :number)` (256) |
+| `inlet` | `(process index)` | `process process`, `index :int` (position in `p.inlets`), `name`, `type :string`, `options (list-of :string)`, `value :number` [x], `default`, `min`, `max :number`, `decimals :int`, `doc :string` |
+| `port` | `(process index)` | `process process`, `index :int` (position in `p.ports`), `name`, `label`, `hint`, `target`, `status :string` (`bound`, `hint`, `unbound`), `manual`, `disconnected`, `mappable`, `connectable`, `bindable :bool`, `target-kind :string`, `target-process process`, `target-inlet`, `target-step-param :string`, `fanout (list-of fanout)` |
+| `fanout` | `(port index)` | `port port`, `index :int` (position in `pt.fanout`), `target :string`, `target-process process`, `target-inlet`, `target-step-param :string`, `lo`, `hi :number` [x] |
+| `state-cell` | `(process index)` | `process process`, `index :int` (position in `p.cells`), `name :string`, `values (list-of :number)` (L) |
+| `process-class` | `(index)` | `index :int`, `name`, `doc`, `source-path`, `target :string`, `lane-count :int`, `ports (list-of :string)` |
+| `process-library` | `()` | `classes (list-of process-class)` |
+| `track` | `(index)` | `processes (list-of process)`, `lanes (list-of lane)` |
+| `project` | `()` | `step-param-options (list-of :string)` (the step params a port may write, by their canonical names: an option list the host owns, §14.1) |
+
+Every part kind's `index` is its key index (its place in its process's,
+or its port's, list), as `fanout.index` and `state-cell.index`.
+
+[x] = the `edit-process` host command (`:track-id`, `:proc-id`, `:op`;
+`host_commands/lanes.rs`). The `:set` of `process.enabled` and
+`inlet.value` are the actions `set-process-enabled!` and `set-inlet!`;
+`fanout.lo` / `hi` go through the same command (`fanout-address`).
+Actions: `(set-process-enabled! p v :all true)`, `(set-inlet! i v :all
+true)`, `(set-lane-steps! l steps v)` (steps: step instances of the lane's
+track), `(move-process! p before)` (nil: to the end of its layer),
+`(add-process! t c)` (`c` a `process-class`: a lane of the track's own, as
+the patch bay's + cell), `(remove-process! p)`, `(bind-port! pt x)`,
+`(add-fanout! pt x)`, `(unbind-port! pt)`, `(clear-port! pt)`,
+`(remove-fanout! fo)` (each port action takes `:all true`). A port target
+`x` (`port-target`) is an instance of the port's own track: a `param` of
+its devices (instrument, chain effect or MIDI effect), a `send` of the
+track (a bus send), a `lane` or `inlet` of another process of the track (a
+wire); or a step param's name (a string: any spelling the scheduler
+accepts, stored as its canonical name, one of `project.step-param-options`).
+The singleton is `process-library`, not `processes`: `processes` is the
+process DSL's own form (`(processes :track 0 …)`), which a referred
+singleton would shadow.
+
+Built (7c):
+
+- **The chain is the composed one.** `t.processes` is the track's chain as
+  the scheduler fires it (`composed_track_process_chain`): the project
+  lanes (every track's, with this track's forks applied), then the track's
+  own; `t.lanes` every lane of it in the lane selector's order (legacy
+  `SEQ.track-process-lanes`, whose `lane-index` is `l.position`). The
+  current track's (legacy `SEQ.process-lanes`, `SEQ.process-slots`) are
+  `selection.track.lanes` / `processes`. The selector's mode numbers
+  (`seqv-process-lane-mode-offset` + lane position) and the selected lane
+  are view state (the editor's param mode), not host fields. A lane's
+  values are per step on the track's own timebase (`t.timebase`); a step
+  no write reached reads the lane's default (a write past the lane's end
+  pads the steps before it with the default: the slot's inlet literal,
+  else the class default, eseq-gk0h).
+- **Identity.** A process is keyed (track instance id, its stable
+  `ProcessInstanceId`): a reorder keeps the instance (only `index` moves),
+  and a project lane is a process of every track, each its own instance
+  (its lanes, inlets and bindings fork per track). Lanes, inlets, ports
+  and state cells are keyed (process instance id, index) in the class's
+  order; fan-out entries (port instance id, index): removing one retargets
+  the handles after it, as macro mappings. A process whose class changes
+  (an expr card's body) gets fresh parts. A removed process (or track)
+  drops its parts; a project load drops the tracks and with them every
+  process; classes are positional, kept by class id (`registry::reconcile`)
+  and replaced on a project load. A chain repeating an id gets no second
+  instance.
+- **Feeds.** A track's processes are registered on the first read of
+  `t.processes` or `t.lanes` (the reader hook, `cold_track_lanes`, or the
+  tick once either is observed), like a device's params, so a project
+  whose views read no lanes registers none. The tick then keeps a
+  registered track current behind its lane key: the track's process
+  generation (`UiInvalidationQueue::process_generation`, a per-track
+  revision moved by `ProcessChain`, `ProcessLaneValues`, whole-track and
+  project invalidations), the library's version and the class set. The
+  global triggers, the pattern epoch (a chain edit, a scene switch, a
+  roster edit, a script's `processes`) and the scenes revision (the
+  project layer; an undo restores the scenes), mark no track by
+  themselves: when either moves the tick fetches the project layer once
+  and compares it with the last fetch, and compares each registered
+  track's own chain and project lane overrides in place with those its
+  composed chain was built from (`track_process_chain_is`,
+  `project_lane_overrides_are`); only a track whose inputs moved is
+  synced. None reads the history revision or the UI epoch: an idle tick
+  or a UI epoch costs a few loads per registered track and allocates
+  nothing (`LaneShared::syncs` counts the syncs, `process_syncs` the
+  processes re-derived). A sync composes the chain from the project
+  layer, the track's own chain and its overrides, and compares it (and the
+  overrides' forked lanes: an override holding the shared values composes
+  the same chain but forks the lane) with the last synced one: unchanged,
+  nothing is pushed; changed only in some slots' lane values (a lane
+  drag), only those processes' lanes are re-derived (each lane's fields
+  compared with its cell, so a drag re-pushes that lane's `values`); else
+  every process is, each push compared with its cell. The library snapshot
+  is fetched once per library version (`LaneShared::published`, shared by
+  the cold reads and the tick). Derivations are the legacy publishers':
+  `process_slot_lane_entries` / `process_lane_entries_for_chain` (lanes),
+  `process_scalar_inlet_view` / `process_scalar_inlet_names` /
+  `process_inlet_def` (inlets), `process_slot_port_defs` /
+  `process_port_view` (ports, fan-out), `process_port_readers`,
+  `resolve_process_inlet_target` and `lane_patch_in_port` (the patchbay's
+  wiring and in ports), `process_library_defs` (classes; compiled `expr#…`
+  bodies excluded). Live: `process.error` (the slot's latest run error
+  under its runtime id on this track, `SequencerState::process_run_error`)
+  and `state-cell.values` (the cell's scope history, read in place:
+  `with_process_scope_cell`), kept in `ObservedList`s and re-read only
+  while observed and when, respectively, the scheduler's run error or
+  scope version, or the observed set, moved. The id lists those loops read
+  are rebuilt only when a track's process or state cell instances changed.
+- **The patchbay is a view derivation.** Legacy `SEQ.track-lane-patch`
+  maps to the processes: `p.in-ports` (lane, gate and wired inlets, in
+  class order), a connectable port's `target-process` / `target-inlet`
+  (its primary wire, resolved with the scheduler's same-layer rule) and
+  its `fanout` entries' (the further cables); the writers into an in port
+  are the ports and fan-out entries naming it. A cable's port id
+  (`(track * 4096 + slot) * 16 + ordinal`) is computed by the view from
+  `t.index`, `p.index` and the port's place among the connectable ones.
+  `port.disconnected` and `manual` replace the legacy `clearable` /
+  `disconnectable` / `primary-free` flags (`(or pt.manual
+  pt.disconnected)` is clearable).
+- **Setters.** `edit-process` resolves the track by `TrackId` and the
+  process by its `:proc-id` (matched as the number Lisp holds, so an id
+  past 2^53 still resolves; a gone track or process is an error) when it
+  lands, and a port target the same way, with its track's id: a target on
+  another track is an error (`a port targets its own track`; a param by
+  its device's `device-target`, resolved to its slot now: another track's
+  param, a drum rack slot's or a bus effect's is an error), as is a wire
+  into the process itself or across layers (project to track lanes), and
+  a step param name the scheduler does not take. `move-process!`'s
+  `before` must be a process of the same track and layer; moving a
+  project lane reorders the project layer, so it moves on every track.
+  They act only where the model differs and go through the legacy edits,
+  shared with `process-history-action` (`process_edit::apply_process_edit`
+  over `ProcessEdit`, one recorded scene-structure entry each, undo
+  restores; the bus-send pre-step included) and queue `ProcessChain`; lane
+  steps go through `app::edit::apply_process_lane_drag_steps` (the drag's
+  merge key: a script's `set-lane-steps!` on one lane while the pointer is
+  down joins one entry, else each is its own) and queue
+  `ProcessLaneValues`. Field setters edit this track (a project lane forks
+  for it); the actions' `:all true` writes the shared project slot and is
+  an error on a track's own process. A shared edit is a no-op, recording
+  nothing, unless it changes the model (the every-track state writes
+  report a change, not the slots they matched), and a shared fan-out edit
+  addresses the project layer's own list (its index is the shared list's,
+  whatever this track's fork holds; the edit drops every track's fork of
+  the port). Values follow §14.2c: an inlet or lane value is a number of
+  its type (a gate 0 or 1, or a bool; an int or track an integer; an enum
+  an integer below its option count) within the class's declared range (a
+  range the class does not declare, such as the ±1 hint around a float,
+  is not enforced); the current value always round-trips (a lane's when
+  every named step holds it). A fan-out bound is any finite number.
+- **Not covered.** A graph node's process slots (the node bay's scopes and
+  run errors, legacy `SEQ.process-scope-cells` and the node half of
+  `SEQ.process-run-errors`): eseq-0l17.45, with the graph-node kinds
+  (eseq-0l17.33). A class's ports are listed by name
+  (`process-class.ports`); a process's ports carry the rest.
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -2021,7 +2181,8 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7b-4 | eseq-0l17.43 | the rest of the panel data: sampler media, sound binding, modulator display, tables and IR names, effect editors, param UI metadata, scene macro config | .14 .18 |
 | 7b-3a | eseq-0l17.44 | recorded (undoable) drum rack macro edits | .18 |
-| 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
+| 7c | eseq-0l17.29 (built) | `process` (a track's chain), `lane`, `inlet`, `port`, `fanout`, `state-cell`, `process-class`, `process-library`; `track.processes` / `lanes` | .11 .14 .20 |
+| 7c-2 | eseq-0l17.45 | graph-node process slot probes and run errors (the node bay's scopes) | .11 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
 | 7e | eseq-0l17.31 | `note`, `piano-roll` singleton, tracker rows and grid playheads | .16 .20 |
@@ -2147,16 +2308,16 @@ builds the field name.
 | `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | built (.28) | .14 |
 | `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list → track.variants / variant (built .37) | built (.28, .37) | .14 |
 | `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28) | .14 |
-| `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | lane kind | .29 | .11 |
-| `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | processes singleton | .29 | .11 .20 |
-| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | processes.errors | .29 | .11 |
-| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | process scope (live) | .29 | .11 |
-| `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes | .29 | .14 |
-| `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | lane.patch | .29 | .11 |
-| `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | .29 | .11 .20 |
-| `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes | .29 | .11 .20 |
-| `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process scope (live) | .29 | .11 |
-| `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes | .29 | .11 .20 |
+| `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | selection.track.lanes → lane | built (.29) | .11 |
+| `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | process-library.classes → process-class | built (.29) | .11 .20 |
+| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (a track slot's, live); a graph node slot's: .45 | built (.29), .45 | .11 |
+| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes (the node bay) | .45 | .11 .20 |
+| `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29) | .14 |
+| `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | t.processes: p.in-ports, port.target-process / target-inlet, fanout.target-process (cable ids derived in the view) | built (.29) | .11 |
+| `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29) | .11 .20 |
+| `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes → lane | built (.29) | .11 .20 |
+| `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process.cells → state-cell.values (live) | built (.29) | .11 |
+| `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes → process | built (.29) | .11 .20 |
 | `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30) | .13 |
 | `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30) | .15 |
 | `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30) | .15 .17 |

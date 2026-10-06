@@ -4063,7 +4063,7 @@
         let rate = crate::process::ParamTarget::StepParam {
             param: "rate".to_string(),
         };
-        assert!(state.set_process_port_binding_for_instance(rand.instance_id, "out", rate.clone()) > 0);
+        assert!(state.set_process_port_binding_for_instance(rand.instance_id, "out", rate.clone()));
         assert_eq!(binding(0), Some(velocity.clone()), "track 0's fork still wins");
         assert_eq!(binding(1), Some(rate.clone()), "track 1 inherits the shared bind");
         assert!(state.clear_process_port_binding(0, rand.instance_id, "out"));
