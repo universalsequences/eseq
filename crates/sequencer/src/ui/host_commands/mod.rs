@@ -127,10 +127,7 @@ impl ScriptEdit {
     ) -> Result<bool, String> {
         let script = Self::begin(app, ctx);
         let outcome = script.apply_with(app, apply);
-        let changed = matches!(
-            outcome,
-            Ok(app::edit::EditOutcome::Applied(_) | app::edit::EditOutcome::AppliedUnrecorded)
-        );
+        let changed = outcome.as_ref().is_ok_and(app::edit::EditOutcome::changed);
         script.end(app, ctx, continuous, changed);
         outcome
             .map(|_| changed)

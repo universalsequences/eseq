@@ -12,7 +12,7 @@ const CUTOFF: usize = 2;
 
 const REFER_PANEL: &str = "(import eseq.kinds :refer (track tracks macros device-param \
                            lock-param! set-tensor-cell! stamp-variant! stamp-key-variant! \
-                           selection))";
+                           lock-rack-macro! unlock-rack-macro! selection))";
 
 impl Harness {
     fn eval_panel(&mut self, code: &str) -> Value {
@@ -914,28 +914,68 @@ fn project_macros_read_set_and_keep_their_identity() {
     );
 }
 
+impl Harness {
+    /// A drum rack on track 2 whose macro 1 maps onto its first slot's
+    /// `start` (stored 0–0.5); `rk` the rack, `rs` the slot, `rm` the
+    /// macro, `rmm` its mapping.
+    fn mapped_rack_macro(&mut self) -> sequencer::sequencer::RackMacroId {
+        self.rack_track();
+        self.sync();
+        let id = sequencer::sequencer::RackMacroId::from_index(1).unwrap();
+        let mapping = sequencer::sequencer::RackMacroMapping {
+            target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                slot: 0,
+                param: "start".to_string(),
+                param_index: START,
+            },
+            range_min: 0.0,
+            range_max: 0.5,
+            curve: sequencer::sequencer::RackMacroCurve::Linear,
+        };
+        self.app
+            .map_rack_macro(2, id, mapping)
+            .expect("map the macro");
+        self.sync();
+        self.eval_panel(
+            "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices)) \
+             (def rm (nth rk.macros 1)) (def rmm (first rm.mappings))",
+        );
+        id
+    }
+
+    /// Track 2's rack macro 1: (name, base, mapping range, curve label),
+    /// asserting the live rack and the effective pattern agree.
+    fn rack_macro_1(&self) -> (String, f32, (f32, f32), &'static str) {
+        let read = |rack_macro: &sequencer::sequencer::RackMacro| {
+            let mapping = &rack_macro.mappings[0];
+            (
+                rack_macro.name.clone(),
+                rack_macro.value,
+                (mapping.range_min, mapping.range_max),
+                mapping.curve.label(),
+            )
+        };
+        let live = read(
+            &self
+                .shared
+                .state
+                .live_rack_track_snapshot(2)
+                .unwrap()
+                .macros[1],
+        );
+        let stored = self.app.state.with_project_scenes(|scenes| {
+            let pattern = scenes.effective_pattern_id(2).unwrap();
+            read(&scenes.track_pools[2].rack_macros(pattern).unwrap()[1])
+        });
+        assert_eq!(live, stored, "the live rack and the pattern agree");
+        live
+    }
+}
+
 #[test]
 fn rack_macros_read_set_and_map_onto_the_slot_params() {
     let mut h = Harness::new();
-    h.rack_track();
-    h.sync();
-    let id = sequencer::sequencer::RackMacroId::from_index(1).unwrap();
-    let mapping = sequencer::sequencer::RackMacroMapping {
-        target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
-            slot: 0,
-            param: "start".to_string(),
-            param_index: START,
-        },
-        range_min: 0.0,
-        range_max: 0.5,
-        curve: sequencer::sequencer::RackMacroCurve::Linear,
-    };
-    h.app.map_rack_macro(2, id, mapping).expect("map the macro");
-    h.sync();
-    h.eval_panel(
-        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices)) \
-         (def rm (nth rk.macros 1)) (def rmm (first rm.mappings))",
-    );
+    let id = h.mapped_rack_macro();
     assert_eq!(h.eval_panel("(len rk.macros)"), Value::Number(8.0));
     assert_eq!(
         h.eval_panel("(list rm.device rm.index rm.stable-key rm.name (len rm.mappings))"),
@@ -1035,13 +1075,325 @@ fn rack_macros_read_set_and_map_onto_the_slot_params() {
     );
     // A bound outside the target's range (an older mapping) sets back as
     // it reads: the no-op comes before the range check.
-    assert!(h.app.set_rack_macro_mapping_range(2, id, 0, 0.0, 2.0));
+    let target = h.app.rack_macro_mapping_target(2, id, 0).unwrap();
+    let range = sequencer::sequencer::RackMacroField::Range {
+        target,
+        min: 0.0,
+        max: 2.0,
+    };
+    h.app
+        .apply_rack_macro_edit(2, id, range)
+        .expect("widen the range");
     h.drain_and_sync();
     assert_eq!(h.eval_panel("rmm.max"), Value::Number(200.0));
     h.editor.minibuffer = None;
     h.eval_panel("(set! rmm.max rmm.max)");
     h.drain();
     assert_eq!(h.error(), "", "the current value always works");
+}
+
+#[test]
+fn rack_macro_setters_record_one_entry_each_and_a_drag_joins_one() {
+    let mut h = Harness::new();
+    h.mapped_rack_macro();
+    let start = h.rack_macro_1();
+    assert_eq!(start, ("Macro 2".to_string(), 0.0, (0.0, 0.5), "linear"));
+    let undo = h.app.history.undo_len();
+    h.eval_panel(r#"(set! rm.base 0.75) (set! rm.name "Tone") (set! rmm.max 80)"#);
+    h.eval_panel(r#"(set! rmm.curve "exp")"#);
+    h.drain_and_sync();
+    let edited = ("Tone".to_string(), 0.75, (0.0, 0.8), "exp");
+    assert_eq!(h.rack_macro_1(), edited);
+    assert_eq!(h.app.history.undo_len(), undo + 4, "one entry each");
+    // Absolute: the values it holds add no entry.
+    h.eval_panel(r#"(set! rm.base 0.75) (set! rm.name "Tone") (set! rmm.curve "exp")"#);
+    h.drain_and_sync();
+    assert_eq!(h.app.history.undo_len(), undo + 4);
+    // Undo walks back one field at a time; redo replays them.
+    let steps = [
+        ("Tone".to_string(), 0.75, (0.0, 0.8), "linear"),
+        ("Tone".to_string(), 0.75, (0.0, 0.5), "linear"),
+        ("Macro 2".to_string(), 0.75, (0.0, 0.5), "linear"),
+        start.clone(),
+    ];
+    for expected in &steps {
+        h.undo();
+        assert_eq!(&h.rack_macro_1(), expected);
+    }
+    for _ in &steps {
+        app::edit::redo(&mut h.app);
+    }
+    assert_eq!(h.rack_macro_1(), edited);
+    h.sync();
+    assert_eq!(
+        h.eval_panel("(list rm.name rm.base rmm.max rmm.curve)"),
+        h.eval_panel(r#"(list "Tone" 0.75 80 "exp")"#)
+    );
+    // A drag view: base and min set!s while the pointer is down join one
+    // entry per field, which undoes to the value before the drag.
+    let undo = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in [0.5, 0.25, 0.1] {
+        h.eval_panel(&format!("(set! rm.base {value})"));
+        h.drain();
+    }
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.rack_macro_1().1, 0.1);
+    assert_eq!(h.app.history.undo_len(), undo + 1, "the drag is one entry");
+    h.gesture.pointer_down = true;
+    for min in [10, 20, 30] {
+        h.eval_panel(&format!("(set! rmm.min {min})"));
+        h.drain();
+    }
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.rack_macro_1().2, (0.3, 0.8));
+    assert_eq!(h.app.history.undo_len(), undo + 2);
+    h.undo();
+    assert_eq!(h.rack_macro_1().2, (0.0, 0.8));
+    h.undo();
+    assert_eq!(h.rack_macro_1(), edited);
+    // A bad value is an error that records nothing.
+    h.rejects_in(
+        REFER_PANEL,
+        "(set! rm.base 2)",
+        "a number from 0 to 1",
+        true,
+    );
+}
+
+/// Rack macro 1's own value in the Patch track 2's `pattern` plays, and in
+/// the live rack.
+fn rack_macro_1_values(
+    state: &sequencer::sequencer::SequencerState,
+    pattern: sequencer::sequencer::PatternId,
+) -> (f32, f32) {
+    let stored = state.with_project_scenes(|scenes| {
+        let patch = scenes.track_pools[2].patch(pattern).unwrap();
+        patch.rack_track.as_ref().unwrap().macros[1].value
+    });
+    (
+        stored,
+        state.live_rack_track_snapshot(2).unwrap().macros[1].value,
+    )
+}
+
+/// A pattern of track 2 copied from `from`, with a Patch of its own or
+/// (`shared`) sharing `from`'s.
+fn rack_pattern_copy(
+    state: &sequencer::sequencer::SequencerState,
+    from: sequencer::sequencer::PatternId,
+    shared: bool,
+) -> sequencer::sequencer::PatternId {
+    state.with_scenes_mut(|scenes| {
+        let pool = &mut scenes.track_pools[2];
+        let data = pool.get(from).unwrap();
+        match shared {
+            true => {
+                let refs = pool.refs(from).unwrap();
+                pool.insert_with_refs(data, refs)
+            }
+            false => pool.insert(data),
+        }
+    })
+}
+
+#[test]
+fn rack_macro_edits_follow_the_patch_the_live_rack_mirrors() {
+    use sequencer::sequencer::RackMacroField;
+    let mut h = Harness::new();
+    let id = h.mapped_rack_macro();
+    let state = h.app.state.clone();
+    let scene = state.with_project_scenes(|scenes| scenes.effective_pattern_id(2).unwrap());
+    // A bound take with a Patch of its own: the edit lands in the copy the
+    // panel shows (the take's), and its undo there.
+    let take = rack_pattern_copy(&state, scene, false);
+    let data = state.with_project_scenes(|scenes| scenes.track_pools[2].get(take).unwrap());
+    assert!(state.borrow_track_device_state(2, take, &data));
+    h.app
+        .apply_rack_macro_edit(2, id, RackMacroField::Value(0.5))
+        .unwrap();
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(rack_macro_1_values(&state, take), (0.5, 0.5));
+    assert_eq!(
+        rack_macro_1_values(&state, scene).0,
+        0.0,
+        "the scene's Patch is untouched"
+    );
+    h.undo();
+    assert_eq!(rack_macro_1_values(&state, take), (0.0, 0.0));
+    state.release_bound_device_state();
+    // A pattern sharing the scene pattern's Patch: an undo after switching
+    // to it still reaches the live rack.
+    h.app
+        .apply_rack_macro_edit(2, id, RackMacroField::Value(0.75))
+        .unwrap();
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(rack_macro_1_values(&state, scene), (0.75, 0.75));
+    let sibling = rack_pattern_copy(&state, scene, true);
+    state.with_scenes_mut(|scenes| scenes.track_overrides[2] = Some(sibling));
+    h.undo();
+    assert_eq!(rack_macro_1_values(&state, sibling), (0.0, 0.0));
+    assert_eq!(rack_macro_1_values(&state, scene).0, 0.0);
+}
+
+#[test]
+fn a_rack_macro_drag_across_a_pattern_switch_keeps_one_entry_per_pattern() {
+    use sequencer::sequencer::RackMacroField;
+    let mut h = Harness::new();
+    let id = h.mapped_rack_macro();
+    let state = h.app.state.clone();
+    let scene = state.with_project_scenes(|scenes| scenes.effective_pattern_id(2).unwrap());
+    let other = rack_pattern_copy(&state, scene, false);
+    let undo = h.app.history.undo_len();
+    for value in [0.2, 0.4] {
+        h.app
+            .apply_rack_macro_edit(2, id, RackMacroField::Value(value))
+            .unwrap();
+    }
+    // The pattern switches under the open drag.
+    state.with_scenes_mut(|scenes| scenes.track_overrides[2] = Some(other));
+    for value in [0.6, 0.8] {
+        h.app
+            .apply_rack_macro_edit(2, id, RackMacroField::Value(value))
+            .unwrap();
+    }
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), undo + 2, "one entry per pattern");
+    assert_eq!(rack_macro_1_values(&state, scene).0, 0.4);
+    assert_eq!(rack_macro_1_values(&state, other), (0.8, 0.8));
+    h.undo();
+    assert_eq!(rack_macro_1_values(&state, other).0, 0.0, "its own before");
+    assert_eq!(rack_macro_1_values(&state, scene).0, 0.4);
+    h.undo();
+    assert_eq!(rack_macro_1_values(&state, scene).0, 0.0);
+}
+
+#[test]
+fn a_rack_macro_mapping_edit_names_its_mapping_by_target() {
+    use sequencer::sequencer::{RackMacroCurve, RackMacroField, RackMacroMapping, RackMacroTarget};
+    let mut h = Harness::new();
+    let id = h.mapped_rack_macro();
+    let gain = RackMacroTarget::SlotParam {
+        slot: 0,
+        param: "gain".to_string(),
+    };
+    let mapping = RackMacroMapping {
+        target: gain.clone(),
+        range_min: 0.0,
+        range_max: 1.0,
+        curve: RackMacroCurve::Linear,
+    };
+    h.app.map_rack_macro(2, id, mapping).expect("map the gain");
+    let range = |h: &Harness| {
+        let rack = h.shared.state.live_rack_track_snapshot(2).unwrap();
+        let mappings = &rack.macros[1].mappings;
+        let (index, mapping) = (mappings.iter().enumerate())
+            .find(|(_, mapping)| mapping.target == gain)
+            .unwrap();
+        (index, mapping.range_min, mapping.range_max, mappings.len())
+    };
+    let edit = RackMacroField::Range {
+        target: gain.clone(),
+        min: 0.25,
+        max: 0.75,
+    };
+    h.app.apply_rack_macro_edit(2, id, edit).unwrap();
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(range(&h), (1, 0.25, 0.75, 2));
+    // Unmapping the earlier mapping moves the gain's to position 0: undo
+    // still restores the gain's range.
+    assert!(h.app.unmap_rack_macro(2, id, 0));
+    h.undo();
+    assert_eq!(range(&h), (0, 0.0, 1.0, 1));
+    // With the gain unmapped too, redo has no mapping to write: an error
+    // that changes nothing.
+    assert!(h.app.unmap_rack_macro(2, id, 0));
+    let replay = app::edit::redo(&mut h.app);
+    assert!(
+        matches!(replay, app::history::HistoryReplay::Failed(_)),
+        "{replay:?}"
+    );
+    let rack = h.shared.state.live_rack_track_snapshot(2).unwrap();
+    assert!(rack.macros[1].mappings.is_empty());
+}
+
+#[test]
+fn rack_macro_locks_set_and_clear_the_steps_that_differ_through_history() {
+    let mut h = Harness::new();
+    h.mapped_rack_macro();
+    h.eval_panel("(def s2 (nth t2.steps 2)) (def s5 (nth t2.steps 5)) (def s7 (nth t2.steps 7))");
+    let locks = |h: &Harness| {
+        let rack = h.shared.state.live_rack_track_snapshot(2).unwrap();
+        [2, 5, 7].map(|step| rack.macros[1].plocks[step])
+    };
+    // The rack is the current track, its step 2 shown.
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    let before = h.app.history.undo_len();
+    h.eval_panel("(lock-rack-macro! rm (list s2 s5) 0.25)");
+    h.drain_and_sync();
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 1,
+        "one entry for both steps"
+    );
+    assert_eq!(locks(&h), [Some(0.25), Some(0.25), None]);
+    assert_eq!(
+        h.eval_panel("(list rm.value rm.base rm.locked rm.has-locks)"),
+        h.eval_panel("(list 0.25 0 true true)")
+    );
+    // The rack panel's knob field follows at once.
+    let field = rack_macro_value_field(2, 1);
+    let shown = h
+        .editor
+        .runtime()
+        .reactive_field_value("SEQ", &field)
+        .cloned();
+    assert_eq!(shown, Some(Value::Number(0.25)));
+    // Steps already holding the lock, or none to clear, are left alone.
+    h.eval_panel("(lock-rack-macro! rm (list s2 s5) 0.25) (unlock-rack-macro! rm (list s7))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1, "nothing to do");
+    h.eval_panel("(lock-rack-macro! rm (list s5 s7) 0.5)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    assert_eq!(locks(&h), [Some(0.25), Some(0.5), Some(0.5)]);
+    // Clearing is one entry; undo puts the locks back.
+    h.eval_panel("(unlock-rack-macro! rm (list s2 s5 s7))");
+    h.drain_and_sync();
+    assert_eq!(h.app.history.undo_len(), before + 3);
+    assert_eq!(locks(&h), [None, None, None]);
+    assert_eq!(
+        h.eval_panel("(list rm.value rm.locked rm.has-locks)"),
+        h.eval_panel("(list 0 false false)")
+    );
+    h.undo();
+    assert_eq!(locks(&h), [Some(0.25), Some(0.5), Some(0.5)]);
+    h.undo();
+    assert_eq!(locks(&h), [Some(0.25), Some(0.25), None]);
+    // The value rule: a number in 0–1, steps of the rack's track.
+    h.rejects_in(
+        REFER_PANEL,
+        "(lock-rack-macro! rm (list s2) 2)",
+        "a number from 0 to 1",
+        true,
+    );
+    h.rejects_in(
+        REFER_PANEL,
+        "(let ((t0 (track 0))) (lock-rack-macro! rm (list (nth t0.steps 2)) 0.5))",
+        "steps of the device's track",
+        true,
+    );
+    h.rejects_in(
+        REFER_PANEL,
+        "(let ((t0 (track 0))) (unlock-rack-macro! rm (list (nth t0.steps 2))))",
+        "steps of the device's track",
+        true,
+    );
+    assert_eq!(locks(&h), [Some(0.25), Some(0.25), None]);
 }
 
 #[test]

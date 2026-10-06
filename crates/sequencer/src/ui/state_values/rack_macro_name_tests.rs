@@ -63,7 +63,8 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
             };
             assert_eq!(name, "rename-rack-macro");
             assert_eq!(*map["name"].borrow(), Value::String(expected.to_string()));
-            apply_rack_macro_rename_host_command(&mut editor, &mut app, &map);
+            let epoch = AtomicUsize::new(0);
+            apply_rack_macro_rename_host_command(&mut editor, &mut app, &map, &selected, &epoch);
         }
         let layout = editor.widget_layout().unwrap();
         timings.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -120,7 +121,8 @@ fn rack_macro_cached_labels_follow_names_without_rebuilding_metadata() {
             ("track", Value::Number(0.0)), ("id", Value::Number(0.0)),
             ("name", Value::String(name.to_string())),
         ]) else { unreachable!() };
-        apply_rack_macro_rename_host_command(&mut editor, &mut app, &map);
+        let epoch = AtomicUsize::new(0);
+        apply_rack_macro_rename_host_command(&mut editor, &mut app, &map, &selected, &epoch);
         for expression in [
             "(eseq.macro-state/macro-name cached-macro)",
             "(eseq.effects.track-panels/plock-row-title cached-plock)",

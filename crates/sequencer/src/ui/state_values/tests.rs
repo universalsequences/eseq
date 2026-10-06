@@ -11450,32 +11450,38 @@ use panel_kinds_seed::*;
             },
         )
         .expect("rack macro mapping");
-        assert!(app.set_rack_macro_mapping_range(
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            0,
-            12.0,
-            30.0,
-        ));
-        assert!(app.set_rack_macro_mapping_curve(
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            0,
-            sequencer::sequencer::RackMacroCurve::Log,
-        ));
-        assert!(app.set_rack_macro_mapping_range(
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            0,
-            10.0,
-            30.0,
-        ));
-        assert!(app.set_rack_macro_mapping_curve(
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            0,
-            sequencer::sequencer::RackMacroCurve::Linear,
-        ));
+        {
+            use sequencer::sequencer::{RackMacroCurve, RackMacroField, RackMacroTarget};
+            let target = RackMacroTarget::SlotInstrumentParam {
+                slot: 0,
+                param: "attack".to_string(),
+                param_index: 0,
+            };
+            let id = sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1");
+            for field in [
+                RackMacroField::Range {
+                    target: target.clone(),
+                    min: 12.0,
+                    max: 30.0,
+                },
+                RackMacroField::Curve {
+                    target: target.clone(),
+                    curve: RackMacroCurve::Log,
+                },
+                RackMacroField::Range {
+                    target: target.clone(),
+                    min: 10.0,
+                    max: 30.0,
+                },
+                RackMacroField::Curve {
+                    target,
+                    curve: RackMacroCurve::Linear,
+                },
+            ] {
+                let outcome = app.apply_rack_macro_edit(0, id, field).expect("edit the mapping");
+                assert!(outcome.changed());
+            }
+        }
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().set_reactive(

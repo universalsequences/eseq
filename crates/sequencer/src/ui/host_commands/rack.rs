@@ -1666,7 +1666,13 @@ pub(super) fn handle(
         }
         "rename-rack-macro" => {
             if let Value::Map(ref map) = payload {
-                apply_rack_macro_rename_host_command(&mut editor, &mut app, map);
+                apply_rack_macro_rename_host_command(
+                    &mut editor,
+                    &mut app,
+                    map,
+                    &selected_steps,
+                    &ui_epoch,
+                );
             }
         }
         "set-rack-macro-plock" => {
@@ -1769,13 +1775,7 @@ pub(super) fn handle(
         }
         "set-rack-macro-range" => {
             if let Value::Map(ref map) = payload {
-                if let (
-                    Some(track),
-                    Some(id),
-                    Some(mapping_idx),
-                    Some(range_min),
-                    Some(range_max),
-                ) = (
+                if let (Some(track), Some(id), Some(mapping), Some(min), Some(max)) = (
                     map_usize(map, "track"),
                     map_usize(map, "id")
                         .and_then(sequencer::sequencer::RackMacroId::from_index),
@@ -1783,17 +1783,16 @@ pub(super) fn handle(
                     map_number(map, "min").map(|value| value as f32),
                     map_number(map, "max").map(|value| value as f32),
                 ) {
-                    app.set_rack_macro_mapping_range(
+                    let Some(target) = app.rack_macro_mapping_target(track, id, mapping) else {
+                        return;
+                    };
+                    let range = sequencer::sequencer::RackMacroField::Range { target, min, max };
+                    apply_rack_macro_edit_reactive(
+                        &mut editor,
+                        &mut app,
                         track,
                         id,
-                        mapping_idx,
-                        range_min,
-                        range_max,
-                    );
-                    refresh_instrument_panel_reactive(
-                        &mut editor,
-                        &app,
-                        track,
+                        range,
                         &selected_steps,
                         &ui_epoch,
                     );
@@ -1804,18 +1803,23 @@ pub(super) fn handle(
             if let Value::Map(ref map) = payload {
                 let curve = map_string(map, "curve")
                     .and_then(|curve| sequencer::sequencer::RackMacroCurve::from_label(&curve));
-                if let (Some(track), Some(id), Some(mapping_idx), Some(curve)) = (
+                if let (Some(track), Some(id), Some(mapping), Some(curve)) = (
                     map_usize(map, "track"),
                     map_usize(map, "id")
                         .and_then(sequencer::sequencer::RackMacroId::from_index),
                     map_usize(map, "mapping-idx"),
                     curve,
                 ) {
-                    app.set_rack_macro_mapping_curve(track, id, mapping_idx, curve);
-                    refresh_instrument_panel_reactive(
+                    let Some(target) = app.rack_macro_mapping_target(track, id, mapping) else {
+                        return;
+                    };
+                    let curve = sequencer::sequencer::RackMacroField::Curve { target, curve };
+                    apply_rack_macro_edit_reactive(
                         &mut editor,
-                        &app,
+                        &mut app,
                         track,
+                        id,
+                        curve,
                         &selected_steps,
                         &ui_epoch,
                     );
@@ -3291,4 +3295,133 @@ mod tests {
         assert!(!published_enabled(&h), "redo republishes the parked slot");
     }
 
+    #[test]
+    fn rack_macro_panel_edits_are_undoable_and_a_drag_joins_one_entry() {
+        use sequencer::sequencer::{
+            RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget,
+        };
+        let mut h = RackHarness::new(HashSet::new());
+        let id = RackMacroId::from_index(0).unwrap();
+        let mapping = RackMacroMapping {
+            target: RackMacroTarget::SlotParam {
+                slot: SLOT,
+                param: "gain".to_string(),
+            },
+            range_min: 0.0,
+            range_max: 1.0,
+            curve: RackMacroCurve::Linear,
+        };
+        h.app
+            .map_rack_macro(TRACK, id, mapping)
+            .expect("map the macro");
+        // (name, value, range, curve) in the live rack and the pattern.
+        let read = |h: &RackHarness| {
+            let read = |rack_macro: &sequencer::sequencer::RackMacro| {
+                let mapping = &rack_macro.mappings[0];
+                let range = (mapping.range_min, mapping.range_max);
+                (
+                    rack_macro.name.clone(),
+                    rack_macro.value,
+                    range,
+                    mapping.curve,
+                )
+            };
+            let live = read(&h.state.live_rack_track_snapshot(TRACK).unwrap().macros[0]);
+            let stored = h.state.with_project_scenes(|scenes| {
+                let pattern = scenes.effective_pattern_id(TRACK).unwrap();
+                read(&scenes.track_pools[TRACK].rack_macros(pattern).unwrap()[0])
+            });
+            assert_eq!(live, stored, "the live rack and the pattern agree");
+            live
+        };
+        let start = read(&h);
+        assert_eq!(
+            start,
+            (
+                "Macro 1".to_string(),
+                0.0,
+                (0.0, 1.0),
+                RackMacroCurve::Linear
+            )
+        );
+        let undo = h.app.history.undo_len();
+        // A knob drag: one entry, kept open until the release.
+        for value in [0.2, 0.4, 0.6] {
+            let payload = number_payload(&[("track", TRACK as f64), ("id", 0.0), ("value", value)]);
+            h.dispatch("set-rack-macro-value", payload);
+        }
+        app::edit::finish_active_gesture(&mut h.app);
+        assert_eq!(h.app.history.undo_len(), undo + 1, "the drag is one entry");
+        assert_eq!(read(&h).1, 0.6);
+        let shown = reactive_number(&h.editor, &rack_macro_value_field(TRACK, 0));
+        assert!(
+            (shown - 0.6).abs() < 1e-6,
+            "the knob's field follows: {shown}"
+        );
+        let Value::Map(mut rename) = number_payload(&[("track", TRACK as f64), ("id", 0.0)]) else {
+            unreachable!()
+        };
+        let name = Rc::new(RefCell::new(Value::String("Tone".to_string())));
+        rename.insert("name".to_string(), name);
+        h.dispatch("rename-rack-macro", Value::Map(rename));
+        app::edit::finish_active_gesture(&mut h.app);
+        let range = number_payload(&[
+            ("track", TRACK as f64),
+            ("id", 0.0),
+            ("mapping-idx", 0.0),
+            ("min", 0.25),
+            ("max", 0.75),
+        ]);
+        h.dispatch("set-rack-macro-range", range);
+        app::edit::finish_active_gesture(&mut h.app);
+        let Value::Map(mut curve) =
+            number_payload(&[("track", TRACK as f64), ("id", 0.0), ("mapping-idx", 0.0)])
+        else {
+            unreachable!()
+        };
+        let exp = Rc::new(RefCell::new(Value::String("exp".to_string())));
+        curve.insert("curve".to_string(), exp);
+        h.dispatch("set-rack-macro-curve", Value::Map(curve));
+        app::edit::finish_active_gesture(&mut h.app);
+        let edited = ("Tone".to_string(), 0.6, (0.25, 0.75), RackMacroCurve::Exp);
+        assert_eq!(read(&h), edited);
+        assert_eq!(h.app.history.undo_len(), undo + 4, "one entry each");
+        let published = |h: &RackHarness| {
+            let snapshot = h.state.latest_scheduler_snapshot();
+            let rack = snapshot.tracks[TRACK].rack_track.as_ref().unwrap();
+            rack.macros[0].mappings[0].curve
+        };
+        assert_eq!(published(&h), RackMacroCurve::Exp);
+        for expected in [
+            (
+                "Tone".to_string(),
+                0.6,
+                (0.25, 0.75),
+                RackMacroCurve::Linear,
+            ),
+            ("Tone".to_string(), 0.6, (0.0, 1.0), RackMacroCurve::Linear),
+            (
+                "Macro 1".to_string(),
+                0.6,
+                (0.0, 1.0),
+                RackMacroCurve::Linear,
+            ),
+            start.clone(),
+        ] {
+            let replay = app::edit::undo(&mut h.app);
+            assert!(matches!(replay, app::history::HistoryReplay::Applied(_)));
+            assert_eq!(read(&h), expected);
+        }
+        assert_eq!(
+            published(&h),
+            RackMacroCurve::Linear,
+            "undo republishes a mapping"
+        );
+        for _ in 0..4 {
+            let replay = app::edit::redo(&mut h.app);
+            assert!(matches!(replay, app::history::HistoryReplay::Applied(_)));
+        }
+        assert_eq!(read(&h), edited);
+        assert_eq!(published(&h), RackMacroCurve::Exp);
+    }
 }

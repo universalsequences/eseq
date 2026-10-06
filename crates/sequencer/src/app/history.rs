@@ -69,6 +69,7 @@ pub enum EditPatch {
     GraphNodeProcessChain(GraphNodeProcessChainPatch),
     GraphOverride(GraphOverridePatch),
     NeuralNetwork(NeuralNetworkPatch),
+    RackMacro(RackMacroPatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -260,6 +261,26 @@ pub struct NeuralNetworkPatch {
 }
 
 impl NeuralNetworkPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
+    }
+}
+
+/// One field of a drum rack macro (its name, value, or a mapping's range or
+/// curve) before and after a rack panel or host kind edit (eseq-0l17.44).
+/// Replay writes the recorded field back into the rack macros of the
+/// pattern the edit was made in (and the live rack while that pattern
+/// plays) and leaves the rest of the macro alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackMacroPatch {
+    pub track: TrackId,
+    pub pattern: PatternId,
+    pub macro_id: crate::sequencer::RackMacroId,
+    pub before: crate::sequencer::RackMacroField,
+    pub after: crate::sequencer::RackMacroField,
+}
+
+impl RackMacroPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
     }

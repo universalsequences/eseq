@@ -26,6 +26,7 @@ use super::history::{
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
     BarTransposePatch, GraphNodeProcessChainPatch, GraphOverridePatch, NeuralNetworkPatch,
+    RackMacroPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -53,6 +54,16 @@ pub enum EditOutcome {
     NoOp,
     Applied(HistoryMove),
     AppliedUnrecorded,
+}
+
+impl EditOutcome {
+    /// Whether the edit changed the model (recorded or not).
+    pub fn changed(&self) -> bool {
+        match self {
+            Self::NoOp => false,
+            Self::Applied(_) | Self::AppliedUnrecorded => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2274,10 +2285,11 @@ impl App {
     ) -> Result<EditOutcome, EditError> {
         let sequencer_id = manifest.id;
         let merge_key = MergeKey::new(format!("graph:{sequencer_id}:{}", after.address()));
+        let scene = current_scene(self)?;
         stage_field_edit(
             self,
             ("Edit graph", merge_key),
-            after,
+            (scene, after),
             |staged, scene| match staged {
                 EditPatch::GraphOverride(staged)
                     if staged.scene == scene && staged.sequencer_id == sequencer_id =>
@@ -2286,8 +2298,8 @@ impl App {
                 }
                 _ => None,
             },
-            |state, after| {
-                state.edit_current_graph_overrides(|graphs| {
+            |app, after| {
+                app.state.edit_current_graph_overrides(|graphs| {
                     let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
                     let current = graph.slot(after);
                     graph.set_slot(after);
@@ -2318,10 +2330,11 @@ impl App {
         after: crate::neural::NeuralSlot,
     ) -> Result<EditOutcome, EditError> {
         let merge_key = MergeKey::new(format!("neural:{network_id}:{}", after.address()));
+        let scene = current_scene(self)?;
         stage_field_edit(
             self,
             ("Edit neural network", merge_key),
-            after,
+            (scene, after),
             |staged, scene| match staged {
                 EditPatch::NeuralNetwork(staged)
                     if staged.scene == scene && staged.network_id == network_id =>
@@ -2330,8 +2343,8 @@ impl App {
                 }
                 _ => None,
             },
-            |state, after| {
-                state.edit_current_neural_networks(|networks| {
+            |app, after| {
+                app.state.edit_current_neural_networks(|networks| {
                     let network = (networks.iter_mut())
                         .find(|network| network.id == network_id)
                         .ok_or_else(|| "the network is gone".to_string())?;
@@ -2349,6 +2362,99 @@ impl App {
                 })
             },
         )
+    }
+
+    /// A drum rack macro edit (eseq-0l17.44): write `after` (one field of
+    /// rack macro `id` of `track`, a [`crate::sequencer::RackMacroField`])
+    /// into the rack macros of the pattern the live rack mirrors (and the
+    /// live rack), and record it, as [`Self::apply_graph_override_edit`] records
+    /// a graph field: a coalescing gesture keyed by the field, so a drag's
+    /// writes on one field (the rack panel's knob, or a script's `set!`s
+    /// under `ScriptEdit`) join one entry, which keeps the value from
+    /// before the drag's first. Shared by the rack panel's commands and the
+    /// host kinds' `set-rack-macro` / `set-macro-mapping`.
+    pub fn apply_rack_macro_edit(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        after: crate::sequencer::RackMacroField,
+    ) -> Result<EditOutcome, EditError> {
+        let track_id =
+            (self.track_registry.id_at(track)).ok_or(EditError::TrackOutOfRange { track })?;
+        let pattern = self
+            .rack_macro_pattern(track)
+            .ok_or(EditError::MissingTrackPattern)?;
+        let merge_key = MergeKey::new(format!(
+            "rack-macro:{}:{}:{}",
+            track_id.0,
+            id.index(),
+            after.address()
+        ));
+        stage_field_edit(
+            self,
+            (after.label(), merge_key),
+            (pattern, after),
+            |staged, pattern| match staged {
+                EditPatch::RackMacro(staged)
+                    if staged.track == track_id
+                        && staged.pattern == pattern
+                        && staged.macro_id == id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |app, after| app.write_rack_macro_field(track, pattern, id, after),
+            |pattern, before, after| {
+                EditPatch::RackMacro(RackMacroPatch {
+                    track: track_id,
+                    pattern,
+                    macro_id: id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// The pattern a rack macro edit of `track` writes: the one the live
+    /// rack mirrors (a bound take's while the binding borrows the lane, as
+    /// step and track param edits resolve it).
+    pub(crate) fn rack_macro_pattern(&self, track: usize) -> Option<crate::sequencer::PatternId> {
+        (self.state)
+            .with_project_scenes(|scenes| self.state.mirror_device_pattern_id(track, scenes))
+    }
+
+    /// Write `field` of rack macro `id` into the Patch `track`'s pattern
+    /// `pattern` plays (and the live rack while it mirrors that Patch),
+    /// with the rack panel's side effects when the live rack changed: a
+    /// value reaches the macro's runtime default and its targets at once,
+    /// a mapping edit publishes the scheduler. Returns the field before. A
+    /// recorded edit's write, its replay and the unrecorded value reset.
+    pub(crate) fn write_rack_macro_field(
+        &mut self,
+        track: usize,
+        pattern: crate::sequencer::PatternId,
+        id: crate::sequencer::RackMacroId,
+        field: &crate::sequencer::RackMacroField,
+    ) -> Result<crate::sequencer::RackMacroField, String> {
+        use crate::sequencer::RackMacroField;
+        let (before, live) = self
+            .state
+            .write_rack_macro_field(track, pattern, id, field)?;
+        if live && before != *field {
+            match field {
+                RackMacroField::Name(_) => {}
+                RackMacroField::Value(value) => {
+                    self.state.set_live_rack_macro_default(track, id, *value);
+                    self.send_transient_rack_macro_value(track, id, *value);
+                }
+                RackMacroField::Range { .. } | RackMacroField::Curve { .. } => {
+                    self.state.publish_scheduler_snapshot();
+                }
+            }
+        }
+        Ok(before)
     }
 
     pub fn apply_scene_transpose_to_bank(
@@ -8242,28 +8348,41 @@ fn app_bus_effect_gesture_before(
 
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A host kind setter's one-field edit in the current scene, recorded as
-/// the coalescing gesture `merge_key` (labelled `label`): `write` writes
-/// `after` and returns the field's value before the write; a gesture
-/// already staged under the key for this scene and target keeps its
-/// `before` (`staged` reads it from the staged entry), so a drag's writes
-/// join one entry; a write back to where the gesture started discards it.
-/// `patch` builds the entry from (scene, before, after).
-fn stage_field_edit<S: PartialEq>(
+/// The current scene, which a scene-keyed field edit is made in.
+fn current_scene(app: &App) -> Result<crate::sequencer::SceneId, EditError> {
+    (app.state.current_scene_id())
+        .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))
+}
+
+/// A one-field edit at `site` (the scene or pattern the field lives in),
+/// recorded as the coalescing gesture `merge_key` (labelled `label`):
+/// `write` writes `after` and returns the field's value before the write;
+/// a gesture already staged under the key for this site and target keeps
+/// its `before` (`staged` reads it from the staged entry), so a drag's
+/// writes join one entry; one staged for another site (a scene or pattern
+/// switched mid-drag) is finished first; a write back to where the gesture
+/// started discards it. `patch` builds the entry from (site, before, after).
+fn stage_field_edit<K: Copy, S: PartialEq>(
     app: &mut App,
     (label, merge_key): (&'static str, MergeKey),
-    after: S,
-    staged: impl FnOnce(&EditPatch, crate::sequencer::SceneId) -> Option<S>,
-    write: impl FnOnce(&crate::sequencer::SequencerState, &S) -> Result<S, String>,
-    patch: impl FnOnce(crate::sequencer::SceneId, S, S) -> EditPatch,
+    (site, after): (K, S),
+    staged: impl FnOnce(&EditPatch, K) -> Option<S>,
+    write: impl FnOnce(&mut App, &S) -> Result<S, String>,
+    patch: impl FnOnce(K, S, S) -> EditPatch,
 ) -> Result<EditOutcome, EditError> {
-    let scene = app
-        .state
-        .current_scene_id()
-        .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))?;
-    let staged_before =
-        (app.history.active_gesture_patch(&merge_key)).and_then(|patch| staged(patch, scene));
-    let current = write(&app.state, &after).map_err(EditError::ReplayFailed)?;
+    let staged_entry =
+        (app.history.active_gesture_patch(&merge_key)).map(|patch| staged(patch, site));
+    let staged_before = match staged_entry {
+        Some(None) => {
+            // The gesture's entry names another site (a scene or pattern
+            // switched mid-drag): keep it as an entry of its own.
+            finish_active_gesture(app);
+            None
+        }
+        Some(before) => before,
+        None => None,
+    };
+    let current = write(app, &after).map_err(EditError::ReplayFailed)?;
     let unchanged = current == after;
     let before = staged_before.unwrap_or(current);
     if before == after {
@@ -8275,7 +8394,7 @@ fn stage_field_edit<S: PartialEq>(
             EditOutcome::AppliedUnrecorded
         });
     }
-    let patch = patch(scene, before, after);
+    let patch = patch(site, before, after);
     let retained_bytes = edit_patch_retained_bytes(&patch);
     ensure_coalescing_gesture(app, &merge_key);
     let history_move = app
@@ -10408,6 +10527,22 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackMacro(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack macro replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            let track = (app.track_registry.index_of(patch.track))
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            (app.write_rack_macro_field(track, patch.pattern, patch.macro_id, target))
+                .map(|_| ())
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::NeuralNetwork(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -10604,6 +10739,9 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::GraphNodeProcessChain(_)
         | EditPatch::GraphOverride(_)
         | EditPatch::NeuralNetwork(_) => true,
+        // Its writes publish what the scheduler reads (a mapping edit) or
+        // reach the runtime values directly (a value).
+        EditPatch::RackMacro(_) => false,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -11108,6 +11246,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::GraphNodeProcessChain(patch) => patch.retained_bytes(),
         EditPatch::GraphOverride(patch) => patch.retained_bytes(),
         EditPatch::NeuralNetwork(patch) => patch.retained_bytes(),
+        EditPatch::RackMacro(patch) => patch.retained_bytes(),
     }
 }
 
@@ -11267,7 +11406,8 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         | EditPatch::SceneSlots(_)
         | EditPatch::GraphNodeProcessChain(_)
         | EditPatch::GraphOverride(_)
-        | EditPatch::NeuralNetwork(_) => {
+        | EditPatch::NeuralNetwork(_)
+        | EditPatch::RackMacro(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {

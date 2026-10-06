@@ -2471,7 +2471,8 @@ Built (7b-2):
   `(unlock-strip! d field steps)` (`set-device-strip-locks` /
   `clear-device-strip-locks`; `field` `gain`, `pan`, `muted` or
   `soloed`, `v` under the field's rule, steps of the device's track)
-  act on the steps that differ through `SetRackSlotParamPlockMulti` /
+  act on the steps that differ (`lock_steps`, shared with
+  `lock-rack-macro!`, §14.2g) through `SetRackSlotParamPlockMulti` /
   `ClearRackSlotParamPlockMulti` (one undo entry), refreshed like
   `set-rack-slot-param-plock` (`rack_slot_plock_applied`, shared) plus
   the steps' p-lock presence. Deleting a rack slot now forgets its
@@ -2536,7 +2537,9 @@ macro's `device-target` and `:macro`; `:mapping`, `:field`); all but [d] in
 `host_commands/panel.rs`. Actions: `(set-tensor-cell! tz cell v)`
 (`set-device-tensor`), `(stamp-variant! t steps v)` (`stamp-variant`, nil
 `v` clears the steps' variant locks), `(stamp-key-variant! d notes v)`
-(`stamp-key-variant`, nil `v` clears).
+(`stamp-key-variant`, nil `v` clears), `(lock-rack-macro! rm steps v)` /
+`(unlock-rack-macro! rm steps)` (`set-rack-macro-locks` /
+`clear-rack-macro-locks`, eseq-0l17.57).
 
 Built (7b-3):
 
@@ -2663,10 +2666,70 @@ Built (7b-3):
   `MacroSetCurve` (one undo entry each); its value through
   `MacroSetValue`, a performance control with no undo entry (as the macro
   panel's). A rack macro's name, base and mappings go through the rack
-  panel's edits, which are not recorded (eseq-0l17.44), with their legacy
-  refreshes (`rename_rack_macro_reactive`, shared with
-  `rename-rack-macro`); a rack macro's locks are the rack panel's p-lock
-  commands.
+  panel's edit, recorded since eseq-0l17.44 (below); a rack macro's locks
+  are actions (eseq-0l17.57, below).
+- **Recorded rack macro edits** (built by eseq-0l17.44). A rack macro's
+  name, base (`value`), and a mapping's range and curve are one recorded
+  edit, `App::apply_rack_macro_edit` (a `RackMacroField`: `Name`, `Value`,
+  `Range { target, min, max }`, `Curve { target, curve }`; a mapping is
+  named by its `RackMacroTarget`, which a macro maps at most once, so an
+  edit keeps naming its mapping when an earlier one is unmapped), a
+  field-granular patch like the graph override and neural field edits
+  (`stage_field_edit`, now keyed by a site: the current scene for those,
+  a pattern here). The pattern is the one the live rack mirrors
+  (`mirror_device_pattern_id`, as step and track param edits resolve it:
+  a bound take's while a sound binding borrows the lane).
+  `EditPatch::RackMacro` keeps the field before and after, keyed
+  (`TrackId`, pattern, macro), so replay writes that field alone, in
+  place under one scenes lock, into the rack macros of the Patch that
+  pattern plays (`SequencerState::write_rack_macro_field`; the patterns'
+  p-locks untouched), and into the live rack whenever the mirrored
+  pattern plays the same Patch (a shared Patch entity counts: an undo
+  after switching to a pattern sharing it reaches the live rack), with
+  the rack panel's side effects when the live rack changed (a value: the
+  runtime default and the transient target values; a mapping: a
+  scheduler publish), never the macro's locks or other mappings. A
+  mapping no longer mapped is a replay error that changes nothing. Every
+  edit stages a coalescing gesture keyed by the field
+  (`rack-macro:<track id>:<macro>:<field>`, a mapping by its target's
+  address), so a drag's writes join one entry that keeps the value from
+  before the drag, and a drag back to where it started records nothing;
+  when the site moved under the open gesture (a scene or pattern switched
+  mid-drag; graph and neural edits too), `stage_field_edit` finishes the
+  old entry first, so each site keeps an entry of its own. The rack
+  panel's `set-rack-macro-value`, `rename-rack-macro`,
+  `set-rack-macro-range` and `set-rack-macro-curve`
+  (`apply_rack_macro_edit_reactive`: a knob drag is one entry, closed by
+  the pointer release or the idle timeout, typing a name one entry per
+  pause) and the kind setters (`set-rack-macro` `name` / `value`,
+  `set-macro-mapping` `min` / `max` / `curve` on a rack macro's mapping, as
+  `ScriptEdit`s: a `value`, `min` or `max` drag joins one entry, a name or
+  curve is its own) share one tail (`rack_macro_edit_reactive`, then the
+  refresh: a name its text field, a value the macro's and its targets'
+  value fields, a mapping the instrument panel). The value a field holds
+  is a no-op (no entry). One write path: the unrecorded value reset after
+  mapping a param (`App::set_rack_macro_value`) writes through it too (a
+  value it already holds still reaches the targets); the unrecorded
+  rename and mapping setters are gone. Mapping and unmapping a param
+  (`map-rack-macro-param`, `unmap-rack-macro-param`) stay unrecorded and
+  first finish an open gesture.
+- **Rack macro locks** (built by eseq-0l17.57). Actions, as
+  `lock-strip!` (§14.2f): `(lock-rack-macro! rm steps v)` and
+  `(unlock-rack-macro! rm steps)` (`set-rack-macro-locks` /
+  `clear-rack-macro-locks`: the rack's `device-target` and `:macro`, the
+  steps with their `:step-tracks`; `v` under the value rule (§14.2c), a
+  number in 0–1; a step of another track is an error that changes
+  nothing) act on the steps whose lock differs (or that hold one, to
+  clear) through `SetRackMacroPlockMulti` /
+  `ClearRackMacroPlockMulti`, one undo entry, nothing at all when no step
+  differs (`lock_steps`, shared with `lock-strip!`: the pending steps,
+  the command, the presence and the rows). The refresh is the rack
+  panel's `set-rack-macro-plock`'s (`refresh_rack_macro_plock_reactive`,
+  now shared and taking how the rows moved: the macro's and its targets'
+  value fields, and the p-lock rows plus one UI epoch resync only when a
+  lock lands anew on, or is cleared from, the shown step) plus the steps'
+  p-lock presence (a `StepInvalidationBatch`). `rack-macro.value`, `locked` and `has-locks`
+  follow on the next tick (the track's `PlockKey` moved).
 - **Neural selection.** While a neural neuron is selected for step
   editing, its output override shows in a track instrument's or chain
   effect's `param.value`, as in the legacy value fields
@@ -2687,8 +2750,8 @@ Built (7b-3):
   sound-binding badge and display name, a modulator instrument's phase and
   level, the fixed modulators' labels, param UI metadata, effect tables and
   IR names, the built-in effect editors (eseq-0l17.56, built: §14.2p), the meter selector,
-  scene macro config setters and `step.variant`. Rack macro edits are not
-  undoable (eseq-0l17.44).
+  scene macro config setters and `step.variant`. Rack macro edits are
+  undoable since eseq-0l17.44 (above).
 - eseqlisp strings have no `\"` escape: a quote escaped in a string (a
   `:doc` included) ends it, and the module fails to compile with no
   message.
@@ -3666,8 +3729,10 @@ Built (7e-2):
 - **Not covered:** writing a device param's or rack macro's lane points.
   A device param's are `lock-param!` / `unlock-param!` on the live steps
   (one undo entry per call: a drag of them is an entry per frame), a rack
-  macro's have no kinds action yet (legacy `set-track-plock-entry` /
-  `clear-track-plock-entry` with `:target rack-macro`).
+  macro's `lock-rack-macro!` / `unlock-rack-macro!` (built by
+  eseq-0l17.57, §14.2g; the factory lane still sends the legacy
+  `set-track-plock-entry` / `clear-track-plock-entry` with `:target
+  rack-macro` until its port, .16).
 
 ### 14.2o Built in stage 7d-2 (eseq-0l17.39)
 
@@ -3991,7 +4056,8 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7b-4 | eseq-0l17.43 (built) | the rest of the panel data: sampler media (rack slot selection included), sound binding, display name, meter selector, fixed modulators and the modulator envelope, tables and IR names, param UI metadata, scene macro config setters and `diff-count`, `step.variant` | .14 .18 |
 | 7b-5 | eseq-0l17.56 (built) | the built-in effect editors' host state: the `table-editor` singleton (the Filter Table response editor session) and its actions | .14 |
-| 7b-3a | eseq-0l17.44 | recorded (undoable) drum rack macro edits | .18 |
+| 7b-3a | eseq-0l17.44 (built) | recorded (undoable) drum rack macro edits: name, base, mapping range and curve (`App::apply_rack_macro_edit`, `EditPatch::RackMacro`), shared by the rack panel's commands and the kind setters | .18 |
+| 7b-3b | eseq-0l17.57 (built) | rack macro p-lock actions: `lock-rack-macro!` / `unlock-rack-macro!` (`SetRackMacroPlockMulti` / `ClearRackMacroPlockMulti`, one undo entry) | .16 |
 | 7c | eseq-0l17.29 (built) | `process` (a track's chain), `lane`, `inlet`, `port`, `fanout`, `state-cell`, `process-class`, `process-library`; `track.processes` / `lanes` | .11 .14 .20 |
 | 7c-2 | eseq-0l17.45 (built) | graph-node process slot probes and run errors (the node bay's scopes): `process.error`, `state-cell.values` of `n.processes` | .11 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |

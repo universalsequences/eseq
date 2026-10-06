@@ -1689,7 +1689,8 @@
         // Select-all + Backspace, replacement typing (including a space),
         // and individual Backspaces all publish on-change values verbatim.
         for text in ["", "M", "Ma", "Macro", "Macro ", "Macro Q", "M", ""] {
-            assert!(app.rename_rack_macro(0, id, text.to_string()));
+            let name = crate::sequencer::RackMacroField::Name(text.to_string());
+            app.apply_rack_macro_edit(0, id, name).expect("rename the macro");
             let actual = app.state.pattern.rack_tracks.lock().unwrap()[0]
                 .as_ref().unwrap().macros[0].clone();
             let mut expected = before.clone();
@@ -2151,7 +2152,8 @@
             } else {
                 format!("Tone {}", rack_macro.id.index())
             };
-            assert!(app.rename_rack_macro(0, rack_macro.id, name));
+            let name = crate::sequencer::RackMacroField::Name(name);
+            app.apply_rack_macro_edit(0, rack_macro.id, name).expect("rename the macro");
         }
         let expected = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref().unwrap().macros.clone();

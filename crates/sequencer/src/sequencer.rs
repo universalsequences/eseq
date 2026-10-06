@@ -56,7 +56,7 @@ pub use state::{
     GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, RackClip, RackClipBank, RackClipId, PublishedSequencer, RackMacro, RackMacroCurve,
     ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES, SCENE_TRANSPOSE_SLOT,
     rack_choke_key,
-    RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,
+    RackMacroField, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,
     RackSlotParamPlocks, RackSlotSnapshot, RackSlotValuesSnapshot, RackTrackSnapshot,
     RackMacroPatternStateSnapshot, RackSlotPatternStateSnapshot, RecordPosition, SequencerState,
     StepCellSnapshot,

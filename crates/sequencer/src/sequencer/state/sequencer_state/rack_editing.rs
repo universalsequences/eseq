@@ -939,6 +939,65 @@ impl SequencerState {
         updated
     }
 
+    /// Write `field` of rack macro `id` into the rack macros of the Patch
+    /// `track`'s pattern `pattern` plays and, when the live rack mirrors
+    /// that Patch (the pattern the device panel shows, a bound take's or
+    /// any pattern sharing its Patch), into the live rack too (a recorded
+    /// rack macro edit and its replay, eseq-0l17.44). Returns the field's
+    /// value before and whether the live rack mirrors the Patch; a field
+    /// that already holds the value writes nothing. Written in place under
+    /// one scenes lock (the patterns' p-locks are left alone); a field the
+    /// live rack cannot take is an error that changes nothing.
+    pub fn write_rack_macro_field(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        id: RackMacroId,
+        field: &RackMacroField,
+    ) -> Result<(RackMacroField, bool), String> {
+        let live_takes_it = {
+            let racks = self.pattern.rack_tracks.lock().unwrap();
+            let rack = racks.get(track).and_then(Option::as_ref);
+            let rack_macro = rack.and_then(|rack| rack.macros.get(id.index()));
+            rack_macro.is_some_and(|rack_macro| field.read(rack_macro).is_ok())
+        };
+        let (before, live) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let mirror = self.mirror_device_pattern_id(track, &scenes);
+            let pool = scenes
+                .track_pools
+                .get_mut(track)
+                .ok_or("the track has no pattern pool")?;
+            let patch = pool.refs(pattern).ok_or("the pattern is gone")?.patch;
+            let mirrored = mirror.and_then(|mirror| pool.refs(mirror));
+            let live = mirrored.is_some_and(|refs| refs.patch == patch);
+            let rack_macro = (pool.patch(pattern))
+                .and_then(|patch| patch.rack_track.as_ref())
+                .and_then(|rack| rack.macros.get(id.index()))
+                .ok_or("no such macro")?;
+            let before = field.read(rack_macro)?;
+            if before == *field {
+                return Ok((before, live));
+            }
+            if live && !live_takes_it {
+                return Err("the live rack cannot take the edit".to_string());
+            }
+            let rack_macro = (pool.patch_mut(pattern))
+                .and_then(|patch| patch.rack_track.as_mut())
+                .and_then(|rack| rack.macros.get_mut(id.index()))
+                .ok_or("no such macro")?;
+            field.write(rack_macro)?;
+            (before, live)
+        };
+        if live {
+            let mut racks = self.pattern.rack_tracks.lock().unwrap();
+            let rack = racks.get_mut(track).and_then(Option::as_mut);
+            let rack_macro = rack.and_then(|rack| rack.macros.get_mut(id.index()));
+            field.write(rack_macro.ok_or("the live rack has no such macro")?)?;
+        }
+        Ok((before, live))
+    }
+
     pub fn set_live_rack_macro_default(&self, track: usize, id: RackMacroId, value: f32) {
         self.rack_macro_runtime_values.set_live_default(track, id, value);
     }

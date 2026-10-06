@@ -1148,21 +1148,6 @@ impl App {
         slot_exists && wrote
     }
 
-    pub fn rename_rack_macro(
-        &mut self,
-        track: usize,
-        id: crate::sequencer::RackMacroId,
-        name: String,
-    ) -> bool {
-        // This is a live text-input value, not a submitted identifier.
-        // Preserve empty text and spaces so clearing/replacing a label works;
-        // macro identity and mappings are carried by RackMacroId, not its name.
-        self.state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.name = name.clone()
-            })
-    }
-
     pub fn set_rack_macro_plock(
         &mut self,
         track: usize,
@@ -1209,6 +1194,8 @@ impl App {
         id: crate::sequencer::RackMacroId,
         mapping: crate::sequencer::RackMacroMapping,
     ) -> Result<(), String> {
+        // Unrecorded: a rack macro edit's open gesture ends before it.
+        super::edit::finish_active_gesture(self);
         if !mapping.range_min.is_finite() || !mapping.range_max.is_finite() {
             return Err("Rack macro mapping range must be finite".to_string());
         }
@@ -1240,74 +1227,22 @@ impl App {
         Ok(())
     }
 
-    pub fn set_rack_macro_mapping_range(
-        &mut self,
+    /// The target of mapping `mapping` of rack macro `id` of `track` (the
+    /// live rack's), which a recorded range or curve edit names it by.
+    pub fn rack_macro_mapping_target(
+        &self,
         track: usize,
         id: crate::sequencer::RackMacroId,
-        mapping_idx: usize,
-        range_min: f32,
-        range_max: f32,
-    ) -> bool {
-        if !range_min.is_finite() || !range_max.is_finite() {
-            return false;
-        }
-        let mapping_exists = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .and_then(|rack| rack.macros.get(id.index()))
-            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
-        if !mapping_exists {
-            return false;
-        }
-        let updated = self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                let mapping = &mut rack_macro.mappings[mapping_idx];
-                mapping.range_min = range_min;
-                mapping.range_max = range_max;
-            });
-        if updated {
-            self.state.publish_scheduler_snapshot();
-        }
-        updated
+        mapping: usize,
+    ) -> Option<crate::sequencer::RackMacroTarget> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let rack_macro = racks.get(track)?.as_ref()?.macros.get(id.index())?;
+        Some(rack_macro.mappings.get(mapping)?.target.clone())
     }
 
-    pub fn set_rack_macro_mapping_curve(
-        &mut self,
-        track: usize,
-        id: crate::sequencer::RackMacroId,
-        mapping_idx: usize,
-        curve: crate::sequencer::RackMacroCurve,
-    ) -> bool {
-        let mapping_exists = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .and_then(|rack| rack.macros.get(id.index()))
-            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
-        if !mapping_exists {
-            return false;
-        }
-        let updated = self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.mappings[mapping_idx].curve = curve;
-            });
-        if updated {
-            self.state.publish_scheduler_snapshot();
-        }
-        updated
-    }
-
+    /// Set rack macro `id`'s own value (clamped to 0–1), unrecorded (a
+    /// fresh mapping's reset), through the recorded edit's write; a value
+    /// it already holds still reaches its targets.
     pub fn set_rack_macro_value(
         &mut self,
         track: usize,
@@ -1315,14 +1250,17 @@ impl App {
         value: f32,
     ) -> bool {
         let value = value.clamp(0.0, 1.0);
-        if !self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| rack_macro.value = value)
-        {
+        let field = crate::sequencer::RackMacroField::Value(value);
+        let Some(pattern) = self.rack_macro_pattern(track) else {
             return false;
+        };
+        let Ok(before) = self.write_rack_macro_field(track, pattern, id, &field) else {
+            return false;
+        };
+        if before == field {
+            self.state.set_live_rack_macro_default(track, id, value);
+            self.send_transient_rack_macro_value(track, id, value);
         }
-        self.state.set_live_rack_macro_default(track, id, value);
-        self.send_transient_rack_macro_value(track, id, value);
         true
     }
 
@@ -1454,6 +1392,8 @@ impl App {
         id: crate::sequencer::RackMacroId,
         mapping_idx: usize,
     ) -> bool {
+        // Unrecorded: a rack macro edit's open gesture ends before it.
+        super::edit::finish_active_gesture(self);
         let exists = self
             .state
             .pattern

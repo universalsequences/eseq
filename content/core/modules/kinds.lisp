@@ -39,6 +39,7 @@
         tracks scenes banks buses groups routes macros
         launch! clone-scene! delete-scene! step-preset!
         device-param lock-param! unlock-param! lock-strip! unlock-strip!
+        lock-rack-macro! unlock-rack-macro!
         set-tensor-cell! stamp-variant! stamp-key-variant!
         lock-none lock-seq lock-variant
         reset-tuning! justify-tuning! randomize-tuning! stretch-tuning!
@@ -547,7 +548,7 @@
          (name   :string :set (rack-macro-setter "name"))
          (value  :number :range (0 1) :doc "The value shown: the p-lock at the displayed step, else base under any engaged project macro")
          (base   :number :range (0 1) :set (rack-macro-setter "value")
-                 :doc "The macro's own value (setting it never p-locks)")
+                 :doc "The macro's own value (setting it never p-locks; lock-rack-macro! does). A drag's set!s join one undo entry")
          (locked :bool :doc "value comes from a p-lock")
          (has-locks :bool :doc "Some step of the track's pattern locks it")
          (step-locks (list-of (list-of :number)) :doc "The p-locks of the track's pattern, (step value) per locked step, ascending")
@@ -1878,6 +1879,22 @@
   (host-command "clear-device-strip-locks"
     (merge (device-target d)
            :field field :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps))))
+
+;; P-lock rack macro rm to v (0-1) on steps, a list of step instances of its
+;; rack's track (any other track's step is an error); one undo entry. Steps
+;; already locked to v are left alone.
+(def lock-rack-macro! (rm steps v)
+  (host-command "set-rack-macro-locks"
+    (merge (device-target rm.device)
+           :macro rm.index :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps) :value v)))
+
+;; Clear rack macro rm's p-locks on steps; one undo entry.
+(def unlock-rack-macro! (rm steps)
+  (host-command "clear-rack-macro-locks"
+    (merge (device-target rm.device)
+           :macro rm.index :steps (map (lambda (s) s.index) steps)
            :step-tracks (map (lambda (s) s.track.tid) steps))))
 
 ;; Set cell cell (row * tz.cols + col) of tensor tz to v (the device's own

@@ -176,6 +176,8 @@ pub(super) fn apply_rack_macro_rename_host_command(
     editor: &mut Editor,
     app: &mut app::App,
     map: &HashMap<String, Rc<RefCell<Value>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
 ) {
     let (Some(track), Some(id), Some(name)) = (
         map_usize(map, "track"), map_usize(map, "id"),
@@ -185,27 +187,81 @@ pub(super) fn apply_rack_macro_rename_host_command(
         }),
     ) else { return; };
     let Some(id) = sequencer::sequencer::RackMacroId::from_index(id) else { return; };
-    rename_rack_macro_reactive(editor, app, track, id, name);
+    let name = sequencer::sequencer::RackMacroField::Name(name);
+    apply_rack_macro_edit_reactive(editor, app, track, id, name, selected_steps, ui_epoch);
 }
 
-/// Rename rack macro `id` of `track` and publish its name field; returns
-/// whether it changed. Shared by `rename-rack-macro` and the host kinds'
-/// `set-rack-macro`.
-pub(super) fn rename_rack_macro_reactive(
+/// The rack panel's rack macro edit (`set-rack-macro-value`,
+/// `rename-rack-macro`, `set-rack-macro-range`, `set-rack-macro-curve`):
+/// `field` of rack macro `id` of `track` through history
+/// (`App::apply_rack_macro_edit`: a drag joins one entry), then its
+/// refresh; returns whether the model changed.
+pub(super) fn apply_rack_macro_edit_reactive(
     editor: &mut Editor,
     app: &mut app::App,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
-    name: String,
+    field: sequencer::sequencer::RackMacroField,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
 ) -> bool {
-    if !app.rename_rack_macro(track, id, name) {
-        return false;
+    let fields = (selected_steps, ui_epoch);
+    let changed =
+        rack_macro_edit_reactive(editor, app, (track, id), field, fields, |app, field| {
+            let outcome = app.apply_rack_macro_edit(track, id, field);
+            outcome
+                .map(|outcome| outcome.changed())
+                .map_err(|error| format!("{error:?}"))
+        });
+    changed.unwrap_or(false)
+}
+
+/// A rack macro edit: `field` of rack macro `id` of `track`, recorded by
+/// `record` (which returns whether the model changed: the rack panel's
+/// plain `App::apply_rack_macro_edit`, or a script's `ScriptEdit`), then
+/// its refresh (`rack_macro_edit_applied`) when it did. Shared by the rack
+/// panel's commands and the host kinds' setters.
+pub(super) fn rack_macro_edit_reactive(
+    editor: &mut Editor,
+    app: &mut app::App,
+    (track, id): (usize, sequencer::sequencer::RackMacroId),
+    field: sequencer::sequencer::RackMacroField,
+    (selected_steps, ui_epoch): (&Arc<Mutex<HashSet<usize>>>, &AtomicUsize),
+    record: impl FnOnce(&mut app::App, sequencer::sequencer::RackMacroField) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let changed = record(app, field.clone())?;
+    if changed {
+        rack_macro_edit_applied(editor, app, track, id, &field, selected_steps, ui_epoch);
     }
-    // A label edit cannot change rack topology, locks, or DSP. Publish only
-    // its text fields; an epoch bump resyncs the entire project.
-    let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
-    flush_reactive_display_edit(editor, dirty);
-    true
+    Ok(changed)
+}
+
+/// Publish what an edit of `field` of rack macro `id` of `track` changed:
+/// a name its text field alone (a label edit cannot change rack topology,
+/// locks or DSP; an epoch bump resyncs the entire project), a value the
+/// macro's and its targets' value fields, a mapping the instrument panel.
+fn rack_macro_edit_applied(
+    editor: &mut Editor,
+    app: &app::App,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+    field: &sequencer::sequencer::RackMacroField,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
+) {
+    use sequencer::sequencer::RackMacroField;
+    match field {
+        RackMacroField::Name(_) => {
+            let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
+            flush_reactive_display_edit(editor, dirty);
+        }
+        RackMacroField::Value(_) => {
+            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps);
+        }
+        RackMacroField::Range { .. } | RackMacroField::Curve { .. } => {
+            refresh_instrument_panel_reactive(editor, app, track, selected_steps, ui_epoch);
+        }
+    }
 }
 
 pub(super) fn refresh_rack_macro_value_reactive(
@@ -225,6 +281,15 @@ pub(super) fn refresh_rack_macro_value_reactive(
     flush_reactive_display_edit(editor, dirty);
 }
 
+/// After a rack macro p-lock edit (the rack panel's `set-rack-macro-plock`,
+/// the host kinds' `lock-rack-macro!` / `unlock-rack-macro!`): the macro's
+/// and its targets' value fields. Same policy as
+/// `refresh_rack_direct_param_reactive`: the macro knob and its mapped
+/// targets repaint through bound value fields, so only a write that moves
+/// the shown step's p-lock rows (`RowSetChanged`: a first lock there, or a
+/// clear) republishes them and runs the epoch-driven resync. A macro is
+/// always continuous, so the *fx* tree never needs a structural
+/// (`fx_epoch`) rebuild for it.
 pub(super) fn refresh_rack_macro_plock_reactive(
     editor: &mut Editor,
     app: &app::App,
@@ -232,13 +297,15 @@ pub(super) fn refresh_rack_macro_plock_reactive(
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    rebuild_plock_rows: bool,
+    ui_epoch: &AtomicUsize,
+    plock_rows: RackPlockRowsSync,
 ) {
     let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
     let rt = editor.runtime_mut();
     let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
     dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
-    if rebuild_plock_rows {
+    let rows_moved = plock_rows == RackPlockRowsSync::RowSetChanged;
+    if rows_moved {
         let result = rt.set_reactive(
             "SEQ",
             "track-plocks",
@@ -247,6 +314,9 @@ pub(super) fn refresh_rack_macro_plock_reactive(
         dirty |= result.effects_dirty || result.widgets_dirty;
     }
     flush_reactive_display_edit(editor, dirty);
+    if rows_moved {
+        ui_epoch.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -404,10 +474,16 @@ pub(super) fn apply_rack_macro_host_command(
     };
     match name {
         "set-rack-macro-value" => {
-            if !app.set_rack_macro_value(track, id, value) {
-                return false;
-            }
-            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps);
+            let value = sequencer::sequencer::RackMacroField::Value(value.clamp(0.0, 1.0));
+            return apply_rack_macro_edit_reactive(
+                editor,
+                app,
+                track,
+                id,
+                value,
+                selected_steps,
+                ui_epoch,
+            );
         }
         "set-rack-macro-plock" => {
             let steps = selected_steps
@@ -448,17 +524,9 @@ pub(super) fn apply_rack_macro_host_command(
                 track,
                 id,
                 selected_steps,
-                !plock_row_exists,
+                ui_epoch,
+                RackPlockRowsSync::for_plock_write(plock_row_exists),
             );
-            // Same policy as `refresh_rack_direct_param_reactive`: the macro
-            // knob and its mapped targets repaint through bound value fields,
-            // so only the first write of the lock (new *step* row, new
-            // step-grid presence tick) runs the epoch-driven resync. A macro
-            // is always continuous, so the *fx* tree never needs a
-            // structural (`fx_epoch`) rebuild for it.
-            if !plock_row_exists {
-                ui_epoch.fetch_add(1, Ordering::Relaxed);
-            }
         }
         _ => return false,
     }

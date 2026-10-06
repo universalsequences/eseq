@@ -274,6 +274,61 @@ fn plock_rows(
     }
 }
 
+/// A lock edit (`lock-strip!`, `lock-rack-macro!` and their clears) of
+/// `steps` of `track`: `held` the locks the target holds now, by step;
+/// `lock` the lock to set, or `None` to clear.
+pub(super) struct StepLocks {
+    pub(super) track: usize,
+    pub(super) steps: Vec<usize>,
+    pub(super) held: Vec<Option<f32>>,
+    pub(super) lock: Option<f32>,
+}
+
+/// Apply a lock edit to the steps whose lock differs (or that hold one, to
+/// clear): the command `command` builds for them, as one script edit (one
+/// undo entry; nothing at all when no step differs), then the steps' p-lock
+/// presence and `refresh`, given how the shown step's p-lock rows moved.
+pub(super) fn lock_steps(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    locks: StepLocks,
+    command: impl FnOnce(Vec<usize>) -> app::AppCommand,
+    refresh: impl FnOnce(&mut Editor, &app::App, &mut LoopCtx<'_>, RackPlockRowsSync),
+) {
+    let StepLocks {
+        track,
+        steps,
+        held,
+        lock,
+    } = locks;
+    let held = |step: usize| held.get(step).copied().flatten();
+    // The step the rack panel shows, and whether it held a lock before
+    // (its p-lock rows move when a lock lands there anew or is cleared).
+    let shared = ctx.shared;
+    let selected = selected_plock_step(&shared.selected_steps);
+    let shown = displayed_plock_step(&shared.state, track, selected);
+    let shown_locked = shown.is_some_and(|step| held(step).is_some());
+    let steps = pending_steps(&steps, held, lock);
+    if steps.is_empty() {
+        return;
+    }
+    let script = ScriptEdit::begin(app, ctx);
+    let changed = script.apply(app, command(steps.clone()));
+    if changed {
+        let rows = plock_rows(shown, shown_locked, &steps, lock.is_some());
+        shared
+            .ui_invalidations
+            .push(UiInvalidation::StepInvalidationBatch {
+                track,
+                steps,
+                change: StepInvalidation::PlockPresence,
+            });
+        refresh(editor, app, ctx, rows);
+    }
+    script.end(app, ctx, false, changed);
+}
+
 /// Set a device param's base (stored units) through its family's history
 /// edit and refresh what shows it; returns whether the model changed.
 fn base_edit(
@@ -452,58 +507,48 @@ fn strip_lock_edit(
     let (DeviceSlot::RackSlot(slot_idx), Some(track_id)) = (device, track_id) else {
         return Err(format!("a {} has no strip controls", device.role()));
     };
-    let locking = name == "set-device-strip-locks";
-    let lock = match locking {
+    let lock = match name == "set-device-strip-locks" {
         true => Some(control.parse(&value)?.number()),
         false => None,
     };
     let steps = super::track_steps(map, track_id, "the device's track")?;
     let track = owner;
-    let state = app.state.clone();
-    // The step the rack panel shows, and whether it held a lock before
-    // (its p-lock rows move when a lock lands there anew or is cleared).
-    let shown = displayed_plock_step(
-        &state,
-        track,
-        selected_plock_step(&ctx.shared.selected_steps),
-    );
-    let (steps, shown_locked) = with_rack_slot(&state, track, slot_idx, |_, slot| {
-        let held = |step| slot.param_plocks.get(step, param);
-        let shown_locked = shown.is_some_and(|step| held(step).is_some());
-        (pending_steps(&steps, held, lock), shown_locked)
+    let held = with_rack_slot(&app.state, track, slot_idx, |_, slot| {
+        (0..MAX_STEPS)
+            .map(|step| slot.param_plocks.get(step, param))
+            .collect()
     })
     .ok_or("the device is gone")?;
-    if steps.is_empty() {
-        return Ok(());
-    }
-    let command = match lock {
+    let locks = StepLocks {
+        track,
+        steps,
+        held,
+        lock,
+    };
+    let command = |steps| match lock {
         Some(value) => app::AppCommand::SetRackSlotParamPlockMulti {
             track,
             slot_idx,
-            steps: steps.clone(),
+            steps,
             param,
             value,
         },
         None => app::AppCommand::ClearRackSlotParamPlockMulti {
             track,
             slot_idx,
-            steps: steps.clone(),
+            steps,
             param,
         },
     };
-    let script = ScriptEdit::begin(app, ctx);
-    let changed = script.apply(app, command);
-    if changed {
-        let rows = plock_rows(shown, shown_locked, &steps, locking);
-        ctx.shared
-            .ui_invalidations
-            .push(UiInvalidation::StepInvalidationBatch {
-                track,
-                steps,
-                change: StepInvalidation::PlockPresence,
-            });
-        rack_slot_plock_applied(editor, app, ctx, track, slot_idx, param, rows);
-    }
-    script.end(app, ctx, false, changed);
+    lock_steps(
+        app,
+        editor,
+        ctx,
+        locks,
+        command,
+        |editor, app, ctx, rows| {
+            rack_slot_plock_applied(editor, app, ctx, track, slot_idx, param, rows)
+        },
+    );
     Ok(())
 }

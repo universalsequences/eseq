@@ -4,8 +4,9 @@
 //! `set-macro` (a project macro's `name` and `value`, a scene macro's
 //! `target-scene`, `morph-params`, `steal-patterns`, `quantize` and
 //! `tracks`), `set-rack-macro` (a
-//! drum rack macro's `name` and `base`) and `set-macro-mapping` (a
-//! mapping's `min`, `max` and `curve`).
+//! drum rack macro's `name` and `base`), `set-macro-mapping` (a
+//! mapping's `min`, `max` and `curve`) and `set-rack-macro-locks` /
+//! `clear-rack-macro-locks` (`lock-rack-macro!` / `unlock-rack-macro!`).
 //!
 //! Everything is named by stable ids resolved when the command lands: a
 //! device by its owner's id and `did` (as `set-device`), a track by its
@@ -20,9 +21,10 @@
 //! undo entry each; a tensor drag's `set!`s join one, as `ScriptEdit`), a project
 //! macro's value as the macro panel's performance control (no undo entry),
 //! and a rack macro's name, value and mappings through the rack panel's
-//! (unrecorded) edits, with their legacy refreshes.
+//! recorded edit (`App::apply_rack_macro_edit`, eseq-0l17.44: one entry
+//! each, a value or range drag's `set!`s join one), with its refreshes.
 
-use super::devices::{addressed, Addressed};
+use super::devices::{addressed, lock_steps, Addressed, StepLocks};
 use super::instrument_params::{key_variant_command, sync_instrument_tensor_display};
 use super::step_history::{stamp_step_variant, step_list, variant_edit_applied};
 use super::track_settings::SetValue;
@@ -37,6 +39,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-macro",
     "set-rack-macro",
     "set-macro-mapping",
+    "set-rack-macro-locks",
+    "clear-rack-macro-locks",
 ];
 
 type Payload = HashMap<String, Rc<RefCell<Value>>>;
@@ -57,7 +61,11 @@ pub(super) fn handle(
         "stamp-key-variant" => stamp_key_variant(map, app, ctx),
         "set-macro" => macro_edit(map, app, ctx),
         "set-rack-macro" => rack_macro_edit(map, app, editor, ctx),
-        _ => mapping_edit(map, app, editor, ctx),
+        "set-macro-mapping" => mapping_edit(map, app, editor, ctx),
+        "set-rack-macro-locks" | "clear-rack-macro-locks" => {
+            rack_macro_lock_edit(name, map, app, editor, ctx)
+        }
+        other => Err(format!("{other} is no panel command")),
     };
     if let Err(message) = result {
         editor.handle_host_event(HostEvent::Error(format!("{name}: {message}")));
@@ -389,29 +397,99 @@ fn rack_macro_edit(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
+    use sequencer::sequencer::RackMacroField;
     let (track, id) = rack_macro(app, map)?;
     let (field, value) = SetValue::field(map)?;
-    let (name, base) = with_rack_macro(app, track, id, |_, rack_macro| {
-        (rack_macro.name.clone(), rack_macro.value)
-    })
-    .ok_or("the macro is gone")?;
-    match field.as_str() {
-        "name" => {
-            // A live text field, as the rack panel's: any text (even empty).
-            let next = value.label()?;
-            if name != next {
-                rename_rack_macro_reactive(editor, app, track, id, next.to_string());
-            }
-        }
-        "value" => {
-            let next = value.number(0.0, 1.0)? as f32;
-            if base != next && app.set_rack_macro_value(track, id, next) {
-                let selected = &ctx.shared.selected_steps;
-                refresh_rack_macro_value_reactive(editor, app, track, id, selected);
-            }
-        }
+    let field = match field.as_str() {
+        // A live text field, as the rack panel's: any text (even empty).
+        "name" => RackMacroField::Name(value.label()?.to_string()),
+        "value" => RackMacroField::Value(value.number(0.0, 1.0)? as f32),
         other => return Err(format!("a rack macro has no settable field {other}")),
-    }
+    };
+    record_rack_macro_edit(app, editor, ctx, track, id, field)
+}
+
+/// A host kind setter's rack macro edit: `field` of rack macro `id` of
+/// `track` through history as a script edit (a value or range drag joins
+/// one entry), then the rack panel's refresh.
+fn record_rack_macro_edit(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+    field: sequencer::sequencer::RackMacroField,
+) -> Result<(), String> {
+    use sequencer::sequencer::RackMacroField;
+    let continuous = match field {
+        RackMacroField::Value(_) | RackMacroField::Range { .. } => true,
+        RackMacroField::Name(_) | RackMacroField::Curve { .. } => false,
+    };
+    let shared = ctx.shared;
+    let fields = (&shared.selected_steps, &*shared.ui_epoch);
+    rack_macro_edit_reactive(editor, app, (track, id), field, fields, |app, field| {
+        ScriptEdit::run(app, ctx, continuous, |app| {
+            app.apply_rack_macro_edit(track, id, field)
+        })
+    })
+    .map(|_| ())
+}
+
+/// `set-rack-macro-locks` / `clear-rack-macro-locks` (`device-target`,
+/// `:macro`, `:steps` with their `:step-tracks`, and a lock's `:value`, a
+/// number in 0–1): the steps whose lock differs (or that hold one, to
+/// clear) through `SetRackMacroPlockMulti` / `ClearRackMacroPlockMulti`,
+/// one undo entry, refreshed as the rack panel's `set-rack-macro-plock`
+/// plus the steps' p-lock presence (as `lock-strip!`).
+fn rack_macro_lock_edit(
+    name: &str,
+    map: &Payload,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<(), String> {
+    let (track, id) = rack_macro(app, map)?;
+    let track_id = app.track_registry.id_at(track).ok_or("the track is gone")?;
+    let lock = match name == "set-rack-macro-locks" {
+        true => Some(SetValue::of(map, "value", "value").number(0.0, 1.0)? as f32),
+        false => None,
+    };
+    let steps = super::track_steps(map, track_id, "the device's track")?;
+    let held = with_rack_macro(app, track, id, |_, rack_macro| rack_macro.plocks.clone())
+        .ok_or("the macro is gone")?;
+    let locks = StepLocks {
+        track,
+        steps,
+        held,
+        lock,
+    };
+    let macro_idx = id.index();
+    let command = |steps| match lock {
+        Some(value) => app::AppCommand::SetRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx,
+            value,
+        },
+        None => app::AppCommand::ClearRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx,
+        },
+    };
+    lock_steps(
+        app,
+        editor,
+        ctx,
+        locks,
+        command,
+        |editor, app, ctx, rows| {
+            let shared = ctx.shared;
+            let (state, selected, epoch) =
+                (&shared.state, &shared.selected_steps, &shared.ui_epoch);
+            refresh_rack_macro_plock_reactive(editor, app, state, track, id, selected, epoch, rows);
+        },
+    );
     Ok(())
 }
 
@@ -481,6 +559,7 @@ fn mapping_edit(
         script.end(app, ctx, field != "curve", changed);
         return Ok(());
     }
+    use sequencer::sequencer::{RackMacroCurve, RackMacroField};
     let (track, id) = rack_macro(app, map)?;
     let mapping = with_rack_macro(app, track, id, |rack, rack_macro| {
         let mapping = rack_macro.mappings.get(mapping_idx)?.clone();
@@ -501,37 +580,30 @@ fn mapping_edit(
         hi,
         scale,
     };
-    let changed = match field.as_str() {
+    let field = match field.as_str() {
         "min" | "max" => {
             let Some((min, max)) = range.next(&value, &field)? else {
                 return Ok(());
             };
-            app.set_rack_macro_mapping_range(track, id, mapping_idx, min, max)
+            RackMacroField::Range {
+                target: mapping.target,
+                min,
+                max,
+            }
         }
         "curve" => {
-            use sequencer::sequencer::RackMacroCurve;
             let label = value.label()?;
             let Some(curve) = RackMacroCurve::from_label(label) else {
                 return value.fail(&format!("one of {:?}", RackMacroCurve::LABELS));
             };
-            if mapping.curve == curve {
-                return Ok(());
+            RackMacroField::Curve {
+                target: mapping.target,
+                curve,
             }
-            app.set_rack_macro_mapping_curve(track, id, mapping_idx, curve)
         }
         other => return Err(format!("a mapping has no settable field {other}")),
     };
-    if changed {
-        let shared = ctx.shared;
-        refresh_instrument_panel_reactive(
-            editor,
-            app,
-            track,
-            &shared.selected_steps,
-            &shared.ui_epoch,
-        );
-    }
-    Ok(())
+    record_rack_macro_edit(app, editor, ctx, track, id, field)
 }
 
 /// A mapping's range as its `min` / `max` setters see it (shared by the
