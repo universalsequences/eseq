@@ -1182,3 +1182,113 @@ fn node_processes_sync_with_their_node_and_go_with_it() {
     );
     assert!(h.frame.host_kinds.shared.borrow().lanes.nodes.is_empty());
 }
+
+#[test]
+fn node_process_errors_and_scopes_are_live_observed_gated_and_drop_with_their_slot() {
+    let mut h = Harness::node_patch();
+    h.eval_graph(NODE_HANDLES);
+    h.eval_graph("(def held (first rnd.cells)) (def hit (first cmp.cells))");
+    h.sync();
+    // A node slot runs under its own id (the node runner's runtime id).
+    let rand_id = num(h.eval_graph("rand-id")) as u64;
+    let cmp_id = num(h.eval_graph("cmp-id")) as u64;
+    let scopes = |rand: Vec<f32>, hit: Vec<f32>| {
+        HashMap::from([
+            (rand_id, HashMap::from([("held".to_string(), rand)])),
+            (cmp_id, HashMap::from([("hit".to_string(), hit)])),
+        ])
+    };
+    let state = h.shared.state.clone();
+    state.publish_process_scope_values(scopes(vec![1.0, 4.0], vec![0.0]));
+    state.publish_process_run_errors(std::collections::BTreeMap::from([(
+        cmp_id,
+        "cmp failed".to_string(),
+    )]));
+    // Unobserved: the tick computes nothing; a cold read asks the host.
+    h.sync();
+    assert_eq!(h.computed(f::STATE_CELL_VALUES), 0);
+    assert_eq!(h.computed(f::PROCESS_ERROR), 0);
+    assert_eq!(h.eval_graph("held.values"), h.eval_graph("(list 1 4)"));
+    assert_eq!(h.eval_graph("cmp.error"), s("cmp failed"));
+    assert_eq!(h.eval_graph("rnd.error"), s(""));
+    let cold = (
+        h.computed(f::STATE_CELL_VALUES),
+        h.computed(f::PROCESS_ERROR),
+    );
+    h.sync();
+    assert_eq!(
+        (
+            h.computed(f::STATE_CELL_VALUES),
+            h.computed(f::PROCESS_ERROR)
+        ),
+        cold,
+        "unobserved: the tick reads nothing"
+    );
+
+    // Observed: pushed when the scheduler's scopes or run errors move, not
+    // every tick.
+    h.eval_graph(r#"(effect-buffer "*node-bay*" (label (str (len held.values) rnd.error)))"#);
+    h.editor.runtime_mut().run_reactive_cycle();
+    let held = h.graph_instance("held");
+    assert!(h.rt().host_field_observed(held, "values"));
+    h.sync();
+    let observed = (
+        h.computed(f::STATE_CELL_VALUES),
+        h.computed(f::PROCESS_ERROR),
+    );
+    h.sync();
+    h.sync();
+    assert_eq!(
+        (
+            h.computed(f::STATE_CELL_VALUES),
+            h.computed(f::PROCESS_ERROR)
+        ),
+        observed,
+        "nothing moved"
+    );
+    state.publish_process_scope_values(scopes(vec![1.0, 4.0, 7.0], vec![1.0]));
+    h.sync();
+    assert!(h.computed(f::STATE_CELL_VALUES) > observed.0);
+    assert_eq!(h.eval_graph("held.values"), h.eval_graph("(list 1 4 7)"));
+    // hit is not observed: the loop left it alone, a read asks again.
+    assert_eq!(h.eval_graph("hit.values"), h.eval_graph("(list 1)"));
+    state.publish_process_run_errors(std::collections::BTreeMap::from([(
+        rand_id,
+        "rand failed".to_string(),
+    )]));
+    h.sync();
+    assert_eq!(h.eval_graph("rnd.error"), s("rand failed"));
+    state.publish_process_run_errors(std::collections::BTreeMap::new());
+    h.sync();
+    assert_eq!(h.eval_graph("rnd.error"), s(""), "a clean run clears it");
+
+    // A removed slot's process and cells go stale, and the loop reads
+    // nothing more for them.
+    let rnd = h.graph_instance("rnd");
+    h.eval_graph("(graph-node-process-remove nn 2 rand-id)");
+    h.graph_drain();
+    assert!(!h.rt().instance_is_live(rnd) && !h.rt().instance_is_live(held));
+    let gone = (
+        h.computed(f::STATE_CELL_VALUES),
+        h.computed(f::PROCESS_ERROR),
+    );
+    state.publish_process_scope_values(scopes(vec![9.0], vec![2.0]));
+    state.publish_process_run_errors(std::collections::BTreeMap::from([(
+        rand_id,
+        "late".to_string(),
+    )]));
+    h.sync();
+    assert_eq!(
+        (
+            h.computed(f::STATE_CELL_VALUES),
+            h.computed(f::PROCESS_ERROR)
+        ),
+        gone,
+        "no live field of a removed slot is computed"
+    );
+    // So does a dropped node's.
+    let hit = h.graph_instance("hit");
+    h.eval_graph("(set! g.node-count 2)");
+    h.graph_drain();
+    assert!(!h.rt().instance_is_live(hit));
+}

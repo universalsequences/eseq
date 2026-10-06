@@ -2711,9 +2711,9 @@ Built (7c):
   is not enforced); the current value always round-trips (a lane's when
   every named step holds it). A fan-out bound is any finite number.
 - **Not covered.** A graph node's process slots are `process` instances
-  since 7g-2 (§14.2m); the node bay's scopes and run errors (legacy
-  `SEQ.process-scope-cells` and the node half of `SEQ.process-run-errors`)
-  are eseq-0l17.45. A class's ports are listed by name
+  since 7g-2 (§14.2m), with their scopes and run errors (legacy
+  `SEQ.process-scope-cells` and the node half of `SEQ.process-run-errors`;
+  7c-2, §14.2n). A class's ports are listed by name
   (`process-class.ports`); a process's ports carry the rest.
 
 ### 14.2i Built in stage 7f (eseq-0l17.32)
@@ -3109,9 +3109,7 @@ Built (7g):
   index is a view derivation); the route color strips
   (`gvr-route-color-field`, `ggm-route-color-field`) are a view derivation
   from `n.route.color`. `bind-graph-node-notes` is `n.sounding`.
-- **Not covered:** the node bay's scopes and run errors (eseq-0l17.45; a
-  node's process patch is built in 7g-2, §14.2m); the native neural
-  engine's networks
+- **Not covered:** the native neural engine's networks
   (`SEQ.neural-networks`, `neural-*-matrix`, the neuron selection;
   eseq-0l17.50); event streams (the graph's event history, node events,
   deltas and group traces; `SEQ.track-events`, `track-event-current-beat`;
@@ -3367,8 +3365,7 @@ Built (7g-2):
   that same sync (`LaneShared::retain_nodes`). The live loop's id lists
   (`process.error`, `state-cell.values`) include a node's processes, whose
   runtime id is the slot's own id (the node runner's), so `error` and the
-  scopes read through the same machinery; eseq-0l17.45 ports the node
-  bay's readers to them. The live loop re-reads (its lists rebuilt, its
+  scopes read through the same machinery (§14.2n). The live loop re-reads (its lists rebuilt, its
   last pushes forgotten) when a track's or a node's instances changed or
   any process's or state cell's runtime record did, with the same
   instances: a project lane's runtime id follows its track's position, a
@@ -3412,6 +3409,34 @@ Built (7g-2):
   `process-library.classes` and `GRAPH_NODE_HIDDEN_PROCESS_CLASSES` (not
   published).
 
+### 14.2n Built in stage 7c-2 (eseq-0l17.45)
+
+No new fields: a graph node's process slots are `process` instances
+(§14.2m), and their run errors and scopes are the track processes' live
+fields, `process.error` and `state-cell.values` (§14.2h).
+
+- **Runtime ids.** A node slot runs under its own id (`proc-id`, the node
+  runner's runtime id; never a track's position-mixed id), so
+  `process.error` is `SequencerState::process_run_error` of it and a
+  state cell's `values` its scope history under that id
+  (`with_process_scope_cell`), the legacy `SEQ.process-run-errors` /
+  `SEQ.process-scope-cells` entries whose `:runtime-id` is the slot's
+  `:instance-id`.
+- **Feeds.** As a track's: observed only (`ObservedList`s over every
+  registered track's and node's processes and cells), re-read when the
+  scheduler's run error or scope version, the observer epoch or the
+  observed set moved; a cold read asks the host. A removed slot or a
+  dropped node takes its process and cells with it (stale handles), and
+  the loop reads nothing more for them.
+- **The node bay's readers map to fields** (the views port in .11 / .20):
+  `lane-patch-run-error` (a runtime id's error) is `p.error`;
+  `lane-patch-expr-error` is `p.compile-error`, else the edit buffer's
+  failed commit (`eseq.expr-buffer/commit-error`: view state, not host
+  state), else `p.error`; `process-scope-cells-for` (a slot's cells by
+  name, each a history) is `p.cells` (`(part p.cells "snap").values`,
+  the newest last; an empty history reads as before the first fire, the
+  legacy nil entry: "waiting for a fire").
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3428,7 +3453,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-5 | eseq-0l17.56 (built) | the built-in effect editors' host state: the `table-editor` singleton (the Filter Table response editor session) and its actions | .14 |
 | 7b-3a | eseq-0l17.44 | recorded (undoable) drum rack macro edits | .18 |
 | 7c | eseq-0l17.29 (built) | `process` (a track's chain), `lane`, `inlet`, `port`, `fanout`, `state-cell`, `process-class`, `process-library`; `track.processes` / `lanes` | .11 .14 .20 |
-| 7c-2 | eseq-0l17.45 | graph-node process slot probes and run errors (the node bay's scopes); needs 7g-2 | .11 .20 |
+| 7c-2 | eseq-0l17.45 (built) | graph-node process slot probes and run errors (the node bay's scopes): `process.error`, `state-cell.values` of `n.processes` | .11 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
 | 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation) | .16 .20 |
@@ -3562,8 +3587,8 @@ builds the field name.
 | `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28) | .14 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | selection.track.lanes → lane | built (.29) | .11 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | process-library.classes → process-class | built (.29) | .11 .20 |
-| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (a track slot's, live); a graph node slot's (n.processes, .49: read under the slot's id): .45 | built (.29), .45 | .11 |
-| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes: state-cell.values of n.processes (slots as instances: built .49) | .45 | .11 .20 |
+| `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (live): a track slot's, and a graph node slot's (n.processes, under the slot's id); `lane-patch-run-error` → p.error, `lane-patch-expr-error` → p.compile-error, else the expr buffer's commit error (view state), else p.error | built (.29, .45) | .11 |
+| `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes: state-cell.values of n.processes (live; `process-scope-cells-for` id → p.cells by name, each a history) | built (.45) | .11 .20 |
 | `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29) | .14 |
 | `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | t.processes: p.in-ports, port.target-process / target-inlet, fanout.target-process (cable ids derived in the view) | built (.29) | .11 |
 | `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29) | .11 .20 |
