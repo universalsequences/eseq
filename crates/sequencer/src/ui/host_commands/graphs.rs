@@ -126,7 +126,7 @@ impl Graph {
 }
 
 /// A timebase label (`graph-timebase-options`), case-insensitively.
-fn timebase(field: &str, label: &str) -> Result<Timebase, String> {
+pub(super) fn timebase(field: &str, label: &str) -> Result<Timebase, String> {
     let value = SetValue::new(field, Value::String(label.to_string()));
     let index = value.choice(&Timebase::LABELS)?;
     Ok(Timebase::from_index(index as u32))

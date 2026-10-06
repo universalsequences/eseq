@@ -442,6 +442,7 @@ mod graph;
 mod lanes;
 mod mixer;
 mod mixer_view;
+mod neural;
 mod panel;
 mod panel_extras;
 mod panels_view;

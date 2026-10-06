@@ -704,6 +704,10 @@ pub struct SequencerState {
     pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
+    /// The next native neural network id to mint (`mint_neural_network_id`):
+    /// only ever grows, so a deleted network's id is never reused in the
+    /// session (held handles and history entries name networks by id).
+    pub(super) next_neural_network_id: AtomicU64,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     /// `gen-mark` values per (generator id, key): (audio sample, value),
     /// oldest first, capped (see `push_generator_mark`).

@@ -9,7 +9,7 @@
 ;; and their mappings, process classes, the browser's preset files and rack
 ;; slots, the open sound palette's sounds, the editor's macros and assets,
 ;; Patch Learn's rows, a MIDI capture's lanes and notes, MIDI inputs, graph
-;; sequencers and their nodes;
+;; sequencers and their nodes, native neural networks and their neurons;
 ;; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
@@ -63,7 +63,8 @@
         graph-max-poly-selection-options
         table-editor table-editor-open! table-editor-close! table-editor-band!
         table-editor-op! table-editor-add-node! table-editor-frame! table-editor-undo!
-        table-editor-redo! table-editor-save!)
+        table-editor-redo! table-editor-save!
+        network networks set-neural-weight!)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -361,6 +362,25 @@
     (graph-edit p.node.graph "param" v :node p.node.index :param p.name)
     (graph-edit p.edge.from.graph "edge-param" v
       :node p.edge.from.index :to p.edge.to.index :param p.name)))
+
+;; Native neural networks (spec §14.2q): a network by its id (nid) among
+;; the current scene's networks, a neuron by its index, resolved when the
+;; command lands (a network the scene no longer holds is an error). Edits
+;; are one undo entry per field (undo restores that field alone); a drag's
+;; set!s on one field join one entry. Values (spec §14.2c): labels among
+;; their options (case-insensitive), numbers finite and in range (where the
+;; neural-* natives clamp, the setters reject), integers whole.
+(def neural-edit (nw field v &rest more)
+  (host-command "set-neural" (apply merge (dict :network-id nw.nid :field field :value v) more)))
+(def network-setter (field) (lambda (nw v) (neural-edit nw field v)))
+(def neuron-setter (field)
+  (lambda (nr v) (neural-edit nr.network field v :neuron nr.index)))
+;; A neuron's route: a track, or nil for none.
+(def set-neuron-route (nr t)
+  (neural-edit nr.network "route" nil :neuron nr.index :track-id (if t t.tid nil)))
+;; The step-editing selection (view state, applied at once): true selects
+;; the neuron alone, false deselects it.
+(def set-neuron-selected (nr on) (neural-set-neuron-selected nr.network.nid nr.index on))
 
 ;; ── Kinds ──
 
@@ -857,6 +877,51 @@
          (processes  (list-of process) :doc "Its process patch, in run order (each fire runs it)")
          (sounding   (list-of (list-of :number))
                      :doc "The notes it sounds now, (note velocity) per open gate, oldest first; empty while stopped")))
+
+;; One neuron of a native neural network: (nth nw.neurons 3). Positional
+;; (the network numbers them).
+(def-kind neuron
+  :key (network index)
+  :host ((network    network :doc "The network it belongs to")
+         (index      :int    :doc "Neuron index, from 0")
+         (route      track   :set set-neuron-route :doc "The track it plays, or nil")
+         (resolution :string :set (neuron-setter "resolution")
+                     :doc "Its clock, one of graph-timebase-options")
+         (delay      :int    :set (neuron-setter "delay") :doc "Propagation delay in steps (0 or more)")
+         (threshold  :number :set (neuron-setter "threshold") :doc "The energy it fires at (0 or more)")
+         (transpose  :number :set (neuron-setter "transpose") :doc "Semitones its notes move by")
+         (quantize   :string :set (neuron-setter "quantize")
+                     :doc "Its quantize grid, one of graph-quantize-options")
+         (dampening-amount :number :range (0 1) :set (neuron-setter "dampening-amount")
+                     :doc "How much a fire dampens its outgoing edges")
+         (dampening-recovery :number :range (0 1) :set (neuron-setter "dampening-recovery")
+                     :doc "How fast its edges recover per step")
+         (selected   :bool   :set set-neuron-selected
+                     :doc "Selected for step editing (its output p-locks show in param.value); true selects it alone")
+         ;; Playback (the engine's visualization: zeros unless its network runs).
+         (energy     :number :doc "Its energy, 0-4")
+         (trigger    :number :doc "Its trigger activity, 0-1")
+         (dampening  (list-of :number) :doc "Its edges' live dampening, by target neuron, 0-1")))
+
+;; A native neural network of the current scene (neural-create): (nth
+;; (networks) 0). Positional, kept by its id; a scene switch shows the new
+;; scene's networks.
+(def-kind network
+  :key (index)
+  :host ((index      :int    :doc "Position in project.networks")
+         (nid        :int    :doc "Its id in the scene (the neural-* natives' network id)")
+         (name       :string :set (network-setter "name"))
+         (enabled    :bool   :set (network-setter "enabled") :doc "The engine runs the first enabled network")
+         (neuron-count :int  :doc "Its neurons, 1-16")
+         (reset-bars :number :set (network-setter "reset-bars") :doc "Reset period in bars (0.25 or more)")
+         (energy-decay :number :range (0 1) :set (network-setter "energy-decay"))
+         (max-poly   :int    :set (network-setter "max-poly") :doc "Fires kept per boundary (1 or more)")
+         (max-poly-selection :string :set (network-setter "max-poly-selection")
+                     :doc "Which fires survive past max-poly, one of graph-max-poly-selection-options")
+         (weights    (list-of (list-of :number)) :set (network-setter "weights")
+                     :doc "Connection weights, rows from-neuron, columns to-neuron (neuron-count square); set-neural-weight! for one cell")
+         (neurons    (list-of neuron))
+         (active     :bool   :doc "The engine runs it now")))
 
 ;; A graph-mode sequencer: a created kind's instance (neural, …) or a
 ;; script's def-sequencer. (graph-of self) is an instance's.
@@ -1636,6 +1701,7 @@
          (name :string :doc "The project's name; empty while unsaved")
          (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")
          (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")
+         (networks (list-of network) :doc "The current scene's native neural networks, in order")
          (instances (list-of :any)
                     :doc "The project's package instances, as seq-package-tree takes them: dicts :id :kind :label :owner-label :owner-rack (a rack's group id, nil for the project) :registered? (false: its kind is not loaded)")))
 
@@ -1649,6 +1715,7 @@
 (def routes () project.routes)
 (def macros () project.macros)
 (def graphs () project.graphs)
+(def networks () project.networks)
 
 ;; Graph sequencers (spec §14.2k). The graph of a created instance (self) or
 ;; of a sequencer id, or nil.
@@ -1673,6 +1740,9 @@
 ;; (set! n.route t) routes it back to a track.
 (def gate-generator! (n id &key (restart false))
   (graph-edit n.graph "generator" id :node n.index :restart restart))
+;; Set cell (from to) of network nw's weight matrix (neuron indices; any
+;; finite number).
+(def set-neural-weight! (nw from to v) (neural-edit nw "weight" v :from from :to to))
 ;; graph-node.resolution / quantize labels (the host checks they match its
 ;; own), graph.max-poly-selection's.
 (def graph-timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))

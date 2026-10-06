@@ -68,6 +68,7 @@ pub enum EditPatch {
     BarTranspose(BarTransposePatch),
     GraphNodeProcessChain(GraphNodeProcessChainPatch),
     GraphOverride(GraphOverridePatch),
+    NeuralNetwork(NeuralNetworkPatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -240,6 +241,25 @@ pub struct GraphOverridePatch {
 }
 
 impl GraphOverridePatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
+    }
+}
+
+/// One field of a native neural network (a network setting, a weight cell
+/// or the matrix, a neuron's field) before and after a host kind setter's
+/// edit (kind-bindings spec §14.2q). Replay writes the recorded value back
+/// into the network in the scene the edit was made in and leaves every other
+/// field alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeuralNetworkPatch {
+    pub scene: SceneId,
+    pub network_id: u64,
+    pub before: crate::neural::NeuralSlot,
+    pub after: crate::neural::NeuralSlot,
+}
+
+impl NeuralNetworkPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
     }

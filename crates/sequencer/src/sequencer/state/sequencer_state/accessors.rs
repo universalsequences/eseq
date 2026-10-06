@@ -290,6 +290,7 @@ impl SequencerState {
             live_macro_overrides: Mutex::new(HashMap::new()),
             rack_macro_runtime_values: Arc::new(RackMacroRuntimeValues::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
+            next_neural_network_id: AtomicU64::new(1),
             graph_visualizations: Mutex::new(Vec::new()),
             generator_marks: Mutex::new(HashMap::new()),
             graph_control_commands: Mutex::new(Vec::new()),

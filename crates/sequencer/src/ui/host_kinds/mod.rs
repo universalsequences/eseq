@@ -64,7 +64,9 @@
 //! instance id, target index) and params (node or edge instance id, a key
 //! per param name), the last two lazy (`graphs`); a node's process patch
 //! is `process` instances keyed (node instance id, slot id), lazy like a
-//! track's processes (`lanes`).
+//! track's processes (`lanes`). The current scene's native neural networks
+//! are positional, kept by network id (replaced on a project load), their
+//! neurons keyed (network instance id, neuron index) (`neural`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -85,8 +87,9 @@
 //! (process lanes), `presentation` (the browser, the sound palette, the
 //! editor and the app's views, from `ui::presented`), `notes` (the piano
 //! roll and its notes), `focus_steps` (the piano roll's steps), `graphs`
-//! (graph sequencers, active notes) and `table_editor` (the Filter Table
-//! response editor session) the per-kind syncs.
+//! (graph sequencers, active notes), `neural` (native neural networks and
+//! their neurons) and `table_editor` (the Filter Table response editor
+//! session) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -102,6 +105,7 @@ mod macros;
 mod media;
 mod mixer;
 mod focus_steps;
+mod neural;
 mod notes;
 mod panel;
 mod params;
@@ -130,6 +134,7 @@ use macros::*;
 use media::*;
 pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
+use neural::*;
 use panel::*;
 use params::*;
 use pending::PendingState;
@@ -216,6 +221,8 @@ pub(crate) const GRAPH: &str = "eseq.kinds:graph";
 pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
 pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
 pub(crate) const GRAPH_PARAM: &str = "eseq.kinds:graph-param";
+pub(crate) const NETWORK: &str = "eseq.kinds:network";
+pub(crate) const NEURON: &str = "eseq.kinds:neuron";
 pub(crate) const MODULATOR: &str = "eseq.kinds:modulator";
 pub(crate) const TABLE_EDITOR: &str = "eseq.kinds:table-editor";
 
@@ -354,6 +361,34 @@ pub(crate) mod f {
     pub(crate) const GRAPH_PARAM_MAX: FieldKey = (GRAPH_PARAM, "max");
     pub(crate) const GRAPH_PARAM_DEFAULT: FieldKey = (GRAPH_PARAM, "default");
     pub(crate) const GRAPH_PARAM_VALUE: FieldKey = (GRAPH_PARAM, "value");
+
+    pub(crate) const NETWORK_INDEX: FieldKey = (NETWORK, "index");
+    pub(crate) const NETWORK_NID: FieldKey = (NETWORK, "nid");
+    pub(crate) const NETWORK_NAME: FieldKey = (NETWORK, "name");
+    pub(crate) const NETWORK_ENABLED: FieldKey = (NETWORK, "enabled");
+    pub(crate) const NETWORK_NEURON_COUNT: FieldKey = (NETWORK, "neuron-count");
+    pub(crate) const NETWORK_RESET_BARS: FieldKey = (NETWORK, "reset-bars");
+    pub(crate) const NETWORK_ENERGY_DECAY: FieldKey = (NETWORK, "energy-decay");
+    pub(crate) const NETWORK_MAX_POLY: FieldKey = (NETWORK, "max-poly");
+    pub(crate) const NETWORK_MAX_POLY_SELECTION: FieldKey = (NETWORK, "max-poly-selection");
+    pub(crate) const NETWORK_WEIGHTS: FieldKey = (NETWORK, "weights");
+    pub(crate) const NETWORK_NEURONS: FieldKey = (NETWORK, "neurons");
+    pub(crate) const NETWORK_ACTIVE: FieldKey = (NETWORK, "active");
+
+    pub(crate) const NEURON_NETWORK: FieldKey = (NEURON, "network");
+    pub(crate) const NEURON_INDEX: FieldKey = (NEURON, "index");
+    pub(crate) const NEURON_ROUTE: FieldKey = (NEURON, "route");
+    pub(crate) const NEURON_RESOLUTION: FieldKey = (NEURON, "resolution");
+    pub(crate) const NEURON_DELAY: FieldKey = (NEURON, "delay");
+    pub(crate) const NEURON_THRESHOLD: FieldKey = (NEURON, "threshold");
+    pub(crate) const NEURON_TRANSPOSE: FieldKey = (NEURON, "transpose");
+    pub(crate) const NEURON_QUANTIZE: FieldKey = (NEURON, "quantize");
+    pub(crate) const NEURON_DAMPENING_AMOUNT: FieldKey = (NEURON, "dampening-amount");
+    pub(crate) const NEURON_DAMPENING_RECOVERY: FieldKey = (NEURON, "dampening-recovery");
+    pub(crate) const NEURON_SELECTED: FieldKey = (NEURON, "selected");
+    pub(crate) const NEURON_ENERGY: FieldKey = (NEURON, "energy");
+    pub(crate) const NEURON_TRIGGER: FieldKey = (NEURON, "trigger");
+    pub(crate) const NEURON_DAMPENING: FieldKey = (NEURON, "dampening");
 
     pub(crate) const BROWSER_TRACK: FieldKey = (BROWSER, "track");
     pub(crate) const BROWSER_INSTRUMENT_KIND: FieldKey = (BROWSER, "instrument-kind");
@@ -1134,6 +1169,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_NAME: FieldKey = (PROJECT, "name");
     pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
     pub(crate) const PROJECT_GRAPHS: FieldKey = (PROJECT, "graphs");
+    pub(crate) const PROJECT_NETWORKS: FieldKey = (PROJECT, "networks");
     pub(crate) const PROJECT_INSTANCES: FieldKey = (PROJECT, "instances");
 }
 
@@ -2052,6 +2088,37 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GRAPH_PARAM_MAX, ":number", Model),
     (f::GRAPH_PARAM_DEFAULT, ":number", Model),
     (f::GRAPH_PARAM_VALUE, ":number", Model),
+    // Native neural networks (`neural`): the current scene's networks and
+    // their neurons when the scenes revision, the scene or the track
+    // instances moved (pushed only for a network that changed); playback
+    // (the engine's visualization) and the step-editing selection live.
+    (f::PROJECT_NETWORKS, "(list-of network)", Model),
+    (f::NETWORK_INDEX, ":int", Model),
+    (f::NETWORK_NID, ":int", Model),
+    (f::NETWORK_NAME, ":string", Model),
+    (f::NETWORK_ENABLED, ":bool", Model),
+    (f::NETWORK_NEURON_COUNT, ":int", Model),
+    (f::NETWORK_RESET_BARS, ":number", Model),
+    (f::NETWORK_ENERGY_DECAY, ":number", Model),
+    (f::NETWORK_MAX_POLY, ":int", Model),
+    (f::NETWORK_MAX_POLY_SELECTION, ":string", Model),
+    (f::NETWORK_WEIGHTS, "(list-of (list-of :number))", Model),
+    (f::NETWORK_NEURONS, "(list-of neuron)", Model),
+    (f::NETWORK_ACTIVE, ":bool", Live),
+    (f::NEURON_NETWORK, "network", Model),
+    (f::NEURON_INDEX, ":int", Model),
+    (f::NEURON_ROUTE, "track", Model),
+    (f::NEURON_RESOLUTION, ":string", Model),
+    (f::NEURON_DELAY, ":int", Model),
+    (f::NEURON_THRESHOLD, ":number", Model),
+    (f::NEURON_TRANSPOSE, ":number", Model),
+    (f::NEURON_QUANTIZE, ":string", Model),
+    (f::NEURON_DAMPENING_AMOUNT, ":number", Model),
+    (f::NEURON_DAMPENING_RECOVERY, ":number", Model),
+    (f::NEURON_SELECTED, ":bool", Live),
+    (f::NEURON_ENERGY, ":number", Live),
+    (f::NEURON_TRIGGER, ":number", Live),
+    (f::NEURON_DAMPENING, "(list-of :number)", Live),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -2138,6 +2205,8 @@ pub(super) static GRAPH_NODE_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(GRAPH_NODE));
 pub(super) static TABLE_EDITOR_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(TABLE_EDITOR));
+pub(super) static NETWORK_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(NETWORK));
+pub(super) static NEURON_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(NEURON));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -2480,6 +2549,8 @@ pub(crate) struct HostKinds {
     pub(crate) graphs: GraphState,
     /// The Filter Table response editor session.
     pub(crate) table_editor: TableEditorState,
+    /// Native neural networks and their neurons.
+    pub(crate) networks: NeuralState,
 }
 
 impl HostKinds {
@@ -2568,6 +2639,7 @@ impl HostKinds {
             self.piano_roll.invalidate();
             self.graphs.invalidate(&self.shared);
             self.table_editor.invalidate();
+            self.networks.invalidate();
         }
         if self
             .song
@@ -2584,6 +2656,10 @@ impl HostKinds {
         if (self.graphs.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
             // A hot reload dropped graph instances.
             self.graphs.invalidate(&self.shared);
+        }
+        if (self.networks.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
+            // A hot reload dropped network instances.
+            self.networks.invalidate();
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -2661,6 +2737,7 @@ impl HostKinds {
         self.sync_governed(&mut pusher, app);
         self.sync_piano_roll(&mut pusher, app);
         self.sync_graph_model(&mut pusher, app);
+        self.sync_network_model(&mut pusher, app);
         self.sync_presented(&mut pusher, app, &variant_tint);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
@@ -2684,6 +2761,7 @@ impl HostKinds {
         self.sync_rack_live(&mut pusher);
         self.sync_graph_live(&mut pusher);
         self.sync_table_editor(&mut pusher);
+        self.sync_network_live(&mut pusher);
         let singletons = [
             (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
@@ -2771,6 +2849,7 @@ impl HostKinds {
             .chain(self.macros.drain())
             .chain(self.lanes.drain())
             .chain(self.graphs.drain())
+            .chain(self.networks.drain())
             .chain(self.scenes.drain())
             .chain(self.banks.drain());
         for (_, id) in doomed {

@@ -618,6 +618,7 @@ pub(super) fn live_value<S: KindStore>(
         PROCESS | STATE_CELL => lane_live_value(sources, shared, id, key)?,
         GRAPH | GRAPH_NODE => graph_live_value(store, sources, shared, id, key)?,
         TABLE_EDITOR => table_editor_live_value(store, sources, shared, key)?,
+        NETWORK | NEURON => neural_live_value(store, sources, id, key)?,
         RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {

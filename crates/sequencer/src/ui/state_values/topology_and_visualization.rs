@@ -261,7 +261,7 @@ pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value 
 
 pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -> Value {
     let snapshot = state.neural_visualization();
-    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    let size = neural_snapshot_size(&snapshot);
     Value::List(
         (0..size)
             .map(|row| {
@@ -281,7 +281,7 @@ pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -
 
 pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> Value {
     let snapshot = state.neural_visualization();
-    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    let size = neural_snapshot_size(&snapshot);
     neural_column_matrix_value(
         (0..size).map(|idx| neural_energy_display_value(snapshot.energy[idx])),
     )
@@ -289,7 +289,7 @@ pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> V
 
 pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> Value {
     let snapshot = state.neural_visualization();
-    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    let size = neural_snapshot_size(&snapshot);
     neural_column_matrix_value(
         (0..size).map(|idx| neural_trigger_display_value(snapshot.trigger_activity[idx])),
     )
@@ -679,7 +679,15 @@ pub(super) fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> V
     )
 }
 
-pub(super) fn neural_energy_display_value(value: f32) -> f64 {
+/// The neurons the engine's visualization snapshot covers (the legacy
+/// `SEQ.neural-*-matrix` size, and the host kinds' `neuron` live values).
+pub(crate) fn neural_snapshot_size(
+    snapshot: &sequencer::neural::NeuralVisualizationSnapshot,
+) -> usize {
+    snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS)
+}
+
+pub(crate) fn neural_energy_display_value(value: f32) -> f64 {
     let value = value.clamp(0.0, 4.0) as f64;
     (value * 100.0).round() / 100.0
 }

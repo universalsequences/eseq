@@ -3243,7 +3243,7 @@ Built (7g):
   from `n.route.color`. `bind-graph-node-notes` is `n.sounding`.
 - **Not covered:** the native neural engine's networks
   (`SEQ.neural-networks`, `neural-*-matrix`, the neuron selection;
-  eseq-0l17.50); event streams (the graph's event history, node events,
+  eseq-0l17.50, built: §14.2q); event streams (the graph's event history, node events,
   deltas and group traces; `SEQ.track-events`, `track-event-current-beat`;
   eseq-0l17.51); generator marks (alez.jaki, eseq-0l17.52); a node's
   `duration` / `swing` overrides (no content edits them).
@@ -3724,6 +3724,115 @@ Built (7d-2):
 - **Not covered:** the view (`ui/arrangement.lisp`, port .15) still reads
   `SEQ.song-pending`; .15 moves it to these fields and removes the legacy
   publisher.
+### 14.2q Built in stage 7g-3 (eseq-0l17.50)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `network` | `(index)` | `index :int`, `nid :int` (its id in the scene: the `neural-*` natives' network id), `name :string` [n], `enabled :bool` [n], `neuron-count :int` (1–16), `reset-bars :number` [n] (0.25 or more), `energy-decay :number` (0–1) [n], `max-poly :int` [n] (1 or more), `max-poly-selection :string` [n], `weights (list-of (list-of :number))` [n] (rows from-neuron, columns to-neuron, `neuron-count` square), `neurons (list-of neuron)`; live: `active :bool` (L) |
+| `neuron` | `(network index)` | `network network`, `index :int`, `route track` [n] (nil: none), `resolution :string` [n], `delay :int` [n], `threshold :number` [n] (0 or more), `transpose :number` [n], `quantize :string` [n] (`off` or a timebase label), `dampening-amount`, `dampening-recovery :number` (0–1) [n]; live: `selected :bool` (L) [`neural-set-neuron-selected`], `energy`, `trigger :number`, `dampening (list-of :number)` (L) |
+| `project` | `()` | `networks (list-of network)`; `(networks)` |
+
+[n] = the `set-neural` host command (`:network-id`, `:field`, `:value`;
+`:neuron` for a neuron's field, `:track-id` for its route, `:from` / `:to`
+for one weight cell; `host_commands/neural.rs`). Action:
+`(set-neural-weight! nw from to v)` (neuron indices). Labels share
+`graph-timebase-options`, `graph-quantize-options` and
+`graph-max-poly-selection-options`. `neuron` is a sub-kind, so it is not
+exported (`network` is); the process DSL's `(neuron k :note)` native keeps
+its global name.
+
+Built (7g-3):
+
+- **The native engine, not graph sequencers.** The networks the
+  `neural-create` / `neural-set` / `neural-neuron` / `neural-weight(s)`
+  natives author (`ProjectNeuralNetwork`, per scene) are `network`s of the
+  current scene, their neurons `neuron`s; graph-mode sequencers (an
+  `alez.neural` instance included) stay `graph` / `graph-node` (§14.2k).
+- **Identity.** Networks are positional, kept by network id
+  (`registry::reconcile`; a repeated id keeps its first network), replaced
+  on a project load. `neural-create` mints ids that are never reused
+  (`SequencerState::mint_neural_network_id`: above every id any scene holds
+  and every id minted before in the session; the counter never goes back,
+  not with an undo, a scene rebuild or a load), so deleting a network and
+  creating another never hands its id, its held handles or its history
+  entries to the new one. The ids are not persisted: on load they start
+  above the loaded project's, and no handle or history entry survives a
+  load. A scene switch shows the new scene's networks: an id both scenes
+  hold (a cloned scene's copy) keeps its instance, now showing the new
+  scene's network; any other goes stale. Neurons are keyed (network instance id, neuron index), registered
+  and dropped with the neuron count, and go with their network (a
+  `neural-delete`, a project load).
+- **Feeds.** The model fields sync behind one key compared without
+  allocating (the scenes revision, which every network edit moves, the
+  current scene and the track instances, which a route names); when it
+  moves the sync reads the current scene's networks once and pushes only a
+  network that differs from its last push (a step edit pushes none). Values
+  are the legacy `SEQ.neural-networks` map's (`neural_network_value`):
+  clocks as labels (the legacy keywords; no quantize is `off`), the route a
+  track instance (the legacy track index), the neuron map's `dampening` is
+  `dampening-amount` (`dampening` is the live row), the weights the matrix
+  sized `neuron-count` square (`ProjectNeuralNetwork::shaped_weights`, which
+  the natives' shape normalization shares). Live, observed only and
+  compared in place with the last push (an idle tick allocates nothing):
+  `network.active` and a neuron's `energy`, `trigger` and `dampening` (its
+  edges' row, by target neuron) from the engine's visualization snapshot,
+  read once per tick with the legacy `SEQ.neural-*-matrix` transforms
+  (`neural_energy_display_value`, `neural_trigger_display_value`,
+  `neural_dampening_display_value`, sized by `neural_snapshot_size`, shared
+  with the legacy builders); a network the engine does not run (it runs
+  the current scene's first enabled one) reads zeros and `active` false. A
+  neuron's `selected` is the step-editing selection
+  (`SharedSelectedNeuralNeurons`, keyed (scene, network id, neuron), as the
+  legacy `neural-neuron-selected-{pattern}-{network}-{neuron}` fields),
+  locked once per tick only while one is observed. A cold read asks the
+  host (the network's id and count from its cells).
+- **Setters.** `set-neural` resolves the network by id among the current
+  scene's networks, a neuron (or a cell's `from` / `to`) below the neuron
+  count and a route's track by `TrackId` when it lands; a network the scene
+  no longer holds is an error. Values follow §14.2c, and where the natives
+  clamp (a threshold below 0, an energy decay or a dampening past 1, a
+  max-poly below 1, reset bars below 0.25) the setters reject, so every
+  value they write is one the natives keep; `weights` takes `neuron-count`
+  lists of `neuron-count` finite numbers (the `neural-weights` parse,
+  `parse_neural_weight_matrix`). Setters act only where the value
+  differs and write the field the natives write, through
+  `App::apply_neural_network_edit`: one undo entry
+  (`EditPatch::NeuralNetwork`) per field, a `NeuralSlot`
+  (`neural/slot.rs`: a network setting, one weight cell or the matrix, one
+  neuron field), before and after, that undo and redo write back into the
+  network in the scene it was made in (`edit_scene_neural_networks`),
+  leaving every other field alone (an unrecorded legacy write included). A
+  replay onto a network that is gone, or whose neuron count no longer
+  covers the slot (a neuron or cell past it, a matrix of another size), is
+  an error that changes nothing (`NeuralSlot::write`). The graph override
+  edit and this one share the gesture staging (`stage_field_edit`: the
+  scene, the staged entry's `before`, the write and the entry): a numeric field's `set!`s while the pointer is down
+  join one entry (`ScriptEdit`), anything else is its own entry. Legacy
+  `neural-*` edits stay unrecorded; the kinds pick them up at the next
+  sync. An undo of a neural edit takes the full refresh (no targeted
+  replay), so the legacy `SEQ.neural-networks` publisher follows it.
+- **Selection.** `(set! nr.selected true)` selects the neuron alone (as
+  `neural-select-neuron`), `false` deselects it, through the
+  `neural-set-neuron-selected` native (UI-thread state: no history, applied
+  at once; a gone network or a neuron past the count is a native error on
+  the status line). `neural-select-neuron`, `neural-neuron-selected?` and
+  this setter resolve the neuron the same way (`resolve_selected_neuron`;
+  the predicate reads false for a gone network). The legacy natives and the kind field share the
+  handle, so either sees the other's selection.
+- **The router's legacy reads map to fields** (the view ports in .20):
+  `SEQ.neural-networks` is `project.networks` (a network by name:
+  `(first (filter (lambda (n) (= n.name …)) (networks)))`);
+  `SEQ.neural-energy-matrix` / `-trigger-matrix` (column matrices) are
+  `(map (lambda (nr) (list nr.energy)) nw.neurons)` and its triggers; the
+  dampening matrix is `(map (lambda (nr) nr.dampening) nw.neurons)`; the
+  row selection field (`neural-neuron-selected-…`, `bind-seq`) is
+  `#'nr.selected`; the row controls' `neural-neuron` / `neural-set` /
+  `neural-weights` calls are `set!`s of the fields.
+- **Not covered:** creating, deleting and enabling-by-name stay the
+  natives (`neural-create`, `neural-delete`: they return the network the
+  view uses at once); a neuron's output p-locks (`neural-plock-*`; their
+  display is `param.value` / `param.overridden`, §14.2g); a network's
+  `seed-on-reset` (no content reads it).
 
 ### 14.3 Follow-up beads
 
@@ -3750,7 +3859,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 (built) | `graph`, `graph-node`, `graph-edge`, `graph-param` (the GRAPH namespace, graph playback), `project.graphs`, `track.active-notes` | .13 .14 .20 |
 | 7g-2 | eseq-0l17.49 (built) | a graph node's process patch as `process` instances (`graph-node.processes`), its setters through `edit-process` | .20 (and .45) |
-| 7g-3 | eseq-0l17.50 | the native neural engine's networks and neuron selection | .20 |
+| 7g-3 | eseq-0l17.50 (built) | the native neural engine's networks and neuron selection: `network`, `neuron`, `project.networks` | .20 |
 | 7g-4 | eseq-0l17.51 | event streams: graph event history, deltas, group traces; track events | .20 |
 | 7g-5 | eseq-0l17.52 | generator marks (alez.jaki) | .20 |
 | 7h | eseq-0l17.34 (built) | rack pads, rack clips, grooves (rack, clip, pad shares, pool, library), armed rack | .11 .13 .19 |
@@ -4018,14 +4127,14 @@ builds the field name.
 | `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | built (.32); ported, legacy removed (.17) | .17 |
 | `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
-| `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | neuron.selected (the native neural engine) | .50 | .20 |
+| `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.selected (the native neural engine; `nr.selected`, setter `neural-set-neuron-selected`) | built (.50) | .20 |
 | `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | model | jaki generator marks | .52 | .20 |
 | `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33); ported (.13), removed | .13 |
 | `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event history, deltas, group traces: .51 | built (.33), .51 | .20 |
-| `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | network.dampening-matrix | .50 | .20 |
-| `SEQ.neural-energy-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | network.energy-matrix (live) | .50 | .20 |
-| `SEQ.neural-networks` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | neural network kind | .50 | .20 |
-| `SEQ.neural-trigger-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | network.trigger-matrix (live) | .50 | .20 |
+| `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.dampening (live; the matrix is `(map (lambda (nr) nr.dampening) nw.neurons)`) | built (.50) | .20 |
+| `SEQ.neural-energy-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.energy (live; one per neuron) | built (.50) | .20 |
+| `SEQ.neural-networks` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | project.networks → network / neuron | built (.50) | .20 |
+| `SEQ.neural-trigger-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.trigger (live; one per neuron) | built (.50) | .20 |
 | `SEQ.track-active-notes` | 5 | effects/panel-bodies, scripts/sequencers/graph-neural-8x8-demo, scripts/sequencers/graph-neural-variable-reset-demo +2 | reactive_tick.rs | live | track.active-notes (live; `(note velocity trigger-id)` rows) | built (.33); ported (.14 A: panel-bodies reads t.active-notes), kept: scripts | .14 .20 |
 | `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | track events | .51 | .20 |
 | `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | track events (demo scripts) | .51 | .20 |

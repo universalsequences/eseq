@@ -226,7 +226,7 @@ fn labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Value {
     list_value(labels.into_iter().map(text))
 }
 
-fn quantize_label(quantize: Option<Timebase>) -> &'static str {
+pub(super) fn quantize_label(quantize: Option<Timebase>) -> &'static str {
     quantize.map_or("off", |timebase| timebase.label())
 }
 

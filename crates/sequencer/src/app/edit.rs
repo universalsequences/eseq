@@ -25,7 +25,7 @@ use super::history::{
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
-    BarTransposePatch, GraphNodeProcessChainPatch, GraphOverridePatch,
+    BarTransposePatch, GraphNodeProcessChainPatch, GraphOverridePatch, NeuralNetworkPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -2272,60 +2272,83 @@ impl App {
         manifest: &crate::graph::GraphManifest,
         after: crate::graph::GraphOverrideSlot,
     ) -> Result<EditOutcome, EditError> {
-        let scene = self
-            .state
-            .current_scene_id()
-            .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))?;
-        let merge_key = MergeKey::new(format!("graph:{}:{}", manifest.id, after.address()));
-        let staged_before = self
-            .history
-            .active_gesture_patch(&merge_key)
-            .and_then(|staged| match staged {
+        let sequencer_id = manifest.id;
+        let merge_key = MergeKey::new(format!("graph:{sequencer_id}:{}", after.address()));
+        stage_field_edit(
+            self,
+            ("Edit graph", merge_key),
+            after,
+            |staged, scene| match staged {
                 EditPatch::GraphOverride(staged)
-                    if staged.scene == scene && staged.sequencer_id == manifest.id =>
+                    if staged.scene == scene && staged.sequencer_id == sequencer_id =>
                 {
                     Some(staged.before.clone())
                 }
                 _ => None,
-            });
-        let current = self
-            .state
-            .edit_current_graph_overrides(|graphs| {
-                let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
-                let current = graph.slot(&after);
-                graph.set_slot(&after);
-                Ok(current)
-            })
-            .map_err(EditError::ReplayFailed)?;
-        let unchanged = current == after;
-        let before = staged_before.unwrap_or(current);
-        if before == after {
-            // A drag back to where it started: nothing to record.
-            self.history.discard_active_gesture_entry(&merge_key);
-            return Ok(if unchanged {
-                EditOutcome::NoOp
-            } else {
-                EditOutcome::AppliedUnrecorded
-            });
-        }
-        let patch = GraphOverridePatch {
-            scene,
-            sequencer_id: manifest.id,
-            before,
+            },
+            |state, after| {
+                state.edit_current_graph_overrides(|graphs| {
+                    let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
+                    let current = graph.slot(after);
+                    graph.set_slot(after);
+                    Ok(current)
+                })
+            },
+            |scene, before, after| {
+                EditPatch::GraphOverride(GraphOverridePatch {
+                    scene,
+                    sequencer_id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// A host kind setter's neural network edit (kind-bindings spec
+    /// §14.2q): write `after` (one field of the current scene's network
+    /// `network_id`, a [`crate::neural::NeuralSlot`]) and record it, as
+    /// [`Self::apply_graph_override_edit`] records a graph field: a
+    /// coalescing gesture keyed by the field, so a drag's `set!`s on one
+    /// field join one entry, which keeps the value from before the drag's
+    /// first. A network the current scene no longer holds is an error.
+    pub fn apply_neural_network_edit(
+        &mut self,
+        network_id: u64,
+        after: crate::neural::NeuralSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let merge_key = MergeKey::new(format!("neural:{network_id}:{}", after.address()));
+        stage_field_edit(
+            self,
+            ("Edit neural network", merge_key),
             after,
-        };
-        let retained_bytes = patch.retained_bytes();
-        ensure_coalescing_gesture(self, &merge_key);
-        let history_move = self
-            .history
-            .stage_active_gesture(
-                "Edit graph",
-                &merge_key,
-                EditPatch::GraphOverride(patch),
-                retained_bytes,
-            )
-            .ok_or(EditError::UnsupportedCommand)?;
-        Ok(EditOutcome::Applied(history_move))
+            |staged, scene| match staged {
+                EditPatch::NeuralNetwork(staged)
+                    if staged.scene == scene && staged.network_id == network_id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |state, after| {
+                state.edit_current_neural_networks(|networks| {
+                    let network = (networks.iter_mut())
+                        .find(|network| network.id == network_id)
+                        .ok_or_else(|| "the network is gone".to_string())?;
+                    let current = after.read(network);
+                    after.write(network)?;
+                    Ok(current)
+                })
+            },
+            |scene, before, after| {
+                EditPatch::NeuralNetwork(NeuralNetworkPatch {
+                    scene,
+                    network_id,
+                    before,
+                    after,
+                })
+            },
+        )
     }
 
     pub fn apply_scene_transpose_to_bank(
@@ -8219,6 +8242,49 @@ fn app_bus_effect_gesture_before(
 
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A host kind setter's one-field edit in the current scene, recorded as
+/// the coalescing gesture `merge_key` (labelled `label`): `write` writes
+/// `after` and returns the field's value before the write; a gesture
+/// already staged under the key for this scene and target keeps its
+/// `before` (`staged` reads it from the staged entry), so a drag's writes
+/// join one entry; a write back to where the gesture started discards it.
+/// `patch` builds the entry from (scene, before, after).
+fn stage_field_edit<S: PartialEq>(
+    app: &mut App,
+    (label, merge_key): (&'static str, MergeKey),
+    after: S,
+    staged: impl FnOnce(&EditPatch, crate::sequencer::SceneId) -> Option<S>,
+    write: impl FnOnce(&crate::sequencer::SequencerState, &S) -> Result<S, String>,
+    patch: impl FnOnce(crate::sequencer::SceneId, S, S) -> EditPatch,
+) -> Result<EditOutcome, EditError> {
+    let scene = app
+        .state
+        .current_scene_id()
+        .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))?;
+    let staged_before =
+        (app.history.active_gesture_patch(&merge_key)).and_then(|patch| staged(patch, scene));
+    let current = write(&app.state, &after).map_err(EditError::ReplayFailed)?;
+    let unchanged = current == after;
+    let before = staged_before.unwrap_or(current);
+    if before == after {
+        // A drag back to where it started: nothing to record.
+        app.history.discard_active_gesture_entry(&merge_key);
+        return Ok(if unchanged {
+            EditOutcome::NoOp
+        } else {
+            EditOutcome::AppliedUnrecorded
+        });
+    }
+    let patch = patch(scene, before, after);
+    let retained_bytes = edit_patch_retained_bytes(&patch);
+    ensure_coalescing_gesture(app, &merge_key);
+    let history_move = app
+        .history
+        .stage_active_gesture(label, &merge_key, patch, retained_bytes)
+        .ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
+}
+
 pub(crate) fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) == Some(merge_key) {
         return;
@@ -10342,6 +10408,27 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::NeuralNetwork(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "neural network replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            (app.state)
+                .edit_scene_neural_networks(patch.scene, |networks| {
+                    let network = (networks.iter_mut())
+                        .find(|network| network.id == patch.network_id)
+                        .ok_or_else(|| {
+                            format!("neural network {} no longer exists", patch.network_id)
+                        })?;
+                    target.write(network)
+                })
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneSlots(patches) => {
             let writes = patches.iter().map(|patch| {
                 let target = match mode {
@@ -10514,7 +10601,9 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
-        EditPatch::GraphNodeProcessChain(_) | EditPatch::GraphOverride(_) => true,
+        EditPatch::GraphNodeProcessChain(_)
+        | EditPatch::GraphOverride(_)
+        | EditPatch::NeuralNetwork(_) => true,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -11018,6 +11107,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::BarTranspose(patch) => patch.retained_bytes(),
         EditPatch::GraphNodeProcessChain(patch) => patch.retained_bytes(),
         EditPatch::GraphOverride(patch) => patch.retained_bytes(),
+        EditPatch::NeuralNetwork(patch) => patch.retained_bytes(),
     }
 }
 
@@ -11176,7 +11266,8 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::SceneSlot(_)
         | EditPatch::SceneSlots(_)
         | EditPatch::GraphNodeProcessChain(_)
-        | EditPatch::GraphOverride(_) => {
+        | EditPatch::GraphOverride(_)
+        | EditPatch::NeuralNetwork(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {

@@ -4,6 +4,9 @@ use crate::accumulator::ResolvedStep;
 use crate::scheduled_event::{EventSource, StepEvent};
 use crate::sequencer::Timebase;
 
+mod slot;
+pub use slot::{NeuralSlot, NeuronField};
+
 pub const NUM_NEURONS: usize = 16;
 pub const NEURAL_DELAY_QUEUE_CAPACITY: usize = 8;
 const TRIGGER_VISUAL_HOLD_BEATS: f64 = 0.25;
@@ -198,6 +201,37 @@ impl Default for ProjectNeuralNetwork {
             max_poly: default_max_poly(),
             max_poly_selection: default_max_poly_selection(),
             seed_on_reset: vec![0.0; NUM_NEURONS],
+        }
+    }
+}
+
+impl ProjectNeuralNetwork {
+    /// The weight matrix sized `num_neurons` square (a missing cell 0).
+    pub fn shaped_weights(&self) -> Vec<Vec<f32>> {
+        let size = self.num_neurons;
+        (0..size)
+            .map(|row| {
+                (0..size)
+                    .map(|col| {
+                        (self.weights.get(row))
+                            .and_then(|cells| cells.get(col))
+                            .copied()
+                            .unwrap_or(0.0)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Size the neurons and the weight matrix to `num_neurons` (new neurons
+    /// default, new cells 0): the shape a neuron or cell edit writes into.
+    pub fn normalize_shape(&mut self) {
+        self.neurons
+            .resize_with(self.num_neurons, ProjectNeuron::default);
+        let square = self.weights.len() == self.num_neurons
+            && self.weights.iter().all(|row| row.len() == self.num_neurons);
+        if !square {
+            self.weights = self.shaped_weights();
         }
     }
 }

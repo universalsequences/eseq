@@ -504,6 +504,26 @@ impl SequencerState {
             .current_neural_networks()
     }
 
+    /// A fresh id for a new neural network: above every network id any
+    /// scene holds and above every id minted before (the counter never
+    /// goes back, not with an undo, a scene rebuild or a project load), so
+    /// no id is ever reused and a held handle or history entry naming a
+    /// deleted network never reaches a newer one.
+    pub fn mint_neural_network_id(&self) -> u64 {
+        let floor = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let ids = scenes
+                .scenes
+                .iter()
+                .flat_map(|scene| &scene.neural_networks);
+            ids.map(|network| network.id).max().unwrap_or(0) + 1
+        };
+        let next = &self.next_neural_network_id;
+        let id = next.load(Ordering::Relaxed).max(floor);
+        next.store(id + 1, Ordering::Relaxed);
+        id
+    }
+
     pub fn edit_current_neural_networks<F, R>(&self, edit: F) -> Result<R, String>
     where
         F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
@@ -518,6 +538,28 @@ impl SequencerState {
                 .current_scene_index()
                 .min(bank.scene_count().saturating_sub(1));
             bank.edit_current_neural_networks(edit)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    /// [`Self::edit_current_neural_networks`] for the scene `scene` rather
+    /// than the current one: undo and redo of a host kind neural edit
+    /// (`NeuralNetworkPatch`) land in the scene the edit was made in.
+    pub fn edit_scene_neural_networks<F, R>(&self, scene: SceneId, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
+    {
+        let result = {
+            let mut bank = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let scene_idx = bank
+                .scene_index(scene)
+                .ok_or_else(|| format!("scene {} no longer exists", scene.0))?;
+            bank.edit_scene_neural_networks(scene_idx, edit)?
         };
         self.publish_scheduler_snapshot();
         Ok(result)
