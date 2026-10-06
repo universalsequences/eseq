@@ -37,14 +37,16 @@
 //! reads the rack). `voices` (a rack slot's max polyphony) is a model field
 //! of that pass; `delete-target` is live (the device sync's observed list).
 //!
-//! **Strip controls** (eseq-0l17.42). A rack slot's `gain`, `pan`, `muted`,
-//! `soloed` (each with its `-display` and `-locked`) and `choke` are live
-//! fields: the device live loop collects the observed ones and reads them
-//! all under one rack lock per tick ([`DeviceState::push_strips`]); a cold
-//! read takes the lock for its one field ([`device_strip_field`]). The
+//! **Strip controls** (eseq-0l17.42, .54). A rack slot's `gain`, `pan`,
+//! `muted`, `soloed`, `base-note` (each with its `-display` and `-locked`),
+//! `choke` and `voices-display` (the voices base is the model field) are
+//! live fields: the device live loop collects the observed ones and reads
+//! them all under one rack lock per tick ([`DeviceState::push_strips`]); a
+//! cold read takes the lock for its one field ([`device_strip_field`]). The
 //! shown value is `rack_slot_control_value` (shared with the legacy rack
 //! panel fields) at the displayed step (the current track's selected step,
-//! else its playing step).
+//! else its playing step). Any other device reads its own value, never
+//! locked: a track instrument's base note (an atomic, no lock), else 0.
 
 use super::*;
 use crate::host_commands::StripControl;
@@ -742,7 +744,7 @@ enum StripPart {
 
 /// The strip fields: each with the strip control it reads and what it reads
 /// of it.
-const STRIP_FIELDS: [(FieldKey, StripControl, StripPart); 13] = [
+const STRIP_FIELDS: [(FieldKey, StripControl, StripPart); 17] = [
     (f::DEVICE_GAIN, StripControl::Gain, StripPart::Base),
     (
         f::DEVICE_GAIN_DISPLAY,
@@ -776,6 +778,22 @@ const STRIP_FIELDS: [(FieldKey, StripControl, StripPart); 13] = [
         StripPart::Locked,
     ),
     (f::DEVICE_CHOKE, StripControl::Choke, StripPart::Base),
+    (f::DEVICE_BASE_NOTE, StripControl::BaseNote, StripPart::Base),
+    (
+        f::DEVICE_BASE_NOTE_DISPLAY,
+        StripControl::BaseNote,
+        StripPart::Display,
+    ),
+    (
+        f::DEVICE_BASE_NOTE_LOCKED,
+        StripControl::BaseNote,
+        StripPart::Locked,
+    ),
+    (
+        f::DEVICE_VOICES_DISPLAY,
+        StripControl::Voices,
+        StripPart::Display,
+    ),
 ];
 
 /// The strip fields' keys.
@@ -815,14 +833,32 @@ fn rack_strip_field(
     })
 }
 
-/// Strip field `key` of a device that is no rack slot: 0 or false.
-fn no_strip_field(key: FieldKey) -> Option<Value> {
+/// Strip field `key` of `device` of track `owner`, which is no rack slot:
+/// its own value (a track instrument's base note, else 0), never locked.
+fn other_strip_field(
+    sources: &KindsHandles,
+    owner: usize,
+    device: DeviceSlot,
+    key: FieldKey,
+) -> Option<Value> {
     let &(_, control, part) = STRIP_FIELDS.iter().find(|(strip, ..)| *strip == key)?;
+    let own = match (control, device) {
+        (StripControl::BaseNote, DeviceSlot::Instrument) => instrument_base_note(sources, owner),
+        _ => 0.0,
+    };
     Some(match (control.param(), part) {
         (_, StripPart::Locked) => Value::Bool(false),
-        (Some(param), _) => rack_slot_control_reactive_value(param, 0.0),
-        (None, _) => number(0),
+        (Some(param), _) => rack_slot_control_reactive_value(param, own),
+        (None, _) => number(own),
     })
+}
+
+/// Track `track`'s instrument base note offset (0 for a track gone).
+fn instrument_base_note(sources: &KindsHandles, track: usize) -> f32 {
+    let offsets = &sources.state.pattern.instrument_base_note_offsets;
+    offsets
+        .get(track)
+        .map_or(0.0, |bits| f32::from_bits(bits.load(Ordering::Relaxed)))
 }
 
 /// Strip field `key` of `device` (the reader hook's cold read); `None`
@@ -834,7 +870,7 @@ pub(super) fn device_strip_field(
     key: FieldKey,
 ) -> Option<Value> {
     let DeviceSlot::RackSlot(slot_idx) = device.device else {
-        return no_strip_field(key);
+        return other_strip_field(sources, device.owner, device.device, key);
     };
     let step = display_step(sources, shared, device.owner);
     with_rack_slot(&sources.state, device.owner, slot_idx, |rack, slot| {
@@ -874,10 +910,11 @@ impl DeviceState {
             return;
         }
         let pending = &mut self.strip_pending;
+        let sources = pusher.sources;
         let any_slot =
             (self.strip_work.iter()).any(|work| matches!(work.device, DeviceSlot::RackSlot(_)));
         {
-            let racks = any_slot.then(|| pusher.sources.state.pattern.rack_tracks.lock().unwrap());
+            let racks = any_slot.then(|| sources.state.pattern.rack_tracks.lock().unwrap());
             if any_slot {
                 self.strip_locks += 1;
             }
@@ -901,7 +938,7 @@ impl DeviceState {
                                 rack_strip_field(rack, slot_idx, slot, *key, step)
                             })
                         }
-                        _ => no_strip_field(*key),
+                        _ => other_strip_field(sources, track, device, *key),
                     };
                     if let Some(value) = value {
                         pending.push((id, *key, value));

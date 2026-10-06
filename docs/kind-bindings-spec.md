@@ -2183,7 +2183,7 @@ Built (7h):
 
 | Kind | Key | New `:host` fields (`:set` in brackets) |
 |---|---|---|
-| `device` | `((track bus) did)` (was `(track did)`) | `bus bus` (nil for a track's device; `track` is nil for a bus effect), `role :string` (`instrument`, `effect`, `midi-fx`, `rack-slot`, `rack-effect`, `bus-effect`), `devices (list-of device)` (a drum rack's slots on its instrument device, a rack slot's effects on the slot), `container device` (the device whose `devices` holds it, or nil), `voices :int` (a rack slot's, 1–16; 0 otherwise; no declared range, the setter checks) [d], `delete-target :bool` (L) [d]; a rack slot's strip (eseq-0l17.42): `gain :number` (0–2) [d], `gain-display :number`, `gain-locked :bool`, `pan :number` (−1–1) [d], `pan-display`, `pan-locked`, `muted :bool` [d], `muted-display`, `muted-locked`, `soloed :bool` [d], `soloed-display`, `soloed-locked`, `choke :int` (0–16, 0 none) [d] (all L), and `enabled` takes [d] |
+| `device` | `((track bus) did)` (was `(track did)`) | `bus bus` (nil for a track's device; `track` is nil for a bus effect), `role :string` (`instrument`, `effect`, `midi-fx`, `rack-slot`, `rack-effect`, `bus-effect`), `devices (list-of device)` (a drum rack's slots on its instrument device, a rack slot's effects on the slot), `container device` (the device whose `devices` holds it, or nil), `voices :int` (a rack slot's, 1–16; 0 otherwise; no declared range, the setter checks) [d], `delete-target :bool` (L) [d]; a rack slot's strip (eseq-0l17.42): `gain :number` (0–2) [d], `gain-display :number`, `gain-locked :bool`, `pan :number` (−1–1) [d], `pan-display`, `pan-locked`, `muted :bool` [d], `muted-display`, `muted-locked`, `soloed :bool` [d], `soloed-display`, `soloed-locked`, `choke :int` (0–16, 0 none) [d] (all L), and `enabled` takes [d]; eseq-0l17.54: a rack slot's `base-note` [d] (the 7b-3 field, §14.2g), `base-note-display :number` (−48–48), `base-note-locked :bool`, `voices-display :int` (all L; `voices` stays the model base) |
 | `track` | `(index)` | `midi-devices (list-of device)` |
 | `bus` | `(index)` | `devices (list-of device)` |
 
@@ -2296,7 +2296,9 @@ Built (7b-2):
   field declares no `:range` (0 would violate one) and its setter checks:
   an integer in 1–16 (`SetRackSlotMaxPolyphony` through history, refreshed
   with the legacy command's `rack_slot_voices_applied`; a drag joins one
-  entry); another device's is an error.
+  entry); another device's is an error. Since eseq-0l17.54 it is a strip
+  control (`StripControl::Voices`, below) with `voices-display` and
+  p-locks.
 - **Delete targets.** `device.delete-target` (live) reads true while the
   active delete target names the device (`DeviceSlot::delete_target`: a
   rack slot or rack slot effect, a bus effect, and a chain effect or MIDI
@@ -2347,10 +2349,37 @@ Built (7b-2):
   recorded mutation): before, the next slot inherited the deleted slot's
   `did`, so the deleted slot's handle silently retargeted it and the
   next slot's handle went stale; undo rebinds the captured identities.
-- **Not covered:** the rack slot's base note (a strip control the 7b-3
-  `device.base-note` excludes; still the legacy `set-rack-slot-base-note`
-  and `rack_slot_value_field` `base-note`) and max-polyphony p-locks
-  (`device.voices` is the base only): eseq-0l17.54; the rest of the panel extras
+- **Base note and voices** (built by eseq-0l17.54). Two more rows of the
+  same tables (`StripControl`, `devices::STRIP_FIELDS`), no new path: a
+  rack slot's `base-note` (its own offset, read unclamped like the other
+  bases), `base-note-display` and `base-note-locked`, and
+  `voices-display` (the voices base stays the model field `voices`),
+  read in the strip pass under its one rack lock. `device.base-note` is
+  now a strip field for every device: a track instrument's reads its
+  atomic (no rack lock: `other_strip_field`; its `-display` is the same
+  value and `-locked` false), any other device 0 (`voices-display` too).
+  `set-device` `base-note` on a track instrument keeps its 7b-3 path
+  (`SetInstrumentBaseNoteOffset`, the `BaseNote` invalidation); on a rack
+  slot it is `SetRackSlotBaseNoteOffset` under −48–48, and `voices` is
+  `SetRackSlotMaxPolyphony` under 1–16 (both through history, a drag
+  joins one entry: `StripControl::drags`), refreshed by
+  `rack_slot_strip_applied` (base note: the control snapshot republish
+  and the value field, which the legacy `set-rack-slot-base-note` now
+  shares; voices: `rack_slot_voices_applied`). `lock-strip!` /
+  `unlock-strip!` take `base-note` (−48–48) and `voices` (an integer in
+  1–16) through `SetRackSlotParamPlockMulti` /
+  `ClearRackSlotParamPlockMulti` (`RackSlotParam::BaseNote`,
+  `MaxPolyphony`). **Decisions.** `voices-display` is published because
+  the rack panel's V picker shows the displayed value
+  (`rack-slot-display-value slot :max-polyphony :max-polyphony-field`,
+  `content/ui/effects/instrument-panel.lisp`), not the base;
+  `voices-locked` is not: the panel's p-lock marker is the slot
+  wrapper's `plock-any` over its targets (any step), never the shown
+  step's lock, and the device's observed mask is a `u32` with the
+  params bit last (30 live fields + `params` = 31 of 32 bits; the mask
+  stays `u32`, one bit left: the next live device field past that
+  widens `host_fields_observed` and the observed lists to `u64`).
+- **Not covered:** the rest of the panel extras
   (eseq-0l17.37, built: §14.2g), rack slot sampler playheads
   (`device.playhead` is a track instrument's).
 
@@ -2424,8 +2453,8 @@ Built (7b-3):
 - **Base note.** `device.base-note` is a track instrument's offset (an
   atomic); `(set! d.base-note 12)` is `SetInstrumentBaseNoteOffset` through
   history (a drag joins one entry) with the legacy `BaseNote`
-  invalidation; another device's is an error (a rack slot's base note is a
-  strip control, not covered by eseq-0l17.42 either: §14.2f).
+  invalidation; a rack slot's is its own (a strip control, built by
+  eseq-0l17.54: §14.2f); any other device's is an error.
 - **Tensors.** `device.tensors` are registered with the device (model;
   replaced with the params on a descriptor change); their cells are live:
   `values` the displayed step's p-lock else `base`. The tick reads only
@@ -3223,7 +3252,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-2 | eseq-0l17.36 (built) | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i), `device.voices` | .13 .14 .18 .19 .21 |
 | 7b-2a | eseq-0l17.41 | the clear command for a rack slot instrument's p-locks (`unlock-param!` on a rack slot param) | — |
 | 7b-2b | eseq-0l17.42 (built) | rack slot strip controls (gain, pan, mute, solo, choke, enabled) on the rack slot device, with their p-lock display; `lock-strip!` / `unlock-strip!` | .14 .19 |
-| 7b-2c | eseq-0l17.54 | a rack slot's base note (base, display, lock) and max-polyphony p-locks on the rack slot device | .14 .19 |
+| 7b-2c | eseq-0l17.54 (built) | a rack slot's base note (base, display, lock) and max-polyphony p-locks on the rack slot device | .14 .19 |
 | 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7b-4 | eseq-0l17.43 (built) | the rest of the panel data: sampler media (rack slot selection included), sound binding, display name, meter selector, fixed modulators and the modulator envelope, tables and IR names, param UI metadata, scene macro config setters and `diff-count`, `step.variant` | .14 .18 |
 | 7b-5 | eseq-0l17.56 | the built-in effect editors' host state (the Filter Table response editor session) | .14 |
@@ -3344,11 +3373,11 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10) | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels) | .13 .14 |
 | `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) .56 | built (.28, .37, .43) | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now) | .14 .17 .18 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now) | .14 .17 .18 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) (built .37); a scene macro's `:target-scene` / `:morph-params` / `:steal-patterns` / `:quantize` / `:track-mask` → macro.target-scene / morph-params / steal-patterns / quantize / tracks, settable (`macro-scene-config` → their `set!`s), `:diff-count` → macro.diff-count (built .43) | built (.37, .43) | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28) | .11 |

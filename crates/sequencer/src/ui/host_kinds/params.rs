@@ -542,7 +542,13 @@ static DEVICE_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     names.push(f::DEVICE_PARAMS.1);
     names
 });
-static DEVICE_PARAMS_BIT: LazyLock<u32> = LazyLock::new(|| 1 << DEVICE_LIVE.keys.len());
+static DEVICE_PARAMS_BIT: LazyLock<u32> = LazyLock::new(|| {
+    assert!(
+        DEVICE_LIVE.keys.len() < 32,
+        "device live fields + params exceed the u32 observed mask: widen host_fields_observed"
+    );
+    1 << DEVICE_LIVE.keys.len()
+});
 
 /// `device.delete-target`: the delete target names the device
 /// ([`DeviceSlot::delete_target`]).
@@ -947,10 +953,6 @@ impl HostKinds {
             let held = device_delete_target(sources, source);
             pusher.push_computed(id, f::DEVICE_DELETE_TARGET, Value::Bool(held));
         }
-        if mask & bits.base_note != 0 {
-            let note = device_base_note(sources, source);
-            pusher.push_computed(id, f::DEVICE_BASE_NOTE, number(note));
-        }
         if mask & bits.mod_phases != 0 {
             let phases = device_mod_phases(sources, shared, source);
             pusher.push_numbers(id, f::DEVICE_MOD_PHASES, &phases);
@@ -983,7 +985,6 @@ impl HostKinds {
 struct DeviceBits {
     playhead: u32,
     delete_target: u32,
-    base_note: u32,
     mod_phases: u32,
     key_locked_notes: u32,
     variants: u32,
@@ -1005,7 +1006,6 @@ impl DeviceBits {
             DeviceBits {
                 playhead: DEVICE_LIVE.bit(f::DEVICE_PLAYHEAD),
                 delete_target: DEVICE_LIVE.bit(f::DEVICE_DELETE_TARGET),
-                base_note: DEVICE_LIVE.bit(f::DEVICE_BASE_NOTE),
                 mod_phases: DEVICE_LIVE.bit(f::DEVICE_MOD_PHASES),
                 key_locked_notes,
                 variants,

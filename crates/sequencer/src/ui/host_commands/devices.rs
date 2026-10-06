@@ -1,11 +1,12 @@
 //! The host kinds' device setters (kind-bindings spec §14.2b, §14.2f):
 //! `set-device-param` (`param.base`), `set-device-param-locks` /
 //! `clear-device-param-locks` (`lock-param!` / `unlock-param!`) and
-//! `set-device` (`device.voices`, `device.delete-target`, `device.base-note`,
-//! a rack slot's strip controls `gain`, `pan`, `muted`, `soloed`, `choke`
-//! and `enabled`), and `set-device-strip-locks` / `clear-device-strip-locks`
-//! (`lock-strip!` / `unlock-strip!`: a rack slot's gain, pan, mute and solo
-//! p-locks).
+//! `set-device` (`device.delete-target`, a track instrument's
+//! `device.base-note`, a rack slot's strip controls `gain`, `pan`, `muted`,
+//! `soloed`, `choke`, `enabled`, `base-note` and `voices`), and
+//! `set-device-strip-locks` / `clear-device-strip-locks` (`lock-strip!` /
+//! `unlock-strip!`: a rack slot's gain, pan, mute, solo, base note and
+//! voices p-locks).
 //!
 //! A device is named by its owner's stable id, `:track-id` (a track's
 //! chain, MIDI effects, drum rack slots and their effects) or `:bus-id` (a
@@ -30,24 +31,24 @@
 //! slot's instrument p-locks have no clear command yet: both are errors.
 //!
 //! A strip control's value follows the value rule: gain a number in 0–2,
-//! pan in −1–1, the choke group an integer in 0–16 (0: none), the flags a
-//! bool; anything else (or a device that is no rack slot) is an error that
-//! changes nothing. They go through the legacy rack strip commands'
-//! history edits (`SetRackSlotGain`, …, `SetRackSlotParamPlockMulti`,
+//! pan in −1–1, the base note in −48–48, the choke group an integer in
+//! 0–16 (0: none), voices an integer in 1–16, the flags a bool; anything
+//! else (or a device that is no rack slot) is an error that changes
+//! nothing. They go through the legacy rack strip commands' history edits
+//! (`SetRackSlotGain`, …, `SetRackSlotParamPlockMulti`,
 //! `ClearRackSlotParamPlockMulti`) with their refreshes
 //! (`rack_slot_strip_applied`, `rack_slot_plock_applied`).
 //!
-//! Gestures as [`super::ScriptEdit`]: a base edit, a gain or pan edit or a
-//! voices edit while
-//! the pointer is down stays open and later script edits join it (a drag
+//! Gestures as [`super::ScriptEdit`]: a base edit, a gain, pan, base note
+//! or voices edit, or a track instrument's base note edit while the
+//! pointer is down stays open and later script edits join it (a drag
 //! view's `set!` per frame is one undo entry, which the release ends); any
 //! other script edit ends its entry at once. An edit landing while another
 //! gesture is active (a user's knob drag) gets an entry of its own beside
 //! it.
 
 use super::rack::{
-    rack_param_applied, rack_slot_plock_applied, rack_slot_strip_applied, rack_slot_voices_applied,
-    StripControl,
+    rack_param_applied, rack_slot_plock_applied, rack_slot_strip_applied, StripControl,
 };
 use super::routing::bus_effect_param_applied;
 use super::track_settings::SetValue;
@@ -325,7 +326,8 @@ fn base_edit(
     changed
 }
 
-/// `set-device` (`:field` `voices` or `delete-target`, `:value`).
+/// `set-device` (`:field` `delete-target`, a track instrument's
+/// `base-note` or a strip control, `:value`).
 fn device_edit(
     map: &Payload,
     app: &mut app::App,
@@ -335,29 +337,6 @@ fn device_edit(
     let Addressed { owner, device, .. } = addressed(app, map)?;
     let (field, value) = SetValue::field(map)?;
     match field.as_str() {
-        "voices" => {
-            let DeviceSlot::RackSlot(slot_idx) = device else {
-                return Err(format!("a {} has no voices", device.role()));
-            };
-            let voices = value.integer(1, sequencer::audio::MAX_VOICES)?;
-            let current =
-                rack_slot_voices(&app.state, owner, slot_idx).ok_or("the device is gone")?;
-            if current == voices {
-                return Ok(());
-            }
-            let script = ScriptEdit::begin(app, ctx);
-            let command = app::AppCommand::SetRackSlotMaxPolyphony {
-                track: owner,
-                slot_idx,
-                value: voices,
-            };
-            let changed = script.apply(app, command);
-            if changed {
-                rack_slot_voices_applied(editor, app, ctx, owner, slot_idx);
-            }
-            script.end(app, ctx, true, changed);
-            Ok(())
-        }
         "delete-target" => {
             let on = value.flag()?;
             let shared = ctx.shared;
@@ -376,10 +355,8 @@ fn device_edit(
             }
             Ok(())
         }
-        "base-note" => {
-            let DeviceSlot::Instrument = device else {
-                return Err(format!("a {} has no base note", device.role()));
-            };
+        // A rack slot's base note is a strip control.
+        "base-note" if device == DeviceSlot::Instrument => {
             let note = value.number(-48.0, 48.0)? as f32;
             let offsets = &app.state.pattern.instrument_base_note_offsets;
             let current = offsets.get(owner).ok_or("the device is gone")?;
@@ -411,10 +388,10 @@ fn device_edit(
 }
 
 /// A strip control's base edit (`set-device` `gain`, `pan`, `muted`,
-/// `soloed`, `choke`, `enabled`): the value the slot holds now is a no-op
-/// (even one stored out of range), else the value rule, then the legacy
-/// command through history (a gain or pan drag joins one entry) and its
-/// refresh.
+/// `soloed`, `choke`, `enabled`, `base-note`, `voices`): the value the slot
+/// holds now is a no-op (even one stored out of range), else the value
+/// rule, then the legacy command through history (a drag of a continuous
+/// control joins one entry, [`StripControl::drags`]) and its refresh.
 fn strip_edit(
     owner: usize,
     device: DeviceSlot,
@@ -427,6 +404,7 @@ fn strip_edit(
     let DeviceSlot::RackSlot(slot_idx) = device else {
         return Err(match control {
             StripControl::Enabled => format!("a {}'s enabled is not settable", device.role()),
+            StripControl::BaseNote => format!("a {} has no base note", device.role()),
             _ => format!("a {} has no {}", device.role(), control.field()),
         });
     };
@@ -436,21 +414,21 @@ fn strip_edit(
         return Ok(());
     }
     let wanted = control.parse(value)?;
-    let continuous = matches!(control, StripControl::Gain | StripControl::Pan);
     let script = ScriptEdit::begin(app, ctx);
     let changed = script.apply(app, control.command(owner, slot_idx, wanted));
     if changed {
         rack_slot_strip_applied(editor, app, ctx, owner, slot_idx, control);
     }
-    script.end(app, ctx, continuous, changed);
+    script.end(app, ctx, control.drags(), changed);
     Ok(())
 }
 
 /// `set-device-strip-locks` / `clear-device-strip-locks` (`:field` `gain`,
-/// `pan`, `muted` or `soloed`, `:steps` with their `:step-tracks`, and a
-/// lock's `:value` under the value rule): the steps whose lock differs (or
-/// that hold one, to clear) through `SetRackSlotParamPlockMulti` /
-/// `ClearRackSlotParamPlockMulti`, one undo entry.
+/// `pan`, `muted`, `soloed`, `base-note` or `voices`, `:steps` with their
+/// `:step-tracks`, and a lock's `:value` under the value rule): the steps
+/// whose lock differs (or that hold one, to clear) through
+/// `SetRackSlotParamPlockMulti` / `ClearRackSlotParamPlockMulti`, one undo
+/// entry.
 fn strip_lock_edit(
     name: &str,
     map: &Payload,
@@ -468,7 +446,7 @@ fn strip_lock_edit(
     let Some((control, param)) = control.and_then(|control| Some((control, control.param()?)))
     else {
         return Err(format!(
-            "{field} takes no p-locks (gain, pan, muted or soloed)"
+            "{field} takes no p-locks (gain, pan, muted, soloed, base-note or voices)"
         ));
     };
     let (DeviceSlot::RackSlot(slot_idx), Some(track_id)) = (device, track_id) else {
@@ -528,9 +506,4 @@ fn strip_lock_edit(
     }
     script.end(app, ctx, false, changed);
     Ok(())
-}
-
-/// Rack slot `slot_idx` of `track`'s voices (`device.voices`).
-fn rack_slot_voices(state: &SequencerState, track: usize, slot_idx: usize) -> Option<usize> {
-    with_rack_slot(state, track, slot_idx, |_, slot| slot.max_polyphony)
 }

@@ -29,7 +29,8 @@
 //!   per track under its [`PlockKey`] (a key-lock edit moves the fx and UI
 //!   epochs).
 //! - **Base note** (`device.base-note`): a track instrument's offset (an
-//!   atomic; the setter is `set-device`'s).
+//!   atomic; the setter is `set-device`'s), read with the strip controls
+//!   (`devices::other_strip_field`; a rack slot's is its strip control).
 //! - **Tensors** (`tensor`, keyed (device instance id, index)): registered
 //!   with their device (`sync_device_source`); their cells are live, from
 //!   the slot's tensor data at the displayed step (track instruments,
@@ -411,17 +412,6 @@ fn param_key_locks(
         rows.iter()
             .map(|(note, value)| numbers(&[f64::from(*note), f64::from(*value)])),
     )
-}
-
-/// `device.base-note`: a track instrument's base note offset; 0 otherwise.
-pub(super) fn device_base_note(sources: &KindsHandles, device: &DeviceSource) -> f64 {
-    let offsets = &sources.state.pattern.instrument_base_note_offsets;
-    match (device.device, offsets.get(device.owner)) {
-        (DeviceSlot::Instrument, Some(bits)) => {
-            f64::from(f32::from_bits(bits.load(Ordering::Relaxed)))
-        }
-        _ => 0.0,
-    }
 }
 
 /// The source params a device's modulation sources show now

@@ -588,7 +588,6 @@ pub(super) fn live_value<S: KindStore>(
             match key {
                 f::DEVICE_PLAYHEAD => number(device.sampler.as_ref().map_or(0.0, |s| s.seconds())),
                 f::DEVICE_DELETE_TARGET => Value::Bool(device_delete_target(sources, &device)),
-                f::DEVICE_BASE_NOTE => number(device_base_note(sources, &device)),
                 f::DEVICE_MOD_PHASES => {
                     panel::numbers(&device_mod_phases(sources, shared, &device))
                 }

@@ -1311,3 +1311,246 @@ fn rack_slot_strip_handles_follow_their_slot_and_go_stale_with_it() {
         Value::Number(1.0)
     );
 }
+
+#[test]
+fn rack_slot_base_note_and_voices_read_their_base_display_and_lock_state() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def s2 (nth t2.steps 2)) (def s5 (nth t2.steps 5))",
+    );
+    let slot = h.rack_slot();
+    let voices = slot.max_polyphony;
+    assert_eq!(
+        h.eval_all(
+            "(list rs.base-note rs.base-note-display rs.base-note-locked rs.voices-display)"
+        ),
+        h.eval_all(&format!(
+            "(list {b} {b} false {voices})",
+            b = slot.instrument_base_note_offset
+        ))
+    );
+    // Locks (one undo entry each); the bases stay.
+    let before = h.app.history.undo_len();
+    h.eval_all("(lock-strip! rs \"base-note\" (list s2 s5) 7)");
+    h.eval_all("(lock-strip! rs \"voices\" (list s2) 3)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    let locks = h.rack_slot().param_plocks;
+    assert_eq!(locks.get(2, RackSlotParam::BaseNote), Some(7.0));
+    assert_eq!(locks.get(5, RackSlotParam::BaseNote), Some(7.0));
+    assert_eq!(locks.get(2, RackSlotParam::MaxPolyphony), Some(3.0));
+    // Nothing displayed (the rack is not the current track): the base.
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list rs.base-note-display rs.base-note-locked rs.voices-display)"),
+        h.eval_all(&format!(
+            "(list {} false {voices})",
+            slot.instrument_base_note_offset
+        ))
+    );
+    // The current track's selected step shows its locks.
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    assert_eq!(
+        h.eval_all(
+            "(list rs.base-note rs.base-note-display rs.base-note-locked rs.voices rs.voices-display)"
+        ),
+        h.eval_all(&format!(
+            "(list {} 7 true {voices} 3)",
+            slot.instrument_base_note_offset
+        ))
+    );
+    // The legacy rack slot value fields show the same values.
+    for (param, field) in [
+        (RackSlotParam::BaseNote, "rs.base-note-display"),
+        (RackSlotParam::MaxPolyphony, "rs.voices-display"),
+    ] {
+        sync_rack_slot_control_value_field(h.editor.runtime_mut(), &h.app, 2, 0, param, Some(2));
+        assert_eq!(
+            legacy(&h, &rack_slot_value_field(2, 0, param)),
+            Some(h.eval_all(field)),
+            "{field}"
+        );
+    }
+    // Any other device: its own value, never locked (a track instrument's
+    // base note; 0 else).
+    let offsets = &h.shared.state.pattern.instrument_base_note_offsets;
+    offsets[2].store(5.0f32.to_bits(), Ordering::Relaxed);
+    assert_eq!(
+        h.eval_all(
+            "(list rk.base-note rk.base-note-display rk.base-note-locked rk.voices-display)"
+        ),
+        h.eval_all("(list 5 5 false 0)")
+    );
+    assert_eq!(
+        rs_base_note(&mut h),
+        slot.instrument_base_note_offset as f64
+    );
+    // Clearing is one entry; only steps holding a lock count.
+    let before = h.app.history.undo_len();
+    h.eval_all("(unlock-strip! rs \"voices\" (list s5))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before, "nothing to clear");
+    h.eval_all("(unlock-strip! rs \"base-note\" (list s2 s5))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list rs.base-note-display rs.base-note-locked rs.voices-display)"),
+        h.eval_all(&format!(
+            "(list {} false 3)",
+            slot.instrument_base_note_offset
+        ))
+    );
+    app::edit::undo(&mut h.app);
+    assert_eq!(
+        h.rack_slot().param_plocks.get(2, RackSlotParam::BaseNote),
+        Some(7.0)
+    );
+    // The value rule: each field's own range.
+    h.fails(
+        "(lock-strip! rs \"base-note\" (list s2) 60)",
+        "a number from -48 to 48",
+    );
+    h.fails(
+        "(lock-strip! rs \"voices\" (list s2) 0)",
+        "an integer from 1 to 16",
+    );
+    h.fails(
+        "(lock-strip! rs \"voices\" (list s2) 2.5)",
+        "an integer from 1 to 16",
+    );
+    h.fails(
+        "(lock-strip! rk \"base-note\" (list s2) 1)",
+        "no strip controls",
+    );
+    assert_eq!(
+        h.rack_slot()
+            .param_plocks
+            .get(2, RackSlotParam::MaxPolyphony),
+        Some(3.0)
+    );
+}
+
+/// `rs.base-note` (rack slot 0 of track 2).
+fn rs_base_note(h: &mut Harness) -> f64 {
+    match h.eval_all("rs.base-note") {
+        Value::Number(note) => note,
+        other => panic!("not a number: {other:?}"),
+    }
+}
+
+#[test]
+fn rack_slot_base_note_and_voices_setters_follow_the_value_rule_through_history() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    let slot = h.rack_slot();
+    let offset = |h: &Harness| {
+        let offsets = &h.shared.state.pattern.instrument_base_note_offsets;
+        f32::from_bits(offsets[2].load(Ordering::Relaxed))
+    };
+    // A rack slot's base note: its own, through history; the track
+    // instrument's is untouched.
+    let before = h.app.history.undo_len();
+    h.eval_all("(set! rs.base-note 12)");
+    h.drain_and_sync();
+    assert_eq!(h.rack_slot().instrument_base_note_offset, 12.0);
+    assert_eq!(offset(&h), 0.0);
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    assert_eq!(rs_base_note(&mut h), 12.0);
+    // The legacy value field is repainted (rack_slot_strip_applied).
+    let field = rack_slot_value_field(2, 0, RackSlotParam::BaseNote);
+    assert_eq!(legacy(&h, &field), Some(Value::Number(12.0)));
+    // The current value is a no-op.
+    h.eval_all("(set! rs.base-note 12)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    // The track instrument's base note keeps its own path.
+    h.eval_all("(set! rk.base-note -5)");
+    h.drain_and_sync();
+    assert_eq!(offset(&h), -5.0);
+    assert_eq!(h.rack_slot().instrument_base_note_offset, 12.0);
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    // Out of range, wrong type: errors that change nothing.
+    h.fails("(set! rs.base-note 49)", "a number from -48 to 48");
+    h.fails("(set! rs.voices 17)", "an integer from 1 to 16");
+    assert_eq!(h.rack_slot().instrument_base_note_offset, 12.0);
+    // A drag's base note and voices set!s join one entry each.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in ["13", "14", "15"] {
+        h.eval_all(&format!("(set! rs.base-note {value})"));
+        h.drain();
+    }
+    h.gesture.pointer_down = false;
+    h.eval_all("(set! rs.base-note 16)");
+    h.drain();
+    assert_eq!(h.rack_slot().instrument_base_note_offset, 16.0);
+    assert_eq!(h.app.history.undo_len(), before + 1, "one drag entry");
+    h.gesture.pointer_down = true;
+    for value in ["2", "3", "4"] {
+        h.eval_all(&format!("(set! rs.voices {value})"));
+        h.drain();
+    }
+    h.gesture.pointer_down = false;
+    h.eval_all("(set! rs.voices 5)");
+    h.drain();
+    assert_eq!(h.rack_slot().max_polyphony, 5);
+    assert_eq!(h.app.history.undo_len(), before + 2, "one drag entry");
+    app::edit::undo(&mut h.app);
+    app::edit::undo(&mut h.app);
+    assert_eq!(h.rack_slot().max_polyphony, slot.max_polyphony);
+    assert_eq!(h.rack_slot().instrument_base_note_offset, 12.0);
+}
+
+#[test]
+fn rack_slot_base_note_fields_are_computed_only_while_observed() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    h.sync();
+    let (computed, locks) = (h.strip_computed(), h.frame.host_kinds.devices.strip_locks);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(h.strip_computed(), computed, "nothing observes them");
+    assert_eq!(h.frame.host_kinds.devices.strip_locks, locks);
+    // A track instrument's base note alone takes no rack lock.
+    h.eval_all("(def n #'rk.base-note)");
+    h.sync();
+    let (computed, locks) = (h.strip_computed(), h.frame.host_kinds.devices.strip_locks);
+    h.sync();
+    assert_eq!(h.strip_computed(), computed + 1);
+    assert_eq!(
+        h.frame.host_kinds.devices.strip_locks, locks,
+        "no rack lock"
+    );
+    // The rack slot's: computed per tick under one rack lock.
+    h.eval_all("(def d #'rs.base-note-display) (def v #'rs.voices-display)");
+    h.sync();
+    let (computed, locks) = (h.strip_computed(), h.frame.host_kinds.devices.strip_locks);
+    assert!(!h.sync(), "unchanged values push nothing");
+    assert_eq!(
+        h.strip_computed(),
+        computed + 3,
+        "the three observed fields"
+    );
+    assert_eq!(h.frame.host_kinds.devices.strip_locks, locks + 1);
+    // A base note edit repaints the binding without device work (a voices
+    // edit moves the rack's layout fingerprint).
+    let syncs = h.device_syncs();
+    h.eval_all("(set! rs.base-note -3)");
+    h.drain_and_sync();
+    assert_eq!(h.slot("d"), -3.0);
+    assert_eq!(h.device_syncs(), syncs, "no device work");
+    h.eval_all("(set! rs.voices 4)");
+    h.drain_and_sync();
+    assert_eq!(h.slot("v"), 4.0);
+}

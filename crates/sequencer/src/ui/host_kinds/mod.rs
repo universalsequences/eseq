@@ -860,6 +860,9 @@ pub(crate) mod f {
     pub(crate) const DEVICE_SOLOED: FieldKey = (DEVICE, "soloed");
     pub(crate) const DEVICE_SOLOED_DISPLAY: FieldKey = (DEVICE, "soloed-display");
     pub(crate) const DEVICE_SOLOED_LOCKED: FieldKey = (DEVICE, "soloed-locked");
+    pub(crate) const DEVICE_BASE_NOTE_DISPLAY: FieldKey = (DEVICE, "base-note-display");
+    pub(crate) const DEVICE_BASE_NOTE_LOCKED: FieldKey = (DEVICE, "base-note-locked");
+    pub(crate) const DEVICE_VOICES_DISPLAY: FieldKey = (DEVICE, "voices-display");
     pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
     pub(crate) const DEVICE_DISPLAY_NAME: FieldKey = (DEVICE, "display-name");
     pub(crate) const DEVICE_SOUND_BINDING: FieldKey = (DEVICE, "sound-binding");
@@ -1264,7 +1267,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_PARAMS, "(list-of param)", Model),
     (f::DEVICE_PLAYHEAD, ":number", Live),
     // Panel extras (`panel`): the tensors registered with the device; the
-    // rest computed while observed.
+    // rest computed while observed (`base-note` with the strip controls).
     (f::DEVICE_BASE_NOTE, ":number", Live),
     (f::DEVICE_MOD_PHASES, "(list-of :number)", Live),
     (f::DEVICE_TENSORS, "(list-of tensor)", Model),
@@ -1273,7 +1276,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // The rack macro sync (`macros`), when the rack's macros moved.
     (f::DEVICE_MACROS, "(list-of rack-macro)", Model),
     // A rack slot's strip controls (`devices::rack_strip_field`): computed
-    // while observed, under one rack lock per tick.
+    // while observed, under one rack lock per tick (with `base-note`, above;
+    // `voices`, the voices base, is a model field).
     (f::DEVICE_GAIN, ":number", Live),
     (f::DEVICE_GAIN_DISPLAY, ":number", Live),
     (f::DEVICE_GAIN_LOCKED, ":bool", Live),
@@ -1287,6 +1291,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_SOLOED_DISPLAY, ":bool", Live),
     (f::DEVICE_SOLOED_LOCKED, ":bool", Live),
     (f::DEVICE_CHOKE, ":int", Live),
+    (f::DEVICE_BASE_NOTE_DISPLAY, ":number", Live),
+    (f::DEVICE_BASE_NOTE_LOCKED, ":bool", Live),
+    (f::DEVICE_VOICES_DISPLAY, ":int", Live),
     // The panel header (`DeviceModel`): pushed with the device's model
     // fields; `modulators` registered with its descriptor (`panel`).
     (f::DEVICE_DISPLAY_NAME, ":string", Model),

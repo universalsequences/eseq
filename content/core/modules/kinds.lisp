@@ -540,12 +540,12 @@
          (devices (list-of device) :doc "The devices it holds: a drum rack's slots, a rack slot's effects; empty otherwise")
          (container device :doc "The device whose devices holds this one (a rack slot's rack, a rack slot effect's slot), or nil")
          (voices  :int :set (device-setter "voices")
-                  :doc "A drum rack slot's voices, 1 (mono) to 16 (the setter checks; no declared range: 0 reads for any other device, which takes no set!)")
+                  :doc "A drum rack slot's own voices, 1 (mono) to 16 (the setter checks; no declared range: 0 reads for any other device, which takes no set!); a drag's set!s join one undo entry. lock-strip! p-locks it; voices-display is the voices shown")
          (delete-target :bool :set (device-setter "delete-target")
                   :doc "The delete target (Backspace deletes it). Track effects are targets only on the current track; an instrument never")
          ;; Panel extras (spec §14.2g).
          (base-note :number :range (-48 48) :set (device-setter "base-note")
-                    :doc "A track instrument's base note offset, in semitones; 0 for any other device (which takes no set!)")
+                    :doc "A track instrument's base note offset, or a drum rack slot's own (a strip control: lock-strip! p-locks it), in semitones; 0 for any other device (which takes no set!). A drag's set!s join one undo entry")
          (mod-phases (list-of :number) :doc "Each modulation source's (1-4) cycle position; -1 when it has none or nothing samples it")
          (tensors (list-of tensor) :doc "The device's tensors (tables of cells)")
          (key-locked-notes (list-of :int) :doc "A track instrument's keys holding a key lock, ascending")
@@ -573,6 +573,10 @@
          (soloed-locked :bool :doc "soloed-display comes from a p-lock")
          (choke :int :range (0 16) :set (device-setter "choke")
                 :doc "A rack slot's choke group, 0 for none (no p-locks)")
+         (base-note-display :number :range (-48 48)
+                            :doc "The base note shown (a track instrument's: its base-note)")
+         (base-note-locked :bool :doc "base-note-display comes from a p-lock")
+         (voices-display :int :doc "The voices shown (the rack panel's V picker); 0 for any other device")
          ;; The panel header and its meters (spec §14.2l).
          (display-name :string :doc "The name the panel header shows: an instrument's or rack slot's without its folder or pin (a drum rack's track name, Sampler for a sampler), else name")
          (sound-binding :string :doc "A track instrument's bound sound (the header badge): the patch name, else the binding's (Take 2 · bars 0-2, Pattern 2); empty when unbound or for any other device. Computed while observed (an unobserved one reads its last value, empty before)")
@@ -1617,11 +1621,11 @@
            :param-idx p.index :steps (map (lambda (s) s.index) steps)
            :step-tracks (map (lambda (s) s.track.tid) steps))))
 
-;; P-lock rack slot d's strip control field (gain, pan, muted or soloed) to v
-;; on steps, a list of step instances of d's track (any other track's step is
-;; an error); one undo entry. Steps already locked to v are left alone. v
-;; follows the field's own range: gain 0-2, pan -1-1, a bool for muted and
-;; soloed.
+;; P-lock rack slot d's strip control field (gain, pan, muted, soloed,
+;; base-note or voices) to v on steps, a list of step instances of d's track
+;; (any other track's step is an error); one undo entry. Steps already locked
+;; to v are left alone. v follows the field's own range: gain 0-2, pan -1-1,
+;; base-note -48-48, voices an integer 1-16, a bool for muted and soloed.
 (def lock-strip! (d field steps v)
   (host-command "set-device-strip-locks"
     (merge (device-target d)

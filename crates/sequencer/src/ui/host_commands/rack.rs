@@ -123,8 +123,8 @@ pub(super) fn rack_param_applied(
 }
 
 /// A rack slot strip control: a rack slot device's kind field (`gain`,
-/// `pan`, `muted`, `soloed`, `enabled`, `choke`) and the legacy
-/// `set-rack-slot-*` command it shares.
+/// `pan`, `muted`, `soloed`, `enabled`, `choke`, `base-note`, `voices`)
+/// and the legacy `set-rack-slot-*` command it shares.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum StripControl {
     Gain,
@@ -133,6 +133,8 @@ pub(crate) enum StripControl {
     Solo,
     Enabled,
     Choke,
+    BaseNote,
+    Voices,
 }
 
 /// A strip control's value as a slot stores it.
@@ -140,7 +142,7 @@ pub(crate) enum StripControl {
 pub(crate) enum StripValue {
     Number(f32),
     Flag(bool),
-    Choke(u8),
+    Integer(usize),
 }
 
 impl StripValue {
@@ -149,7 +151,7 @@ impl StripValue {
         match self {
             Self::Number(value) => value,
             Self::Flag(on) => f32::from(u8::from(on)),
-            Self::Choke(group) => f32::from(group),
+            Self::Integer(value) => value as f32,
         }
     }
 
@@ -166,13 +168,15 @@ impl StripValue {
 }
 
 /// Each strip control's kind field.
-const STRIP_CONTROL_FIELDS: [(StripControl, FieldKey); 6] = [
+const STRIP_CONTROL_FIELDS: [(StripControl, FieldKey); 8] = [
     (StripControl::Gain, f::DEVICE_GAIN),
     (StripControl::Pan, f::DEVICE_PAN),
     (StripControl::Mute, f::DEVICE_MUTED),
     (StripControl::Solo, f::DEVICE_SOLOED),
     (StripControl::Enabled, f::DEVICE_ENABLED),
     (StripControl::Choke, f::DEVICE_CHOKE),
+    (StripControl::BaseNote, f::DEVICE_BASE_NOTE),
+    (StripControl::Voices, f::DEVICE_VOICES),
 ];
 
 impl StripControl {
@@ -198,20 +202,29 @@ impl StripControl {
             Self::Pan => Some(RackSlotParam::Pan),
             Self::Mute => Some(RackSlotParam::Mute),
             Self::Solo => Some(RackSlotParam::Solo),
+            Self::BaseNote => Some(RackSlotParam::BaseNote),
+            Self::Voices => Some(RackSlotParam::MaxPolyphony),
             Self::Enabled | Self::Choke => None,
         }
     }
 
+    /// Whether a drag's `set!`s join one undo entry (the continuous
+    /// controls); a flag or choke edit is an entry of its own.
+    pub(super) fn drags(self) -> bool {
+        matches!(self, Self::Gain | Self::Pan | Self::BaseNote | Self::Voices)
+    }
+
     /// A script's value under the value rule: gain a number in 0–2, pan in
-    /// −1–1, the choke group an integer in 0–16 (0: none), the flags a bool.
+    /// −1–1, the base note in −48–48, the choke group an integer in 0–16
+    /// (0: none), voices an integer in 1–16, the flags a bool.
     pub(super) fn parse(self, value: &SetValue<'_>) -> Result<StripValue, String> {
         Ok(match self {
             Self::Gain => StripValue::Number(value.number(0.0, 2.0)? as f32),
             Self::Pan => StripValue::Number(value.number(-1.0, 1.0)? as f32),
+            Self::BaseNote => StripValue::Number(value.number(-48.0, 48.0)? as f32),
             Self::Mute | Self::Solo | Self::Enabled => StripValue::Flag(value.flag()?),
-            Self::Choke => {
-                StripValue::Choke(value.integer(0, super::rack_kinds::CHOKE_GROUPS)? as u8)
-            }
+            Self::Choke => StripValue::Integer(value.integer(0, super::rack_kinds::CHOKE_GROUPS)?),
+            Self::Voices => StripValue::Integer(value.integer(1, sequencer::audio::MAX_VOICES)?),
         })
     }
 
@@ -224,7 +237,9 @@ impl StripControl {
             Self::Mute => StripValue::Flag(slot.mute),
             Self::Solo => StripValue::Flag(slot.solo),
             Self::Enabled => StripValue::Flag(slot.enabled),
-            Self::Choke => StripValue::Choke(slot.choke_group.unwrap_or(0)),
+            Self::Choke => StripValue::Integer(usize::from(slot.choke_group.unwrap_or(0))),
+            Self::BaseNote => StripValue::Number(slot.instrument_base_note_offset),
+            Self::Voices => StripValue::Integer(slot.max_polyphony),
         }
     }
 
@@ -268,6 +283,16 @@ impl StripControl {
                 slot_idx,
                 value: value.number() as u8,
             },
+            Self::BaseNote => app::AppCommand::SetRackSlotBaseNoteOffset {
+                track,
+                slot_idx,
+                value: value.number(),
+            },
+            Self::Voices => app::AppCommand::SetRackSlotMaxPolyphony {
+                track,
+                slot_idx,
+                value: value.number() as usize,
+            },
         }
     }
 }
@@ -276,7 +301,8 @@ impl StripControl {
 /// control snapshot (else per-trigger panner pushes clobber the new value
 /// with the stale snapshot's) and repaint the control's value field; mute
 /// and solo also rebuild the rack panel's pad/slot dicts (which carry them
-/// as plain values), enabled the slot header (and the fx panel).
+/// as plain values), enabled the slot header (and the fx panel); voices
+/// refresh as `rack_slot_voices_applied`.
 pub(super) fn rack_slot_strip_applied(
     editor: &mut Editor,
     app: &app::App,
@@ -286,14 +312,23 @@ pub(super) fn rack_slot_strip_applied(
     control: StripControl,
 ) {
     let shared = ctx.shared;
-    if control == StripControl::Choke {
+    match control {
         // The choke group: no snapshot republish (as the legacy command),
         // and no field to repaint (no value field shows it; the legacy
         // command's base-note field refresh repainted an unchanged value
         // and is dropped).
-        return;
+        StripControl::Choke => return,
+        StripControl::Voices => {
+            rack_slot_voices_applied(editor, app, ctx, track, slot_idx);
+            return;
+        }
+        _ => {}
     }
-    ctx.gesture.rack_control_snapshot_dirty = true;
+    // The base note repaints its field only (as the legacy command): no
+    // snapshot republish.
+    if !matches!(control, StripControl::BaseNote) {
+        ctx.gesture.rack_control_snapshot_dirty = true;
+    }
     if let Some(param) = control.param() {
         refresh_rack_direct_param_reactive(
             editor,
@@ -1553,19 +1588,13 @@ pub(super) fn handle(
                     );
                     // The rack transpose picker and slot base-note knob share
                     // this value binding; neither changes panel structure.
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
+                    rack_slot_strip_applied(
+                        editor,
+                        app,
+                        ctx,
                         track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::BaseNote,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
+                        slot_idx,
+                        StripControl::BaseNote,
                     );
                 }
             }
