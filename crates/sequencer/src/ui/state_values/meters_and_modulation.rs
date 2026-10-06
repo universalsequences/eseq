@@ -1575,9 +1575,7 @@ pub(crate) fn sync_generator_mark_fields(
     state: &Arc<SequencerState>,
     previous: &mut HashMap<(u64, String), f64>,
 ) -> bool {
-    let mut dirty = false;
-    let playing = state.is_playing();
-    let sample = state.audio_rendered_sample();
+    let mut consumed = Vec::new();
     for (id, key) in state.generator_mark_keys() {
         let field = if key.is_empty() {
             format!("generator-mark-{id}")
@@ -1589,15 +1587,22 @@ pub(crate) fn sync_generator_mark_fields(
             previous.remove(&slot);
             continue;
         }
-        let mark = if playing {
-            state.generator_mark_at(slot.0, &slot.1, sample).unwrap_or(0.0)
-        } else {
-            0.0
-        };
+        consumed.push((slot, field));
+    }
+    if consumed.is_empty() {
+        return false;
+    }
+    // One clock read and one lock per pass.
+    let marks: Vec<f64> = state
+        .with_shown_generator_marks(|shown| consumed.iter().map(|(slot, _)| shown(slot)).collect());
+    let mut dirty = false;
+    for ((slot, field), mark) in consumed.into_iter().zip(marks) {
         if previous.get(&slot) == Some(&mark) {
             continue;
         }
-        dirty |= rt.set_reactive("SEQ", &field, Value::Number(mark)).effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", &field, Value::Number(mark))
+            .effects_dirty;
         previous.insert(slot, mark);
     }
     dirty

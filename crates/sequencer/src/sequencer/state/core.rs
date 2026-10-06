@@ -712,6 +712,9 @@ pub struct SequencerState {
     /// `gen-mark` values per (generator id, key): (audio sample, value),
     /// oldest first, capped (see `push_generator_mark`).
     pub(super) generator_marks: Mutex<HashMap<(u64, String), std::collections::VecDeque<(u64, f64)>>>,
+    /// Moved (under the `generator_marks` lock) whenever its key set changes:
+    /// a first mark under a new (generator id, key), or a clear.
+    pub(super) generator_mark_keys_revision: AtomicU64,
     pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
     /// Control-thread hold ownership and ordered roll commands, drained at
     /// the top of every scheduler worker iteration.

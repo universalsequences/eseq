@@ -3,6 +3,18 @@ use super::super::*;
 /// Marks kept per generator: a few bars of sixteenths of lookahead.
 const GENERATOR_MARK_CAP: usize = 256;
 
+/// The latest of `marks` (oldest first) at or before audio sample `sample`.
+fn latest_generator_mark(
+    marks: &std::collections::VecDeque<(u64, f64)>,
+    sample: u64,
+) -> Option<f64> {
+    marks
+        .iter()
+        .rev()
+        .find(|(at, _)| *at <= sample)
+        .map(|(_, value)| *value)
+}
+
 impl SequencerState {
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
@@ -73,7 +85,11 @@ impl SequencerState {
     /// previous hit's end-of-gate mark) drops that stale future first.
     pub fn push_generator_mark(&self, id: u64, key: &str, sample: u64, value: f64) {
         let mut marks = self.generator_marks.lock().unwrap();
-        let queue = marks.entry((id, key.to_string())).or_default();
+        let queue = marks.entry((id, key.to_string())).or_insert_with(|| {
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+            Default::default()
+        });
         while queue.back().is_some_and(|(at, _)| *at > sample) {
             queue.pop_back();
         }
@@ -87,12 +103,22 @@ impl SequencerState {
     /// sample `sample`.
     pub fn generator_mark_at(&self, id: u64, key: &str, sample: u64) -> Option<f64> {
         let marks = self.generator_marks.lock().unwrap();
-        marks
-            .get(&(id, key.to_string()))?
-            .iter()
-            .rev()
-            .find(|(at, _)| *at <= sample)
-            .map(|(_, value)| *value)
+        latest_generator_mark(marks.get(&(id, key.to_string()))?, sample)
+    }
+
+    /// Run `read` with the mark a view shows per (generator id, key) slot,
+    /// under one lock: the latest at or before the audio clock while the
+    /// transport plays, else 0 (also 0 for a slot with no mark yet).
+    pub fn with_shown_generator_marks<R>(
+        &self,
+        read: impl FnOnce(&dyn Fn(&(u64, String)) -> f64) -> R,
+    ) -> R {
+        let (playing, sample) = (self.is_playing(), self.audio_rendered_sample());
+        let marks = self.generator_marks.lock().unwrap();
+        read(&|slot| {
+            let mark = playing.then(|| latest_generator_mark(marks.get(slot)?, sample));
+            mark.flatten().unwrap_or(0.0)
+        })
     }
 
     /// Every (generator id, key) that has stamped marks.
@@ -100,8 +126,30 @@ impl SequencerState {
         self.generator_marks.lock().unwrap().keys().cloned().collect()
     }
 
+    /// Moves whenever [`Self::generator_mark_keys`] changes.
+    pub fn generator_mark_keys_revision(&self) -> u64 {
+        self.generator_mark_keys_revision.load(Ordering::Acquire)
+    }
+
+    /// Drop generator `id`'s marks (its sequencer was unpublished: a
+    /// redefinition under the same id starts with none).
+    pub fn drop_generator_marks(&self, id: u64) {
+        let mut marks = self.generator_marks.lock().unwrap();
+        let before = marks.len();
+        marks.retain(|(generator, _), _| *generator != id);
+        if marks.len() != before {
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     pub fn clear_generator_marks(&self) {
-        self.generator_marks.lock().unwrap().clear();
+        let mut marks = self.generator_marks.lock().unwrap();
+        if !marks.is_empty() {
+            marks.clear();
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     pub fn has_graph_visualizations(&self) -> bool {

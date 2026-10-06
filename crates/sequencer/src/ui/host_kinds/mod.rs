@@ -67,6 +67,9 @@
 //! track's processes (`lanes`). The current scene's native neural networks
 //! are positional, kept by network id (replaced on a project load), their
 //! neurons keyed (network instance id, neuron index) (`neural`).
+//! Generators (tick-mode sequencers) are positional, kept by sequencer id
+//! (replaced on a project load), their marks keyed (generator instance id,
+//! a key per mark key string) (`generators`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -88,8 +91,9 @@
 //! editor and the app's views, from `ui::presented`), `notes` (the piano
 //! roll and its notes), `focus_steps` (the piano roll's steps), `graphs`
 //! (graph sequencers, active notes), `neural` (native neural networks and
-//! their neurons) and `table_editor` (the Filter Table response editor
-//! session) the per-kind syncs.
+//! their neurons), `generators` (generators and their marks) and
+//! `table_editor` (the Filter Table response editor session) the per-kind
+//! syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -99,6 +103,7 @@ use std::sync::LazyLock;
 mod arrangement;
 mod devices;
 mod events;
+mod generators;
 mod graphs;
 mod lanes;
 mod live;
@@ -128,6 +133,7 @@ pub(crate) use self::notes::{NoteKey, NoteShared, NoteSource};
 use arrangement::SongState;
 use devices::*;
 use events::*;
+use generators::*;
 use graphs::*;
 use lanes::*;
 pub(crate) use live::KindsHandles;
@@ -225,6 +231,8 @@ pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
 pub(crate) const GRAPH_PARAM: &str = "eseq.kinds:graph-param";
 pub(crate) const NETWORK: &str = "eseq.kinds:network";
 pub(crate) const NEURON: &str = "eseq.kinds:neuron";
+pub(crate) const GENERATOR: &str = "eseq.kinds:generator";
+pub(crate) const GENERATOR_MARK: &str = "eseq.kinds:generator-mark";
 pub(crate) const MODULATOR: &str = "eseq.kinds:modulator";
 pub(crate) const TABLE_EDITOR: &str = "eseq.kinds:table-editor";
 
@@ -397,6 +405,16 @@ pub(crate) mod f {
     pub(crate) const NEURON_ENERGY: FieldKey = (NEURON, "energy");
     pub(crate) const NEURON_TRIGGER: FieldKey = (NEURON, "trigger");
     pub(crate) const NEURON_DAMPENING: FieldKey = (NEURON, "dampening");
+
+    pub(crate) const GENERATOR_INDEX: FieldKey = (GENERATOR, "index");
+    pub(crate) const GENERATOR_GID: FieldKey = (GENERATOR, "gid");
+    pub(crate) const GENERATOR_NAME: FieldKey = (GENERATOR, "name");
+    pub(crate) const GENERATOR_OWNER: FieldKey = (GENERATOR, "owner");
+    pub(crate) const GENERATOR_MARKS: FieldKey = (GENERATOR, "marks");
+
+    pub(crate) const GENERATOR_MARK_GENERATOR: FieldKey = (GENERATOR_MARK, "generator");
+    pub(crate) const GENERATOR_MARK_NAME: FieldKey = (GENERATOR_MARK, "name");
+    pub(crate) const GENERATOR_MARK_VALUE: FieldKey = (GENERATOR_MARK, "value");
 
     pub(crate) const BROWSER_TRACK: FieldKey = (BROWSER, "track");
     pub(crate) const BROWSER_INSTRUMENT_KIND: FieldKey = (BROWSER, "instrument-kind");
@@ -1180,6 +1198,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
     pub(crate) const PROJECT_GRAPHS: FieldKey = (PROJECT, "graphs");
     pub(crate) const PROJECT_NETWORKS: FieldKey = (PROJECT, "networks");
+    pub(crate) const PROJECT_GENERATORS: FieldKey = (PROJECT, "generators");
     pub(crate) const PROJECT_INSTANCES: FieldKey = (PROJECT, "instances");
 }
 
@@ -2143,6 +2162,18 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::NEURON_ENERGY, ":number", Live),
     (f::NEURON_TRIGGER, ":number", Live),
     (f::NEURON_DAMPENING, "(list-of :number)", Live),
+    // Generators (`generators`): the tick-mode sequencers and their marks
+    // when the published version, the mark keys or the group instances
+    // moved; a mark's value live, read against the audio clock.
+    (f::PROJECT_GENERATORS, "(list-of generator)", Model),
+    (f::GENERATOR_INDEX, ":int", Model),
+    (f::GENERATOR_GID, ":int", Model),
+    (f::GENERATOR_NAME, ":string", Model),
+    (f::GENERATOR_OWNER, "group", Model),
+    (f::GENERATOR_MARKS, "(list-of generator-mark)", Model),
+    (f::GENERATOR_MARK_GENERATOR, "generator", Model),
+    (f::GENERATOR_MARK_NAME, ":string", Model),
+    (f::GENERATOR_MARK_VALUE, ":number", Live),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -2231,6 +2262,8 @@ pub(super) static TABLE_EDITOR_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(TABLE_EDITOR));
 pub(super) static NETWORK_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(NETWORK));
 pub(super) static NEURON_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(NEURON));
+pub(super) static GENERATOR_MARK_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(GENERATOR_MARK));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -2577,6 +2610,8 @@ pub(crate) struct HostKinds {
     pub(crate) networks: NeuralState,
     /// The tracks' output event stream (`transport.track-events`).
     track_events: TrackEventsState,
+    /// Generators (tick-mode sequencers) and their marks.
+    pub(crate) generators: GeneratorState,
 }
 
 impl HostKinds {
@@ -2667,6 +2702,7 @@ impl HostKinds {
             self.table_editor.invalidate();
             self.networks.invalidate();
             self.track_events.invalidate();
+            self.generators.invalidate();
         }
         if self
             .song
@@ -2687,6 +2723,10 @@ impl HostKinds {
         if (self.networks.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
             // A hot reload dropped network instances.
             self.networks.invalidate();
+        }
+        if (self.generators.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
+            // A hot reload dropped generator instances.
+            self.generators.invalidate();
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -2765,6 +2805,7 @@ impl HostKinds {
         self.sync_piano_roll(&mut pusher, app);
         self.sync_graph_model(&mut pusher, app);
         self.sync_network_model(&mut pusher, app);
+        self.sync_generator_model(&mut pusher, app);
         self.sync_presented(&mut pusher, app, &variant_tint);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
@@ -2789,6 +2830,7 @@ impl HostKinds {
         self.sync_graph_live(&mut pusher);
         self.sync_table_editor(&mut pusher);
         self.sync_network_live(&mut pusher);
+        self.sync_generator_live(&mut pusher);
         self.sync_transport_live(&mut pusher);
         let singletons = [
             (ENGINE, &*ENGINE_LIVE),
@@ -2877,6 +2919,7 @@ impl HostKinds {
             .chain(self.lanes.drain())
             .chain(self.graphs.drain())
             .chain(self.networks.drain())
+            .chain(self.generators.drain())
             .chain(self.scenes.drain())
             .chain(self.banks.drain());
         for (_, id) in doomed {

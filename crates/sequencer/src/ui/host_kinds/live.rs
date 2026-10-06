@@ -129,6 +129,9 @@ pub(crate) struct KindsShared {
     pub(crate) focus_steps: FocusStepShared,
     /// The graphs' sources and registered parts (`graphs`).
     pub(crate) graphs: GraphShared,
+    /// Each generator mark instance's slot, (sequencer id, mark key), as of
+    /// the last generator sync (`generators`; exact, where `gid` is an f64).
+    pub(super) generator_marks: HashMap<InstanceId, (u64, String)>,
 }
 
 type VariantKey = sequencer::plock_variants::PlockVariantKey;
@@ -619,6 +622,7 @@ pub(super) fn live_value<S: KindStore>(
         GRAPH | GRAPH_NODE => graph_live_value(store, sources, shared, id, key)?,
         TABLE_EDITOR => table_editor_live_value(store, sources, shared, key)?,
         NETWORK | NEURON => neural_live_value(store, sources, id, key)?,
+        GENERATOR_MARK => generator_mark_value(sources, shared, id, key)?,
         RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {

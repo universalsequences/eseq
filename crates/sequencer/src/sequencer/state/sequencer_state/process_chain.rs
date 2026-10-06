@@ -22,6 +22,7 @@ impl SequencerState {
         };
         if removed {
             self.published_sequencers_version.fetch_add(1, Ordering::AcqRel);
+            self.drop_generator_marks(id);
         }
         removed
     }
@@ -210,17 +211,26 @@ impl SequencerState {
     }
 
     pub fn unpublish_sequencer_by_name(&self, name: &str) -> bool {
-        let removed = {
-            let mut list = self.published_sequencers.lock().unwrap();
-            let before = list.len();
-            list.retain(|sequencer| sequencer.name != name);
-            list.len() != before
-        };
-        if removed {
-            self.published_sequencers_version
-                .fetch_add(1, Ordering::AcqRel);
+        let mut removed = Vec::new();
+        self.published_sequencers
+            .lock()
+            .unwrap()
+            .retain(|sequencer| {
+                let keep = sequencer.name != name;
+                if !keep {
+                    removed.push(sequencer.id);
+                }
+                keep
+            });
+        if removed.is_empty() {
+            return false;
         }
-        removed
+        self.published_sequencers_version
+            .fetch_add(1, Ordering::AcqRel);
+        for id in removed {
+            self.drop_generator_marks(id);
+        }
+        true
     }
     pub fn published_sequencers(&self) -> Vec<PublishedSequencer> {
         self.published_sequencers.lock().unwrap().clone()

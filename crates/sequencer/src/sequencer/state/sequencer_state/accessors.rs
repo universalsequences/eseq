@@ -293,6 +293,7 @@ impl SequencerState {
             next_neural_network_id: AtomicU64::new(1),
             graph_visualizations: Mutex::new(Vec::new()),
             generator_marks: Mutex::new(HashMap::new()),
+            generator_mark_keys_revision: AtomicU64::new(0),
             graph_control_commands: Mutex::new(Vec::new()),
             roll_input: Mutex::new(crate::sequencer::RollInputState::default()),
             roll_recorded_hits: Mutex::new(Vec::new()),

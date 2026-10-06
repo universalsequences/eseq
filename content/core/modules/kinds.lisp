@@ -9,7 +9,8 @@
 ;; and their mappings, process classes, the browser's preset files and rack
 ;; slots, the open sound palette's sounds, the editor's macros and assets,
 ;; Patch Learn's rows, a MIDI capture's lanes and notes, MIDI inputs, graph
-;; sequencers and their nodes, native neural networks and their neurons;
+;; sequencers and their nodes, native neural networks and their neurons,
+;; generators and their marks;
 ;; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
@@ -64,7 +65,8 @@
         table-editor table-editor-open! table-editor-close! table-editor-band!
         table-editor-op! table-editor-add-node! table-editor-frame! table-editor-undo!
         table-editor-redo! table-editor-save!
-        network networks set-neural-weight!)
+        network networks set-neural-weight!
+        generator generators generator-of generator-mark-named)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -966,6 +968,27 @@
          (node-events (list-of (list-of :number))
                      :doc "Each node's latest event while it shows (transpose to 0.01, velocity 0-1), an empty row when none")))
 
+;; One mark of a generator (spec §14.2t): what its ticks stamp with
+;; (gen-mark v key), read as it sounds. (generator-mark-named g "chord");
+;; the unkeyed (gen-mark v) is key "".
+(def-kind generator-mark
+  :key (generator mname)
+  :host ((generator  generator :doc "The generator whose ticks stamp it")
+         (name       :string :doc "Its gen-mark key; empty for an unkeyed (gen-mark v)")
+         (value      :number
+                     :doc "The latest value its ticks stamped at or before the audio clock (the hit sounding now); 0 while stopped")))
+
+;; A tick-mode sequencer: a created kind's instance (jaki, …) or a script's
+;; def-sequencer with a :tick. (generator-of self) is an instance's.
+(def-kind generator
+  :key (index)
+  :host ((index      :int    :doc "Position in project.generators")
+         (gid        :int    :doc "Its sequencer id: the created instance's id (self.id) for an instance's generator")
+         (name       :string)
+         (owner      group   :doc "The drum rack that owns it (its :track is a member index), or nil")
+         (marks      (list-of generator-mark)
+                     :doc "Its marks by key, sorted; a key appears with its first gen-mark")))
+
 (def-kind track
   :key (index)
   :host ((index     :int    :doc "Position in the track list, from 0")
@@ -1716,6 +1739,7 @@
          (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")
          (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")
          (networks (list-of network) :doc "The current scene's native neural networks, in order")
+         (generators (list-of generator) :doc "The tick-mode sequencers (generators), in publish order")
          (instances (list-of :any)
                     :doc "The project's package instances, as seq-package-tree takes them: dicts :id :kind :label :owner-label :owner-rack (a rack's group id, nil for the project) :registered? (false: its kind is not loaded)")))
 
@@ -1730,6 +1754,7 @@
 (def macros () project.macros)
 (def graphs () project.graphs)
 (def networks () project.networks)
+(def generators () project.generators)
 
 ;; Graph sequencers (spec §14.2k). The graph of a created instance (self) or
 ;; of a sequencer id, or nil.
@@ -1757,6 +1782,15 @@
 ;; Set cell (from to) of network nw's weight matrix (neuron indices; any
 ;; finite number).
 (def set-neural-weight! (nw from to v) (neural-edit nw "weight" v :from from :to to))
+;; Generators (spec §14.2t). The generator of a created instance (self) or
+;; of a sequencer id, or nil.
+(def generator-of (x)
+  (let ((id (if (number? x) x x.id)))
+    (first (filter (lambda (g) (= g.gid id)) project.generators))))
+;; Generator g's mark named key (its gen-mark key; "" for an unkeyed
+;; gen-mark), or nil before its first stamp.
+(def generator-mark-named (g key)
+  (first (filter (lambda (m) (= m.name key)) g.marks)))
 ;; graph-node.resolution / quantize labels (the host checks they match its
 ;; own), graph.max-poly-selection's.
 (def graph-timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))

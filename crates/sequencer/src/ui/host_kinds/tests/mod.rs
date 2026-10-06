@@ -438,6 +438,7 @@ mod browser;
 mod browser_view;
 mod devices;
 mod focus_steps;
+mod generator;
 mod graph;
 mod lanes;
 mod mixer;

@@ -3245,7 +3245,8 @@ Built (7g):
   (`SEQ.neural-networks`, `neural-*-matrix`, the neuron selection;
   eseq-0l17.50, built: §14.2q); event streams (the graph's event history, node events,
   deltas and group traces; `SEQ.track-events`, `track-event-current-beat`;
-  eseq-0l17.51, built: §14.2s); generator marks (alez.jaki, eseq-0l17.52); a node's
+  eseq-0l17.51, built: §14.2s); generator marks (alez.jaki, eseq-0l17.52,
+  built: §14.2t); a node's
   `duration` / `swing` overrides (no content edits them).
 
 ### 14.2l Built in stage 7b-4 (eseq-0l17.43)
@@ -3907,6 +3908,75 @@ Built (7g-4):
   and `delta-leak-per-beat` (the weights are `graph-param.value`, §14.2k;
   nothing reads the rest).
 
+### 14.2t Built in stage 7g-5 (eseq-0l17.52)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `generator` | `(index)` | `index :int`, `gid :int` (the sequencer id: a created instance's id), `name :string`, `owner group` (nil: the project), `marks (list-of generator-mark)` (sorted by name) |
+| `generator-mark` | `(generator mname)` (by name) | `generator generator`, `name :string` (its `gen-mark` key; `""` for an unkeyed `(gen-mark v)`); live: `value :number` (L) |
+| `project` | `()` | `generators (list-of generator)`; `(generators)` |
+
+Helpers: `(generator-of x)` (a created instance or a sequencer id, like
+`graph-of`), `(generator-mark-named g key)` (nil before the key's first
+stamp). Nothing is settable: marks are what a tick stamps. A mark's key
+field is `name` (`key` is every keyed instance's builtin field).
+`generator-mark` is a sub-kind, so it is not exported (`generator` is).
+
+Built (7g-5):
+
+- **Generators and created instances.** A created kind such as `jaki`
+  stays a created kind (D5: no `:host`); the host publishes every
+  tick-mode sequencer it runs (an instance's `:generator`, or a script's
+  `def-sequencer` with a `:tick`; a graph-mode one is a `graph`, §14.2k)
+  as a `generator`, whose `gid` is the published sequencer id (an
+  instance's own id), so a view reaches its marks with `(generator-of
+  self)`. View state stays the instance's `:state`.
+- **Identity.** Generators are positional, kept by sequencer id
+  (`registry::reconcile`), replaced on a project load. Creating or deleting
+  an instance publishes or unpublishes its sequencer, which registers or
+  drops its generator and with it its marks (held handles go stale). Marks
+  are keyed (generator instance id, a stable sub-key per mark key string,
+  never reused for another string until a project load replaces every
+  generator and resets them), registered when their key gets its first
+  stamp (the legacy field likewise appeared then) and dropped with the
+  generator's marks: unpublishing a sequencer (by id or by name) drops its
+  marks (`SequencerState::drop_generator_marks`, new), so a script
+  generator removed and defined again starts with none, and a clear
+  (`clear_generator_marks`: a project load, an instance replacement) drops
+  them all.
+- **Feeds.** The model fields sync behind one key compared without
+  allocating: the published sequencer version, the mark keys' revision
+  (`SequencerState::generator_mark_keys_revision`, new: moved under the
+  marks lock by the first stamp under a new (generator, key) and by a clear
+  that removed some) and the group instances (an owner). The published
+  generators are re-read only when the published version moved, the mark
+  keys only when their revision did, so a stamp under a known key (every
+  hit) costs no model sync. A mark's `value` is live, observed only: the
+  observed marks (an `ObservedList`) are read under one lock per tick
+  (`SequencerState::with_shown_generator_marks`, new, which the legacy
+  `sync_generator_mark_fields` now reads through too, once per pass for
+  every consumed field: the latest stamp at
+  or before `audio_rendered_sample` while the transport plays, else 0) and
+  pushed where they moved since the last push; with nothing observed a tick
+  reads nothing. A mark's slot (sequencer id, key) is kept host-side
+  (`KindsShared::generator_marks`), exact where `gid` is an f64 (a legacy
+  hashed id past 2^53); a cold read asks the host through it.
+- **The jaki reads map to fields** (`packages/alez.jaki/src/kind.lisp`;
+  the view ports in .20). Let `g` be `(generator-of self)` and `(mark g k)`
+  `(let ((m (generator-mark-named g k))) (if m … 0))`, read in the subtree
+  that draws it (it re-runs when `g.marks` gains the key):
+  `(reactive-value (bind-seq (str "generator-mark-" self.id)))` (the hit
+  strip's playhead, `jk-playhead`) → the `""` mark's `m.value`;
+  `… "-chord"` (`jk-chord-now`) → the `"chord"` mark's `m.value`; a
+  row's `:lit (bind-seq (str "generator-mark-" self.id "-" route-slot))`
+  → `#'m.value` of the mark named `route-slot` (0 without one); its
+  `:lit-values` `(bind-seq (str … route-slot "." k))` → `#'m.value` of
+  the marks named `(str route-slot "." k)`.
+- **Not covered:** the mark history (only the shown value is published;
+  no view reads past stamps); a generator's tick source, resolution and
+  `:requires` (no content reads them); its tick errors (the status line
+  reports them, `GeneratorTickErrorNotice`).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3934,7 +4004,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7g-2 | eseq-0l17.49 (built) | a graph node's process patch as `process` instances (`graph-node.processes`), its setters through `edit-process` | .20 (and .45) |
 | 7g-3 | eseq-0l17.50 (built) | the native neural engine's networks and neuron selection: `network`, `neuron`, `project.networks` | .20 |
 | 7g-4 | eseq-0l17.51 (built) | event streams as positional rows: `graph.events`, `node-events`, `deltas`, `node-deltas`, `group-activity`, `group-suppression`; `transport.track-events`, `track-events-beat` | .20 |
-| 7g-5 | eseq-0l17.52 | generator marks (alez.jaki) | .20 |
+| 7g-5 | eseq-0l17.52 (built) | generators (tick-mode sequencers) and their marks: `generator`, `generator-mark`, `project.generators`, `generator-of`, `generator-mark-named` | .20 |
 | 7h | eseq-0l17.34 (built) | rack pads, rack clips, grooves (rack, clip, pad shares, pool, library), armed rack | .11 .13 .19 |
 | 7i | eseq-0l17.35 (built) | track settings (`tp-*`), scales (`tuning`, `degree`), routing (outputs, mod routes and levels), the project's option lists and option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
 
@@ -4201,7 +4271,7 @@ builds the field name.
 | `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.selected (the native neural engine; `nr.selected`, setter `neural-set-neuron-selected`) | built (.50) | .20 |
-| `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | model | jaki generator marks | .52 | .20 |
+| `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | live | `generator-mark-<id>[-<key>]` → `(generator-mark-named (generator-of self) key).value` (live; key `""` unkeyed) | built (.52) | .20 |
 | `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33); ported (.13), removed | .13 |
 | `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event-history → graph.events, node-events → graph.node-events (events: its non-empty rows), delta-matrix → graph.deltas, node-delta-column → graph.node-deltas, group-activity / group-suppression-matrix → graph.group-activity / group-suppression (live, built .51) | built (.33, .51) | .20 |
 | `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.dampening (live; the matrix is `(map (lambda (nr) nr.dampening) nw.neurons)`) | built (.50) | .20 |
