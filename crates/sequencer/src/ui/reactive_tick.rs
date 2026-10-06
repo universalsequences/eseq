@@ -489,7 +489,10 @@ pub(crate) fn sync_reactive_tick(
         // switching instruments republishes immediately rather than leaving the
         // previous one's modulation on the panel.
         let mod_display_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        if !fx_visible {
+        // A host kind's modulation field (param.mod-offset, …) keeps the
+        // sample live with the panel hidden; publishing stays the panel's.
+        let mod_display_live = fx_visible || ctx.frame.host_kinds.wants_mod_display();
+        if !mod_display_live {
             // Releasing the watchlist also removes audio-thread snapshot work.
             // Keep the last published values for the next visible delta.
             for node in ctx.meters.watched_display_modulators.drain() {
@@ -497,7 +500,8 @@ pub(crate) fn sync_reactive_tick(
             }
             ctx.meters.mod_display_poll_track = None;
         } else if meter_polled
-            || !was_visible.fx
+            || (fx_visible && !was_visible.fx)
+            || ctx.meters.mod_display_poll_track.is_none()
             || mod_display_epoch != ctx.meters.mod_display_poll_fx_epoch
             || Some(ct) != ctx.meters.mod_display_poll_track
         {
@@ -510,7 +514,7 @@ pub(crate) fn sync_reactive_tick(
                 &ctx.shared.state,
                 Some(ct),
                 mod_display_selected_step,
-                fx_visible,
+                mod_display_live,
                 &mut ctx.meters.watched_display_modulators,
             );
         }
@@ -2219,6 +2223,7 @@ pub(crate) fn sync_reactive_tick(
         mod_ports: &ctx.meters.cached_mod_port_levels,
         overloaded: ctx.frame.cpu_overload.displayed(),
         pad_triggers: &ctx.frame.rack_pad_triggers,
+        mod_display: &ctx.meters.cached_mod_display_values,
     };
     if ctx
         .frame

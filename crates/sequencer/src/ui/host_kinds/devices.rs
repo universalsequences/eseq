@@ -38,7 +38,7 @@
 //! of that pass; `delete-target` is live (the device sync's observed list).
 
 use super::*;
-use sequencer::effects::{EffectDescriptor, ParamDescriptor};
+use sequencer::effects::EffectDescriptor;
 use std::hash::{Hash, Hasher};
 
 /// The device sync's state (in [`HostKinds`]).
@@ -169,7 +169,10 @@ pub(super) struct DeviceModel<'a> {
     pub(super) kind: String,
     pub(super) name: String,
     pub(super) enabled: bool,
-    pub(super) params: &'a [ParamDescriptor],
+    /// The device's descriptor (`None`: no params).
+    pub(super) desc: Option<&'a EffectDescriptor>,
+    /// A sampler instrument (its lane depths are DSP units).
+    pub(super) sampler: bool,
     /// The device whose `devices` holds this one (a rack slot's rack, a
     /// rack slot effect's slot).
     pub(super) container: Option<InstanceId>,
@@ -265,7 +268,8 @@ fn push_device(
     pusher.push(id, f::DEVICE_ENABLED, Value::Bool(model.enabled));
     pusher.push(id, f::DEVICE_CONTAINER, instance_or_nil(model.container));
     pusher.push(id, f::DEVICE_VOICES, number(model.voices as f64));
-    HostKinds::sync_device_source(pusher, app, id, owner, model.device, model.params)
+    let desc = (model.desc, model.sampler);
+    HostKinds::sync_device_source(pusher, app, id, owner, model.device, desc)
 }
 
 /// The placeholder lookup [`reconcile_devices`] takes for the devices
@@ -314,16 +318,14 @@ fn effect_model<'a>(
     descriptors: &'a [EffectDescriptor],
     container: Option<InstanceId>,
 ) -> DeviceModel<'a> {
-    let params = descriptors
-        .get(entry.slot as usize)
-        .map_or(&[][..], |desc| desc.params.as_slice());
     DeviceModel {
         device,
         did,
         kind: entry.name.clone(),
         name: entry.name,
         enabled: entry.enabled,
-        params,
+        desc: descriptors.get(entry.slot as usize),
+        sampler: false,
         container,
         voices: 0,
     }
@@ -465,7 +467,8 @@ impl DeviceState {
                         kind: desc.name.clone(),
                         name: desc.name.clone(),
                         enabled: effect_enabled(desc, values),
-                        params: &desc.params,
+                        desc: Some(desc),
+                        sampler: false,
                         container: None,
                         voices: 0,
                     }
@@ -539,7 +542,8 @@ impl DeviceState {
                     kind: instrument_type_label(slot.instrument_type).to_string(),
                     name: rack_slot_raw_name(app, slot_idx, slot),
                     enabled: slot.enabled,
-                    params: (app.rack_slot_descriptor(slot)).map_or(&[][..], |d| &d.params),
+                    desc: app.rack_slot_descriptor(slot),
+                    sampler: slot.instrument_type == sequencer::sequencer::InstrumentType::Sampler,
                     container: instrument,
                     voices: slot.max_polyphony,
                 });

@@ -265,7 +265,9 @@ fn label_for_index(index: usize) -> String {
     }
 }
 
-fn label_sort_index(label: &str) -> usize {
+/// A label's place in the A, B, …, A', … order (`usize::MAX` for any other
+/// text); unique per label, so a stable key while the variant exists.
+pub fn label_sort_index(label: &str) -> usize {
     let mut chars = label.chars();
     let Some(base) = chars.next() else {
         return usize::MAX;

@@ -1318,7 +1318,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&fx_epoch),
         Arc::clone(&ui_invalidations),
         Arc::clone(&expanded_step_projection),
-        selected_neural_neurons,
+        Arc::clone(&selected_neural_neurons),
         Arc::clone(&active_delete_target),
         Arc::clone(&active_delete_target_version),
         Arc::clone(&auto_follow_override_until),
@@ -1345,6 +1345,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         auto_follow_override_until,
         armed_rack,
         bus_state: Arc::clone(&bus_state),
+        selected_neural_neurons,
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {

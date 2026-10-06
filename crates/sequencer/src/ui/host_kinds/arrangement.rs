@@ -244,7 +244,7 @@ impl HostKinds {
                 continue;
             };
             let wanted: Vec<u64> = cells.iter().map(|cell| cell.pattern_id.0).collect();
-            let ids = reconcile_children(pusher, track_id, CELL, &wanted);
+            let ids = pusher.reconcile_children(track_id, CELL, &wanted);
             let first = all.len();
             for (cell, id) in cells.iter().zip(ids) {
                 let Some(id) = id else { continue };
@@ -364,7 +364,7 @@ impl HostKinds {
             let Some(track_id) = *id else { continue };
             let clips = lanes.get(track).map_or(&[][..], Vec::as_slice);
             let wanted: Vec<u64> = clips.iter().map(|clip| clip.id.0).collect();
-            let ids = reconcile_children(pusher, track_id, CLIP, &wanted);
+            let ids = pusher.reconcile_children(track_id, CLIP, &wanted);
             let first = rows.len();
             for (clip, id) in clips.iter().zip(ids) {
                 let Some(id) = id else { continue };

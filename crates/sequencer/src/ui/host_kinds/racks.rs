@@ -322,7 +322,7 @@ impl HostKinds {
                 RackBank::NotRack | RackBank::Legacy => (&[][..], None),
             };
             let wanted: Vec<u64> = rows.iter().map(|row| row.cid).collect();
-            let ids = reconcile_children(pusher, group_id, RACK_CLIP, &wanted);
+            let ids = pusher.reconcile_children(group_id, RACK_CLIP, &wanted);
             let first = all.len();
             let mut playing = None;
             for (index, (row, id)) in rows.iter().zip(ids).enumerate() {
@@ -383,15 +383,15 @@ impl HostKinds {
             };
             let Some(rack) = group.rack.as_ref() else {
                 // A plain group (or a rack turned back into one).
-                reconcile_children(pusher, group_id, PAD, &[]);
-                reconcile_children(pusher, group_id, GROOVE, &[]);
+                pusher.reconcile_children(group_id, PAD, &[]);
+                pusher.reconcile_children(group_id, GROOVE, &[]);
                 pusher.push(group_id, f::GROUP_PADS, instance_list([]));
                 pusher.push(group_id, f::GROUP_GROOVE, Value::Nil);
                 continue;
             };
             let rows = pad_rows(group, rack, tids);
             let wanted: Vec<u64> = rows.iter().map(|row| row.tid).collect();
-            let ids = reconcile_children(pusher, group_id, PAD, &wanted);
+            let ids = pusher.reconcile_children(group_id, PAD, &wanted);
             let first = pads.len();
             for (row, id) in rows.iter().zip(ids) {
                 let Some(id) = id else { continue };
@@ -454,7 +454,7 @@ impl HostKinds {
         let settings: Vec<(u64, &RackGrooveSettings)> =
             std::iter::once((0, &rack.groove)).chain(owned).collect();
         let wanted: Vec<u64> = settings.iter().map(|(clip, _)| *clip).collect();
-        let ids = reconcile_children(pusher, group_id, GROOVE, &wanted);
+        let ids = pusher.reconcile_children(group_id, GROOVE, &wanted);
         let mut own = None;
         for ((clip, settings), id) in settings.iter().zip(&ids) {
             let Some(id) = *id else { continue };
@@ -530,7 +530,7 @@ impl HostKinds {
                 .filter_map(|(pad, lane)| Some((tid_of(pad)?, lane)))
                 .collect();
             let wanted: Vec<u64> = shares.iter().map(|(tid, _)| *tid).collect();
-            let ids = reconcile_children(pusher, id, PAD_GROOVE, &wanted);
+            let ids = pusher.reconcile_children(id, PAD_GROOVE, &wanted);
             let group_pad = |rt: &Runtime, tid: u64| rt.keyed_instance(PAD, &[group_id, tid]);
             for ((tid, lane), share) in shares.iter().zip(&ids) {
                 let Some(share) = *share else { continue };

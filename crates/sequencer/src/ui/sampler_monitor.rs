@@ -12,7 +12,8 @@ pub(crate) fn read_sampler_playhead_seconds(app: &app::App, track: usize) -> f64
 pub(crate) struct SamplerPlayhead {
     lg: sequencer::audiograph::LiveGraphPtr,
     sampler_ids: Vec<i32>,
-    /// The registered sample's key, when the track has one.
+    /// The sample's path and registered key, when the track has one.
+    path: Option<std::path::PathBuf>,
     sample: Option<String>,
     sample_rate: u32,
 }
@@ -24,12 +25,12 @@ impl SamplerPlayhead {
         if ids.sampler_ids.is_empty() {
             return None;
         }
+        let path = app.sampler_path_ref_for_track(track).cloned();
         Some(Self {
             lg: app.graph.lg,
             sampler_ids: ids.sampler_ids.clone(),
-            sample: app
-                .sampler_path_for_track(track)
-                .map(|path| path.display().to_string()),
+            sample: path.as_ref().map(|path| path.display().to_string()),
+            path,
             sample_rate: app.graph.sample_rate,
         })
     }
@@ -37,8 +38,24 @@ impl SamplerPlayhead {
     /// Whether `other` reads the same voices of the same sample.
     pub(crate) fn same_voices(&self, other: &Self) -> bool {
         self.sampler_ids == other.sampler_ids
-            && self.sample == other.sample
+            && self.path == other.path
             && self.sample_rate == other.sample_rate
+    }
+
+    /// Whether `of(app, track)` would read the same voices of the same
+    /// sample (`None` for a track with no sampler voices); allocates
+    /// nothing. What keeps a cold `device.playhead` read current.
+    pub(crate) fn current(this: Option<&Self>, app: &app::App, track: usize) -> bool {
+        let ids = app.graph.track_node_ids.get(track);
+        let voices = ids.map_or(&[][..], |ids| &ids.sampler_ids[..]);
+        match this {
+            None => voices.is_empty(),
+            Some(this) => {
+                this.sampler_ids == voices
+                    && this.path.as_ref() == app.sampler_path_ref_for_track(track)
+                    && this.sample_rate == app.graph.sample_rate
+            }
+        }
     }
 
     /// The newest playing voice's position in seconds; 0 when none plays.

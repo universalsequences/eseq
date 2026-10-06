@@ -1,5 +1,122 @@
 use super::*;
 
+/// Where a param sits on its device's panel: the main controls, a
+/// modulation lane's own params (`mod …`), a modulation source's settings
+/// (voice modulator source params), or host plumbing nobody shows. Shared by
+/// the instrument panel builders and the host kinds' `param.section`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelSection {
+    Main,
+    Mod,
+    Source,
+    Hidden,
+}
+
+impl PanelSection {
+    pub(crate) fn of(pdesc: &sequencer::effects::ParamDescriptor) -> Self {
+        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
+            Self::Hidden
+        } else if is_source_param(pdesc.node_param_idx) {
+            Self::Source
+        } else if is_mod_param(&pdesc.name) {
+            Self::Mod
+        } else {
+            Self::Main
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Mod => "mod",
+            Self::Source => "source",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// The name the panel shows: a mod param without its `mod ` prefix, a
+    /// source param by its role (`type`, `rate`, …).
+    pub(crate) fn label(self, pdesc: &sequencer::effects::ParamDescriptor) -> String {
+        match self {
+            Self::Mod => (pdesc.name.strip_prefix("mod ").unwrap_or(&pdesc.name)).to_string(),
+            Self::Source => rename_source_param(&pdesc.name),
+            Self::Main | Self::Hidden => pdesc.name.clone(),
+        }
+    }
+
+    /// The modulation source (1-based) a source param sets; 0 otherwise.
+    pub(crate) fn mod_slot(self, pdesc: &sequencer::effects::ParamDescriptor) -> usize {
+        match self {
+            Self::Source => {
+                sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn is_mod_param(name: &str) -> bool {
+    name.starts_with("mod ")
+}
+
+fn is_generated_host_mod_param(name: &str) -> bool {
+    name.starts_with("__host_mod__")
+}
+
+fn is_hidden_dgen_mod_param(name: &str) -> bool {
+    name.starts_with("__dgen_mod_active__")
+}
+
+fn is_source_param(node_param_idx: u32) -> bool {
+    // u32::MAX marks host-only controls such as sampler slicing; it is not a
+    // packed voice-modulator source index.
+    node_param_idx != u32::MAX
+        && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+}
+
+fn rename_source_param(name: &str) -> String {
+    sequencer::instruments::voice_modulator::source_param_display_name(name)
+}
+
+/// An instrument's visible key locks: per param, `(note, value)` in display
+/// units, ascending by note; and the notes holding any, ascending. A lock
+/// whose node id no longer matches its param's (a rebuilt instrument) is
+/// not shown. Shared by the instrument panel and the host kinds'
+/// `param.key-locks` / `device.key-locked-notes`.
+pub(crate) struct InstrumentKeyLocks {
+    pub(crate) by_param: Vec<Vec<(u8, f32)>>,
+    pub(crate) notes: Vec<u8>,
+}
+
+pub(crate) fn instrument_key_locks(
+    slot: &sequencer::effects::EffectSlotState,
+    params: &[sequencer::effects::ParamDescriptor],
+) -> InstrumentKeyLocks {
+    let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let mut by_param = vec![Vec::<(u8, f32)>::new(); params.len()];
+    let mut notes = Vec::<u8>::new();
+    for note in 0..sequencer::effects::MAX_MIDI_NOTES {
+        let note = note as u8;
+        if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
+            continue;
+        }
+        for (param_idx, pdesc) in params.iter().enumerate().take(slot_num_params) {
+            let Some(value) = slot.key_locks.get(note, param_idx) else {
+                continue;
+            };
+            if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
+                continue;
+            }
+            by_param[param_idx].push((note, pdesc.stored_to_user(value)));
+            if notes.last() != Some(&note) {
+                notes.push(note);
+            }
+        }
+    }
+    InstrumentKeyLocks { by_param, notes }
+}
+
 /// The panel header's sound-binding label (takes spec 16.6): the bound
 /// sound's identity only — the patch name, or the binding label
 /// (`Take 2 · bars 0–2` / `Pattern 2 (scene)`) when no palette entry
@@ -73,29 +190,6 @@ pub(crate) fn build_sampler_panel_value(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
     use std::collections::HashMap;
-
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
-    }
-
-    fn is_generated_host_mod_param(name: &str) -> bool {
-        name.starts_with("__host_mod__")
-    }
-
-    fn is_hidden_dgen_mod_param(name: &str) -> bool {
-        name.starts_with("__dgen_mod_active__")
-    }
-
-    fn is_source_param(node_param_idx: u32) -> bool {
-        // u32::MAX marks host-only controls such as sampler slicing; it is not
-        // a packed voice-modulator source index.
-        node_param_idx != u32::MAX
-            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
-    }
-
-    fn rename_source_param(name: &str) -> String {
-        sequencer::instruments::voice_modulator::source_param_display_name(name)
-    }
 
     app.publish_sampler_analysis_runtime(track);
 
@@ -976,55 +1070,13 @@ fn build_instrument_panel_entries(
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
 
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
-    }
-
-    fn is_generated_host_mod_param(name: &str) -> bool {
-        name.starts_with("__host_mod__")
-    }
-
-    fn is_hidden_dgen_mod_param(name: &str) -> bool {
-        name.starts_with("__dgen_mod_active__")
-    }
-
-    fn is_source_param(node_param_idx: u32) -> bool {
-        // u32::MAX marks host-only controls; it is not a packed
-        // voice-modulator source index.
-        node_param_idx != u32::MAX
-            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
-    }
-
-    fn rename_source_param(name: &str) -> String {
-        sequencer::instruments::voice_modulator::source_param_display_name(name)
-    }
-
     let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
-    let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-    let mut key_locks_by_param = vec![Vec::<(u8, f32)>::new(); desc.params.len()];
     // Ascending notes with at least one visible key lock, so the keys tab can
     // mark them without scanning every param's rows per key.
-    let mut key_locked_notes = Vec::<u8>::new();
-    for note in 0..sequencer::effects::MAX_MIDI_NOTES {
-        let note = note as u8;
-        if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
-            continue;
-        }
-        for (param_idx, pdesc) in desc.params.iter().enumerate().take(slot_num_params) {
-            let Some(value) = slot.key_locks.get(note, param_idx) else {
-                continue;
-            };
-            if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
-                continue;
-            }
-            if let Some(rows) = key_locks_by_param.get_mut(param_idx) {
-                rows.push((note, pdesc.stored_to_user(value)));
-                if key_locked_notes.last() != Some(&note) {
-                    key_locked_notes.push(note);
-                }
-            }
-        }
-    }
+    let InstrumentKeyLocks {
+        by_param: key_locks_by_param,
+        notes: key_locked_notes,
+    } = instrument_key_locks(slot, &desc.params);
     let key_locks = key_locks_by_param
         .iter()
         .map(|rows| {
@@ -1115,38 +1167,7 @@ fn build_instrument_panel_entries(
     );
     key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(def_map))));
     for entry in app.state.key_lock_variant_registry_snapshot(track).entries {
-        let mut map = HashMap::new();
-        map.insert(
-            "kind".to_string(),
-            Rc::new(RefCell::new(Value::String("variant".to_string()))),
-        );
-        map.insert(
-            "label".to_string(),
-            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
-        );
-        map.insert(
-            "display".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
-            ))),
-        );
-        map.insert(
-            "count".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
-        );
-        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
-        map.insert(
-            "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
-        );
-        map.insert(
-            "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
-        );
-        map.insert(
-            "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
-        );
+        let map = VariantChip::of(&entry).legacy_map();
         key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(map))));
     }
 

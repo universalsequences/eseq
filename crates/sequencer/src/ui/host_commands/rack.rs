@@ -1635,13 +1635,8 @@ pub(super) fn handle(
         }
         "set-rack-macro-curve" => {
             if let Value::Map(ref map) = payload {
-                let curve =
-                    map_string(map, "curve").and_then(|curve| match curve.as_str() {
-                        "linear" => Some(sequencer::sequencer::RackMacroCurve::Linear),
-                        "exp" => Some(sequencer::sequencer::RackMacroCurve::Exp),
-                        "log" => Some(sequencer::sequencer::RackMacroCurve::Log),
-                        _ => None,
-                    });
+                let curve = map_string(map, "curve")
+                    .and_then(|curve| sequencer::sequencer::RackMacroCurve::from_label(&curve));
                 if let (Some(track), Some(id), Some(mapping_idx), Some(curve)) = (
                     map_usize(map, "track"),
                     map_usize(map, "id")

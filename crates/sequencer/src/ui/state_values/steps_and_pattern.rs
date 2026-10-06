@@ -19,6 +19,21 @@ pub(super) fn instrument_modulation_depth_display_range(
     (target.depth_min, target.depth_max)
 }
 
+/// A modulation lane's depth range in display units: a sampler's lanes
+/// store DSP units (scaled), every other instrument's display units. Shared
+/// by the rack panel and the host kinds' `mod-target`.
+pub(crate) fn mod_target_depth_range(
+    depth_desc: &sequencer::effects::ParamDescriptor,
+    target: &sequencer::effects::InstrumentModulationTarget,
+    sampler: bool,
+) -> (f32, f32) {
+    if sampler {
+        sampler_modulation_depth_display_range(depth_desc, target)
+    } else {
+        instrument_modulation_depth_display_range(target)
+    }
+}
+
 pub(super) fn modulation_routing_param_indices(
     desc: &sequencer::effects::EffectDescriptor,
 ) -> std::collections::HashSet<usize> {

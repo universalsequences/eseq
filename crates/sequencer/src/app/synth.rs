@@ -1436,26 +1436,16 @@ impl App {
         id: crate::sequencer::RackMacroId,
         step: Option<usize>,
     ) -> Option<f32> {
-        if let Some(value) = self.state.take_rack_macro_override.values_for_track(track)[id.index()] {
-            return Some(value);
-        }
+        let take = self.state.take_rack_macro_override.values_for_track(track)[id.index()];
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
         let rack_macro = racks
             .get(track)
             .and_then(Option::as_ref)
             .and_then(|rack| rack.macros.get(id.index()))?;
-        if let Some(value) = step
-            .and_then(|step| rack_macro.plocks.get(step))
-            .and_then(|value| *value)
-        {
-            return Some(value.clamp(0.0, 1.0));
-        }
-        let key = crate::macro_engine::MacroParamKey::for_rack_macro(track, id.index() as u8);
-        Some(
-            self.macro_engine
-                .effective_value(&key, rack_macro.value)
-                .clamp(0.0, 1.0),
-        )
+        let overrides = self.macro_engine.overrides();
+        Some(rack_macro_shown_value(
+            take, overrides, track, rack_macro, step,
+        ))
     }
 
     pub fn unmap_rack_macro(
@@ -1791,6 +1781,32 @@ impl App {
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
+}
+
+/// A rack macro's shown value: a take's override (`take`), else its p-lock
+/// on `step`, else its own value under an engaged project macro (the
+/// `overrides` layer). Shared by [`App::effective_rack_macro_value`] and the
+/// host kinds' `rack-macro.value`, which reads a copy of the layer.
+pub fn rack_macro_shown_value(
+    take: Option<f32>,
+    overrides: &std::collections::HashMap<crate::macro_engine::MacroParamKey, f32>,
+    track: usize,
+    rack_macro: &crate::sequencer::RackMacro,
+    step: Option<usize>,
+) -> f32 {
+    if let Some(value) = take {
+        return value;
+    }
+    if let Some(value) = step
+        .and_then(|step| rack_macro.plocks.get(step))
+        .and_then(|value| *value)
+    {
+        return value.clamp(0.0, 1.0);
+    }
+    let key =
+        crate::macro_engine::MacroParamKey::for_rack_macro(track, rack_macro.id.index() as u8);
+    let value = overrides.get(&key).copied().unwrap_or(rack_macro.value);
+    value.clamp(0.0, 1.0)
 }
 
 /// The macro engine's key for `track`'s instrument param `param_idx`; `None`

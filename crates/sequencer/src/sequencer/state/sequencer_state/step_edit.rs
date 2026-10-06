@@ -1666,14 +1666,19 @@ impl SequencerState {
     }
 
     pub fn key_lock_variant_registry_snapshot(&self, track: usize) -> PlockVariantRegistry {
-        let _ = self.reconcile_key_lock_variant_registry_for_track(track);
-        self.pattern
-            .key_lock_variant_registries
-            .lock()
-            .unwrap()
-            .get(track)
-            .cloned()
-            .unwrap_or_default()
+        self.key_lock_variant_registry_with_assignments(track).0
+    }
+
+    /// [`Self::key_lock_variant_registry_snapshot`] and each note's
+    /// assignment, from one reconcile.
+    pub fn key_lock_variant_registry_with_assignments(
+        &self,
+        track: usize,
+    ) -> (PlockVariantRegistry, Vec<Option<PlockVariantAssignment>>) {
+        let assignments = self.reconcile_key_lock_variant_registry_for_track(track);
+        let registries = self.pattern.key_lock_variant_registries.lock().unwrap();
+        let registry = registries.get(track).cloned().unwrap_or_default();
+        (registry, assignments)
     }
 
     pub fn clear_key_lock_variant_locks_for_notes(&self, track: usize, notes: &[u8]) -> bool {

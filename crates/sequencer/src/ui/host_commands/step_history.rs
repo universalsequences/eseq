@@ -1984,50 +1984,62 @@ pub(super) fn handle(
                         .assignment_for_label(label)
                         .map(|assignment| assignment.key.clone())
                 });
-                let outcome = app::edit::apply_recorded_step_mutation(
-                    &mut app,
-                    track,
-                    &steps,
-                    if is_clear {
-                        "Clear step variant locks"
-                    } else {
-                        "Stamp step variant"
-                    },
-                    |app| {
-                        if is_clear {
-                            app.state
-                                .clear_variant_locks_for_steps_no_publish(track, &steps);
-                        } else if let Some(key) = &assignment {
-                            app.state
-                                .stamp_variant_key_to_steps_no_publish(track, key, &steps);
-                        }
-                        Ok(())
-                    },
-                );
-                let changed = match outcome {
-                    Ok(app::edit::EditOutcome::Applied(_)) => true,
-                    Ok(app::edit::EditOutcome::NoOp) => false,
-                    Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
-                        editor.handle_host_event(HostEvent::Error(
-                            "Variant edit was applied without history".to_string(),
-                        ));
-                        false
-                    }
-                    Err(error) => {
-                        editor.handle_host_event(HostEvent::Error(format!(
-                            "Could not apply variant edit: {error:?}"
-                        )));
-                        false
-                    }
-                };
-                if changed {
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                if !is_clear && assignment.is_none() {
+                    return; // an unknown label stamps nothing
+                }
+                let key = if is_clear { None } else { assignment.as_ref() };
+                match stamp_step_variant(&mut app, track, &steps, key) {
+                    Ok(true) => variant_edit_applied(ctx.shared),
+                    Ok(false) => {}
+                    Err(error) => editor.handle_host_event(HostEvent::Error(error)),
                 }
             }
         }
         _ => {}
     }
+}
+
+/// Stamp the variant `key` onto `steps` of `track`, or clear the steps'
+/// variant locks (`None`), as one undo entry (a missing assignment stamps
+/// nothing); returns whether the model changed. Shared by
+/// `stamp-plock-variant` / `clear-step-variant-locks` and the host kinds'
+/// `stamp-variant`.
+pub(super) fn stamp_step_variant(
+    app: &mut app::App,
+    track: usize,
+    steps: &[usize],
+    key: Option<&sequencer::plock_variants::PlockVariantKey>,
+) -> Result<bool, String> {
+    let label = match key {
+        None => "Clear step variant locks",
+        Some(_) => "Stamp step variant",
+    };
+    let outcome = app::edit::apply_recorded_step_mutation(app, track, steps, label, |app| {
+        match key {
+            None => app
+                .state
+                .clear_variant_locks_for_steps_no_publish(track, steps),
+            Some(key) => app
+                .state
+                .stamp_variant_key_to_steps_no_publish(track, key, steps),
+        };
+        Ok(())
+    });
+    match outcome {
+        Ok(app::edit::EditOutcome::Applied(_)) => Ok(true),
+        Ok(app::edit::EditOutcome::NoOp) => Ok(false),
+        Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+            Err("Variant edit was applied without history".to_string())
+        }
+        Err(error) => Err(format!("Could not apply variant edit: {error:?}")),
+    }
+}
+
+/// After a variant stamp or clear landed: the panels' structural resync
+/// (the fx and UI epochs), as the variant strip's commands do.
+pub(super) fn variant_edit_applied(shared: &SharedHandles) {
+    shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Steps sorted, deduplicated, within `MAX_STEPS`.

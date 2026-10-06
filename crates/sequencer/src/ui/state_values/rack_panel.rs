@@ -293,11 +293,8 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 target.depth_param_idx,
                 selected_step,
             );
-            let (depth_min, depth_max) = if use_sampler_depth_units {
-                sampler_modulation_depth_display_range(depth_desc, target)
-            } else {
-                instrument_modulation_depth_display_range(target)
-            };
+            let (depth_min, depth_max) =
+                mod_target_depth_range(depth_desc, target, use_sampler_depth_units);
             Some((
                 target.base_param_idx,
                 RackUiModMetadata {
@@ -1068,7 +1065,7 @@ pub(super) fn build_rack_slot_effect_value(
     value_cell(Value::Map(effect))
 }
 
-pub(super) fn rack_macro_mapping_display_metadata(
+pub(crate) fn rack_macro_mapping_display_metadata(
     app: &app::App,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     mapping: &sequencer::sequencer::RackMacroMapping,
@@ -1503,15 +1500,7 @@ pub(super) fn build_rack_panel_value(
                         value_cell(Value::Number(display_decimals as f64)),
                     );
                     insert_string_prop(&mut target, "display-unit", display_unit);
-                    insert_string_prop(
-                        &mut target,
-                        "curve",
-                        match mapping.curve {
-                            sequencer::sequencer::RackMacroCurve::Linear => "linear",
-                            sequencer::sequencer::RackMacroCurve::Exp => "exp",
-                            sequencer::sequencer::RackMacroCurve::Log => "log",
-                        },
-                    );
+                    insert_string_prop(&mut target, "curve", mapping.curve.label());
                     target.insert("suspended".to_string(), value_cell(Value::Bool(false)));
                     match &mapping.target {
                         sequencer::sequencer::RackMacroTarget::SlotParam { slot, param } => {

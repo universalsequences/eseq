@@ -1,7 +1,7 @@
 //! The host kinds' device setters (kind-bindings spec §14.2b, §14.2f):
 //! `set-device-param` (`param.base`), `set-device-param-locks` /
 //! `clear-device-param-locks` (`lock-param!` / `unlock-param!`) and
-//! `set-device` (`device.voices`, `device.delete-target`).
+//! `set-device` (`device.voices`, `device.delete-target`, `device.base-note`).
 //!
 //! A device is named by its owner's stable id, `:track-id` (a track's
 //! chain, MIDI effects, drum rack slots and their effects) or `:bus-id` (a
@@ -49,15 +49,17 @@ pub(super) const COMMANDS: &[&str] = &[
 type Payload = HashMap<String, Rc<RefCell<Value>>>;
 
 /// The device a command names, resolved now.
-struct Addressed {
+pub(super) struct Addressed {
     /// The track's position, or the bus's for a bus effect.
-    owner: usize,
-    device: DeviceSlot,
+    pub(super) owner: usize,
+    pub(super) device: DeviceSlot,
     /// The owning track's id (`None` for a bus effect).
-    track_id: Option<sequencer::sequencer::TrackId>,
+    pub(super) track_id: Option<sequencer::sequencer::TrackId>,
 }
 
-fn addressed(app: &app::App, map: &Payload) -> Result<Addressed, String> {
+/// The device a `device-target` payload names (`:track-id` or `:bus-id`,
+/// `:device`), resolved now.
+pub(super) fn addressed(app: &app::App, map: &Payload) -> Result<Addressed, String> {
     let did = map_usize(map, "device").ok_or("needs :device")? as u64;
     if let Some(bus) = map_usize(map, "bus-id") {
         let bus_id = sequencer::sequencer::BusId(bus as u64);
@@ -342,6 +344,33 @@ fn device_edit(
                 *held = on.then_some(target);
                 bump_delete_target_version(&shared.active_delete_target_version);
             }
+            Ok(())
+        }
+        "base-note" => {
+            let DeviceSlot::Instrument = device else {
+                return Err(format!("a {} has no base note", device.role()));
+            };
+            let note = value.number(-48.0, 48.0)? as f32;
+            let offsets = &app.state.pattern.instrument_base_note_offsets;
+            let current = offsets.get(owner).ok_or("the device is gone")?;
+            if f32::from_bits(current.load(Ordering::Relaxed)) == note {
+                return Ok(());
+            }
+            let script = ScriptEdit::begin(app, ctx);
+            let command = app::AppCommand::SetInstrumentBaseNoteOffset {
+                track: owner,
+                value: note,
+            };
+            let changed = script.apply(app, command);
+            if changed {
+                ctx.shared
+                    .ui_invalidations
+                    .push(UiInvalidation::Instrument {
+                        track: owner,
+                        change: InstrumentInvalidation::BaseNote,
+                    });
+            }
+            script.end(app, ctx, true, changed);
             Ok(())
         }
         other => Err(format!("a device has no settable field {other}")),

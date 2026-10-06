@@ -19,6 +19,7 @@ mod instrument_params;
 mod learn;
 mod misc;
 pub(crate) mod packages;
+mod panel;
 mod project;
 mod rack;
 pub(crate) mod rack_kinds;
@@ -333,11 +334,8 @@ pub(crate) fn handle_macro_host_command(
             ) else {
                 return Ignored;
             };
-            let curve = match curve.as_str() {
-                "linear" => sequencer::macro_engine::MacroCurve::Linear,
-                "exp" | "exponential" => sequencer::macro_engine::MacroCurve::Exp,
-                "log" | "logarithmic" => sequencer::macro_engine::MacroCurve::Log,
-                _ => return Ignored,
+            let Some(curve) = sequencer::macro_engine::MacroCurve::from_label(&curve) else {
+                return Ignored;
             };
             app::AppCommand::MacroSetCurve {
                 id,

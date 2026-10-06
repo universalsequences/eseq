@@ -70,6 +70,60 @@ pub(crate) struct KindsShared {
     /// (`pad.triggered`).
     pub(super) pad_tracks: HashMap<InstanceId, usize>,
     pad_triggers: Vec<bool>,
+    /// The tick's modulation display sample, copied when it changes while
+    /// a modulation field is observed (`param.mod-offset`,
+    /// `device.mod-phases`; a cold read otherwise sees the last copy).
+    pub(super) mod_display: ModDisplayValues,
+    /// Moved whenever param instances are replaced (the macro syncs'
+    /// targets resolve to params; a fresh registration resolves no target
+    /// anew: the macro sync registers the params it targets).
+    pub(crate) params_generation: u64,
+    /// Per track position, under its [`PlockKey`] ([`plock_cached`]): the
+    /// instrument's key locks, the instrument params a process writes, the
+    /// step and key-lock variant registries (`panel`, `variants`).
+    pub(super) key_locks: PlockCache<usize, InstrumentKeyLocks>,
+    pub(super) process_bound: PlockCache<usize, HashSet<usize>>,
+    pub(super) variants: PlockCache<(usize, VariantScope), VariantSnapshot>,
+    /// Per track position: the variant key its first selected step plays,
+    /// under the [`PlockKey`] and the step it was read at (`variant.current`).
+    pub(super) variant_current: HashMap<usize, (PlockKey, Option<usize>, Option<VariantKey>)>,
+    /// The owners (track or instrument device instances) that registered
+    /// variant instances, with the [`PlockKey`] they were last pruned at
+    /// (`HostKinds::prune_variants`).
+    pub(super) variant_owners: HashMap<InstanceId, Option<PlockKey>>,
+    /// Registry reads behind those caches, selected-step variant reads
+    /// (`variant.current`), and sampler voice refreshes (`device.playhead`),
+    /// for tests.
+    pub(crate) panel_scans: u64,
+    pub(crate) variant_current_scans: u64,
+    pub(crate) sampler_refreshes: u64,
+}
+
+type VariantKey = sequencer::plock_variants::PlockVariantKey;
+
+/// A per-track cache under its [`PlockKey`] and the descriptor it read
+/// against (0 when none does).
+pub(super) type PlockCache<K, V> = HashMap<K, (PlockKey, usize, Rc<V>)>;
+
+/// `cache(shared)`'s entry at `at` when it was read under `key` and `desc`,
+/// else `read()`, cached (counting a panel scan).
+pub(super) fn plock_cached<K: Eq + std::hash::Hash, V>(
+    shared: &RefCell<KindsShared>,
+    cache: fn(&mut KindsShared) -> &mut PlockCache<K, V>,
+    at: K,
+    (key, desc): (PlockKey, usize),
+    read: impl FnOnce() -> V,
+) -> Rc<V> {
+    if let Some((cached, read_at, value)) = cache(&mut shared.borrow_mut()).get(&at) {
+        if *cached == key && *read_at == desc {
+            return value.clone();
+        }
+    }
+    let value = Rc::new(read());
+    let mut shared = shared.borrow_mut();
+    shared.panel_scans += 1;
+    cache(&mut shared).insert(at, (key, desc, value.clone()));
+    value
 }
 
 impl KindsShared {
@@ -79,7 +133,14 @@ impl KindsShared {
 
     /// Copy the tick's meter cache (pruned to the track and bus counts) and
     /// the solo state.
-    pub(super) fn copy_meters(&mut self, app: &app::App, meters: &KindsMeters<'_>) {
+    /// The modulation sample only while a modulation field is observed
+    /// (`mod_display`): an unobserved tick neither compares nor copies it.
+    pub(super) fn copy_meters(
+        &mut self,
+        app: &app::App,
+        meters: &KindsMeters<'_>,
+        mod_display: bool,
+    ) {
         copy_prefix(&mut self.peaks, meters.tracks, app.tracks.len());
         copy_prefix(&mut self.bus_peaks, meters.buses, app.buses.len());
         self.master_peaks = meters.master;
@@ -97,6 +158,9 @@ impl KindsShared {
         let overrides = app.macro_engine.overrides();
         if &self.macro_overrides != overrides {
             self.macro_overrides.clone_from(overrides);
+        }
+        if mod_display && &self.mod_display != meters.mod_display {
+            self.mod_display.clone_from(meters.mod_display);
         }
     }
 }
@@ -143,6 +207,9 @@ pub(crate) struct KindsHandles {
     pub(crate) armed_rack: Arc<Mutex<Option<u64>>>,
     /// The `App`'s buses as the natives see them (bus effect params).
     pub(crate) bus_state: Arc<Mutex<Vec<app::BusChannelState>>>,
+    /// The neural neurons selected for step editing: a selected neuron's
+    /// output override shows in `param.value` (as the legacy fields).
+    pub(crate) selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
 }
 
 impl KindsHandles {
@@ -166,6 +233,7 @@ impl KindsHandles {
             auto_follow_override_until: shared.auto_follow_override_until.clone(),
             armed_rack: shared.armed_rack.clone(),
             bus_state: shared.bus_state.clone(),
+            selected_neural_neurons: shared.selected_neural_neurons.clone(),
         }
     }
 
@@ -311,6 +379,9 @@ pub(super) fn live_value<S: KindStore>(
                     sources.state.song_manual_latch_mask(),
                     track,
                 )),
+                f::TRACK_VARIANTS => {
+                    owner_variants(store, sources, shared, (id, id), track, VariantScope::Steps)
+                }
                 key => {
                     let input = mod_input(&f::TRACK_MOD_IN, key)?;
                     let shared = shared.borrow();
@@ -381,9 +452,26 @@ pub(super) fn live_value<S: KindStore>(
             match key {
                 f::DEVICE_PLAYHEAD => number(device.sampler.as_ref().map_or(0.0, |s| s.seconds())),
                 f::DEVICE_DELETE_TARGET => Value::Bool(device_delete_target(sources, &device)),
+                f::DEVICE_BASE_NOTE => number(device_base_note(sources, &device)),
+                f::DEVICE_MOD_PHASES => {
+                    panel::numbers(&device_mod_phases(sources, shared, &device))
+                }
+                f::DEVICE_KEY_LOCKED_NOTES => {
+                    key_locked_notes(sources, shared, &device, panel::numbers)
+                }
+                f::DEVICE_VARIANTS => device_variants(store, sources, shared, id, &device),
                 _ => return None,
             }
         }
+        TENSOR => {
+            let &[device_id, index] = store.key_of(id)? else {
+                return None;
+            };
+            let device = shared.borrow().devices.get(&device_id)?.clone();
+            tensor_live_value(sources, &device, index as usize, key)?
+        }
+        VARIANT => variant_live_value(store, sources, shared, id, key)?,
+        RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {
                 return None;

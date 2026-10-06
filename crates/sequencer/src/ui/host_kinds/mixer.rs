@@ -19,7 +19,18 @@ pub(crate) struct KindsMeters<'a> {
     pub(crate) overloaded: bool,
     /// Drum rack pad lights by track position (`pad.triggered`).
     pub(crate) pad_triggers: &'a [bool],
+    /// The modulation display sample (`param.mod-offset`, …,
+    /// `device.mod-phases`): the tick polls it while the fx panel shows or
+    /// a kind field observes it (`HostKinds::wants_mod_display`).
+    pub(crate) mod_display: &'a ModDisplayValues,
 }
+
+/// No modulation sample, for [`KindsMeters::default`].
+static NO_MOD_DISPLAY: ModDisplayValues = ModDisplayValues {
+    effects: Vec::new(),
+    instrument: None,
+    rack_slot: None,
+};
 
 /// No mod port levels, for [`KindsMeters::default`].
 static NO_MOD_PORTS: ModPortLevels = ModPortLevels {
@@ -38,6 +49,7 @@ impl Default for KindsMeters<'_> {
             mod_ports: &NO_MOD_PORTS,
             overloaded: false,
             pad_triggers: &[],
+            mod_display: &NO_MOD_DISPLAY,
         }
     }
 }

@@ -48,7 +48,13 @@
 //! rack pads are keyed (group instance id, member `TrackId`), rack clips
 //! (group instance id, clip id), grooves (group instance id, clip id; 0 for
 //! the rack's own); pool grooves are positional, the instance kept by
-//! groove id across reorders and replaced on a project load.
+//! groove id across reorders and replaced on a project load. A param's
+//! modulation lanes are keyed (param instance id, lane), a device's tensors
+//! (device instance id, index), p-lock variants (track or instrument device
+//! instance id, label index); project macros are positional, kept by macro
+//! id (replaced on a project load), a drum rack's macros keyed (rack
+//! instrument device instance id, index), macro mappings (macro instance
+//! id, position).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -59,8 +65,11 @@
 //! the reader hook; `registry` the instance registry helpers and pushes;
 //! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes),
 //! `settings` (track settings), `arrangement` (song, clips, cells),
-//! `racks` (drum rack pads, rack clips, grooves) and `devices` (devices
-//! beyond the track chain) the per-kind syncs.
+//! `racks` (drum rack pads, rack clips, grooves), `devices` (devices
+//! beyond the track chain), `panel` (the device panel extras: modulation
+//! lanes and display, process mapping, key locks, tensors), `variants`
+//! (p-lock variants) and `macros` (project and drum rack macros) the
+//! per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -70,7 +79,9 @@ use std::sync::LazyLock;
 mod arrangement;
 mod devices;
 mod live;
+mod macros;
 mod mixer;
+mod panel;
 mod params;
 mod racks;
 mod registry;
@@ -78,18 +89,22 @@ mod scenes;
 mod settings;
 mod steps;
 mod tracks;
+mod variants;
 
 use arrangement::SongState;
 use devices::*;
 pub(crate) use live::KindsHandles;
 use live::*;
+use macros::*;
 pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
+use panel::*;
 use params::*;
 use racks::RackState;
 use registry::*;
 use settings::*;
 use steps::*;
+use variants::*;
 
 /// The module declaring the host kinds.
 pub(crate) const KINDS_MODULE: &str = "eseq.kinds";
@@ -122,6 +137,12 @@ pub(crate) const GROOVE: &str = "eseq.kinds:groove";
 pub(crate) const PAD_GROOVE: &str = "eseq.kinds:pad-groove";
 pub(crate) const POOL_GROOVE: &str = "eseq.kinds:pool-groove";
 pub(crate) const LIBRARY_GROOVE: &str = "eseq.kinds:library-groove";
+pub(crate) const MOD_TARGET: &str = "eseq.kinds:mod-target";
+pub(crate) const TENSOR: &str = "eseq.kinds:tensor";
+pub(crate) const VARIANT: &str = "eseq.kinds:variant";
+pub(crate) const MACRO: &str = "eseq.kinds:macro";
+pub(crate) const RACK_MACRO: &str = "eseq.kinds:rack-macro";
+pub(crate) const MACRO_MAPPING: &str = "eseq.kinds:macro-mapping";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +217,7 @@ pub(crate) mod f {
     pub(crate) const TRACK_LATCHED: FieldKey = (TRACK, "latched");
     pub(crate) const TRACK_PAD: FieldKey = (TRACK, "pad");
     pub(crate) const TRACK_MIDI_DEVICES: FieldKey = (TRACK, "midi-devices");
+    pub(crate) const TRACK_VARIANTS: FieldKey = (TRACK, "variants");
 
     pub(crate) const PAD_GROUP: FieldKey = (PAD, "group");
     pub(crate) const PAD_TRACK: FieldKey = (PAD, "track");
@@ -399,6 +421,12 @@ pub(crate) mod f {
     pub(crate) const DEVICE_CONTAINER: FieldKey = (DEVICE, "container");
     pub(crate) const DEVICE_VOICES: FieldKey = (DEVICE, "voices");
     pub(crate) const DEVICE_DELETE_TARGET: FieldKey = (DEVICE, "delete-target");
+    pub(crate) const DEVICE_BASE_NOTE: FieldKey = (DEVICE, "base-note");
+    pub(crate) const DEVICE_MOD_PHASES: FieldKey = (DEVICE, "mod-phases");
+    pub(crate) const DEVICE_TENSORS: FieldKey = (DEVICE, "tensors");
+    pub(crate) const DEVICE_KEY_LOCKED_NOTES: FieldKey = (DEVICE, "key-locked-notes");
+    pub(crate) const DEVICE_VARIANTS: FieldKey = (DEVICE, "variants");
+    pub(crate) const DEVICE_MACROS: FieldKey = (DEVICE, "macros");
 
     pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
     pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
@@ -412,9 +440,83 @@ pub(crate) mod f {
     pub(crate) const PARAM_VALUE: FieldKey = (PARAM, "value");
     pub(crate) const PARAM_BASE: FieldKey = (PARAM, "base");
     pub(crate) const PARAM_LOCKED: FieldKey = (PARAM, "locked");
+    pub(crate) const PARAM_OVERRIDDEN: FieldKey = (PARAM, "overridden");
     pub(crate) const PARAM_HAS_LOCKS: FieldKey = (PARAM, "has-locks");
     pub(crate) const PARAM_TEXT: FieldKey = (PARAM, "text");
     pub(crate) const PARAM_PRINTING: FieldKey = (PARAM, "printing");
+    pub(crate) const PARAM_LABEL: FieldKey = (PARAM, "label");
+    pub(crate) const PARAM_SECTION: FieldKey = (PARAM, "section");
+    pub(crate) const PARAM_MOD_SLOT: FieldKey = (PARAM, "mod-slot");
+    pub(crate) const PARAM_VISIBLE: FieldKey = (PARAM, "visible");
+    pub(crate) const PARAM_MOD_TARGETS: FieldKey = (PARAM, "mod-targets");
+    pub(crate) const PARAM_MOD_OFFSET: FieldKey = (PARAM, "mod-offset");
+    pub(crate) const PARAM_MOD_VALUE: FieldKey = (PARAM, "mod-value");
+    pub(crate) const PARAM_MOD_SCALE: FieldKey = (PARAM, "mod-scale");
+    pub(crate) const PARAM_PROCESS_MAPPED: FieldKey = (PARAM, "process-mapped");
+    pub(crate) const PARAM_PROCESS_VALUE: FieldKey = (PARAM, "process-value");
+    pub(crate) const PARAM_PROCESS_CLAMPED: FieldKey = (PARAM, "process-clamped");
+    pub(crate) const PARAM_KEY_LOCKS: FieldKey = (PARAM, "key-locks");
+
+    pub(crate) const MOD_TARGET_PARAM: FieldKey = (MOD_TARGET, "param");
+    pub(crate) const MOD_TARGET_INDEX: FieldKey = (MOD_TARGET, "index");
+    pub(crate) const MOD_TARGET_SOURCE: FieldKey = (MOD_TARGET, "source");
+    pub(crate) const MOD_TARGET_SLOT: FieldKey = (MOD_TARGET, "slot");
+    pub(crate) const MOD_TARGET_DEPTH: FieldKey = (MOD_TARGET, "depth");
+    pub(crate) const MOD_TARGET_DEPTH_MIN: FieldKey = (MOD_TARGET, "depth-min");
+    pub(crate) const MOD_TARGET_DEPTH_MAX: FieldKey = (MOD_TARGET, "depth-max");
+    pub(crate) const MOD_TARGET_UNIT: FieldKey = (MOD_TARGET, "unit");
+
+    pub(crate) const TENSOR_DEVICE: FieldKey = (TENSOR, "device");
+    pub(crate) const TENSOR_INDEX: FieldKey = (TENSOR, "index");
+    pub(crate) const TENSOR_NAME: FieldKey = (TENSOR, "name");
+    pub(crate) const TENSOR_ROWS: FieldKey = (TENSOR, "rows");
+    pub(crate) const TENSOR_COLS: FieldKey = (TENSOR, "cols");
+    pub(crate) const TENSOR_MIN: FieldKey = (TENSOR, "min");
+    pub(crate) const TENSOR_MAX: FieldKey = (TENSOR, "max");
+    pub(crate) const TENSOR_VALUES: FieldKey = (TENSOR, "values");
+    pub(crate) const TENSOR_BASE: FieldKey = (TENSOR, "base");
+    pub(crate) const TENSOR_LOCKED: FieldKey = (TENSOR, "locked");
+
+    pub(crate) const VARIANT_TRACK: FieldKey = (VARIANT, "track");
+    pub(crate) const VARIANT_DEVICE: FieldKey = (VARIANT, "device");
+    pub(crate) const VARIANT_LABEL: FieldKey = (VARIANT, "label");
+    pub(crate) const VARIANT_NAME: FieldKey = (VARIANT, "name");
+    pub(crate) const VARIANT_COUNT: FieldKey = (VARIANT, "count");
+    pub(crate) const VARIANT_COLOR: FieldKey = (VARIANT, "color");
+    pub(crate) const VARIANT_CURRENT: FieldKey = (VARIANT, "current");
+    pub(crate) const VARIANT_NOTES: FieldKey = (VARIANT, "notes");
+
+    pub(crate) const MACRO_INDEX: FieldKey = (MACRO, "index");
+    pub(crate) const MACRO_MID: FieldKey = (MACRO, "mid");
+    pub(crate) const MACRO_KEY: FieldKey = (MACRO, "script-key");
+    pub(crate) const MACRO_NAME: FieldKey = (MACRO, "name");
+    pub(crate) const MACRO_TYPE: FieldKey = (MACRO, "type");
+    pub(crate) const MACRO_VALUE: FieldKey = (MACRO, "value");
+    pub(crate) const MACRO_MAPPINGS: FieldKey = (MACRO, "mappings");
+    pub(crate) const MACRO_TARGET_SCENE: FieldKey = (MACRO, "target-scene");
+    pub(crate) const MACRO_MORPH_PARAMS: FieldKey = (MACRO, "morph-params");
+    pub(crate) const MACRO_STEAL_PATTERNS: FieldKey = (MACRO, "steal-patterns");
+    pub(crate) const MACRO_QUANTIZE: FieldKey = (MACRO, "quantize");
+
+    pub(crate) const RACK_MACRO_DEVICE: FieldKey = (RACK_MACRO, "device");
+    pub(crate) const RACK_MACRO_INDEX: FieldKey = (RACK_MACRO, "index");
+    pub(crate) const RACK_MACRO_KEY: FieldKey = (RACK_MACRO, "stable-key");
+    pub(crate) const RACK_MACRO_NAME: FieldKey = (RACK_MACRO, "name");
+    pub(crate) const RACK_MACRO_VALUE: FieldKey = (RACK_MACRO, "value");
+    pub(crate) const RACK_MACRO_BASE: FieldKey = (RACK_MACRO, "base");
+    pub(crate) const RACK_MACRO_LOCKED: FieldKey = (RACK_MACRO, "locked");
+    pub(crate) const RACK_MACRO_HAS_LOCKS: FieldKey = (RACK_MACRO, "has-locks");
+    pub(crate) const RACK_MACRO_MAPPINGS: FieldKey = (RACK_MACRO, "mappings");
+
+    pub(crate) const MAPPING_MACRO: FieldKey = (MACRO_MAPPING, "macro");
+    pub(crate) const MAPPING_RACK_MACRO: FieldKey = (MACRO_MAPPING, "rack-macro");
+    pub(crate) const MAPPING_INDEX: FieldKey = (MACRO_MAPPING, "index");
+    pub(crate) const MAPPING_TARGET: FieldKey = (MACRO_MAPPING, "target");
+    pub(crate) const MAPPING_LABEL: FieldKey = (MACRO_MAPPING, "label");
+    pub(crate) const MAPPING_MIN: FieldKey = (MACRO_MAPPING, "min");
+    pub(crate) const MAPPING_MAX: FieldKey = (MACRO_MAPPING, "max");
+    pub(crate) const MAPPING_CURVE: FieldKey = (MACRO_MAPPING, "curve");
+    pub(crate) const MAPPING_SUSPENDED: FieldKey = (MACRO_MAPPING, "suspended");
 
     pub(crate) const SCENE_INDEX: FieldKey = (SCENE, "index");
     pub(crate) const SCENE_NUMBER: FieldKey = (SCENE, "number");
@@ -470,6 +572,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_OUTPUT_OPTIONS: FieldKey = (PROJECT, "output-options");
     pub(crate) const PROJECT_GROOVE_POOL: FieldKey = (PROJECT, "groove-pool");
     pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
+    pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -494,6 +597,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // The device sync (`devices`): MIDI effects, bus effects, drum rack
     // slots and their effects.
     (f::TRACK_MIDI_DEVICES, "(list-of device)", Model),
+    // The p-lock variant chip list (`variants`): computed while observed,
+    // when the track's p-lock key moved.
+    (f::TRACK_VARIANTS, "(list-of variant)", Live),
     (f::TRACK_PAN, ":number", Live),
     (f::TRACK_SOLOED, ":bool", Live),
     (f::TRACK_COLLAPSED, ":bool", Live),
@@ -673,6 +779,15 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // observed (the tick), then at the model sync.
     (f::DEVICE_PARAMS, "(list-of param)", Model),
     (f::DEVICE_PLAYHEAD, ":number", Live),
+    // Panel extras (`panel`): the tensors registered with the device; the
+    // rest computed while observed.
+    (f::DEVICE_BASE_NOTE, ":number", Live),
+    (f::DEVICE_MOD_PHASES, "(list-of :number)", Live),
+    (f::DEVICE_TENSORS, "(list-of tensor)", Model),
+    (f::DEVICE_KEY_LOCKED_NOTES, "(list-of :int)", Live),
+    (f::DEVICE_VARIANTS, "(list-of variant)", Live),
+    // The rack macro sync (`macros`), when the rack's macros moved.
+    (f::DEVICE_MACROS, "(list-of rack-macro)", Model),
     (f::PARAM_DEVICE, "device", Model),
     (f::PARAM_INDEX, ":int", Model),
     (f::PARAM_NAME, ":string", Model),
@@ -685,9 +800,81 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_VALUE, ":number", Live),
     (f::PARAM_BASE, ":number", Live),
     (f::PARAM_LOCKED, ":bool", Live),
+    (f::PARAM_OVERRIDDEN, ":bool", Live),
     (f::PARAM_HAS_LOCKS, ":bool", Live),
     (f::PARAM_TEXT, ":string", Live),
     (f::PARAM_PRINTING, ":bool", Live),
+    // Pushed at registration (the descriptor's); the lanes with the params.
+    (f::PARAM_LABEL, ":string", Model),
+    (f::PARAM_SECTION, ":string", Model),
+    (f::PARAM_MOD_SLOT, ":int", Model),
+    (f::PARAM_MOD_TARGETS, "(list-of mod-target)", Model),
+    (f::PARAM_VISIBLE, ":bool", Live),
+    (f::PARAM_MOD_OFFSET, ":number", Live),
+    (f::PARAM_MOD_VALUE, ":number", Live),
+    (f::PARAM_MOD_SCALE, ":number", Live),
+    (f::PARAM_PROCESS_MAPPED, ":bool", Live),
+    (f::PARAM_PROCESS_VALUE, ":number", Live),
+    (f::PARAM_PROCESS_CLAMPED, ":bool", Live),
+    (f::PARAM_KEY_LOCKS, "(list-of (list-of :number))", Live),
+    (f::MOD_TARGET_PARAM, "param", Model),
+    (f::MOD_TARGET_INDEX, ":int", Model),
+    (f::MOD_TARGET_SOURCE, "param", Model),
+    (f::MOD_TARGET_SLOT, ":int", Model),
+    (f::MOD_TARGET_DEPTH, "param", Model),
+    (f::MOD_TARGET_DEPTH_MIN, ":number", Model),
+    (f::MOD_TARGET_DEPTH_MAX, ":number", Model),
+    (f::MOD_TARGET_UNIT, ":string", Model),
+    (f::TENSOR_DEVICE, "device", Model),
+    (f::TENSOR_INDEX, ":int", Model),
+    (f::TENSOR_NAME, ":string", Model),
+    (f::TENSOR_ROWS, ":int", Model),
+    (f::TENSOR_COLS, ":int", Model),
+    (f::TENSOR_MIN, ":number", Model),
+    (f::TENSOR_MAX, ":number", Model),
+    (f::TENSOR_VALUES, "(list-of :number)", Live),
+    (f::TENSOR_BASE, "(list-of :number)", Live),
+    (f::TENSOR_LOCKED, ":bool", Live),
+    // Read from the owner's variant registry, cached under its p-lock key.
+    (f::VARIANT_TRACK, "track", Model),
+    (f::VARIANT_DEVICE, "device", Model),
+    (f::VARIANT_LABEL, ":string", Live),
+    (f::VARIANT_NAME, ":string", Live),
+    (f::VARIANT_COUNT, ":int", Live),
+    (f::VARIANT_COLOR, ":rgb", Live),
+    (f::VARIANT_CURRENT, ":bool", Live),
+    (f::VARIANT_NOTES, "(list-of :int)", Live),
+    // Project macros (`macros`): the structure when it moved, the values
+    // compared every tick.
+    (f::MACRO_INDEX, ":int", Model),
+    (f::MACRO_MID, ":int", Model),
+    (f::MACRO_KEY, ":string", Model),
+    (f::MACRO_NAME, ":string", Model),
+    (f::MACRO_TYPE, ":string", Model),
+    (f::MACRO_VALUE, ":number", Model),
+    (f::MACRO_MAPPINGS, "(list-of macro-mapping)", Model),
+    (f::MACRO_TARGET_SCENE, "scene", Model),
+    (f::MACRO_MORPH_PARAMS, ":bool", Model),
+    (f::MACRO_STEAL_PATTERNS, ":bool", Model),
+    (f::MACRO_QUANTIZE, ":string", Model),
+    (f::RACK_MACRO_DEVICE, "device", Model),
+    (f::RACK_MACRO_INDEX, ":int", Model),
+    (f::RACK_MACRO_KEY, ":string", Model),
+    (f::RACK_MACRO_NAME, ":string", Model),
+    (f::RACK_MACRO_VALUE, ":number", Live),
+    (f::RACK_MACRO_BASE, ":number", Live),
+    (f::RACK_MACRO_LOCKED, ":bool", Live),
+    (f::RACK_MACRO_HAS_LOCKS, ":bool", Live),
+    (f::RACK_MACRO_MAPPINGS, "(list-of macro-mapping)", Model),
+    (f::MAPPING_MACRO, "macro", Model),
+    (f::MAPPING_RACK_MACRO, "rack-macro", Model),
+    (f::MAPPING_INDEX, ":int", Model),
+    (f::MAPPING_TARGET, "param", Model),
+    (f::MAPPING_LABEL, ":string", Model),
+    (f::MAPPING_MIN, ":number", Model),
+    (f::MAPPING_MAX, ":number", Model),
+    (f::MAPPING_CURVE, ":string", Model),
+    (f::MAPPING_SUSPENDED, ":bool", Model),
     (f::SCENE_INDEX, ":int", Model),
     (f::SCENE_NUMBER, ":int", Model),
     (f::SCENE_NAME, ":string", Model),
@@ -793,6 +980,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PROJECT_OUTPUT_OPTIONS, "(list-of bus)", Model),
     (f::PROJECT_GROOVE_POOL, "(list-of pool-groove)", Model),
     (f::PROJECT_GROOVE_LIBRARY, "(list-of library-groove)", Model),
+    (f::PROJECT_MACROS, "(list-of macro)", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -862,6 +1050,11 @@ pub(super) static CELL_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields:
 pub(super) static SONG_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(SONG));
 pub(super) static GROUP_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(GROUP));
 pub(super) static PAD_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PAD));
+pub(super) static DEVICE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(DEVICE));
+pub(super) static TENSOR_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(TENSOR));
+pub(super) static VARIANT_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(VARIANT));
+pub(super) static RACK_MACRO_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(RACK_MACRO));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -1167,6 +1360,10 @@ pub(crate) struct HostKinds {
     /// Devices beyond the track chain: MIDI effects, bus effects, drum rack
     /// slots and their effects.
     pub(crate) devices: DeviceState,
+    /// The device panel extras: tensors, variants, the modulation sample.
+    panel: PanelState,
+    /// Project and drum rack macros.
+    pub(crate) macros: MacroState,
 }
 
 impl HostKinds {
@@ -1240,6 +1437,7 @@ impl HostKinds {
             self.song.invalidate();
             self.racks.invalidate();
             self.devices.invalidate();
+            self.macros.invalidate();
         }
         if self
             .song
@@ -1258,7 +1456,10 @@ impl HostKinds {
             self.sources = Some(sources.clone());
             self.model = None;
         }
-        self.shared.borrow_mut().copy_meters(app, meters);
+        let mod_display = self.panel.mod_display_observed;
+        self.shared
+            .borrow_mut()
+            .copy_meters(app, meters, mod_display);
         self.shared.borrow_mut().capture_head = app.pending_capture_head_beat();
         let shared_kinds = self.shared.clone();
         let mut pusher = Pusher {
@@ -1310,6 +1511,8 @@ impl HostKinds {
             }
         }
         self.sync_device_model(&mut pusher, app);
+        self.refresh_sampler_playheads(&mut pusher, app);
+        self.sync_macro_model(&mut pusher, app);
         self.sync_cell_model(&mut pusher, app);
         self.sync_rack_clips(&mut pusher, app);
         self.sync_rack_model(&mut pusher, app);
@@ -1324,7 +1527,10 @@ impl HostKinds {
         let selection_changed = self.selection.refresh(&sources);
         self.sync_track_live(&mut pusher, selection_changed);
         self.sync_send_live(&mut pusher);
-        self.sync_device_live(&mut pusher, app);
+        self.sync_device_live(&mut pusher);
+        self.sync_tensor_live(&mut pusher);
+        self.sync_variant_live(&mut pusher);
+        self.sync_rack_macro_live(&mut pusher);
         self.sync_bus_live(&mut pusher);
         self.sync_route_live(&mut pusher);
         self.sync_group_live(&mut pusher);
@@ -1408,7 +1614,8 @@ impl HostKinds {
             .chain(self.buses.drain())
             .chain(self.groups.drain())
             .chain(self.routes.drain())
-            .chain(self.racks.pool.drain());
+            .chain(self.racks.pool.drain())
+            .chain(self.macros.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;

@@ -25,7 +25,9 @@
 //! base, like the legacy `bus-N-fx-*` fields: bus effects show no p-lock).
 
 use super::*;
-use sequencer::effects::{ParamDescriptor, ParamKind};
+use sequencer::effects::{
+    EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, TensorParamDescriptor,
+};
 
 /// What one device's params read without the `App` (see the module docs).
 pub(crate) struct DeviceSource {
@@ -33,15 +35,87 @@ pub(crate) struct DeviceSource {
     /// bus's for a bus effect.
     pub(super) owner: usize,
     pub(super) device: DeviceSlot,
-    pub(super) params: Rc<[ParamDescriptor]>,
-    /// A sampler instrument's voices, for a cold `device.playhead` read (the
-    /// tick re-resolves them from the `App` per read).
+    pub(super) desc: Rc<DeviceDescriptor>,
+    /// A sampler instrument's voices, which `device.playhead` samples
+    /// (observed and cold; the tick refreshes them when they move:
+    /// [`SamplerPlayhead::current`]).
     pub(super) sampler: Option<SamplerPlayhead>,
+}
+
+impl DeviceSource {
+    pub(super) fn params(&self) -> &[ParamDescriptor] {
+        &self.desc.desc.params
+    }
+}
+
+/// A device's descriptor as its kinds read it (the params, the modulation
+/// lanes onto them, the tensors; process bindings resolve against it),
+/// copied out of the `App` when it changes.
+pub(crate) struct DeviceDescriptor {
+    pub(super) desc: EffectDescriptor,
+    /// A sampler's lane depths are stored in DSP units (scaled for display:
+    /// `mod_target_depth_range`); every other instrument's are display units.
+    pub(super) sampler_depths: bool,
+}
+
+impl DeviceDescriptor {
+    pub(super) fn of(desc: Option<&EffectDescriptor>, sampler_depths: bool) -> Self {
+        let desc = desc.cloned().unwrap_or_else(|| EffectDescriptor {
+            declared_latency_samples: None,
+            name: String::new(),
+            params: Vec::new(),
+            tensor_params: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+        });
+        Self {
+            desc,
+            sampler_depths,
+        }
+    }
+
+    pub(super) fn targets(&self) -> &[InstrumentModulationTarget] {
+        &self.desc.instrument_modulation_targets
+    }
+
+    pub(super) fn tensors(&self) -> &[TensorParamDescriptor] {
+        &self.desc.tensor_params
+    }
+
+    /// Whether `desc` describes the same params, lanes and tensors.
+    fn same(&self, desc: Option<&EffectDescriptor>, sampler_depths: bool) -> bool {
+        let mine = &self.desc;
+        let Some(desc) = desc else {
+            return mine.params.is_empty()
+                && mine.instrument_modulation_targets.is_empty()
+                && mine.tensor_params.is_empty();
+        };
+        self.sampler_depths == sampler_depths
+            && same_params(&mine.params, &desc.params)
+            && mine.tensor_params == desc.tensor_params
+            && (mine.instrument_modulation_targets.len())
+                == desc.instrument_modulation_targets.len()
+            && (mine.instrument_modulation_targets.iter())
+                .zip(&desc.instrument_modulation_targets)
+                .all(|(a, b)| same_target(a, b))
+    }
 }
 
 /// Whether two descriptor param lists describe the same params.
 fn same_params(a: &[ParamDescriptor], b: &[ParamDescriptor]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_shape(b))
+}
+
+fn same_target(a: &InstrumentModulationTarget, b: &InstrumentModulationTarget) -> bool {
+    a.base_param_idx == b.base_param_idx
+        && a.source_param_idx == b.source_param_idx
+        && a.modulator_slot == b.modulator_slot
+        && a.depth_param_idx == b.depth_param_idx
+        && a.depth_min.to_bits() == b.depth_min.to_bits()
+        && a.depth_max.to_bits() == b.depth_max.to_bits()
+        && a.depth_unit == b.depth_unit
 }
 
 /// `param.type`.
@@ -53,10 +127,12 @@ fn param_type(pdesc: &ParamDescriptor) -> &'static str {
     }
 }
 
-/// The descriptor (model) fields of a param, in display units.
-fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 7] {
+/// The descriptor (model) fields of a param, in display units, with its
+/// panel placement ([`PanelSection`]).
+fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 10] {
     let user = |stored| number(DeviceSlot::to_user(pdesc, stored));
     let options = param_enum_labels(pdesc).into_iter().map(Value::String);
+    let section = PanelSection::of(pdesc);
     [
         (f::PARAM_NAME, Value::String(pdesc.name.clone())),
         (f::PARAM_MIN, user(pdesc.min)),
@@ -68,28 +144,39 @@ fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 7] {
             f::PARAM_UNIT,
             Value::String(param_unit(pdesc).unwrap_or_default()),
         ),
+        (f::PARAM_LABEL, Value::String(section.label(pdesc))),
+        (f::PARAM_SECTION, text(section.name())),
+        (f::PARAM_MOD_SLOT, number(section.mod_slot(pdesc) as f64)),
     ]
 }
 
 /// Register the param instances of `device` (missing ones get their fixed
-/// `index`/`device` and descriptor fields), drop those past its param
-/// count, and record the device as having registered params. `None` when
-/// the device has no [`DeviceSource`] (not synced yet, or gone).
+/// `index`/`device` and descriptor fields, and their modulation lanes:
+/// [`register_mod_targets`]), drop those past its param count, and record
+/// the device as having registered params. `None` when the device has no
+/// [`DeviceSource`] (not synced yet, or gone).
 pub(super) fn register_params<S: KindStore>(
     store: &mut S,
     shared: &RefCell<KindsShared>,
     device: InstanceId,
 ) -> Option<Vec<InstanceId>> {
     let source = shared.borrow().devices.get(&device)?.clone();
-    let count = source.params.len();
+    let count = source.params().len();
+    let mut fresh = false;
     let params = indexed_children(store, device, PARAM, count, |store, id, index| {
+        fresh = true;
         store.push(id, f::PARAM_INDEX, number(index as f64));
         store.push(id, f::PARAM_DEVICE, Value::Instance(device));
-        for (key, value) in param_model_fields(&source.params[index]) {
+        for (key, value) in param_model_fields(&source.params()[index]) {
             store.push(id, key, value);
         }
     });
+    // A fresh registration moves no `params_generation`: no macro target
+    // resolves anew (the macro sync registers the params it targets).
     shared.borrow_mut().param_devices.insert(device);
+    if fresh {
+        register_mod_targets(store, &source.desc, &params);
+    }
     Some(params)
 }
 
@@ -117,14 +204,16 @@ pub(super) enum ParamField<'a> {
     Number(f32),
     Bool(bool),
     Text(&'a str),
+    Value(Value),
 }
 
 impl ParamField<'_> {
-    pub(super) fn value(&self) -> Value {
+    pub(super) fn value(self) -> Value {
         match self {
-            Self::Number(n) => number(*n),
-            Self::Bool(b) => Value::Bool(*b),
-            Self::Text(text) => Value::String((*text).to_string()),
+            Self::Number(n) => number(n),
+            Self::Bool(b) => Value::Bool(b),
+            Self::Text(text) => Value::String(text.to_string()),
+            Self::Value(value) => value,
         }
     }
 }
@@ -140,32 +229,97 @@ fn param_text(pdesc: &ParamDescriptor, stored: f32) -> &str {
 }
 
 /// The observed-mask bits of the param live fields.
-struct ParamBits {
-    value: u32,
-    base: u32,
-    locked: u32,
-    has_locks: u32,
-    text: u32,
-    printing: u32,
+pub(super) struct ParamBits {
+    pub(super) value: u32,
+    pub(super) base: u32,
+    pub(super) locked: u32,
+    pub(super) overridden: u32,
+    pub(super) has_locks: u32,
+    pub(super) text: u32,
+    pub(super) printing: u32,
+    pub(super) visible: u32,
+    pub(super) mod_offset: u32,
+    pub(super) mod_value: u32,
+    pub(super) mod_scale: u32,
+    pub(super) process_mapped: u32,
+    pub(super) process_value: u32,
+    pub(super) process_clamped: u32,
+    pub(super) key_locks: u32,
 }
 
-static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
+impl ParamBits {
+    /// The fields that need the displayed value.
+    fn shown(&self) -> u32 {
+        self.value | self.locked | self.overridden | self.text | self.mod_value | self.process_value
+    }
+
+    pub(super) fn mod_display(&self) -> u32 {
+        self.mod_offset | self.mod_value | self.mod_scale
+    }
+
+    pub(super) fn process(&self) -> u32 {
+        self.process_mapped | self.process_value | self.process_clamped
+    }
+
+    /// The fields that move only with their track's [`PlockKey`]: the tick
+    /// recomputes them only when it moved.
+    pub(super) fn plock_keyed(&self) -> u32 {
+        self.has_locks | self.process_mapped | self.key_locks
+    }
+}
+
+pub(super) static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
     value: PARAM_LIVE.bit(f::PARAM_VALUE),
     base: PARAM_LIVE.bit(f::PARAM_BASE),
     locked: PARAM_LIVE.bit(f::PARAM_LOCKED),
+    overridden: PARAM_LIVE.bit(f::PARAM_OVERRIDDEN),
     has_locks: PARAM_LIVE.bit(f::PARAM_HAS_LOCKS),
     text: PARAM_LIVE.bit(f::PARAM_TEXT),
     printing: PARAM_LIVE.bit(f::PARAM_PRINTING),
+    visible: PARAM_LIVE.bit(f::PARAM_VISIBLE),
+    mod_offset: PARAM_LIVE.bit(f::PARAM_MOD_OFFSET),
+    mod_value: PARAM_LIVE.bit(f::PARAM_MOD_VALUE),
+    mod_scale: PARAM_LIVE.bit(f::PARAM_MOD_SCALE),
+    process_mapped: PARAM_LIVE.bit(f::PARAM_PROCESS_MAPPED),
+    process_value: PARAM_LIVE.bit(f::PARAM_PROCESS_VALUE),
+    process_clamped: PARAM_LIVE.bit(f::PARAM_PROCESS_CLAMPED),
+    key_locks: PARAM_LIVE.bit(f::PARAM_KEY_LOCKS),
 });
 
 /// What one param shows, as far as a mask asks: the displayed value
-/// (stored units) and whether a p-lock supplies it, the base, whether some
-/// step locks it.
+/// (stored units) and whether a p-lock supplies it, whether a selected
+/// neuron's override replaces it, the base, whether some step locks it.
 #[derive(Default)]
 struct ParamReading {
     shown: Option<(f32, bool)>,
+    overridden: bool,
     base: Option<f32>,
     has_locks: Option<bool>,
+}
+
+/// A selected neural neuron's output override of a track chain param (the
+/// step editing overlay the legacy value fields show); `None` while no
+/// neuron is selected.
+fn neural_override(
+    sources: &KindsHandles,
+    device: DeviceSlot,
+    track: usize,
+    index: usize,
+) -> Option<f32> {
+    let selection = sources.selected_neural_neurons.lock().unwrap();
+    if selection.is_empty() {
+        return None;
+    }
+    let state = &sources.state;
+    match device {
+        DeviceSlot::Instrument => sequencer::lisp_host::selected_neural_instrument_plock_value(
+            state, &selection, track, index,
+        ),
+        DeviceSlot::Effect(slot) => sequencer::lisp_host::selected_neural_effect_plock_value(
+            state, &selection, track, slot, index,
+        ),
+        _ => None,
+    }
 }
 
 /// Read param `index` of `device` where its family keeps it
@@ -180,7 +334,7 @@ fn read_param(
     mask: u32,
 ) -> Option<ParamReading> {
     let bits = &*PARAM_BITS;
-    let shown = mask & (bits.value | bits.locked | bits.text) != 0;
+    let shown = mask & bits.shown() != 0;
     let base = mask & bits.base != 0;
     let has_locks = mask & bits.has_locks != 0;
     let (state, owner) = (&sources.state, device.owner);
@@ -188,6 +342,11 @@ fn read_param(
     if !is_bus && !sources.track_exists(owner) {
         return None;
     }
+    // A selected neuron's override shows over a chain param's value
+    // (`overridden`; `locked` keeps saying whether a p-lock supplies it).
+    let neural = shown
+        .then(|| neural_override(sources, device.device, owner, index))
+        .flatten();
     // Only a bus effect reads the shared bus copy.
     let buses = is_bus.then(|| sources.bus_state.lock().unwrap());
     let buses = buses.as_deref().map_or(&[][..], Vec::as_slice);
@@ -232,8 +391,13 @@ fn read_param(
             // field does.
             DeviceValues::Snapshot(_) => Some((values.base(pdesc, index), false)),
         };
+        let display = match neural {
+            Some(stored) => display.map(|(_, locked)| (stored, locked)),
+            None => display,
+        };
         ParamReading {
             shown: display,
+            overridden: neural.is_some(),
             base: base.then(|| values.base(pdesc, index)),
             has_locks: has_locks.then(|| values.has_lock(index, num_steps())),
         }
@@ -243,7 +407,7 @@ fn read_param(
 /// The track a device's param follows for its print latch and its
 /// `has-locks` key: its own track, or the current track for a bus effect
 /// (whose knob latches under the current track).
-fn param_track(sources: &KindsHandles, device: &DeviceSource) -> usize {
+pub(super) fn param_track(sources: &KindsHandles, device: &DeviceSource) -> usize {
     match device.device {
         DeviceSlot::BusEffect(_) => sources.current_track.load(Ordering::Relaxed),
         _ => device.owner,
@@ -252,16 +416,18 @@ fn param_track(sources: &KindsHandles, device: &DeviceSource) -> usize {
 
 /// The live fields of param `index` of `device` in `mask` (bit `i` is
 /// `PARAM_LIVE.keys[i]`), each passed to `emit`. The displayed value and
-/// its p-lock state are computed once for `value`, `locked` and `text`.
+/// its p-lock state are computed once for `value`, `locked`, `text` and the
+/// panel extras ([`param_panel_fields`]; `visible` caches per device).
 pub(super) fn param_live_fields<'a>(
     sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     device: &'a DeviceSource,
     index: usize,
     mask: u32,
+    visible: &mut VisibleCache,
     mut emit: impl FnMut(FieldKey, ParamField<'a>),
 ) {
-    let Some(pdesc) = device.params.get(index) else {
+    let Some(pdesc) = device.params().get(index) else {
         return;
     };
     let Some(reading) = read_param(sources, shared, device, pdesc, index, mask) else {
@@ -275,6 +441,9 @@ pub(super) fn param_live_fields<'a>(
         }
         if mask & bits.locked != 0 {
             emit(f::PARAM_LOCKED, ParamField::Bool(locked));
+        }
+        if mask & bits.overridden != 0 {
+            emit(f::PARAM_OVERRIDDEN, ParamField::Bool(reading.overridden));
         }
         if mask & bits.text != 0 {
             emit(f::PARAM_TEXT, ParamField::Text(param_text(pdesc, stored)));
@@ -295,6 +464,14 @@ pub(super) fn param_live_fields<'a>(
             && (sources.step_print.lock().unwrap()).holds(track, target);
         emit(f::PARAM_PRINTING, ParamField::Bool(printing));
     }
+    let shown = reading.shown.map(|(stored, _)| stored);
+    let extras = bits.visible | bits.mod_display() | bits.process() | bits.key_locks;
+    if mask & extras != 0 {
+        let emit = &mut |key, value| emit(key, ParamField::Value(value));
+        param_panel_fields(
+            sources, shared, device, pdesc, index, mask, shown, visible, emit,
+        );
+    }
 }
 
 /// One live field of a param (the reader hook's cold read).
@@ -306,26 +483,23 @@ pub(super) fn param_live_value(
     key: FieldKey,
 ) -> Option<Value> {
     let mut value = None;
-    param_live_fields(
-        sources,
-        shared,
-        device,
-        index,
-        PARAM_LIVE.bit(key),
-        |_, field| {
-            value = Some(field.value());
-        },
-    );
+    let mask = PARAM_LIVE.bit(key);
+    let visible = &mut VisibleCache::default();
+    param_live_fields(sources, shared, device, index, mask, visible, |_, field| {
+        value = Some(field.value());
+    });
     value
 }
 
-/// The fields a device's observed mask covers: its live `playhead` and
-/// `delete-target`, and `params`, a model field the tick registers once
-/// something observes it.
-const DEVICE_OBSERVED: [&str; 3] = ["playhead", "params", "delete-target"];
-const DEVICE_PLAYHEAD_BIT: u32 = 1;
-const DEVICE_PARAMS_BIT: u32 = 2;
-const DEVICE_DELETE_TARGET_BIT: u32 = 4;
+/// The fields a device's observed mask covers: its live fields (bit `i` is
+/// `DEVICE_LIVE.keys[i]`), then `params`, a model field the tick registers
+/// once something observes it ([`DEVICE_PARAMS_BIT`]).
+static DEVICE_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut names = DEVICE_LIVE.names.clone();
+    names.push(f::DEVICE_PARAMS.1);
+    names
+});
+static DEVICE_PARAMS_BIT: LazyLock<u32> = LazyLock::new(|| 1 << DEVICE_LIVE.keys.len());
 
 /// `device.delete-target`: the delete target names the device
 /// ([`DeviceSlot::delete_target`]).
@@ -483,63 +657,69 @@ impl ObservedList {
 impl HostKinds {
     /// Keep `device_id`'s [`DeviceSource`] current at a model sync (the
     /// track model's for the track chain, the device sync's for the other
-    /// families): the existing one while its descriptor (`params`) and
-    /// position are unchanged; else a new one. On a descriptor change
-    /// (another effect or instrument in the device) its params are dropped
-    /// and, when they were registered, registered fresh with `d.params`
-    /// re-pushed. Returns whether param instances were replaced.
+    /// families): the existing one while its descriptor and position are
+    /// unchanged; else a new one. On a descriptor change (another effect or
+    /// instrument in the device) its params and tensors are dropped and,
+    /// when the params were registered, registered fresh with `d.params`
+    /// re-pushed; the tensors are registered with the device
+    /// ([`sync_device_tensors`]). Returns whether param instances were
+    /// replaced.
     pub(super) fn sync_device_source(
         pusher: &mut Pusher<'_>,
         app: &app::App,
         device_id: InstanceId,
         owner: usize,
         device: DeviceSlot,
-        params: &[ParamDescriptor],
+        (desc, sampler_depths): (Option<&EffectDescriptor>, bool),
     ) -> bool {
         let sampler = match device {
             DeviceSlot::Instrument => SamplerPlayhead::of(app, owner),
             _ => None,
         };
         let existing = pusher.shared.borrow().devices.get(&device_id).cloned();
-        let same_params = existing
+        let same_desc = existing
             .as_ref()
-            .is_some_and(|source| same_params(&source.params, params));
+            .is_some_and(|source| source.desc.same(desc, sampler_depths));
         if let Some(source) = &existing {
             let same_sampler = match (&source.sampler, &sampler) {
                 (Some(a), Some(b)) => a.same_voices(b),
                 (a, b) => a.is_none() && b.is_none(),
             };
-            if same_params && source.owner == owner && source.device == device && same_sampler {
+            if same_desc && source.owner == owner && source.device == device && same_sampler {
                 return false;
             }
         }
-        let params = match &existing {
-            Some(source) if same_params => source.params.clone(),
-            _ => Rc::from(params.to_vec()),
+        let desc = match &existing {
+            Some(source) if same_desc => source.desc.clone(),
+            _ => Rc::new(DeviceDescriptor::of(desc, sampler_depths)),
         };
-        let source = DeviceSource {
+        let source = Rc::new(DeviceSource {
             owner,
             device,
-            params,
+            desc,
             sampler,
-        };
+        });
         let registered = {
             let mut shared = pusher.shared.borrow_mut();
-            shared.devices.insert(device_id, Rc::new(source));
-            if existing.is_none() || same_params {
+            shared.devices.insert(device_id, source.clone());
+            if same_desc && existing.is_some() {
                 return false;
             }
             shared.param_devices.remove(&device_id)
         };
-        let doomed: Vec<InstanceId> = pusher
-            .rt
-            .keyed_children_of_kind(device_id, PARAM)
+        let doomed: Vec<InstanceId> = (pusher.rt.keyed_children_of_kind(device_id, PARAM))
+            .chain(pusher.rt.keyed_children_of_kind(device_id, TENSOR))
             .map(|(id, _)| id)
             .collect();
         for id in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;
         }
+        sync_device_tensors(pusher, device_id, &source);
+        if existing.is_none() {
+            return false;
+        }
+        pusher.shared.borrow_mut().params_generation += 1;
         if registered {
             if let Some(params) = register_params(&mut *pusher.rt, pusher.shared, device_id) {
                 pusher.push(device_id, f::DEVICE_PARAMS, instance_list(params));
@@ -549,35 +729,66 @@ impl HostKinds {
         true
     }
 
-    /// The observed device fields (`playhead`; `params` registered once
-    /// observed), then the observed param fields, both from lists kept per
-    /// observer epoch ([`ObservedList`]): a tick costs work in proportion
-    /// to what is observed, not to what is registered.
-    pub(super) fn sync_device_live(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
-        let (chain, devices) = (&self.device_ids, &self.devices);
-        (self.device_observed).refresh(pusher.rt, &DEVICE_OBSERVED, || {
-            chain.iter().copied().chain(devices.ids()).collect()
-        });
+    /// Keep each track instrument's sampler voices (what `device.playhead`
+    /// samples, observed or cold) current: a sample load or a voice
+    /// rebuild moves no model counter, so the tick compares them with the
+    /// `App`'s every tick, allocating nothing unless they moved
+    /// ([`SamplerPlayhead::current`]).
+    pub(super) fn refresh_sampler_playheads(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        for (track, id) in self.track_ids.iter().enumerate() {
+            let Some(track_id) = *id else { continue };
+            let Some(device) = pusher.rt.keyed_instance(DEVICE, &[track_id, 0]) else {
+                continue;
+            };
+            let Some(source) = pusher.shared.borrow().devices.get(&device).cloned() else {
+                continue;
+            };
+            if SamplerPlayhead::current(source.sampler.as_ref(), app, track) {
+                continue;
+            }
+            let fresh = DeviceSource {
+                owner: source.owner,
+                device: source.device,
+                desc: source.desc.clone(),
+                sampler: SamplerPlayhead::of(app, track),
+            };
+            pusher
+                .shared
+                .borrow_mut()
+                .devices
+                .insert(device, Rc::new(fresh));
+            pusher.shared.borrow_mut().sampler_refreshes += 1;
+        }
+    }
+
+    /// The observed device fields (`params` registered once observed),
+    /// then the observed param fields, both from lists kept per observer
+    /// epoch ([`ObservedList`]): a tick costs work in proportion to what is
+    /// observed, not to what is registered. Fields that move only with
+    /// their track's [`PlockKey`] (a param's `has-locks`, `process-mapped`
+    /// and `key-locks`; a device's `key-locked-notes` and `variants`) are
+    /// recomputed only when it moved.
+    pub(super) fn sync_device_live(&mut self, pusher: &mut Pusher<'_>) {
+        let devices = all_device_ids(&self.device_ids, &self.devices);
+        (self.device_observed).refresh(pusher.rt, &DEVICE_OBSERVED, || devices.collect());
+        let bits = DeviceBits::get();
+        let mut mod_display = false;
         for index in 0..self.device_observed.entries.len() {
-            let (id, mask, _) = self.device_observed.entries[index];
+            let (id, mut mask, seen) = self.device_observed.entries[index];
             let Some(source) = pusher.shared.borrow().devices.get(&id).cloned() else {
                 continue;
             };
-            if mask & DEVICE_PLAYHEAD_BIT != 0 {
-                // Re-resolved from the `App` per read: a sample load or a
-                // voice rebuild moves no model counter.
-                let seconds = match source.device {
-                    DeviceSlot::Instrument => read_sampler_playhead_seconds(app, source.owner),
-                    _ => 0.0,
-                };
-                pusher.push_computed(id, f::DEVICE_PLAYHEAD, number(seconds));
+            mod_display |= mask & bits.mod_phases != 0 && mod_sampled(pusher.sources, &source);
+            if mask & bits.plock_keyed != 0 {
+                let key = pusher.sources.plock_key(source.owner);
+                if seen == Some(key) {
+                    mask &= !bits.plock_keyed;
+                }
+                self.device_observed.entries[index].2 = Some(key);
             }
-            if mask & DEVICE_DELETE_TARGET_BIT != 0 {
-                let held = device_delete_target(pusher.sources, &source);
-                pusher.push_computed(id, f::DEVICE_DELETE_TARGET, Value::Bool(held));
-            }
+            self.push_device_fields(pusher, id, &source, mask);
             let registered = pusher.shared.borrow().param_devices.contains(&id);
-            if mask & DEVICE_PARAMS_BIT != 0 && !registered {
+            if mask & *DEVICE_PARAMS_BIT != 0 && !registered {
                 if let Some(params) = register_params(&mut *pusher.rt, pusher.shared, id) {
                     pusher.push_computed(id, f::DEVICE_PARAMS, instance_list(params));
                     pusher.changed = true;
@@ -599,8 +810,9 @@ impl HostKinds {
             params.collect()
         });
         pusher.shared.borrow_mut().param_queries += queried as u64;
-        let has_locks = PARAM_BITS.has_locks;
+        let plock_keyed = PARAM_BITS.plock_keyed();
         let (sources, shared) = (pusher.sources, pusher.shared);
+        let visible = &mut VisibleCache::default();
         for entry in &mut self.param_observed.entries {
             let (id, mut mask, seen) = *entry;
             let Some(&[device_id, param]) = pusher.rt.instance_key(id) else {
@@ -609,12 +821,14 @@ impl HostKinds {
             let Some(device) = shared.borrow().devices.get(&device_id).cloned() else {
                 continue;
             };
-            // `has-locks` scans the slot's p-locks: only after they may
-            // have moved.
-            if mask & has_locks != 0 {
+            mod_display |= mask & PARAM_BITS.mod_display() != 0 && mod_sampled(sources, &device);
+            // `has-locks` scans the slot's p-locks, `key-locks` and
+            // `process-mapped` read caches under the same key: only after
+            // they may have moved.
+            if mask & plock_keyed != 0 {
                 let key = sources.plock_key(param_track(sources, &device));
                 if seen == Some(key) {
-                    mask &= !has_locks;
+                    mask &= !plock_keyed;
                 }
                 entry.2 = Some(key);
             }
@@ -624,11 +838,111 @@ impl HostKinds {
                 &device,
                 param as usize,
                 mask,
+                visible,
                 |key, field| match field {
                     ParamField::Text(text) => pusher.push_text(id, key, text),
                     field => pusher.push_computed(id, key, field.value()),
                 },
             );
         }
+        self.panel.mod_display_observed = mod_display;
+    }
+
+    /// One observed device's live fields in `mask`.
+    fn push_device_fields(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        id: InstanceId,
+        source: &DeviceSource,
+        mask: u32,
+    ) {
+        let bits = DeviceBits::get();
+        let (sources, shared) = (pusher.sources, pusher.shared);
+        if mask & bits.playhead != 0 {
+            // The voices `refresh_sampler_playheads` keeps current.
+            let seconds = source
+                .sampler
+                .as_ref()
+                .map_or(0.0, SamplerPlayhead::seconds);
+            pusher.push_computed(id, f::DEVICE_PLAYHEAD, number(seconds));
+        }
+        if mask & bits.delete_target != 0 {
+            let held = device_delete_target(sources, source);
+            pusher.push_computed(id, f::DEVICE_DELETE_TARGET, Value::Bool(held));
+        }
+        if mask & bits.base_note != 0 {
+            let note = device_base_note(sources, source);
+            pusher.push_computed(id, f::DEVICE_BASE_NOTE, number(note));
+        }
+        if mask & bits.mod_phases != 0 {
+            let phases = device_mod_phases(sources, shared, source);
+            pusher.push_numbers(id, f::DEVICE_MOD_PHASES, &phases);
+        }
+        if mask & bits.key_locked_notes != 0 {
+            key_locked_notes(sources, shared, source, |notes| {
+                pusher.push_numbers(id, f::DEVICE_KEY_LOCKED_NOTES, notes);
+            });
+        }
+        if mask & bits.variants != 0 {
+            let variants = device_variants(&mut *pusher.rt, sources, shared, id, source);
+            pusher.push_computed(id, f::DEVICE_VARIANTS, variants);
+            self.panel.variant_observed.reset();
+        }
+    }
+}
+
+/// The observed-mask bits of the device live fields.
+struct DeviceBits {
+    playhead: u32,
+    delete_target: u32,
+    base_note: u32,
+    mod_phases: u32,
+    key_locked_notes: u32,
+    variants: u32,
+    plock_keyed: u32,
+}
+
+impl DeviceBits {
+    fn get() -> &'static Self {
+        static BITS: LazyLock<DeviceBits> = LazyLock::new(|| {
+            let key_locked_notes = DEVICE_LIVE.bit(f::DEVICE_KEY_LOCKED_NOTES);
+            let variants = DEVICE_LIVE.bit(f::DEVICE_VARIANTS);
+            DeviceBits {
+                playhead: DEVICE_LIVE.bit(f::DEVICE_PLAYHEAD),
+                delete_target: DEVICE_LIVE.bit(f::DEVICE_DELETE_TARGET),
+                base_note: DEVICE_LIVE.bit(f::DEVICE_BASE_NOTE),
+                mod_phases: DEVICE_LIVE.bit(f::DEVICE_MOD_PHASES),
+                key_locked_notes,
+                variants,
+                plock_keyed: key_locked_notes | variants,
+            }
+        });
+        &BITS
+    }
+}
+
+/// `device.variants`: a track instrument's key-lock variants (registering
+/// their instances); empty for any other device.
+pub(super) fn device_variants<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    id: InstanceId,
+    source: &DeviceSource,
+) -> Value {
+    let track = source.owner;
+    let owner = (source.device == DeviceSlot::Instrument)
+        .then(|| store.keyed(TRACK, &[track as u64]))
+        .flatten();
+    match owner {
+        Some(track_id) => owner_variants(
+            store,
+            sources,
+            shared,
+            (id, track_id),
+            track,
+            VariantScope::Keys,
+        ),
+        None => instance_list([]),
     }
 }

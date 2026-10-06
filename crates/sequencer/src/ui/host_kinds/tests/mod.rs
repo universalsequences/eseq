@@ -203,6 +203,7 @@ impl Harness {
             mod_ports: &self.meters.cached_mod_port_levels,
             overloaded: self.frame.cpu_overload.displayed(),
             pad_triggers: &self.frame.rack_pad_triggers,
+            mod_display: &self.meters.cached_mod_display_values,
         };
         self.frame
             .host_kinds
@@ -324,6 +325,7 @@ impl Harness {
 mod arrangement;
 mod devices;
 mod mixer;
+mod panel;
 mod params;
 mod racks;
 mod scenes;

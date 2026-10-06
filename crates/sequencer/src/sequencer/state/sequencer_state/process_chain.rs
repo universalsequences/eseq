@@ -417,6 +417,16 @@ impl SequencerState {
     ) -> HashMap<(usize, usize), crate::process::ProcessEffectiveParam> {
         self.process_effective_params.lock().unwrap().clone()
     }
+    /// One entry of [`Self::process_effective_params`], without copying
+    /// the rest (the host kinds' `param.process-value`).
+    pub fn process_effective_param(
+        &self,
+        track: usize,
+        param_idx: usize,
+    ) -> Option<crate::process::ProcessEffectiveParam> {
+        let published = self.process_effective_params.lock().unwrap();
+        published.get(&(track, param_idx)).copied()
+    }
     pub fn process_scope_values_version(&self) -> u64 {
         self.process_scope_values_version.load(Ordering::Acquire)
     }

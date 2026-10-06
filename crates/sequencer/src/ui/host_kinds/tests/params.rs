@@ -14,7 +14,7 @@ impl Harness {
     /// Track 0 gets a Filter in effect slot 0 (through a recorded chain
     /// edit, which binds its instance id); a third track (2) gets a sampler
     /// instrument. Synced, nothing read yet.
-    fn with_devices() -> (Self, usize) {
+    pub(super) fn with_devices() -> (Self, usize) {
         let mut h = Harness::new();
         let slot = h.add_effect(0, "Filter");
         h.app
@@ -62,7 +62,7 @@ impl Harness {
 
     /// Apply a p-lock edit as a knob does: through history, with the
     /// invalidation the knob queues.
-    fn lock_effect(&mut self, slot: usize, step: usize, param: usize, value: f32) {
+    pub(super) fn lock_effect(&mut self, slot: usize, step: usize, param: usize, value: f32) {
         let command = app::AppCommand::SetEffectPlock {
             track: 0,
             step,

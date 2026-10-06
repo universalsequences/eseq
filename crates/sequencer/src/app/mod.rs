@@ -70,7 +70,7 @@ mod synth;
 pub use browser::BrowserNode;
 pub use effect_params::effect_param_macro_key;
 pub use params::SoloAudibility;
-pub use synth::instrument_param_macro_key;
+pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand, TuningEdit};
 pub use edit::try_apply_command;
@@ -3980,7 +3980,16 @@ impl App {
     }
 
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
-        if self.graph.track_buffer_ids.get(track)
+        self.sampler_path_ref_for_track(track).cloned()
+    }
+
+    /// [`Self::sampler_path_for_track`], borrowed (a per-tick comparison
+    /// allocates nothing).
+    pub fn sampler_path_ref_for_track(&self, track: usize) -> Option<&PathBuf> {
+        if self
+            .graph
+            .track_buffer_ids
+            .get(track)
             .is_some_and(|buffer| self.blank_sample_buffers.contains(buffer))
         {
             return None;
@@ -3988,19 +3997,16 @@ impl App {
         self.sampler_paths
             .get(track)
             .and_then(|path| path.as_ref())
-            .cloned()
             .or_else(|| {
                 self.graph
                     .track_buffer_ids
                     .get(track)
                     .and_then(|buffer_id| self.sample_buffer_path_registry.get(buffer_id))
-                    .cloned()
             })
             .or_else(|| {
                 self.tracks
                     .get(track)
                     .and_then(|name| self.sample_path_registry.get(name))
-                    .cloned()
             })
     }
 

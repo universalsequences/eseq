@@ -334,6 +334,42 @@ impl DeviceSlot {
         }
     }
 
+    /// The command setting base cell `cell_idx` of tensor `tensor_idx` of
+    /// this device on `track` (never a p-lock); `None` for the families
+    /// whose tensors take no edit (rack slots, bus effects), as
+    /// [`Self::slot_state`].
+    pub(crate) fn tensor_cell_command(
+        self,
+        track: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> Option<app::AppCommand> {
+        Some(match self {
+            Self::Instrument => app::AppCommand::SetInstrumentTensorCell {
+                track,
+                tensor_idx,
+                cell_idx,
+                value,
+            },
+            Self::Effect(slot_idx) => app::AppCommand::SetEffectTensorCell {
+                track,
+                slot_idx,
+                tensor_idx,
+                cell_idx,
+                value,
+            },
+            Self::MidiFx(slot_idx) => app::AppCommand::SetMidiFxTensorCell {
+                track,
+                slot_idx,
+                tensor_idx,
+                cell_idx,
+                value,
+            },
+            Self::RackSlot(_) | Self::RackEffect { .. } | Self::BusEffect(_) => return None,
+        })
+    }
+
     /// Run `read` over where the device's param values live: the live
     /// slot state, the rack's snapshot (under the rack lock, with the rack
     /// for its display rules) or the bus's (`buses`: the `App`'s, or the

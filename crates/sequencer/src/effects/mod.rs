@@ -9651,6 +9651,64 @@ impl SlotTensorParamData {
             .or_else(|| self.default_values(tensor_idx))
     }
 
+    /// Tensor `tensor_idx`'s (flat offset, length), from the atomics (no
+    /// metadata lock or copy); `None` past the tensor count.
+    fn span(&self, tensor_idx: usize) -> Option<(usize, usize)> {
+        (tensor_idx < self.num_params()).then(|| {
+            let offset = self.flat_offsets[tensor_idx].load(Ordering::Relaxed) as usize;
+            (offset, self.tensor_len(tensor_idx))
+        })
+    }
+
+    /// Whether `step` p-locks tensor `tensor_idx` (no allocation).
+    pub fn has_tensor_plock(&self, step: usize, tensor_idx: usize) -> bool {
+        let Some((flat_offset, len)) = self.span(tensor_idx) else {
+            return false;
+        };
+        if step >= MAX_STEPS || len == 0 {
+            return false;
+        }
+        let Some(plocks) = self.plock_cells() else {
+            return false;
+        };
+        let idx = Self::plock_index(step, flat_offset, 0);
+        idx < plocks.len() && !f32::from_bits(plocks[idx].load(Ordering::Relaxed)).is_nan()
+    }
+
+    /// Tensor `tensor_idx`'s base cells, or with `step` its p-lock there,
+    /// written into `out` (cleared first; nothing else allocates). False
+    /// when there is no such tensor or `step` locks none.
+    pub fn read_cells_into(
+        &self,
+        tensor_idx: usize,
+        step: Option<usize>,
+        out: &mut Vec<f32>,
+    ) -> bool {
+        out.clear();
+        let Some((flat_offset, len)) = self.span(tensor_idx) else {
+            return false;
+        };
+        let cells = match step {
+            None => &self.defaults[flat_offset..flat_offset + len],
+            Some(step) => {
+                if !self.has_tensor_plock(step, tensor_idx) {
+                    return false;
+                }
+                let Some(plocks) = self.plock_cells() else {
+                    return false;
+                };
+                let start = Self::plock_index(step, flat_offset, 0);
+                &plocks[start..start + len]
+            }
+        };
+        out.extend(
+            cells
+                .iter()
+                .map(|cell| f32::from_bits(cell.load(Ordering::Relaxed))),
+        );
+        true
+    }
+
     pub fn set_default(&self, tensor_idx: usize, values: &[f32]) -> bool {
         let Some(meta) = self.meta_at(tensor_idx) else {
             return false;

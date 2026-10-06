@@ -45,6 +45,33 @@ pub enum MacroCurve {
     LogDomain,
 }
 
+impl MacroCurve {
+    /// Every curve's label, in variant order.
+    pub const LABELS: [&'static str; 4] = ["linear", "exp", "log", "log-domain"];
+
+    /// The curve's label (the macro panel's, the host kinds' `curve`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::LogDomain => "log-domain",
+        }
+    }
+
+    /// The curve a label names (any case; `exponential` and `logarithmic`
+    /// too); `label` round-trips.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_ascii_lowercase().as_str() {
+            "linear" => Some(Self::Linear),
+            "exp" | "exponential" => Some(Self::Exp),
+            "log" | "logarithmic" => Some(Self::Log),
+            "log-domain" => Some(Self::LogDomain),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StealQuantize {
     Off,

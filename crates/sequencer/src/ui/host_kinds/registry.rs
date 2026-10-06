@@ -11,9 +11,19 @@ pub(super) trait KindStore {
     fn key_of(&self, id: InstanceId) -> Option<&[u64]>;
     fn kind_of(&self, id: InstanceId) -> Option<&str>;
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId>;
+    /// The `kind` children of `parent` whose sub-key (second key part)
+    /// `pick` accepts.
+    fn children_where(
+        &self,
+        parent: InstanceId,
+        kind: &str,
+        pick: &dyn Fn(u64) -> bool,
+    ) -> Vec<InstanceId>;
     /// The `kind` children of `parent` whose index (second key part) is at
     /// or past `count`: steps past a track's length, params past a device's.
-    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId>;
+    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId> {
+        self.children_where(parent, kind, &|index| index as usize >= count)
+    }
     fn drop_id(&mut self, id: InstanceId);
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value);
     /// A Lisp global's value (the step cursor), read without evaluating.
@@ -33,9 +43,14 @@ impl KindStore for VM {
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId> {
         self.register_keyed_instance(kind, key).ok()
     }
-    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId> {
+    fn children_where(
+        &self,
+        parent: InstanceId,
+        kind: &str,
+        pick: &dyn Fn(u64) -> bool,
+    ) -> Vec<InstanceId> {
         self.keyed_children_of_kind(parent, kind)
-            .filter(|(_, key)| matches!(key, [_, index] if *index as usize >= count))
+            .filter(|(_, key)| matches!(key, [_, sub] if pick(*sub)))
             .map(|(id, _)| id)
             .collect()
     }
@@ -63,9 +78,14 @@ impl KindStore for Runtime {
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId> {
         self.register_keyed_instance(kind, key).ok()
     }
-    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId> {
+    fn children_where(
+        &self,
+        parent: InstanceId,
+        kind: &str,
+        pick: &dyn Fn(u64) -> bool,
+    ) -> Vec<InstanceId> {
         self.keyed_children_of_kind(parent, kind)
-            .filter(|(_, key)| matches!(key, [_, index] if *index as usize >= count))
+            .filter(|(_, key)| matches!(key, [_, sub] if pick(*sub)))
             .map(|(id, _)| id)
             .collect()
     }
@@ -368,36 +388,70 @@ pub(super) fn reconcile(
 }
 
 /// Bring the `kind` children of `parent`, keyed (parent, sub-key), in line
-/// with `wanted` sub-keys: drop the others, register the missing ones.
-/// Returns the instance of each wanted sub-key, aligned with `wanted`
-/// (`None` where registering failed).
-pub(super) fn reconcile_children(
-    pusher: &mut Pusher<'_>,
+/// with `wanted` sub-keys: drop the others, register the missing ones and
+/// run `init` on each new one (its fixed fields). Returns the instance of
+/// each wanted sub-key, aligned with `wanted` (`None` where registering
+/// failed), and whether any instance was dropped or registered.
+pub(super) fn reconcile_children<S: KindStore>(
+    store: &mut S,
     parent: InstanceId,
     kind: &str,
     wanted: &[u64],
-) -> Vec<Option<InstanceId>> {
-    let doomed: Vec<InstanceId> = pusher
-        .rt
-        .keyed_children_of_kind(parent, kind)
-        .filter(|(_, key)| matches!(key, [_, sub] if !wanted.contains(sub)))
-        .map(|(id, _)| id)
-        .collect();
+    mut init: impl FnMut(&mut S, InstanceId, u64),
+) -> (Vec<Option<InstanceId>>, bool) {
+    let doomed = store.children_where(parent, kind, &|sub| !wanted.contains(&sub));
+    let mut changed = !doomed.is_empty();
     for id in doomed {
-        pusher.rt.drop_instance(id);
-        pusher.changed = true;
+        store.drop_id(id);
     }
-    wanted
+    let ids = wanted
         .iter()
         .map(|sub| {
             let key = [parent, *sub];
-            if let Some(id) = pusher.rt.keyed_instance(kind, &key) {
+            if let Some(id) = store.keyed(kind, &key) {
                 return Some(id);
             }
-            pusher.changed = true;
-            pusher.rt.register_keyed_instance(kind, &key).ok()
+            changed = true;
+            let id = store.register(kind, &key)?;
+            init(store, id, *sub);
+            Some(id)
         })
-        .collect()
+        .collect();
+    (ids, changed)
+}
+
+impl Pusher<'_> {
+    /// [`reconcile_children`] with no fixed fields, through the pusher.
+    pub(super) fn reconcile_children(
+        &mut self,
+        parent: InstanceId,
+        kind: &str,
+        wanted: &[u64],
+    ) -> Vec<Option<InstanceId>> {
+        let (ids, changed) = reconcile_children(&mut *self.rt, parent, kind, wanted, |_, _, _| {});
+        self.changed |= changed;
+        ids
+    }
+}
+
+/// Every device instance: the track chains' and the device sync's.
+pub(super) fn all_device_ids<'a>(
+    chain: &'a [InstanceId],
+    devices: &'a DeviceState,
+) -> impl Iterator<Item = InstanceId> + 'a {
+    chain.iter().copied().chain(devices.ids())
+}
+
+/// The `kind` children of every one of `owners`.
+pub(super) fn children_of_owners(
+    rt: &Runtime,
+    owners: impl IntoIterator<Item = InstanceId>,
+    kind: &str,
+) -> Vec<InstanceId> {
+    let children = owners
+        .into_iter()
+        .flat_map(|owner| rt.keyed_children_of_kind(owner, kind));
+    children.map(|(id, _)| id).collect()
 }
 
 pub(super) fn distinct(ids: &[u64]) -> bool {

@@ -4,8 +4,10 @@
 ;; Each kind here is a projection of the sequencer's own state. The host
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices
 ;; (a track's chain, MIDI effects and drum rack slots, a bus's effects),
-;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves;
-;; steps on first read of `t.steps`, params on first read of `d.params`),
+;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves,
+;; tensors, p-lock variants, project and drum rack macros and their mappings;
+;; steps on first read of `t.steps`, params (with their modulation lanes) on
+;; first read of `d.params`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -23,9 +25,10 @@
 
 (export track scene bank bus group transport selection project master engine
         song region
-        tracks scenes banks buses groups routes
+        tracks scenes banks buses groups routes macros
         launch! clone-scene! delete-scene! step-preset!
         device-param lock-param! unlock-param!
+        set-tensor-cell! stamp-variant! stamp-key-variant!
         lock-none lock-seq lock-variant
         reset-tuning! justify-tuning! randomize-tuning! stretch-tuning!
         set-bar-transpose! mod-in-level
@@ -175,6 +178,22 @@
   (lambda (d v)
     (host-command "set-device" (merge (device-target d) :field field :value v))))
 
+;; Macros (spec §14.2g): a project macro by its id, a drum rack's macro by its
+;; rack's device and its index, a mapping by its macro and its position.
+(def macro-setter (field)
+  (lambda (m v) (host-command "set-macro" (dict :macro-id m.mid :field field :value v))))
+(def rack-macro-setter (field)
+  (lambda (rm v)
+    (host-command "set-rack-macro"
+      (merge (device-target rm.device) :macro rm.index :field field :value v))))
+(def mapping-target (mm)
+  (if mm.macro
+    (dict :macro-id mm.macro.mid :mapping mm.index)
+    (merge (device-target mm.rack-macro.device) :macro mm.rack-macro.index :mapping mm.index)))
+(def mapping-setter (field)
+  (lambda (mm v)
+    (host-command "set-macro-mapping" (merge (mapping-target mm) :field field :value v))))
+
 ;; Drum racks (spec §14.2e). Pads are addressed by their rack's group id and
 ;; their member track's stable id, rack clips by (group id, clip id), grooves
 ;; by (group id, clip id; 0 for the rack's own), pool grooves by their id, all
@@ -259,13 +278,112 @@
          (type    :string :doc "continuous, enum or boolean (value 0 or 1)")
          (options (list-of :string) :doc "Labels of an enum param, by value; empty otherwise")
          (unit    :string :doc "Display unit of a continuous param (Hz, ms, %); may be empty")
-         (value   :number :doc "The value shown: on the current track the p-lock at the selected (or playing) step, else the base under any engaged macro")
+         (value   :number :doc "The value shown: a selected neural neuron's output override (overridden), else on the current track the p-lock at the selected (or playing) step, else the base under any engaged macro")
          (base    :number :set set-param-base
                   :doc "The device's own value (setting it never p-locks; see lock-param!). Set values are clamped; enum and boolean ones rounded (true/false work)")
-         (locked  :bool   :doc "value comes from a p-lock")
+         (locked  :bool   :doc "A p-lock supplies the value at the displayed step (even while overridden shows another)")
+         (overridden :bool :doc "value shows a selected neural neuron's output override (step editing), not the p-lock or base")
          (has-locks :bool :doc "Some step of the track's pattern locks this param")
          (text    :string :doc "The option label value selects (on/off for a boolean); empty for continuous params")
-         (printing :bool  :doc "Held under a live print latch while playing and recording")))
+         (printing :bool  :doc "Held under a live print latch while playing and recording")
+         ;; Panel placement (spec §14.2g).
+         (label   :string :doc "The name the panel shows: a mod param without its mod prefix, a modulation source's setting by its role (type, rate, attack, …)")
+         (section :string :doc "main, mod (a modulation lane's own param), source (a modulation source's setting, of source mod-slot) or hidden (host plumbing)")
+         (mod-slot :int   :doc "The modulation source (1-4) a source param sets; 0 otherwise")
+         (visible :bool   :doc "Shown: false for a hidden param and for a source param its source's type does not use")
+         ;; Modulation and process display.
+         (mod-targets (list-of mod-target) :doc "The modulation lanes onto this param")
+         (mod-offset :number :doc "How far modulation moves value now (display units); 0 while unmodulated or not sampled")
+         (mod-value  :number :doc "Where modulation moves value now; value while unmodulated")
+         (mod-scale  :number :doc "An exponential destination's modulation ratio (mod-value / value); 1 otherwise")
+         (process-mapped :bool :doc "An enabled process slot of the track writes this instrument param")
+         (process-value :number :doc "The value a process last wrote here (display units); value when none has")
+         (process-clamped :bool :doc "That write hit the end of the param's range")
+         (key-locks (list-of (list-of :number)) :doc "An instrument param's key locks, (note value) per locked key, ascending (display units)")))
+
+;; One modulation lane onto a param: (nth p.mod-targets 0).
+(def-kind mod-target
+  :key (param index)
+  :host ((param  param :doc "The modulated param")
+         (index  :int)
+         (source param :doc "The param picking the lane's modulation source; nil for a fixed source (slot)")
+         (slot   :int  :doc "The fixed modulation source (1-4) when source is nil")
+         (depth  param :doc "The lane's depth param")
+         (depth-min :number :doc "The depth's range, in the depth param's display units")
+         (depth-max :number)
+         (unit   :string :doc "The depth's display unit; may be empty")))
+
+;; A device's tensor (a table of cells): (nth d.tensors 0).
+(def-kind tensor
+  :key (device index)
+  :host ((device device)
+         (index  :int)
+         (name   :string)
+         (rows   :int)
+         (cols   :int)
+         (min    :number :doc "The cells' range")
+         (max    :number)
+         (values (list-of :number) :doc "The cells shown, row by row: the p-lock at the displayed step, else base")
+         (base   (list-of :number) :doc "The device's own cells (set-tensor-cell! sets one)")
+         (locked :bool :doc "values come from a p-lock")))
+
+;; A p-lock variant: a set of locks several steps share (t.variants), or keys
+;; share (an instrument's d.variants). Keyed by its label while it exists.
+(def-kind variant
+  :key ((track device) vid)
+  :host ((track   track  :doc "The track whose variant it is")
+         (device  device :doc "The instrument of a key-lock variant; nil for a step variant")
+         (label   :string :doc "A, B, …")
+         (name    :string :doc "The name shown: its own name, else label")
+         (count   :int    :doc "How many params it locks")
+         (color   :rgb)
+         (current :bool   :doc "A step variant the selected step plays")
+         (notes   (list-of :int) :doc "The keys a key-lock variant is stamped on")))
+
+;; A project macro: (macros), project.macros.
+(def-kind macro
+  :key (index)
+  :host ((index :int)
+         (mid   :int    :doc "The host's stable macro id")
+         (script-key :string :doc "A script's key for it (macro-ensure), optional: empty when none (a rack macro's stable-key is always set)")
+         (name  :string :set (macro-setter "name"))
+         (type  :string :doc "mapped or scene")
+         (value :number :range (0 1) :set (macro-setter "value")
+                :doc "A performance control: setting it is not an undo entry")
+         (mappings (list-of macro-mapping))
+         (target-scene scene :doc "A scene macro's scene; nil for a mapped one")
+         (morph-params :bool)
+         (steal-patterns :bool)
+         (quantize :string :doc "A scene macro's steal quantization (off, sixteenth, bar); empty for a mapped one")))
+
+;; A drum rack's macro: (nth d.macros 0) of the rack's instrument device.
+(def-kind rack-macro
+  :key (device index)
+  :host ((device device :doc "The drum rack's instrument device")
+         (index  :int    :doc "0-7")
+         (stable-key :string :doc "Its stable id (macro_1, …), always set; a project macro's script-key is the optional script key instead")
+         (name   :string :set (rack-macro-setter "name"))
+         (value  :number :range (0 1) :doc "The value shown: the p-lock at the displayed step, else base under any engaged project macro")
+         (base   :number :range (0 1) :set (rack-macro-setter "value")
+                 :doc "The macro's own value (setting it never p-locks)")
+         (locked :bool :doc "value comes from a p-lock")
+         (has-locks :bool :doc "Some step of the track's pattern locks it")
+         (mappings (list-of macro-mapping))))
+
+;; What one macro drives: (nth m.mappings 0). A mapping has no stable id, so
+;; its handle is positional: deleting a mapping retargets the handles of the
+;; mappings after it to the mapping now at their position.
+(def-kind macro-mapping
+  :key ((macro rack-macro) index)
+  :host ((macro      macro      :doc "Its project macro; nil for a rack macro's")
+         (rack-macro rack-macro :doc "Its rack macro; nil for a project macro's")
+         (index  :int)
+         (target param  :doc "The param it drives; nil when that is no device param (or gone)")
+         (label  :string :doc "What it drives, as the panel names it")
+         (min    :number :set (mapping-setter "min") :doc "The target's value at macro 0 (display units)")
+         (max    :number :set (mapping-setter "max") :doc "… and at macro 1")
+         (curve  :string :set (mapping-setter "curve") :doc "linear, exp, log or log-domain (a project mapping's; a rack mapping's is linear, exp or log)")
+         (suspended :bool :doc "A project mapping that drives nothing now (its target is gone)")))
 
 ;; One device: of a track's chain (t.devices: the instrument, slot -1, then
 ;; its effects), a track's MIDI effects (t.midi-devices), a drum rack's slots
@@ -289,7 +407,15 @@
          (voices  :int :set (device-setter "voices")
                   :doc "A drum rack slot's voices, 1 (mono) to 16 (the setter checks; no declared range: 0 reads for any other device, which takes no set!)")
          (delete-target :bool :set (device-setter "delete-target")
-                  :doc "The delete target (Backspace deletes it). Track effects are targets only on the current track; an instrument never")))
+                  :doc "The delete target (Backspace deletes it). Track effects are targets only on the current track; an instrument never")
+         ;; Panel extras (spec §14.2g).
+         (base-note :number :range (-48 48) :set (device-setter "base-note")
+                    :doc "A track instrument's base note offset, in semitones; 0 for any other device (which takes no set!)")
+         (mod-phases (list-of :number) :doc "Each modulation source's (1-4) cycle position; -1 when it has none or nothing samples it")
+         (tensors (list-of tensor) :doc "The device's tensors (tables of cells)")
+         (key-locked-notes (list-of :int) :doc "A track instrument's keys holding a key lock, ascending")
+         (variants (list-of variant) :doc "A track instrument's key-lock variants (stamp-key-variant!)")
+         (macros (list-of rack-macro) :doc "A drum rack's macros (on its instrument device); empty otherwise")))
 
 (def-kind track
   :key (index)
@@ -354,7 +480,8 @@
          (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
          (latched   :bool   :set set-track-latched
                     :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")
-         (pad       pad     :doc "The drum rack pad this member track backs, or nil")))
+         (pad       pad     :doc "The drum rack pad this member track backs, or nil")
+         (variants  (list-of variant) :doc "The track's p-lock variants, by label (stamp-variant!)")))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.
@@ -658,7 +785,8 @@
          (accumulator-options (list-of :string) :doc "Built-in and script accumulators, for track.accumulator")
          (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")
          (groove-pool (list-of pool-groove) :doc "The project's grooves, in pool order")
-         (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")))
+         (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
+         (macros (list-of macro) :doc "The project's macros, in macro order")))
 
 ;; ── Collections and actions ──
 
@@ -668,6 +796,7 @@
 (def buses () project.buses)
 (def groups () project.groups)
 (def routes () project.routes)
+(def macros () project.macros)
 
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)
@@ -728,6 +857,27 @@
     (merge (device-target p.device)
            :param-idx p.index :steps (map (lambda (s) s.index) steps)
            :step-tracks (map (lambda (s) s.track.tid) steps))))
+
+;; Set cell cell (row * tz.cols + col) of tensor tz to v (the device's own
+;; cells, never a p-lock; v within tz.min-tz.max). A drag's set!s join one
+;; undo entry.
+(def set-tensor-cell! (tz cell v)
+  (host-command "set-device-tensor"
+    (merge (device-target tz.device) :tensor-idx tz.index :cell cell :value v)))
+
+;; Stamp variant v (one of t.variants) onto steps (step instances of track
+;; t); nil v clears the steps' variant locks. One undo entry.
+(def stamp-variant! (t steps v)
+  (host-command "stamp-variant"
+    (dict :track-id t.tid :label (if v v.label "def")
+          :steps (map (lambda (s) s.index) steps)
+          :step-tracks (map (lambda (s) s.track.tid) steps))))
+
+;; Stamp key-lock variant v (one of d.variants) onto keys notes (MIDI note
+;; numbers) of instrument d; nil v clears those keys' variant locks.
+(def stamp-key-variant! (d notes v)
+  (host-command "stamp-key-variant"
+    (merge (device-target d) :label (if v v.label "def") :notes notes)))
 
 ;; Load track t's next (dir 1) or previous (dir -1) preset, wrapping.
 (def step-preset! (t dir)

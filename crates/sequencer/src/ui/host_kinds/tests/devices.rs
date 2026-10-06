@@ -39,7 +39,7 @@ impl Harness {
     }
 
     /// Track 2 becomes a drum rack holding one sampler slot.
-    fn rack_track(&mut self) {
+    pub(super) fn rack_track(&mut self) {
         self.app
             .graph_controller()
             .add_blank_sampler_track()
@@ -51,7 +51,7 @@ impl Harness {
         self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn rack_slot(&self) -> sequencer::sequencer::RackSlotSnapshot {
+    pub(super) fn rack_slot(&self) -> sequencer::sequencer::RackSlotSnapshot {
         self.shared
             .state
             .live_rack_track_snapshot(2)
@@ -70,7 +70,7 @@ impl Harness {
             .get(param)
     }
 
-    fn fails(&mut self, code: &str, expected: &str) {
+    pub(super) fn fails(&mut self, code: &str, expected: &str) {
         self.editor.minibuffer = None;
         self.eval_all(code);
         self.drain();

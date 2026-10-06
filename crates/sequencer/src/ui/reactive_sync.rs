@@ -185,12 +185,27 @@ pub(super) fn apply_rack_macro_rename_host_command(
         }),
     ) else { return; };
     let Some(id) = sequencer::sequencer::RackMacroId::from_index(id) else { return; };
-    if app.rename_rack_macro(track, id, name) {
-        // A label edit cannot change rack topology, locks, or DSP. Publish
-        // only its text fields; an epoch bump resyncs the entire project.
-        let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
-        flush_reactive_display_edit(editor, dirty);
+    rename_rack_macro_reactive(editor, app, track, id, name);
+}
+
+/// Rename rack macro `id` of `track` and publish its name field; returns
+/// whether it changed. Shared by `rename-rack-macro` and the host kinds'
+/// `set-rack-macro`.
+pub(super) fn rename_rack_macro_reactive(
+    editor: &mut Editor,
+    app: &mut app::App,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+    name: String,
+) -> bool {
+    if !app.rename_rack_macro(track, id, name) {
+        return false;
     }
+    // A label edit cannot change rack topology, locks, or DSP. Publish only
+    // its text fields; an epoch bump resyncs the entire project.
+    let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
+    flush_reactive_display_edit(editor, dirty);
+    true
 }
 
 pub(super) fn refresh_rack_macro_value_reactive(

@@ -369,27 +369,16 @@ pub(super) fn handle(
                 if let (Some(notes), Some(label)) = (notes, label) {
                     let track = current_track.load(Ordering::Relaxed);
                     let applied = if label == "def" {
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::ClearInstrumentKeyLockVariantsForNotes {
-                                track,
-                                notes,
-                            },
-                        );
+                        app::apply_command(&mut app, key_variant_command(track, notes, None));
                         true
                     } else {
                         state
                             .key_lock_variant_registry_snapshot(track)
                             .assignment_for_label(&label)
                             .is_some_and(|assignment| {
-                                app::apply_command(
-                                    &mut app,
-                                    app::AppCommand::StampInstrumentKeyLockVariant {
-                                        track,
-                                        notes,
-                                        key: assignment.key,
-                                    },
-                                );
+                                let command =
+                                    key_variant_command(track, notes, Some(assignment.key));
+                                app::apply_command(&mut app, command);
                                 true
                             })
                     };
@@ -775,21 +764,14 @@ pub(super) fn handle(
                                 },
                             );
                         }
-                        let display_step = displayed_plock_step(
-                            &state,
-                            track,
-                            selected_plock_step(&selected_steps),
-                        );
-                        if sync_fx_instrument_tensor_value_field(
-                            editor.runtime_mut(),
+                        sync_instrument_tensor_display(
+                            editor,
                             &app,
                             track,
                             tensor_idx,
-                            display_step,
-                        ) {
-                            editor.refresh_runtime_side_effects();
-                            editor.mark_needs_redraw();
-                        }
+                            track,
+                            &selected_steps,
+                        );
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
@@ -953,6 +935,45 @@ pub(super) fn handle(
             editor.handle_host_event(HostEvent::Status(status));
         }
         _ => {}
+    }
+}
+
+/// The command stamping key-lock variant `key` onto `notes` of `track`'s
+/// instrument, or clearing those keys' variant locks (`None`). Shared by
+/// `stamp-key-lock-variant` and the host kinds' `stamp-key-variant`.
+/// After an instrument tensor edit on `track`: resync the legacy tensor
+/// field the panel binds (the current track's panel-relative one, else the
+/// track's own) at the displayed step. Shared by
+/// `set-instrument-tensor-cell` and the host kinds' `set-device-tensor`.
+pub(super) fn sync_instrument_tensor_display(
+    editor: &mut Editor,
+    app: &app::App,
+    track: usize,
+    tensor_idx: usize,
+    current_track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) {
+    let step = selected_plock_step(selected_steps);
+    let display_step = displayed_plock_step(&app.state, track, step);
+    let rt = editor.runtime_mut();
+    let dirty = match track == current_track {
+        true => sync_fx_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step),
+        false => sync_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step),
+    };
+    if dirty {
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+}
+
+pub(super) fn key_variant_command(
+    track: usize,
+    notes: Vec<u8>,
+    key: Option<sequencer::plock_variants::PlockVariantKey>,
+) -> app::AppCommand {
+    match key {
+        None => app::AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, notes },
+        Some(key) => app::AppCommand::StampInstrumentKeyLockVariant { track, notes, key },
     }
 }
 

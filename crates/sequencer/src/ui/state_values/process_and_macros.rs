@@ -75,7 +75,7 @@ pub(super) fn process_target_hint_label(target: Option<&sequencer::process::Proc
     }
 }
 
-pub(super) fn process_param_target_label(target: &sequencer::process::ParamTarget) -> String {
+pub(crate) fn process_param_target_label(target: &sequencer::process::ParamTarget) -> String {
     target.label()
 }
 
@@ -140,6 +140,61 @@ pub(super) fn macro_mapping_current_value(
     }
 }
 
+/// Where a project macro mapping's target param lives: its owner (the
+/// track's position, or the bus's), the device and the param's index;
+/// `None` when the target is no device param or is gone. Shared by the
+/// macro panel (`SEQ.macros`) and the host kinds' `macro-mapping.target`.
+pub(crate) fn macro_mapping_location(
+    app: &app::App,
+    mapping: &sequencer::macro_engine::MacroMapping,
+) -> Option<(usize, DeviceSlot, usize)> {
+    use sequencer::macro_engine::ParamScope;
+    use sequencer::process::ParamTarget;
+    let index = |device: &sequencer::effects::EffectDescriptor, param: &str| {
+        device
+            .params
+            .iter()
+            .position(|descriptor| descriptor.has_tag_or_name(param))
+    };
+    let named = |device: &&sequencer::effects::EffectDescriptor, effect: &str| {
+        device.name.eq_ignore_ascii_case(effect)
+    };
+    match (mapping.scope, &mapping.target) {
+        (
+            ParamScope::Track(track),
+            ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
+            let device = app.graph.effect_descriptors.get(track)?.get(*slot);
+            let device = device.filter(|device| named(device, effect))?;
+            Some((track, DeviceSlot::Effect(*slot), index(device, param)?))
+        }
+        (ParamScope::Track(track), ParamTarget::InstrumentParam { param, .. }) => {
+            let device = app.graph.instrument_descriptors.get(track)?;
+            Some((track, DeviceSlot::Instrument, index(device, param)?))
+        }
+        (
+            ParamScope::Bus(bus_id),
+            ParamTarget::EffectParam {
+                slot,
+                effect,
+                param,
+                ..
+            },
+        ) => {
+            let bus = app.buses.iter().position(|bus| bus.id == bus_id)?;
+            let device = app.buses[bus].effect_descriptors.get(*slot);
+            let device = device.filter(|device| named(device, effect))?;
+            Some((bus, DeviceSlot::BusEffect(*slot), index(device, param)?))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn macro_mapping_param_descriptor<'a>(
     app: &'a app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
@@ -147,64 +202,17 @@ pub(super) fn macro_mapping_param_descriptor<'a>(
     &'a sequencer::effects::EffectDescriptor,
     &'a sequencer::effects::ParamDescriptor,
 )> {
-    match (mapping.scope, &mapping.target) {
-        (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::EffectParam {
-                slot,
-                effect,
-                param,
-                ..
-            },
-        ) => {
-            let device = app
-                .graph
-                .effect_descriptors
-                .get(track)?
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::InstrumentParam { param, .. },
-        ) => {
-            let device = app.graph.instrument_descriptors.get(track)?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        (
-            sequencer::macro_engine::ParamScope::Bus(bus_id),
-            sequencer::process::ParamTarget::EffectParam {
-                slot,
-                effect,
-                param,
-                ..
-            },
-        ) => {
-            let bus = app.buses.iter().find(|bus| bus.id == bus_id)?;
-            let device = bus
-                .effect_descriptors
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        _ => None,
-    }
+    let (owner, device, param_idx) = macro_mapping_location(app, mapping)?;
+    let device = match device {
+        DeviceSlot::Instrument => app.graph.instrument_descriptors.get(owner)?,
+        DeviceSlot::Effect(slot) => app.graph.effect_descriptors.get(owner)?.get(slot)?,
+        DeviceSlot::BusEffect(slot) => app.buses.get(owner)?.effect_descriptors.get(slot)?,
+        _ => return None,
+    };
+    Some((device, device.params.get(param_idx)?))
 }
 
-pub(super) fn macro_mapping_display_metadata(
+pub(crate) fn macro_mapping_display_metadata(
     app: &app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
@@ -281,12 +289,7 @@ pub(crate) fn build_macros_value(app: &app::App) -> Value {
                     display_decimals,
                     display_unit,
                 ) = macro_mapping_display_metadata(app, mapping);
-                let curve = match mapping.curve {
-                    sequencer::macro_engine::MacroCurve::Linear => "linear",
-                    sequencer::macro_engine::MacroCurve::Exp => "exp",
-                    sequencer::macro_engine::MacroCurve::Log => "log",
-                    sequencer::macro_engine::MacroCurve::LogDomain => "log-domain",
-                };
+                let curve = mapping.curve.label();
                 map_value([
                     ("mapping-idx", Value::Number(mapping_idx as f64)),
                     (

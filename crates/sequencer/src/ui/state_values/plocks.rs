@@ -1169,6 +1169,46 @@ pub(crate) fn build_track_plocks_value(
     Value::List(items)
 }
 
+/// What a variant chip shows: its label, its name (else the label), how
+/// many params it locks and its themed color. Shared by the step panel's
+/// and the keys tab's chip lists and the host kinds' `variant`.
+pub(crate) struct VariantChip {
+    pub(crate) label: String,
+    pub(crate) name: String,
+    pub(crate) count: usize,
+    pub(crate) color: [f32; 3],
+}
+
+impl VariantChip {
+    pub(crate) fn of(entry: &sequencer::plock_variants::PlockVariantRegistryEntry) -> Self {
+        Self {
+            label: entry.label.clone(),
+            name: entry.name.clone().unwrap_or_else(|| entry.label.clone()),
+            count: entry.key.param_count(),
+            color: super::track_and_mixer::themed_variant_rgb(entry.color),
+        }
+    }
+
+    /// The legacy chip map (`kind`, `label`, `display`, `count`,
+    /// `color-r/g/b`; a caller adds `current`).
+    pub(crate) fn legacy_map(self) -> HashMap<String, Rc<RefCell<Value>>> {
+        let cell = |value| Rc::new(RefCell::new(value));
+        let [r, g, b] = self.color.map(|channel| Value::Number(f64::from(channel)));
+        HashMap::from([
+            (
+                "kind".to_string(),
+                cell(Value::String("variant".to_string())),
+            ),
+            ("label".to_string(), cell(Value::String(self.label))),
+            ("display".to_string(), cell(Value::String(self.name))),
+            ("count".to_string(), cell(Value::Number(self.count as f64))),
+            ("color-r".to_string(), cell(r)),
+            ("color-g".to_string(), cell(g)),
+            ("color-b".to_string(), cell(b)),
+        ])
+    }
+}
+
 pub(crate) fn build_track_plock_variants_value(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1230,44 +1270,13 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
     items.push(Rc::new(RefCell::new(Value::Map(def_map))));
 
     for entry in registry.entries {
-        let mut map = HashMap::new();
-        map.insert(
-            "kind".to_string(),
-            Rc::new(RefCell::new(Value::String("variant".to_string()))),
-        );
-        map.insert(
-            "label".to_string(),
-            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
-        );
-        map.insert(
-            "display".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
-            ))),
-        );
-        map.insert(
-            "count".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
-        );
+        let mut map = VariantChip::of(&entry).legacy_map();
         map.insert(
             "current".to_string(),
             Rc::new(RefCell::new(Value::Bool(
                 current_key.as_ref().is_some_and(|key| key == &entry.key)
                     || preview_label.is_some_and(|label| label == entry.label),
             ))),
-        );
-        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
-        map.insert(
-            "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
-        );
-        map.insert(
-            "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
-        );
-        map.insert(
-            "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
         );
         items.push(Rc::new(RefCell::new(Value::Map(map))));
     }

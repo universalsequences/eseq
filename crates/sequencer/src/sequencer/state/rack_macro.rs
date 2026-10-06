@@ -52,6 +52,31 @@ pub enum RackMacroCurve {
     Log,
 }
 
+impl RackMacroCurve {
+    /// Every curve's label, in variant order.
+    pub const LABELS: [&'static str; 3] = ["linear", "exp", "log"];
+
+    /// The curve's label (the rack panel's, the host kinds' `curve`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exp => "exp",
+            Self::Log => "log",
+        }
+    }
+
+    /// The curve a label names (any case; `exponential` and `logarithmic`
+    /// too); `label` round-trips.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_ascii_lowercase().as_str() {
+            "linear" => Some(Self::Linear),
+            "exp" | "exponential" => Some(Self::Exp),
+            "log" | "logarithmic" => Some(Self::Log),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum RackMacroTarget {
     SlotParam {

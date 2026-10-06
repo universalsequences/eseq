@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -357,7 +357,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -1014,6 +1014,10 @@ its instance and field.
    Built (stage 7b-2, eseq-0l17.36): devices beyond the track chain (MIDI
    effects, bus effects, drum rack slots and their effects) with their
    params, `device.voices` and `device.delete-target` (§14.2f).
+   Built (stage 7b-3, eseq-0l17.37): the device panel extras: param
+   placement, modulation lanes and display, process mapping, key locks,
+   the base note, tensors, p-lock variants, project and rack macros, the
+   neural selection's override (§14.2g).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1225,9 +1229,9 @@ Built (7b):
   pushed without allocating unless its label changed; `has-locks`
   (`SlotPLockData::param_has_any_plock`, an early-exit scan bounded by
   `num-steps`) only when the track's p-lock key moved. `device.playhead`
-  is re-resolved from the `App` per tick read (a sample load or voice
-  rebuild moves no model counter); a cold read uses the sampler voices of
-  the last model sync.
+  reads the sampler voices of the device's `DeviceSource`, which since
+  7b-3 the tick keeps current (`SamplerPlayhead::current`: a sample load or
+  voice rebuild moves no model counter; §14.2g), observed and cold alike.
 - **P-lock change tracking.** `UiInvalidationQueue` keeps a p-lock
   revision per track, moved only by invalidations that may move a
   p-lock (`UiInvalidation::plock_scope`: `Full`, `ProjectState`,
@@ -1289,8 +1293,8 @@ Built (7b):
 - **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
   (eseq-0l17.36, built: §14.2f); modulation display, process mapping, tensors, base
   note, key locks, rack and project macros, the variant chip list, the
-  neural-selection display override and the rest of the panel data
-  (eseq-0l17.37).
+  neural-selection display override (eseq-0l17.37, built: §14.2g) and the
+  rest of the panel data (eseq-0l17.43).
 
 ### 14.2c Built in stage 7i (eseq-0l17.35)
 
@@ -1688,7 +1692,8 @@ Built (7h):
   setter is its own entry.
 - **Not covered.** Rack slot voices and polyphony stay with the rack slot
   devices (eseq-0l17.36, §14.2c; built: `device.voices`, §14.2f); a rack's
-  macros are eseq-0l17.37.
+  macros are eseq-0l17.37 (built: `rack-macro` on the rack's instrument
+  device, §14.2g).
   The groove picker's labels, headers and details (`:picker-labels`,
   `:picker-headers`, `:picker-details`) are a view's to build from
   `project.groove-pool` (`pg.racks` says where else one plays) and
@@ -1821,8 +1826,187 @@ Built (7b-2):
   or another track's chain effect, is an error.
 - **Not covered:** rack slot strip controls (gain, pan, mute, solo, choke,
   enabled as settable fields, with their p-lock display) (eseq-0l17.42),
-  base note and the rest of the panel extras (eseq-0l17.37), rack slot
-  sampler playheads (`device.playhead` is a track instrument's).
+  base note and the rest of the panel extras (eseq-0l17.37, built:
+  §14.2g), rack slot sampler playheads (`device.playhead` is a track
+  instrument's).
+
+### 14.2g Built in stage 7b-3 (eseq-0l17.37)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `param` | `(device index)` | `overridden :bool` (L: `value` shows a selected neuron's override); placement: `label :string`, `section :string` (`main`, `mod`, `source`, `hidden`), `mod-slot :int`, `visible :bool` (L); lanes: `mod-targets (list-of mod-target)`; display: `mod-offset`, `mod-value`, `mod-scale :number` (L); process: `process-mapped :bool`, `process-value :number`, `process-clamped :bool` (L); `key-locks (list-of (list-of :number))` (L, `(note value)` rows) |
+| `mod-target` | `(param index)` | `param param`, `index :int`, `source param` (nil: a fixed source), `slot :int`, `depth param`, `depth-min`, `depth-max :number`, `unit :string` |
+| `device` | `((track bus) did)` | `base-note :number` (L, −48–48) [d], `mod-phases (list-of :number)` (L), `tensors (list-of tensor)`, `key-locked-notes (list-of :int)` (L), `variants (list-of variant)` (L, key-lock variants), `macros (list-of rack-macro)` (a drum rack's, on its instrument device) |
+| `tensor` | `(device index)` | `device device`, `index :int`, `name :string`, `rows`, `cols :int`, `min`, `max :number`, `values`, `base (list-of :number)` (L), `locked :bool` (L) |
+| `track` | `(index)` | `variants (list-of variant)` (L, the step variants: the chip list) |
+| `variant` | `((track device) vid)` | `track track`, `device device` (nil: a step variant), `label`, `name :string`, `count :int`, `color :rgb`, `current :bool`, `notes (list-of :int)` (all L but `track`, `device`) |
+| `macro` | `(index)` | `index :int`, `mid :int`, `script-key :string` (optional: empty when none), `name :string` [m], `type :string` (`mapped`, `scene`), `value :number` (0–1) [m], `mappings (list-of macro-mapping)`, `target-scene scene`, `morph-params`, `steal-patterns :bool`, `quantize :string` |
+| `rack-macro` | `(device index)` | `device device`, `index :int` (0–7), `stable-key :string` (always set), `name :string` [rm], `value :number` (L), `base :number` (L) [rm], `locked`, `has-locks :bool` (L), `mappings (list-of macro-mapping)` |
+| `macro-mapping` | `((macro rack-macro) index)` | `macro macro`, `rack-macro rack-macro` (one is nil), `index :int`, `target param` (nil: no device param), `label :string`, `min`, `max :number` [mm], `curve :string` [mm] (`linear`, `exp`, `log`, a project mapping's also `log-domain`), `suspended :bool` (positional: see Macros) |
+| `project` | `()` | `macros (list-of macro)`; `(macros)` |
+
+[d] = `set-device` (`:field` `base-note`); [m] = `set-macro` (`:macro-id`,
+`:field`); [rm] = `set-rack-macro` (`device-target`, `:macro`, `:field`
+`name` or `value`); [mm] = `set-macro-mapping` (`:macro-id`, or a rack
+macro's `device-target` and `:macro`; `:mapping`, `:field`); all but [d] in
+`host_commands/panel.rs`. Actions: `(set-tensor-cell! tz cell v)`
+(`set-device-tensor`), `(stamp-variant! t steps v)` (`stamp-variant`, nil
+`v` clears the steps' variant locks), `(stamp-key-variant! d notes v)`
+(`stamp-key-variant`, nil `v` clears).
+
+Built (7b-3):
+
+- **Placement.** `param.section` sorts a param as the panels do
+  (`PanelSection`, shared with the instrument panel builders): a `mod …`
+  lane param, a voice modulator source's setting (`source`, with its
+  source in `mod-slot`), host plumbing (`hidden`), else `main`; `label` is
+  the name the panel shows (`mod ` stripped, a source setting by its role:
+  `type`, `rate`, `attack`, …). `visible` is live: false for a hidden param
+  and for a source setting the source's type does not use
+  (`selected_source_param_indices` over the displayed values, computed at
+  most once per device per tick), so a view builds the source sections
+  from `d.params` without a dict.
+- **Lanes.** `param.mod-targets` are `mod-target` instances registered
+  with the params (from `instrument_modulation_targets`, each keyed (param
+  instance id, lane)); a lane names its source and depth params as
+  instances (`mt.depth.value` is the depth), its fixed source slot, and its
+  depth range in the depth param's display units (`mod_target_depth_range`,
+  shared with the rack panel: a sampler's lanes store DSP units). A
+  descriptor change replaces them with the params.
+- **Modulation display.** `mod-offset`, `mod-value`, `mod-scale` and
+  `device.mod-phases` read the tick's modulation sample
+  (`ModDisplayValues`, compared and copied into `KindsShared` only while
+  one of these fields is observed; a cold read otherwise sees the last
+  copy): the legacy poll, now also run while one of these fields of a
+  device the sample covers is observed with the fx panel hidden
+  (`HostKinds::wants_mod_display`, `mod_sampled`; at the meter cadence,
+  the watchlist released when neither wants it). The sample covers what the
+  panel shows (every effect by its node, the current track's instrument,
+  its rack's selected slot); anything else reads no modulation (offset 0,
+  `mod-value` = `value`, scale 1, phases −1) and keeps no poll alive.
+  Effect samples are stored units and are shown in display units, like
+  every kind value (`mod_sample`, shared by the param and phase reads).
+- **Process mapping.** A track instrument's params an enabled process slot
+  writes (`process_bound_instrument_params`, shared with the panel),
+  cached per track under its `PlockKey` (a process chain edit's
+  invalidation moves it); `process-value` is the scheduler's last write
+  (`SequencerState::process_effective_param`, one entry, no copy of the
+  feed) while mapped, else `value`.
+- **Key locks.** A track instrument's visible key locks
+  (`instrument_key_locks`, shared with the instrument panel), cached per
+  track under its `PlockKey` (key-lock edits move the fx and UI epochs);
+  `param.key-locks` and `device.key-locked-notes` recompute only when it
+  moved (the observed lists' per-entry key, like `has-locks`).
+- **Base note.** `device.base-note` is a track instrument's offset (an
+  atomic); `(set! d.base-note 12)` is `SetInstrumentBaseNoteOffset` through
+  history (a drag joins one entry) with the legacy `BaseNote`
+  invalidation; another device's is an error (a rack slot's base note is a
+  strip control: eseq-0l17.42).
+- **Tensors.** `device.tensors` are registered with the device (model;
+  replaced with the params on a descriptor change); their cells are live:
+  `values` the displayed step's p-lock else `base`. The tick reads only
+  the observed parts, straight from the slot's cells into a reused buffer
+  (`read_cells_into`, `has_tensor_plock`: no metadata copy, no base copy
+  while unlocked) and compares them with the pushed list in place.
+  `set-tensor-cell!` sets one base cell (value rule: a cell index in range,
+  a value in `min`–`max`; a tensor with no cells is an error) through
+  `DeviceSlot::tensor_cell_command` (`SetInstrumentTensorCell` /
+  `SetEffectTensorCell` / `SetMidiFxTensorCell`; a drag joins one entry),
+  an instrument's legacy field resynced by `sync_instrument_tensor_display`
+  (shared with `set-instrument-tensor-cell`); a rack's or a bus's tensors
+  read their defaults and take no `set!` yet.
+- **Variants.** `t.variants` (the step panel's chips, legacy
+  `SEQ.track-plock-variants` without its `def` chip) and an instrument's
+  `d.variants` (key-lock variants) are `variant` instances keyed (owner
+  instance id, the label's A, B, …, A', … index), so a handle is the
+  variant while it exists. Each registry is read (reconciled, as the legacy
+  publishers do) once per owner track `PlockKey` (`variant_snapshot`,
+  cached in `KindsShared`, `plock_cached`); the lists are computed while
+  observed and only when it moved; a variant's fields from the snapshot,
+  `current` per tick (the first selected step plays it: its variant key is
+  read once per track per key and selected step, however many variants
+  observe it). Whenever an owner's key moved, the tick drops its variant
+  instances whose variant is gone, observed or not
+  (`HostKinds::prune_variants`), so a held handle goes stale instead of
+  silently becoming a later variant that reuses its label. The chips'
+  label, name, count and color are `VariantChip` (shared with the legacy
+  chip lists). `stamp-variant!` and
+  `stamp-key-variant!` act on the steps or keys that differ, through the
+  legacy edits (`stamp_step_variant`, shared with `stamp-plock-variant`;
+  `key_variant_command`, shared with `stamp-key-lock-variant`; a key
+  variant's registry and assignments from one reconcile,
+  `key_lock_variant_registry_with_assignments`): one undo entry; an
+  unknown label, another track's step or a non-MIDI note is an error.
+- **Macros.** Project macros are positional `(index)`, the instance kept
+  by macro id across reorders (`reconcile`) and replaced on a project load.
+  A drum rack's macros hang off its instrument device (the rack's macros
+  live in the rack track's snapshot, beside its slots, not on the group):
+  `rack-macro` keyed (device instance id, index). Mappings are keyed (macro
+  instance id, position), as the legacy commands address them: a mapping
+  has no stable id in the model, so deleting one retargets the handles of
+  the mappings after it (each names the mapping now at its position). A
+  mapping's
+  `target` is the param instance it drives (`macro_mapping_location`,
+  shared with `SEQ.macros`; the target device's params are registered for
+  it), `label` the panel's (`target-label` / path · param), `min` / `max`
+  in the target's display units. `key` is a keyed kind's built-in field,
+  so a project macro's script key (`macro-ensure`; optional, empty when
+  none) is `script-key`, and a rack macro's stable id (`macro_1`, …;
+  always set) is `stable-key`. Feeds: the project macros' structure
+  (everything but the values) is compared every tick with the last
+  synced, and synced again when what targets resolve through moved
+  (`MacroInputs`: param replacements (`params_generation`; a fresh
+  registration resolves no target anew, since the macro sync registers
+  the params it targets), the device registry, the FX epoch, the track,
+  bus, scene and device instances; compared in place); the values every
+  tick (a drag moves no counter); the racks' macros when the rack revision
+  or the inputs moved, a rack whose names and mappings did not change
+  skipped (a macro drag syncs nothing: `MacroState::rack_syncs`); a rack
+  macro's value (`rack_macro_shown_value`, shared with
+  `App::effective_rack_macro_value`: a take's override, the displayed
+  step's p-lock, else the base under an engaged project macro), base and
+  lock flags are live: one rack lock per tick reads every observed field
+  (`MacroState::rack_live_locks`), pushed after it is released, and
+  `has-locks` only when its track's `PlockKey` moved (the observed list's
+  per-entry key, as params). Setters: a project macro's name, a mapping's
+  range (display units, within the target's range; the bound's current
+  value is a no-op checked before the range, so the value a view reads
+  always sets back) and curve (`MacroCurve::from_label` /
+  `RackMacroCurve::from_label`, the labels `label()` prints everywhere, so
+  the current value round-trips: `linear`, `exp`, `log`, a project
+  mapping's also `log-domain`) through `MacroRename` / `MacroSetRange` /
+  `MacroSetCurve` (one undo entry each); its value through
+  `MacroSetValue`, a performance control with no undo entry (as the macro
+  panel's). A rack macro's name, base and mappings go through the rack
+  panel's edits, which are not recorded (eseq-0l17.44), with their legacy
+  refreshes (`rename_rack_macro_reactive`, shared with
+  `rename-rack-macro`); a rack macro's locks are the rack panel's p-lock
+  commands.
+- **Neural selection.** While a neural neuron is selected for step
+  editing, its output override shows in a track instrument's or chain
+  effect's `param.value`, as in the legacy value fields
+  (`selected_neural_*_plock_value`; the selection is a shared handle), and
+  `param.overridden` is true. `locked` keeps its one meaning: whether a
+  p-lock supplies the value at the displayed step (the override hides it
+  without changing it).
+- **Playhead reads.** The tick compares each track instrument's sampler
+  voices and sample with the `App`'s every tick
+  (`SamplerPlayhead::current`, over the borrowed
+  `App::sampler_path_ref_for_track`: no allocation) and refreshes its
+  `DeviceSource` when they moved; an observed `device.playhead` and a cold
+  read both sample those voices (no `SamplerPlayhead::of` per tick), so a
+  read after a sample load or voice rebuild sees the current voices
+  without a model sync.
+- **Not covered** (eseq-0l17.43): the sampler panel's media (waveform
+  buffer, slices, onsets, analysis, selection times), the sound-binding
+  badge and display name, a modulator instrument's phase and level, the
+  fixed modulators' labels, param UI metadata, effect tables and IR names,
+  the built-in effect editors, the meter selector, scene macro config
+  setters and `step.variant`. Rack macro edits are not undoable
+  (eseq-0l17.44).
+- eseqlisp strings have no `\"` escape: a quote escaped in a string (a
+  `:doc` included) ends it, and the module fails to compile with no
+  message.
 
 ### 14.3 Follow-up beads
 
@@ -1834,7 +2018,9 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-2 | eseq-0l17.36 (built) | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i), `device.voices` | .13 .14 .18 .19 .21 |
 | 7b-2a | eseq-0l17.41 | the clear command for a rack slot instrument's p-locks (`unlock-param!` on a rack slot param) | — |
 | 7b-2b | eseq-0l17.42 | rack slot strip controls (gain, pan, mute, solo, choke, enabled) on the rack slot device, with their p-lock display | .14 .19 |
-| 7b-3 | eseq-0l17.37 | panel extras: modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
+| 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
+| 7b-4 | eseq-0l17.43 | the rest of the panel data: sampler media, sound binding, modulator display, tables and IR names, effect editors, param UI metadata, scene macro config | .14 .18 |
+| 7b-3a | eseq-0l17.44 | recorded (undoable) drum rack macro edits | .18 |
 | 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
@@ -1944,12 +2130,12 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10) | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names .37 | built (.28, .36) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37) | built (.28, .36, .37) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
-| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields .37 | built (.28) | .13 .14 |
-| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params (other panel data .37) | built (.28) | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36), key locks / macros / modulation .37) | built (.28, .36) | .14 .17 .18 |
-| `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | rack macros (group.macros) and project macros | .37 | .14 .18 |
+| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37) | .13 .14 |
+| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); tables, IR names, editors .43 | built (.28, .37) | .14 .18 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); sampler media, sound binding, modulator display .43) | built (.28, .36, .37) | .14 .17 .18 |
+| `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) | built (.37) | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28) | .11 |
 | `SEQ.seq-track-step-plocked-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.plocked | built (.28) | .11 |
@@ -1959,7 +2145,7 @@ builds the field name.
 | `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | built (.28) | .11 |
 | `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks, send.has-locks | built (.28) | .14 |
 | `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | built (.28) | .14 |
-| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list | .37 | .14 |
+| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list → track.variants / variant (built .37) | built (.28, .37) | .14 |
 | `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28) | .14 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | lane kind | .29 | .11 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | processes singleton | .29 | .11 .20 |

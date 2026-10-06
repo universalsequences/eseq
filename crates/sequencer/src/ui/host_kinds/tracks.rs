@@ -46,6 +46,9 @@ impl HostKinds {
             self.settings.retain(|id, _| rt.instance_is_live(*id));
             self.tunings.retain(|id, _| rt.instance_is_live(*id));
             self.bar_transposes.retain(|id, _| rt.instance_is_live(*id));
+            self.panel
+                .track_variants
+                .retain(|id, _| rt.instance_is_live(*id));
         }
         let mut params_replaced = false;
         for (track, id) in tracks.iter().enumerate() {
@@ -107,6 +110,7 @@ impl HostKinds {
         let peak_bit = TRACK_LIVE.bit(f::TRACK_PEAK);
         let steps_bit = TRACK_LIVE.bit(f::TRACK_STEPS);
         let bars_bit = TRACK_LIVE.bit(f::TRACK_BAR_TRANSPOSES);
+        let variants_bit = TRACK_LIVE.bit(f::TRACK_VARIANTS);
         let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN) | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
         let mut peaks_observed = false;
         let mut mod_levels_observed = false;
@@ -117,13 +121,18 @@ impl HostKinds {
             if !pusher.sources.track_exists(track) {
                 continue;
             }
-            let observed = pusher.push_live_except(id, &TRACK_LIVE, bars_bit);
+            let observed = pusher.push_live_except(id, &TRACK_LIVE, bars_bit | variants_bit);
             peaks_observed |= observed & peak_bit != 0;
             mod_levels_observed |= observed & mod_bits != 0;
             if observed & bars_bit != 0 {
                 self.sync_bar_transposes(pusher, track, id);
             } else {
                 self.bar_transposes.remove(&id);
+            }
+            if observed & variants_bit != 0 {
+                self.sync_track_variants(pusher, track, id);
+            } else {
+                self.panel.track_variants.remove(&id);
             }
             let diff = self.steps.entry(id).or_default();
             sync_steps(
@@ -166,7 +175,7 @@ fn sync_sends(
         .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
         .filter_map(|bus| Some((bus.id.0, *buses.get(&bus.id.0)?)))
         .unzip();
-    let sends = reconcile_children(pusher, track_id, SEND, &wanted);
+    let sends = pusher.reconcile_children(track_id, SEND, &wanted);
     sends
         .into_iter()
         .zip(bus_ids)
@@ -201,9 +210,9 @@ fn sync_devices(
         .map(|entry| {
             let device = DeviceSlot::from_chain_slot(entry.slot);
             // A chain device's descriptor is the `App`'s own (borrowed).
-            let params = match device.descriptor(app, track, &[]) {
-                Some(std::borrow::Cow::Borrowed(desc)) => desc.params.as_slice(),
-                _ => &[],
+            let desc = match device.descriptor(app, track, &[]) {
+                Some(std::borrow::Cow::Borrowed(desc)) => Some(desc),
+                _ => None,
             };
             DeviceModel {
                 device,
@@ -214,7 +223,8 @@ fn sync_devices(
                 },
                 name: entry.name,
                 enabled: entry.enabled,
-                params,
+                desc,
+                sampler: device == DeviceSlot::Instrument && instrument_type() == "sampler",
                 container: None,
                 voices: 0,
             }
