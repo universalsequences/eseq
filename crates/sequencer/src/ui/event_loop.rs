@@ -387,7 +387,6 @@ pub(crate) fn run_event_loop(
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
-        prev_transport_playhead: u32::MAX,
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
         prev_published_sequencers_version: u64::MAX,
@@ -395,16 +394,10 @@ pub(crate) fn run_event_loop(
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
         prev_instances_fingerprint: u64::MAX,
         prev_current_track: usize::MAX,
-        prev_cpu_load_bits: u32::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
-        prev_output_latency_bits: u32::MAX,
         prev_peak_l_level: -1.0f64,
         prev_peak_r_level: -1.0f64,
         recording_history_open: false,
-        prev_master_recording: false,
-        prev_roll_mode: false,
-        prev_roll_rate: u32::MAX,
-        prev_sequence_rolling: false,
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
@@ -452,7 +445,6 @@ pub(crate) fn run_event_loop(
         prev_sampler_analysis_generation: u64::MAX,
         prev_auto_follow: true,
         prev_browser_preview_playing: false,
-        prev_queued_transport_scene: None,
         prev_queued_track_clips: Vec::new(),
         song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
@@ -604,26 +596,6 @@ pub(crate) fn run_event_loop(
             )));
         }
         app.graph_controller().reap_due_rack_teardowns();
-        let queued_transport_scene = queued_transport_scene(&shared.state);
-        if queued_transport_scene != frame.prev_queued_transport_scene {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "queued-scene",
-                Value::Number(
-                    queued_transport_scene
-                        .map(|scene| scene as f64)
-                        .unwrap_or(-1.0),
-                ),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            if editor_has_visible_buffer(&editor, "*transport*") {
-                editor.refresh_visible_layouts_for_buffer_named("*transport*");
-            }
-            editor.mark_needs_redraw();
-            frame.prev_queued_transport_scene = queued_transport_scene;
-        }
         // Pending quantized clip launches, as the pattern id each track has
         // queued (-1 = none). The queued clip is the just-assigned scene
         // cell (the click assigns the cell up front and defers the audible
@@ -1653,15 +1625,12 @@ pub(crate) fn run_event_loop(
                         } else {
                             shared.state.transport.track_playheads[ct].load(Ordering::Relaxed)
                         };
-                        let transport_playhead =
-                            shared.state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = shared.state.transport.bpm.load(Ordering::Relaxed);
                         if meters.last_cpu_ui_poll_at.elapsed() >= CPU_UI_POLL_INTERVAL {
                             meters.cached_cpu_load_bits =
                                 shared.state.transport.cpu_load_pct.load(Ordering::Relaxed);
                             meters.last_cpu_ui_poll_at = Instant::now();
                         }
-                        let cpu_load_pct = f32::from_bits(meters.cached_cpu_load_bits);
                         let playing = shared.state.transport.playing.load(Ordering::Relaxed);
                         let epoch = shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
                         meters.cached_peak_l_level = meter_display_level(f32::from_bits(
@@ -1683,7 +1652,7 @@ pub(crate) fn run_event_loop(
                         meters.last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
-                        sync_project_scene_state(rt, &shared.state);
+                        sync_project_replacement(rt, &shared.state);
                         sync_project_state(rt, &app);
                         // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
                         // loaded group headers can resolve their backing bus index.
@@ -1693,12 +1662,6 @@ pub(crate) fn run_event_loop(
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
                         rt.set_reactive(
                             "SEQ",
-                            "transport-playhead",
-                            Value::Number(transport_playhead as f64),
-                        );
-                        rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
-                        rt.set_reactive(
-                            "SEQ",
                             "master-peak-l",
                             Value::Number(meters.cached_peak_l_level),
                         );
@@ -1706,11 +1669,6 @@ pub(crate) fn run_event_loop(
                             "SEQ",
                             "master-peak-r",
                             Value::Number(meters.cached_peak_r_level),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-recording",
-                            Value::Bool(shared.master_recording.load(Ordering::Acquire)),
                         );
                         sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
                         sync_modulator_phase_fields(rt, &meters.cached_modulator_phases);
@@ -1737,7 +1695,6 @@ pub(crate) fn run_event_loop(
 
                         if app.tracks.is_empty() {
                             sync_playhead_fields(rt, 0, 1);
-                            rt.set_reactive("SEQ", "transport-playhead", Value::Number(0.0));
                             rt.set_reactive("SEQ", "steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
                             rt.set_reactive("SEQ", "durations", Value::List(vec![]));
@@ -1770,11 +1727,6 @@ pub(crate) fn run_event_loop(
                                 rt,
                                 playhead as usize,
                                 shared.state.pattern.track_params[ct].get_num_steps(),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "transport-playhead",
-                                Value::Number(transport_playhead as f64),
                             );
                             rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
                             sync_step_param_lists(rt, &shared.state, ct);
@@ -1850,15 +1802,11 @@ pub(crate) fn run_event_loop(
 
                         frame.prev_current_track = ct;
                         frame.prev_playhead = playhead;
-                        frame.prev_transport_playhead = transport_playhead;
                         frame.prev_bpm = bpm;
                         frame.prev_playing = playing;
                         frame.prev_pattern_epoch = epoch;
-                        frame.prev_cpu_load_bits = meters.cached_cpu_load_bits;
                         frame.prev_peak_l_level = meters.cached_peak_l_level;
                         frame.prev_peak_r_level = meters.cached_peak_r_level;
-                        frame.prev_master_recording =
-                            shared.master_recording.load(Ordering::Acquire);
                         frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
                         frame.prev_modulator_levels = meters.cached_modulator_levels.clone();

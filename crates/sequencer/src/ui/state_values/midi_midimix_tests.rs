@@ -382,7 +382,7 @@ fn midimix_buttons_toggle_only_on_press_and_scene_buttons_keep_quantization() {
     note(&mut editor, 6, true);
     assert_eq!(state.drain_roll_commands(), vec![RollCommand::SetRate { rate: Timebase::QuarterTriplet }]);
     assert!(commands(&mut editor).is_empty(), "rack strips select rate without arming the rack");
-    set_field(&mut editor, "scene-launch-quantize", "\"1 bar\"");
+    set_kind_field(&mut editor, "transport", "launch-quantize", Value::String("1 bar".into()));
     for (number, delta) in [(25, -1.0), (26, 1.0)] {
         note(&mut editor, number, true);
         note(&mut editor, number, false);

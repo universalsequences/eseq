@@ -482,6 +482,7 @@ pub(crate) mod f {
     pub(crate) const RETRO_ERROR: FieldKey = (RETRO, "error");
     pub(crate) const RETRO_PLAYING: FieldKey = (RETRO, "playing");
     pub(crate) const RETRO_POSITION: FieldKey = (RETRO, "position");
+    pub(crate) const RETRO_PLAYHEAD: FieldKey = (RETRO, "playhead");
     pub(crate) const RETRO_LANE_INDEX: FieldKey = (RETRO_LANE, "index");
     pub(crate) const RETRO_LANE_LABEL: FieldKey = (RETRO_LANE, "label");
     pub(crate) const RETRO_ITEM_INDEX: FieldKey = (RETRO_ITEM, "index");
@@ -938,6 +939,8 @@ pub(crate) mod f {
     pub(crate) const SCENE_BANK: FieldKey = (SCENE, "bank");
 
     pub(crate) const BANK_INDEX: FieldKey = (BANK, "index");
+    pub(crate) const BANK_BID: FieldKey = (BANK, "bid");
+    pub(crate) const BANK_NAME: FieldKey = (BANK, "name");
     pub(crate) const BANK_LABEL: FieldKey = (BANK, "label");
     pub(crate) const BANK_SCENES: FieldKey = (BANK, "scenes");
     pub(crate) const BANK_PLAYING: FieldKey = (BANK, "playing");
@@ -1304,6 +1307,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SCENE_QUEUED, ":bool", Model),
     (f::SCENE_BANK, "bank", Model),
     (f::BANK_INDEX, ":int", Model),
+    (f::BANK_BID, ":int", Model),
+    (f::BANK_NAME, ":string", Model),
     (f::BANK_LABEL, ":string", Model),
     (f::BANK_SCENES, "(list-of scene)", Model),
     (f::BANK_PLAYING, ":bool", Model),
@@ -1647,6 +1652,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::RETRO_ERROR, ":string", Model),
     (f::RETRO_PLAYING, ":bool", Live),
     (f::RETRO_POSITION, ":number", Live),
+    (f::RETRO_PLAYHEAD, ":number", Live),
     (f::RETRO_LANE_INDEX, ":int", Model),
     (f::RETRO_LANE_LABEL, ":string", Model),
     (f::RETRO_ITEM_INDEX, ":int", Model),
@@ -2426,11 +2432,13 @@ impl HostKinds {
     }
 
     /// A new track registry generation (a project load or clear): track,
-    /// bus, group and pool groove ids restart with the project, so they
-    /// name other things now. Drops every such instance (a group's pads,
-    /// rack clips and grooves with it), once per generation, so the
+    /// bus, group, pool groove, scene and bank ids restart with the project,
+    /// so they name other things now. Drops every such instance (a group's
+    /// pads, rack clips and grooves with it), once per generation, so the
     /// syncs after it re-register them (and keep the new ones across ticks
-    /// while the registry lags the track list).
+    /// while the registry lags the track list). A view holding a bank sees
+    /// it go stale with every other bank: the transport strip then shows the
+    /// loaded project's playing bank.
     fn replace_on_project_load(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
         let generation = app.track_registry.generation();
         if self.track_generation == Some(generation) {
@@ -2445,12 +2453,16 @@ impl HostKinds {
             .chain(self.racks.pool.drain())
             .chain(self.macros.drain())
             .chain(self.lanes.drain())
-            .chain(self.graphs.drain());
+            .chain(self.graphs.drain())
+            .chain(self.scenes.drain())
+            .chain(self.banks.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;
         }
         self.route_keys.clear();
+        self.scene_ids.clear();
+        self.bank_ids.clear();
         self.track_generation = Some(generation);
     }
 

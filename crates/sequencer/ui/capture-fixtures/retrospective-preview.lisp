@@ -12,4 +12,4 @@
           (map |t| (dict :lane 2 :start t :end (+ t 0.06))
             (list 20.02 20.25 20.5 20.77 21.0 21.24 21.49 21.73 21.97
                   22.21 22.45 22.69 22.94 23.18 23.41 23.65)))))
-(eseq.retrospective/open 20 24)
+(eseq.retrospective/open 20 24 30)

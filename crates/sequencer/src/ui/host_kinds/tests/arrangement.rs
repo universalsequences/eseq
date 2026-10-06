@@ -142,13 +142,11 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
     assert_eq!(h.seq("song-loop-enabled"), h.eval_7d("song.loop"));
     assert_eq!(h.seq("song-exists"), h.eval_7d("song.exists"));
     assert_eq!(h.seq("song-mode"), h.eval_7d("song.mode"));
-    assert_eq!(h.seq("song-cursor-beats"), h.eval_7d("song.cursor"));
     assert_eq!(h.seq("song-position-beats"), h.eval_7d("song.position"));
     assert_eq!(
         h.seq("song-recording-kind"),
         h.eval_7d("song.recording-kind")
     );
-    assert_eq!(h.seq("song-manual-latch"), h.eval_7d("song.manual-latch"));
     assert_eq!(h.seq("song-scene-latched"), h.eval_7d("song.scene-latched"));
     let governed = items(h.seq("song-track-governed"));
     let latched = items(h.seq("song-track-latched"));

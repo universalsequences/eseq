@@ -287,17 +287,11 @@ pub(super) fn handle(
 
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
             let playing = state.transport.playing.load(Ordering::Relaxed);
-            let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let rt = editor.runtime_mut();
-            sync_project_scene_state(rt, &state);
+            sync_project_replacement(rt, &state);
             sync_project_state(rt, &app);
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-            rt.set_reactive(
-                "SEQ",
-                "transport-playhead",
-                Value::Number(transport_playhead as f64),
-            );
             sync_bus_mixer_state(rt, &app);
             sync_groups_bindings(rt, &app.groups, &app.grooves);
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
@@ -327,7 +321,6 @@ pub(super) fn handle(
 
             ctx.frame.prev_current_track = 0;
             ctx.frame.prev_playhead = 0;
-            ctx.frame.prev_transport_playhead = transport_playhead;
             ctx.frame.prev_bpm = bpm;
             ctx.frame.prev_playing = playing;
             ctx.frame.prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);

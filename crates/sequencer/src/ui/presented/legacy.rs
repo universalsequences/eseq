@@ -1,7 +1,8 @@
 //! The legacy reactive names the record mirrors (spec §13 stage 8,
 //! §14.2i): `SEQ.editor-*`, `SEQ.learn-*`, `EXPORT.export-*`, `AUDIO.*`,
-//! `MIDI.devices` / `error` / `persistent`, `AGENT.generation`, `RETRO.*`
-//! (but the live `playing` and `position`), and the preset listings' rows.
+//! `MIDI.devices` / `error` / `persistent`, `AGENT.generation`, and the
+//! preset listings' rows. (`RETRO.*` went with the MIDI capture view's port,
+//! eseq-0l17.12: the capture area is unmirrored.)
 //!
 //! Every legacy name lives here. Each area's fields are listed once
 //! ([`fields!`]): a typed edit writes the ones that changed
@@ -201,33 +202,6 @@ fn delta_rows(rows: &[LearnDelta]) -> Value {
     }))
 }
 
-fn retro_fields(old: Option<&RetroView>, new: &RetroView, emit: Emit<'_>) {
-    fields!(old, new, emit;
-        "items" => items: retro_items,
-        "lanes" => lanes: retro_lanes,
-        "duration" => duration: number,
-        "error" => error: text,
-        "truncated" => truncated: flag,
-    );
-}
-
-fn retro_lanes(lanes: &[String]) -> Value {
-    list_value(lanes.iter().enumerate().map(|(index, label)| {
-        map_value([("id", Value::Number(index as f64)), ("label", text(label))])
-    }))
-}
-
-fn retro_items(items: &[RetroItem]) -> Value {
-    list_value(items.iter().enumerate().map(|(index, item)| {
-        map_value([
-            ("id", Value::Number(index as f64)),
-            ("lane", Value::Number(item.lane as f64)),
-            ("start", number(&item.start)),
-            ("end", number(&item.end)),
-        ])
-    }))
-}
-
 fn export_fields(old: Option<&ExportView>, new: &ExportView, emit: Emit<'_>) {
     fields!(old, new, emit;
         "export-default-name" => default_name: text,
@@ -314,10 +288,6 @@ pub(super) fn mirror_learn(sink: &mut dyn Sink, old: &LearnView, new: &LearnView
     mirror(sink, "SEQ", old, new, learn_fields);
 }
 
-pub(super) fn mirror_retro(sink: &mut dyn Sink, old: &RetroView, new: &RetroView) {
-    mirror(sink, "RETRO", old, new, retro_fields);
-}
-
 pub(super) fn mirror_export(sink: &mut dyn Sink, old: &ExportView, new: &ExportView) {
     mirror(sink, "EXPORT", old, new, export_fields);
 }
@@ -352,10 +322,8 @@ pub(crate) fn seq_registration() -> Vec<(&'static str, Value)> {
     fields
 }
 
-/// The `RETRO` fields but the live `playing` and `position`.
-pub(crate) fn retro_registration() -> Vec<(&'static str, Value)> {
-    registration(|p| p.retro.get(), retro_fields)
-}
+/// An area no legacy name mirrors any more (its views read the kinds).
+pub(super) fn unmirrored<T>(_sink: &mut dyn Sink, _old: &T, _new: &T) {}
 
 /// The `EXPORT` fields.
 pub(crate) fn export_registration() -> Vec<(&'static str, Value)> {

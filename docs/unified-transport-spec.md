@@ -343,7 +343,8 @@ merge into latched lanes while a song is installed.
   `->SONG` pill are replaced by ONE `back-to-arrangement-icon` button
   (orange tile, play triangle + three lanes, Ableton-style) that lights
   whenever `SEQ.song-manual-latch` is set and clears the latch on click —
-  stopped or playing. `SEQ.song-recording-kind` stays published for future
+  stopped or playing (since eseq-0l17.12 it binds `#'song.manual-latch`
+  and clicks `(set! song.manual-latch false)`; the SEQ field is gone). `SEQ.song-recording-kind` stays published for future
   use. Known edge: `launch_scene` inside the latch-skipping resync still
   clears override pins, so live edits to a still-latched lane made while
   STOPPED don't self-write until re-claimed. Tests:

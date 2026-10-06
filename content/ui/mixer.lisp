@@ -758,8 +758,9 @@
 ;; holds at most 24 scenes, so at most 24 referenced clips per track — the
 ;; grid's 6x4 capacity — plus any orphan clips no scene references yet.
 (def viewed-bank-track-pattern-cells (track)
-  (filter (lambda (cell) (eseq.scene-banks/clip-in-viewed-bank? cell))
-    (track-pattern-cells track)))
+  (let ((viewed (eseq.scene-banks/scene-viewed-bank-index)))
+    (filter (lambda (cell) (eseq.scene-banks/clip-in-viewed-bank? cell viewed))
+      (track-pattern-cells track))))
 
 ;; Clip launch cells scale with the strip width: the 6x4 grid was sized for
 ;; the stock 12.9-cell strip (six 2.0-cell columns), so a narrower strip

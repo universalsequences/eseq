@@ -16972,6 +16972,93 @@ mod solo_binding_tests;
         }
     }
 
+    /// The instance of host-kind singleton `kind` (`transport`, `song`, …)
+    /// in an editor without the host-kinds tick (kind-bindings spec §13
+    /// stage 8: ported views read kinds, not `SEQ`).
+    fn kind_singleton(editor: &Editor, kind: &str) -> eseqlisp::vm::InstanceId {
+        editor
+            .runtime()
+            .singleton_instance(&format!("eseq.kinds:{kind}"))
+            .unwrap_or_else(|| panic!("no {kind} singleton"))
+    }
+
+    /// Push an instance's field as the host-kinds tick does.
+    fn set_field(rt: &mut Runtime, id: eseqlisp::vm::InstanceId, field: &str, value: Value) {
+        rt.set_instance_field(id, field, value)
+            .unwrap_or_else(|error| panic!("{field}: {error:?}"));
+    }
+
+    /// Instances as a `(list-of <kind>)` field holds them.
+    fn instance_list(ids: impl IntoIterator<Item = eseqlisp::vm::InstanceId>) -> Value {
+        test_list(ids.into_iter().map(Value::Instance).collect())
+    }
+
+    /// Push `field` of host-kind singleton `kind` as the host-kinds tick
+    /// does, then run a reactive cycle.
+    fn set_kind_field(editor: &mut Editor, kind: &str, field: &str, value: Value) {
+        let id = kind_singleton(editor, kind);
+        let rt = editor.runtime_mut();
+        set_field(rt, id, field, value);
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish scene banks as the host-kinds tick does (host_kinds/scenes.rs):
+    /// one `(bid, name, scene count)` per bank, scenes numbered across them;
+    /// `current` plays and `queued` waits for a quantized launch. Scene and
+    /// bank instances are keyed by their position, and the project's lists
+    /// and the transport's scenes follow.
+    fn seed_kind_scene_banks(
+        editor: &mut Editor,
+        banks: &[(u64, Option<&str>, usize)],
+        current: usize,
+        queued: Option<usize>,
+    ) {
+        const SCENE: &str = "eseq.kinds:scene";
+        const BANK: &str = "eseq.kinds:bank";
+        let rt = editor.runtime_mut();
+        let total: usize = banks.iter().map(|(_, _, len)| len).sum();
+        let scene_ids: Vec<_> = (0..total)
+            .map(|scene| rt.register_keyed_instance(SCENE, &[scene as u64]).unwrap())
+            .collect();
+        let mut offset = 0;
+        let mut bank_ids = Vec::new();
+        for (bank, (bid, name, len)) in banks.iter().enumerate() {
+            let id = rt.register_keyed_instance(BANK, &[bank as u64]).unwrap();
+            bank_ids.push(id);
+            let span = offset..offset + len;
+            offset += len;
+            set_field(rt, id, "index", Value::Number(bank as f64));
+            set_field(rt, id, "bid", Value::Number(*bid as f64));
+            set_field(rt, id, "name", Value::String(name.unwrap_or_default().to_string()));
+            let label = super::song_state::scene_bank_label(bank, *name);
+            set_field(rt, id, "label", Value::String(label));
+            let members = span.clone().map(|scene| scene_ids[scene]);
+            set_field(rt, id, "scenes", instance_list(members));
+            set_field(rt, id, "playing", Value::Bool(span.contains(&current)));
+            for scene in span.clone() {
+                let sid = scene_ids[scene];
+                set_field(rt, sid, "index", Value::Number(scene as f64));
+                let number = (scene - span.start + 1) as f64;
+                set_field(rt, sid, "number", Value::Number(number));
+                set_field(rt, sid, "active", Value::Bool(scene == current));
+                set_field(rt, sid, "queued", Value::Bool(queued == Some(scene)));
+                set_field(rt, sid, "bank", Value::Instance(id));
+            }
+        }
+        let project = rt.singleton_instance("eseq.kinds:project").unwrap();
+        set_field(rt, project, "scenes", instance_list(scene_ids.iter().copied()));
+        set_field(rt, project, "banks", instance_list(bank_ids));
+        let transport = rt.singleton_instance("eseq.kinds:transport").unwrap();
+        let instance = |scene: Option<usize>| {
+            scene
+                .and_then(|scene| scene_ids.get(scene))
+                .map_or(Value::Nil, |id| Value::Instance(*id))
+        };
+        set_field(rt, transport, "scene", instance(Some(current)));
+        set_field(rt, transport, "queued", instance(queued));
+        rt.run_reactive_cycle();
+    }
+
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
         let src = read_ui_source("main.lisp").expect("read grid lisp");
         full_grid_editor_with_main_source(&src)
@@ -17222,15 +17309,6 @@ mod solo_binding_tests;
                 ("current-project-name", Value::String("test".to_string())),
                 ("current-pattern", Value::Number(0.0)),
                 ("num-patterns", Value::Number(1.0)),
-                (
-                    "scene-banks",
-                    test_list(vec![map_value([
-                        ("id", Value::Number(1.0)),
-                        ("label", Value::String("A".to_string())),
-                        ("len", Value::Number(1.0)),
-                        ("offset", Value::Number(0.0)),
-                    ])]),
-                ),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-error", Value::String(String::new())),
@@ -17273,25 +17351,18 @@ mod solo_binding_tests;
                     Value::String("instrument".to_string()),
                 ),
                 ("recording", Value::Bool(false)),
-                ("master-recording", Value::Bool(false)),
-                ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
-                ("record-quantize", Value::String("1/16".to_string())),
-                ("metronome", Value::Bool(false)),
-                ("queued-scene", Value::Number(-1.0)),
                 // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
                 // the real registration in natives.rs.
                 ("song-exists", Value::Bool(false)),
                 ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
-                ("song-manual-latch", Value::Bool(false)),
                 ("song-track-latched", Value::List(vec![])),
                 ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
-                ("song-cursor-beats", Value::Number(0.0)),
                 ("song-position-beats", Value::Number(0.0)),
                 ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
@@ -17304,9 +17375,6 @@ mod solo_binding_tests;
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
-                ("cpu-load-pct", Value::Number(0.0)),
-                ("cpu-overloaded", Value::Bool(false)),
-                ("output-latency-ms", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
                 ("bus-peak-1", Value::Number(0.0)),
@@ -17431,10 +17499,7 @@ mod solo_binding_tests;
             )
         }), "semicolon must dispatch the global roll toggle while transport owns focus");
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sequence-rolling", Value::Bool(true));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "transport", "sequence-rolling", Value::Bool(true));
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*transport*");
         let layout = editor.widget_layout().expect("transport layout while rolling");
@@ -26682,13 +26747,8 @@ mod solo_binding_tests;
         let mut editor = full_grid_editor_for_scroll_tests();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "transport-playhead", Value::Number(12.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "transport", "position", Value::Number(12.0));
+        set_kind_field(&mut editor, "song", "position", Value::Number(513.5));
 
         assert!(
             editor
@@ -26704,10 +26764,7 @@ mod solo_binding_tests;
         let mut editor = full_grid_editor_for_scroll_tests();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "output-latency-ms", Value::Number(46.44));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "engine", "latency-ms", Value::Number(46.44));
         assert!(
             editor
                 .runtime_mut()
@@ -26738,11 +26795,10 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_transport_cpu_readout_survives_overload_transitions() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive("SEQ", "cpu-load-pct", Value::Number(29.0));
+        set_kind_field(&mut editor, "engine", "cpu-load", Value::Number(29.0));
         editor.runtime_mut().eval_str(r#"(set-window-buffer "*transport*")"#).unwrap();
         for overloaded in [false, true, false] {
-            editor.runtime_mut().set_reactive("SEQ", "cpu-overloaded", Value::Bool(overloaded));
-            editor.runtime_mut().run_reactive_cycle();
+            set_kind_field(&mut editor, "engine", "overloaded", Value::Bool(overloaded));
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("transport layout");
             let cpu = find_layout_node_by_stable_key_suffix(&layout, "/transport-cpu-value")
@@ -26751,8 +26807,7 @@ mod solo_binding_tests;
             assert_eq!(layout_prop_number(cpu, "value"), Some(29.0));
         }
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor.runtime_mut().set_reactive("SEQ", "cpu-load-pct", Value::Number(30.0));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "engine", "cpu-load", Value::Number(30.0));
         assert!(editor.runtime_mut().take_pending_buffer_widget_trees().is_empty(),
             "ordinary CPU updates must remain render-bound");
     }
@@ -26760,18 +26815,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_transport_clock_selects_absolute_position_in_song_mode() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "transport-playhead", Value::Number(222.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-mode",
-            Value::String("song-playback".to_string()),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "transport", "position", Value::Number(222.0));
+        set_kind_field(&mut editor, "song", "position", Value::Number(513.5));
+        set_kind_field(&mut editor, "song", "mode", Value::String("song-playback".to_string()));
         editor
             .runtime_mut()
             .eval_str(r#"(set-window-buffer "*transport*")"#)
@@ -26792,14 +26838,8 @@ mod solo_binding_tests;
             "song playback must display the absolute arrangement position"
         );
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-mode",
-            Value::String("stopped".to_string()),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-cursor-beats", Value::Number(512.0));
+        set_kind_field(&mut editor, "song", "mode", Value::String("stopped".to_string()));
+        set_kind_field(&mut editor, "song", "cursor", Value::Number(512.0));
         editor
             .runtime_mut()
             .eval_str("(set! eseq.arrangement/cursor-time 512)")
@@ -26823,22 +26863,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_transport_scene_pills_are_drag_drop_reorder_targets() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-patterns", Value::Number(3.0));
-        let scene_banks = editor
-            .runtime_mut()
-            .eval_str("(list (dict :id 1 :label \"A\" :len 3 :offset 0))")
-            .expect("evaluate scene bank fixture")
-            .expect("scene bank fixture value");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-banks", scene_banks);
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 0)")
-            .expect("select fixture scene bank");
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_scene_banks(&mut editor, &[(1, None, 3)], 0, None);
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -26873,7 +26898,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.transport/scene-push-target 1) (set! eseq.transport/scene-push-value 0.5))")
+            .eval_str("(let ((p eseq.transport/scene-push)) (set! p.target 1) (set! p.value 0.5))")
             .expect("show scene push interpolation control");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -26885,10 +26910,12 @@ mod solo_binding_tests;
         // change (7396708d swapped the `transport-scene-strip-bg` SDF widget
         // for a themed box). What this test owns is the push-interpolation
         // *state* the strip carries, which is what drives the growth animation.
-        assert!(matches!(
-            strip.props.get("push"),
-            Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6
-        ));
+        // The amount is bound (`#'scene-push.value`): a drag only repaints.
+        let bound_push = |props: &HashMap<String, Value>| match props.get("push") {
+            Some(Value::ReactiveRef { slot, .. }) => eseqlisp::reactive::read_float_slot(slot),
+            other => panic!("push is not bound: {other:?}"),
+        };
+        assert!((bound_push(&strip.props) - 0.5).abs() < 1.0e-6);
         assert!(matches!(
             strip.props.get("push-target"),
             Some(Value::Number(value)) if (*value - 1.0).abs() < 1.0e-6
@@ -26898,7 +26925,7 @@ mod solo_binding_tests;
                 .expect("active scene push pill");
         assert_finite_nonzero_rect(push_pill, "transport-scene-pill-1");
         assert!(
-            matches!(push_pill.props.get("push"), Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6),
+            (bound_push(&push_pill.props) - 0.5).abs() < 1.0e-6,
             "scene push must pass interpolation directly into the pill shader"
         );
         assert!(
@@ -26910,10 +26937,7 @@ mod solo_binding_tests;
             "scene push must not offset the centered label with a child slider"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "queued-scene", Value::Number(1.0));
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_scene_banks(&mut editor, &[(1, None, 3)], 0, Some(1));
         editor.refresh_runtime_side_effects();
         let queued_layout = editor.widget_layout().expect("queued transport layout");
         let queued_pill =
@@ -26952,121 +26976,10 @@ mod solo_binding_tests;
     }
 
     #[test]
-    fn loaded_project_reveals_initial_bank_before_song_tick() {
-        let eng = engine::init_headless_engine(44_100, 2).unwrap();
-        struct GraphGuard(sequencer::audiograph::LiveGraphPtr);
-        impl Drop for GraphGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    sequencer::audiograph::engine_stop_workers();
-                    sequencer::audiograph::destroy_live_graph(self.0.0);
-                }
-            }
-        }
-        let _guard = GraphGuard(eng.lg_ptr);
-        let mut app = app::App::new(eng.state, eng.lg_ptr, eng.sample_rate,
-            eng.buses, eng.master_recorder, eng.keyboard_tx);
-        app.graph_controller().add_blank_sampler_track().unwrap();
-        let mut project = app.capture_export_project().unwrap();
-        // impakt's actual bank topology and saved current scene, with a blank
-        // sampler instead of its DSP: project loading is what this test covers.
-        project.patterns = vec![project.patterns[0].clone(); 28];
-        project.scene_banks = vec![
-            sequencer::project::ProjectSceneBank { id: 1, name: None, len: 10 },
-            sequencer::project::ProjectSceneBank { id: 2, name: None, len: 18 },
-        ];
-        project.current_pattern = 11;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bank-load.json");
-        std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
-
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().eval_str("(set-window-buffer \"*transport*\")").unwrap();
-        let mut song_frame = SongFrameState::default();
-        sync_song_state(editor.runtime_mut(), &app, &mut song_frame, false);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
-            Some(Value::Number(0.0)));
-
-        for _ in 0..2 {
-            editor.runtime_mut().eval_str("(eseq.transport/select-scene-bank \"A\")").unwrap();
-            app.queue_project_load_from_path("bank-load", &path).unwrap();
-            for _ in 0..512 {
-                if !app.has_pending_project_load() { break; }
-                app.advance_pending_project_load().unwrap();
-            }
-            assert!(!app.has_pending_project_load());
-            assert_eq!(app.state.current_scene_index(), 11);
-            // Exactly the load-completion ordering: publish/reset, render,
-            // then the later frame's song sync. No pre-seeded SEQ.scene-banks.
-            sync_project_scene_state(editor.runtime_mut(), &app.state);
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            for after_song_tick in [false, true] {
-                if after_song_tick {
-                    sync_song_state(editor.runtime_mut(), &app, &mut song_frame, false);
-                    editor.runtime_mut().run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                }
-                let layout = editor.widget_layout().unwrap();
-                let dropdown = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-dropdown").unwrap();
-                assert_finite_nonzero_rect(dropdown, "loaded scene bank dropdown");
-                assert_eq!(dropdown.props.get("value"), Some(&Value::String("B".into())),
-                    "loaded initial bank (after_song_tick={after_song_tick})");
-                let pill = find_layout_node_by_stable_key_suffix(&layout, "/transport-scene-pill-11").unwrap();
-                assert_finite_nonzero_rect(pill, "loaded initial scene");
-            }
-        }
-    }
-
-    #[test]
-    fn project_scene_publication_resets_bank_view_on_every_replacement() {
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![
-            ("scene-bank-view-generation", Value::Number(0.0)),
-        ], true);
-        for generation in 1..=2 {
-            sync_project_scene_state(&mut runtime, &state);
-            assert_eq!(runtime.reactive_field_value("SEQ", "scene-bank-view-generation"),
-                Some(&Value::Number(generation as f64)));
-            assert_eq!(runtime.reactive_field_value("SEQ", "current-pattern"),
-                Some(&Value::Number(state.current_scene_index() as f64)));
-        }
-        sync_pattern_state(&mut runtime, &state);
-        assert_eq!(runtime.reactive_field_value("SEQ", "scene-bank-view-generation"),
-            Some(&Value::Number(2.0)));
-    }
-
-    #[test]
     fn metal_seq_transport_scene_bank_ui_filters_and_routes_global_scenes() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let scene_banks = editor
-            .runtime_mut()
-            .eval_str(
-                "(list (dict :id 11 :label \"A\" :name nil :len 2 :offset 0) \
-                       (dict :id 22 :label \"B\" :name \"Peak\" :len 2 :offset 2))",
-            )
-            .expect("evaluate scene bank fixture")
-            .expect("scene bank fixture value");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-banks", scene_banks);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-patterns", Value::Number(4.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-pattern", Value::Number(2.0));
-        editor
-            .runtime_mut()
-            .eval_str("(do (set! eseq.scene-banks/viewed-scene-bank-index 0) \
-                (set! eseq.scene-banks/viewed-scene-bank-pending-new true))")
-            .expect("retain previous project's bank browsing state");
-        editor.runtime_mut().set_reactive(
-            "SEQ", "scene-bank-view-generation", Value::Number(1.0));
-        editor.runtime_mut().run_reactive_cycle();
+        let banks = [(11, None, 2), (22, Some("Peak"), 2)];
+        seed_kind_scene_banks(&mut editor, &banks, 2, None);
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -27080,7 +26993,7 @@ mod solo_binding_tests;
         assert_finite_nonzero_rect(dropdown, "scene bank dropdown");
         assert!(matches!(
             dropdown.props.get("value"),
-            Some(Value::String(value)) if value == "B"
+            Some(Value::String(value)) if value == "B — Peak"
         ));
         assert!(matches!(
             dropdown.props.get("options"),
@@ -27107,17 +27020,21 @@ mod solo_binding_tests;
         assert!(selector.props.contains_key("on-right-click"));
 
         editor.runtime_mut().eval_str("(eseq.transport/select-scene-bank \"A\")").unwrap();
-        editor.runtime_mut().set_reactive("SEQ", "current-pattern", Value::Number(3.0));
+        seed_kind_scene_banks(&mut editor, &banks, 3, None);
         assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
             Some(Value::Number(0.0)), "playback must not override manual browsing");
-        editor.runtime_mut().set_reactive("SEQ", "current-pattern", Value::Number(2.0));
-        editor.runtime_mut().set_reactive("SEQ", "scene-bank-view-generation", Value::Number(2.0));
+        // A project load replaces the bank instances (the host drops them
+        // with the track registry's generation): the viewed bank goes stale.
+        for bank in 0..2 {
+            editor.runtime_mut().drop_keyed_instance("eseq.kinds:bank", &[bank]);
+        }
+        seed_kind_scene_banks(&mut editor, &banks, 2, None);
         assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
             Some(Value::Number(1.0)), "reloading the same project must reveal its initial bank again");
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.transport/open-scene-bank-ops-menu (dict :col 7 :row 3))")
+            .eval_str("(eseq.transport/open-scene-bank-ops-menu (dict :at (dict :col 7 :row 3)))")
             .expect("open scene bank operations menu");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -27151,7 +27068,7 @@ mod solo_binding_tests;
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! eseq.transport/scene-bank-rename-draft \"Build\") \
+                "(let ((r eseq.transport/bank-rename)) (set! r.draft \"Build\") \
                      (eseq.transport/finish-scene-bank-rename true))",
             )
             .expect("edit and submit bank rename");
@@ -27197,7 +27114,7 @@ mod solo_binding_tests;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.scene-banks/viewed-scene-bank-index")
+                .eval_str("(eseq.scene-banks/scene-viewed-bank-index)")
                 .expect("read delete fallback bank"),
             Some(Value::Number(0.0)),
             "deleting a viewed bank must fall back to the previous bank"
@@ -27234,9 +27151,7 @@ mod solo_binding_tests;
         .expect("other-bank playing indicator");
         assert!(eseqlisp::widget_render::layout_wants_animation_frames(indicator));
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-launch-quantize", Value::String("1 bar".into()));
+        set_kind_field(&mut editor, "transport", "launch-quantize", Value::String("1 bar".into()));
         editor
             .runtime_mut()
             .eval_str("(eseq.transport/seq-switch-pattern 2)")
@@ -27275,7 +27190,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.transport/open-scene-bank-menu (dict :col 4 :row 5) 0)")
+            .eval_str("(eseq.transport/open-scene-bank-menu (dict :at (dict :col 4 :row 5)) (first (eseq.kinds/scenes)))")
             .expect("open scene bank menu");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -27287,7 +27202,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.transport/move-scene-to-scene-bank (nth SEQ.scene-banks 1))")
+            .eval_str("(eseq.transport/move-scene-to-scene-bank (nth (eseq.kinds/banks) 1))")
             .expect("move scene to bank B");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -27300,21 +27215,7 @@ mod solo_binding_tests;
             other => panic!("expected move-scene-to-scene-bank command, got {other:?}"),
         }
 
-        let full_bank_fixture = editor
-            .runtime_mut()
-            .eval_str(
-                "(list (dict :id 11 :label \"A\" :name nil :len 24 :offset 0) \
-                       (dict :id 22 :label \"B\" :name nil :len 2 :offset 24))",
-            )
-            .expect("evaluate full bank fixture")
-            .expect("full bank fixture value");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-banks", full_bank_fixture);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-patterns", Value::Number(26.0));
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_scene_banks(&mut editor, &[(11, None, 24), (22, None, 2)], 24, None);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("full scene bank layout");
         let add = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-add")
@@ -27337,10 +27238,21 @@ mod solo_binding_tests;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.scene-banks/viewed-scene-bank-index")
+                .eval_str("(let ((v eseq.scene-banks/scene-bank-view)) v.pending)")
                 .expect("read pending viewed bank"),
             Some(Value::Number(2.0)),
-            "New bank must select the appended bank's pending index"
+            "New bank must remember the appended bank's pending index"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
+            Some(Value::Number(1.0)),
+            "until the host lists it, the last bank shows"
+        );
+        seed_kind_scene_banks(&mut editor, &[(11, None, 24), (22, None, 1), (33, None, 1)], 24, None);
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
+            Some(Value::Number(2.0)),
+            "New bank lands on the appended bank once the host lists it"
         );
     }
 
@@ -27374,17 +27286,11 @@ mod solo_binding_tests;
         };
         assert_eq!(icon_active(&mut editor), Some(0.0), "unlit while unlatched");
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-manual-latch", Value::Bool(true));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "song", "manual-latch", Value::Bool(true));
         editor.refresh_runtime_side_effects();
         assert_eq!(icon_active(&mut editor), Some(1.0), "lit while latched");
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-manual-latch", Value::Bool(false));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "song", "manual-latch", Value::Bool(false));
         editor.refresh_runtime_side_effects();
         assert_eq!(icon_active(&mut editor), Some(0.0), "unlit again after clearing");
     }
@@ -27571,10 +27477,6 @@ mod solo_binding_tests;
             Value::String("".into())
         );
         assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
-        assert_eq!(
-            read(&mut editor, "SEQ.song-cursor-beats"),
-            Value::Number(12.0)
-        );
         assert_eq!(read(&mut editor, "SEQ.song-end-beat"), Value::Number(16.0));
         assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
         assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
@@ -28290,8 +28192,8 @@ mod solo_binding_tests;
     /// Lane-projection read surface for the arrangement timeline
     /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
     /// publishes the per-track clip spans derived from the committed song plus
-    /// the live scenes, while `scene-names` and `scene-banks` publish scene
-    /// structure. All three diff by value — an unchanged frame publishes
+    /// the live scenes, while `scene-names` publishes scene structure (bank
+    /// structure is the host kinds' `bank`). They diff by value — an unchanged frame publishes
     /// nothing, structural edits (including undo) republish scene metadata,
     /// and a song edit republishes lanes.
     #[test]
@@ -28381,24 +28283,6 @@ mod solo_binding_tests;
             read(&mut editor, "(len SEQ.scene-names)"),
             Value::Number(3.0)
         );
-        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(1.0));
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :label)"),
-            Value::String("A".to_string())
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :name)"),
-            Value::Nil
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
-            Value::Number(3.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :offset)"),
-            Value::Number(0.0)
-        );
-
         // The lane-event read surface publishes one entry per referenced
         // pool pattern (three scenes -> three patterns on the one track).
         assert_eq!(
@@ -28429,91 +28313,7 @@ mod solo_binding_tests;
         assert_eq!(scene_bank_auto_label(26), "AA");
         assert_eq!(scene_bank_auto_label(27), "AB");
 
-        // Bank structure has no song revision of its own. Value diffing still
-        // publishes every mutation, and does not publish on intervening frames.
-        let created_bank = test_app
-            .apply_recorded_scene_structure_mutation("Create scene bank", |app| {
-                app.state.create_scene_bank()
-            })
-            .expect("scene bank created");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(2.0));
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :label)"),
-            Value::String("B".to_string())
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
-            Value::Number(3.0)
-        );
-        assert!(!sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-
-        test_app
-            .apply_recorded_scene_structure_mutation("Rename scene bank", |app| {
-                app.state.rename_scene_bank(created_bank, Some("Peak".to_string()))
-            })
-            .expect("scene bank renamed");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :label)"),
-            Value::String("B — Peak".to_string())
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :name)"),
-            Value::String("Peak".to_string())
-        );
-
-        test_app
-            .apply_recorded_scene_structure_mutation("Move scene to scene bank", |app| {
-                let destination = app.state.move_scene_to_scene_bank(0, created_bank)?;
-                app.handle_scene_reordered(0, destination);
-                Ok(destination)
-            })
-            .expect("scene moved into bank");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
-            Value::Number(2.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :len)"),
-            Value::Number(1.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
-            Value::Number(2.0)
-        );
-
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut test_app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
-            Value::Number(3.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :len)"),
-            Value::Number(0.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
-            Value::Number(3.0)
-        );
-
-        test_app
-            .apply_recorded_scene_structure_mutation("Delete scene bank", |app| {
-                app.state.delete_scene_bank(created_bank)
-            })
-            .expect("empty scene bank deleted");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(1.0));
+        // Bank structure is the host kinds' (`bank`, host_kinds tests::scenes).
 
         // A scenes-side change (no song revision bump) republishes names.
         assert!(test_app.state.rename_scene(1, "Drop".to_string()));
@@ -31976,16 +31776,17 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_transport_command_push_drags_from_source_to_target() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        seed_kind_scene_banks(&mut editor, &[(1, None, 2)], 0, None);
         let _ = editor.drain_host_commands();
 
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.transport/scene-push-begin 1 (dict :cmd true :meta true :super true :shift false :y 2.0))",
+                "(eseq.transport/scene-push-begin (nth (eseq.kinds/scenes) 1) (dict :cmd true :shift false :y 2.0))",
             )
             .expect("begin command scene push");
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.transport/scene-push-value").unwrap(),
+            editor.runtime_mut().eval_str("(let ((p eseq.transport/scene-push)) p.value)").unwrap(),
             Some(Value::Number(0.0)),
             "Command push must begin at the source without jumping to the target"
         );
@@ -32005,10 +31806,10 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.transport/scene-push-drag 1 (dict :y 5.0))")
+            .eval_str("(eseq.transport/scene-push-drag (nth (eseq.kinds/scenes) 1) (dict :y 5.0))")
             .expect("drag command scene push toward target");
         assert!(matches!(
-            editor.runtime_mut().eval_str("eseq.transport/scene-push-value").unwrap(),
+            editor.runtime_mut().eval_str("(let ((p eseq.transport/scene-push)) p.value)").unwrap(),
             Some(Value::Number(value)) if (value - 0.42).abs() < 1.0e-6
         ));
         let commands = editor.drain_host_commands();
@@ -32023,29 +31824,25 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_transport_transpose_context_menu_captures_value_and_bank() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        seed_kind_scene_banks(&mut editor, &[(10, None, 1), (20, None, 1)], 0, None);
         editor.runtime_mut().eval_str(r#"(do
             (set-window-buffer "*transport*")
             (set! eseq.transport/scene-transpose -9)
-            (set! eseq.scene-banks/viewed-scene-bank-index 1))"#).unwrap();
-        editor.runtime_mut().set_reactive("SEQ", "scene-banks", test_list(vec![
-            map_value(vec![("id", Value::Number(10.0)), ("label", Value::String("A".into())),
-                ("len", Value::Number(1.0)), ("offset", Value::Number(0.0))]),
-            map_value(vec![("id", Value::Number(20.0)), ("label", Value::String("B".into())),
-                ("len", Value::Number(1.0)), ("offset", Value::Number(1.0))]),
-        ]));
+            (eseq.transport/select-scene-bank "B"))"#).unwrap();
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         for (key, scope) in [("transpose-apply-bank", "bank"), ("transpose-apply-all-banks", "all-banks")] {
             editor.runtime_mut().eval_str(r#"(do
                 (set! eseq.transport/scene-transpose -9)
-                (set! eseq.scene-banks/viewed-scene-bank-index 1))"#).unwrap();
+                (eseq.transport/select-scene-bank "B"))"#).unwrap();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
             let picker = find_layout_node_by_debug_name(&layout, "transport-scene-transpose").unwrap();
             let right_click = picker.props.get("on-right-click").expect("transpose right-click handler").clone();
-            editor.runtime_mut().invoke(right_click, vec![map_value(vec![
-                ("col", Value::Number(15.0)), ("row", Value::Number(2.0)),
-            ])]).unwrap();
+            editor.runtime_mut().invoke(right_click, vec![map_value(vec![(
+                "at",
+                map_value(vec![("col", Value::Number(15.0)), ("row", Value::Number(2.0))]),
+            )])]).unwrap();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
             let item = find_layout_node_by_stable_key_suffix(&layout, &format!("/{key}"))
@@ -32055,7 +31852,7 @@ mod solo_binding_tests;
             // A later scene/value/view change must not retarget the open menu.
             editor.runtime_mut().eval_str(r#"(do
                 (set! eseq.transport/scene-transpose 5)
-                (set! eseq.scene-banks/viewed-scene-bank-index 0))"#).unwrap();
+                (eseq.transport/select-scene-bank "A"))"#).unwrap();
             editor.drain_host_commands();
             editor.runtime_mut().invoke(select, vec![Value::Nil]).unwrap();
             let commands = editor.drain_host_commands();
@@ -32131,13 +31928,10 @@ mod solo_binding_tests;
             dropdown.rect,
             layout.rect
         );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("SEQ.scene-launch-quantize")
-                .unwrap(),
-            Some(Value::String("off".to_string()))
-        );
+        assert!(matches!(
+            dropdown.props.get("value"),
+            Some(Value::String(value)) if value == "off"
+        ));
 
         editor.drain_host_commands();
         editor
@@ -32154,12 +31948,7 @@ mod solo_binding_tests;
             other => panic!("expected scene quantize selection command, got {other:?}"),
         }
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "scene-launch-quantize",
-            Value::String("1/8".to_string()),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "transport", "launch-quantize", Value::String("1/8".to_string()));
         editor.refresh_runtime_side_effects();
         let updated_layout = editor.widget_layout().expect("updated transport layout");
         let updated_dropdown =
@@ -32218,17 +32007,12 @@ mod solo_binding_tests;
                 layout.rect
             );
         }
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("SEQ.record-quantize")
-                .unwrap(),
-            Some(Value::String("1/16".to_string()))
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("SEQ.metronome").unwrap(),
-            Some(Value::Bool(false))
-        );
+        let record_quantize = find_layout_node_by_debug_name(&layout, "transport-record-quantize")
+            .expect("record quantize dropdown");
+        assert!(matches!(
+            record_quantize.props.get("value"),
+            Some(Value::String(value)) if value == "1/16"
+        ));
 
         editor.drain_host_commands();
         editor
@@ -32259,8 +32043,9 @@ mod solo_binding_tests;
         let commands = editor.drain_host_commands();
         assert!(matches!(
             commands.as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "toggle-metronome"
-        ));
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "set-metronome" && payload == &Value::Bool(true)
+        ), "the click sets transport.metronome: {commands:?}");
     }
 
     #[test]
@@ -38649,26 +38434,13 @@ mod solo_binding_tests;
                 banked_cell(4.0, Vec::new()),
             ])]),
         );
-        let scene_banks = editor
-            .runtime_mut()
-            .eval_str(
-                "(list (dict :id 11 :label \"A\" :name nil :len 2 :offset 0) \
-                       (dict :id 22 :label \"B\" :name nil :len 2 :offset 2))",
-            )
-            .expect("evaluate scene bank fixture")
-            .expect("scene bank fixture value");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-banks", scene_banks);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-patterns", Value::Number(4.0));
+        seed_kind_scene_banks(&mut editor, &[(11, None, 2), (22, None, 2)], 0, None);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-pattern", Value::Number(0.0));
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 0)")
+            .eval_str("(eseq.scene-banks/view-scene-bank! (first (eseq.kinds/banks)))")
             .expect("view scene bank A");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -38688,7 +38460,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 1)")
+            .eval_str("(eseq.scene-banks/view-scene-bank! (nth (eseq.kinds/banks) 1))")
             .expect("view scene bank B");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();

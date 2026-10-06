@@ -351,7 +351,7 @@ pub(super) fn reactive_set_needs_ui(result: eseqlisp::runtime::ReactiveSetResult
     result.effects_dirty || result.widgets_dirty
 }
 
-/// The roll rate's label (`SEQ.roll-rate`, `transport.roll-rate`) from the
+/// The roll rate's label (`transport.roll-rate`) from the
 /// transport's `roll_rate` atomic.
 pub(crate) fn roll_rate_label(raw: u32) -> &'static str {
     sequencer::sequencer::Timebase::from_index(raw).label()

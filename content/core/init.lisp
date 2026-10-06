@@ -5,6 +5,8 @@
 ;; Unqualified, so every module sees them through the flat macro table.
 ;; (when c a b) runs a and b only when c is truthy; otherwise nil.
 (defmacro when (c &rest body) `(if ,c (do ,@body) nil))
+;; (unless c a b) runs a and b only when c is falsy; otherwise nil.
+(defmacro unless (c &rest body) `(if ,c nil (do ,@body)))
 ;; (toggle! place) flips a boolean place: a variable or a dotted field.
 (defmacro toggle! (place) `(set! ,place (not ,place)))
 

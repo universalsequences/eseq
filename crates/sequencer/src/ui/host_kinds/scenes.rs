@@ -31,7 +31,7 @@ impl HostKinds {
         // Each scene's bank and position in it (banks are consecutive spans).
         let mut holder: Vec<Option<(usize, usize)>> = vec![None; scenes.len()];
         let mut offset = 0;
-        for (bank, (_, name, len)) in bank_rows.iter().enumerate() {
+        for (bank, (bid, name, len)) in bank_rows.iter().enumerate() {
             let span = offset..(offset + len).min(scenes.len());
             offset += len;
             for scene in span.clone() {
@@ -41,6 +41,12 @@ impl HostKinds {
                 continue;
             };
             pusher.push(id, f::BANK_INDEX, number(bank as f64));
+            pusher.push(id, f::BANK_BID, number(*bid as f64));
+            pusher.push(
+                id,
+                f::BANK_NAME,
+                Value::String(name.clone().unwrap_or_default()),
+            );
             pusher.push(
                 id,
                 f::BANK_LABEL,

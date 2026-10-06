@@ -8,7 +8,7 @@ fn edit_instrument_menu_tracks_selection_and_opens_existing_editor() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "Edit" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "Edit" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();
@@ -67,7 +67,7 @@ fn reload_from_disk_menu_items_queue_their_host_commands() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "Edit" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "Edit" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();
@@ -140,7 +140,7 @@ fn application_menus_share_actions_and_fallback_layout() {
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.transport/open-application-menu \"{menu}\" (dict :col 2 :row 1))"
+                "(eseq.transport/open-application-menu \"{menu}\" (dict :at (dict :col 2 :row 1)))"
             ))
             .unwrap();
         editor.refresh_runtime_side_effects();
@@ -231,7 +231,9 @@ fn lisp_registered_menu_appears_in_toolbar_without_rust_configuration() {
     assert_finite_nonzero_rect(button, "custom menu button");
     editor
         .runtime_mut()
-        .eval_str("(eseq.transport/open-application-menu \"tools\" (dict :col 2 :row 1))")
+        .eval_str(
+            "(eseq.transport/open-application-menu \"tools\" (dict :at (dict :col 2 :row 1)))",
+        )
         .unwrap();
     editor.refresh_runtime_side_effects();
     let layout = editor.widget_layout().unwrap();
@@ -248,7 +250,7 @@ fn view_menu_tracks_panel_visibility_and_confirmation_cancel_is_inert() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "View" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "View" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();

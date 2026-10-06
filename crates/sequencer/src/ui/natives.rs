@@ -3188,16 +3188,9 @@ pub(crate) fn init_runtime(
                 ("playing", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
-                ("record-quantize", Value::String("1/16".to_string())),
-                ("metronome", Value::Bool(false)),
-                // Roll mode (docs/rolling-core-spec.md 8): toggle + rate label.
-                ("roll-mode", Value::Bool(false)),
-                ("roll-rate", Value::String("16".to_string())),
-                ("sequence-rolling", Value::Bool(false)),
                 // Per-track false or (start_beats len_beats), published by
                 // the scheduler for the sequence-roll bracket/playhead UI.
                 ("roll-window", Value::List(vec![])),
-                ("queued-scene", Value::Number(-1.0)),
                 // Per-track pattern id (-1 = none) with a pending quantized
                 // clip launch — drives the mixer grid's queued-cell blink.
                 ("queued-track-clips", Value::List(vec![])),
@@ -3205,13 +3198,11 @@ pub(crate) fn init_runtime(
                 ("song-exists", Value::Bool(false)),
                 ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
-                ("song-manual-latch", Value::Bool(false)),
                 ("song-track-latched", Value::List(vec![])),
                 ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
-                ("song-cursor-beats", Value::Number(0.0)),
                 ("song-position-beats", Value::Number(0.0)),
                 ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
@@ -3287,7 +3278,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
-                ("transport-playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("browser-preview-playing", Value::Bool(false)),
                 ("browser-preview-playhead", Value::Number(0.0)),
@@ -3772,13 +3762,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
-                ("master-recording", Value::Bool(false)),
-                ("cpu-load-pct", Value::Number(0.0)),
-                ("cpu-overloaded", Value::Bool(false)),
-                (
-                    "output-latency-ms",
-                    Value::Number((state.pdc_latency_seconds() * 1000.0) as f64),
-                ),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
                 (
@@ -3811,7 +3794,6 @@ pub(crate) fn init_runtime(
                 ("graph-sequencers", Value::List(vec![])),
                 ("rack-clips", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
-                ("scene-bank-view-generation", Value::Number(0.0)),
                 ("rack-panel-view-generation", Value::Number(0.0)),
                 ("tuning-root-options", build_tuning_root_options()),
             ];

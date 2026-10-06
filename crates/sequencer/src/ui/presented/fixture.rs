@@ -64,7 +64,7 @@ pub(crate) fn present_fixture(
             for (name, value) in &fields {
                 retro_field(&mut view, name, value)?;
             }
-            present(sink, |p| &mut p.retro, |r| *r = view, legacy::mirror_retro);
+            present(sink, |p| &mut p.retro, |r| *r = view, legacy::unmirrored);
         }
         _ => return Err(format!("no presented area {area}")),
     }

@@ -7,7 +7,7 @@ use super::*;
 use sequencer::app::song_transport::SongTransportMode;
 use sequencer::sequencer::{
     arrangement_scene_spans, state_at_beat, ArrClip, ProjectScenes, ProjectSong, ProjectSongRow,
-    SceneBank, SceneSpan, StepParam,
+    SceneSpan, StepParam,
 };
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
@@ -24,10 +24,6 @@ pub(crate) struct SongBindingsSnapshot {
     /// Current row stable id during song playback, else -1.
     pub(crate) current_row_id: f64,
     pub(crate) row_count: f64,
-    /// Arrangement insertion/start cursor, including while playback is
-    /// stopped. This is Rust-owned so transport UI does not depend on the
-    /// arrangement buffer's local `defstate`.
-    pub(crate) cursor_beats: f64,
     /// Smooth render-rate song position (spec 10.2); 0.0 while inactive.
     pub(crate) position_beats: f64,
     pub(crate) end_beat: f64,
@@ -46,10 +42,6 @@ pub(crate) struct SongBindingsSnapshot {
     /// lit Back-to-Song button), 2 = a take lane the performer manually
     /// latched away (editable again; grey button returns it to the song).
     pub(crate) take_lane_states: Vec<u8>,
-    /// True while any lane is manual-override latched during song playback
-    /// (takes spec 10): the SONG indicator glows amber and the Back to Song
-    /// control appears.
-    pub(crate) manual_latch: bool,
     /// Per-track manual-override latch (unified-transport rev 4): drives the
     /// per-lane dimming of overridden timeline clips.
     pub(crate) latched_tracks: Vec<bool>,
@@ -69,8 +61,8 @@ pub(crate) struct SongBindingsSnapshot {
 /// arrangement are cached and re-read only when `committed_song_revision`
 /// changes (`set_committed_arrangement` bumps it). The lane surfaces
 /// (`song-lanes`, `scene-spans`) are functions of the arrangement alone, so
-/// they follow the revision; `scene-names` and `scene-banks` depend on the live
-/// scenes, which have no revision counter, so they diff by value.
+/// they follow the revision; `scene-names` depends on the live scenes, which
+/// have no revision counter, so it diffs by value.
 #[derive(Default)]
 pub(crate) struct SongFrameState {
     pub(crate) revision: Option<u64>,
@@ -81,7 +73,6 @@ pub(crate) struct SongFrameState {
     pub(crate) cached_lanes: Option<Vec<Vec<ArrClip>>>,
     pub(crate) cached_scene_spans: Option<Vec<SceneSpan>>,
     pub(crate) cached_scene_names: Option<Vec<String>>,
-    pub(crate) cached_scene_banks: Option<Vec<SceneBank>>,
     /// Pattern-pool event snapshots for the patterns the lane projection
     /// references (`song-lane-events`), rekeyed when the projection or the
     /// pattern epoch changes — not per frame.
@@ -633,7 +624,6 @@ pub(crate) fn build_song_bindings_snapshot(
         current_row,
         current_row_id,
         row_count: song.map(|song| song.rows.len()).unwrap_or(0) as f64,
-        cursor_beats: app.arrangement_cursor_beat,
         // Quantized to a milli-beat for display: still render-rate smooth,
         // but sub-display-precision jitter does not force a reactive cycle
         // every frame.
@@ -643,7 +633,6 @@ pub(crate) fn build_song_bindings_snapshot(
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
         edit_error: app.song_edit_error.clone(),
-        manual_latch: song_manual_latch(&app.state),
         take_lane_states: song_take_lane_states(app),
         latched_tracks: {
             let mask = app.state.song_manual_latch_mask();
@@ -697,7 +686,7 @@ pub(crate) fn song_recording_kind_label(
 }
 
 /// Some lane, or the scene, is manually latched away from the song (takes
-/// spec 10): `SEQ.song-manual-latch`, `song.manual-latch`.
+/// spec 10): `song.manual-latch`.
 pub(crate) fn song_manual_latch(state: &SequencerState) -> bool {
     state.song_manual_latch_mask() != 0 || state.song_scene_latch()
 }
@@ -844,8 +833,7 @@ pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
 }
 
 /// A scene bank's display label: its auto label (`A`, `B`, …), with its
-/// name after a dash when it has one. Shared by `SEQ.scene-banks` and the
-/// `bank` host kind.
+/// name after a dash when it has one: the `bank` host kind's `label`.
 pub(crate) fn scene_bank_label(index: usize, name: Option<&str>) -> String {
     let auto_label = scene_bank_auto_label(index);
     match name {
@@ -855,7 +843,7 @@ pub(crate) fn scene_bank_label(index: usize, name: Option<&str>) -> String {
 }
 
 /// The scene the transport's pending quantized launch waits for, if any.
-/// Shared by `SEQ.queued-scene` and the host kinds' `queued` fields.
+/// The host kinds' `queued` fields read it.
 pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
     use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
     state
@@ -886,41 +874,11 @@ pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<
     }
 }
 
-pub(super) fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
-    let mut offset = 0usize;
-    Value::List(
-        banks
-            .iter()
-            .enumerate()
-            .map(|(index, bank)| {
-                let label = scene_bank_label(index, bank.name.as_deref());
-                let mut map = HashMap::new();
-                number_field(&mut map, "id", bank.id.0 as f64);
-                map.insert(
-                    "label".to_string(),
-                    Rc::new(RefCell::new(Value::String(label))),
-                );
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(match bank.name.as_ref() {
-                        Some(name) => Value::String(name.clone()),
-                        None => Value::Nil,
-                    })),
-                );
-                number_field(&mut map, "len", bank.len as f64);
-                number_field(&mut map, "offset", offset as f64);
-                offset += bank.len;
-                Rc::new(RefCell::new(Value::Map(map)))
-            })
-            .collect(),
-    )
-}
-
 /// Per-frame publish of the song bindings (spec 12). The committed song and
 /// arrangement are re-read only when the committed-song revision changes; the
-/// scene names and banks diff by value (the scenes side has no revision
-/// counter); scalars publish on change; the render-rate `song-position-beats`
-/// publishes only while a panel that renders it (transport or arrangement) is visible.
+/// scene names diff by value (the scenes side has no revision counter);
+/// scalars publish on change; the render-rate `song-position-beats` publishes
+/// only while a panel that renders it (transport or arrangement) is visible.
 /// Returns true when a reactive cycle is needed.
 pub(crate) fn sync_song_state(
     rt: &mut Runtime,
@@ -957,26 +915,16 @@ pub(crate) fn sync_song_state(
         frame.revision = Some(revision);
         dirty = true;
     }
-    let (scene_names, scene_banks) = app.state.with_project_scenes(|scenes| {
-        let names = scenes
+    let scene_names = app.state.with_project_scenes(|scenes| {
+        scenes
             .scenes
             .iter()
             .map(|scene| scene.name.clone())
-            .collect::<Vec<_>>();
-        (names, scenes.scene_banks().to_vec())
+            .collect::<Vec<_>>()
     });
     if frame.cached_scene_names.as_ref() != Some(&scene_names) {
         rt.set_reactive("SEQ", "scene-names", build_scene_names_value(&scene_names));
         frame.cached_scene_names = Some(scene_names);
-        dirty = true;
-    }
-    if frame.cached_scene_banks.as_ref() != Some(&scene_banks) {
-        rt.set_reactive(
-            "SEQ",
-            "scene-banks",
-            build_scene_banks_value(&scene_banks),
-        );
-        frame.cached_scene_banks = Some(scene_banks);
         dirty = true;
     }
     // Preview events for the patterns the projection references: re-snapshot
@@ -1042,11 +990,6 @@ pub(crate) fn sync_song_state(
         Value::Number(next.current_row_id)
     );
     publish_on_change!("song-row-count", row_count, Value::Number(next.row_count));
-    publish_on_change!(
-        "song-cursor-beats",
-        cursor_beats,
-        Value::Number(next.cursor_beats)
-    );
     publish_on_change!("song-end-beat", end_beat, Value::Number(next.end_beat));
     publish_on_change!(
         "song-loop-enabled",
@@ -1065,11 +1008,6 @@ pub(crate) fn sync_song_state(
             Some(error) => Value::String(error.clone()),
             None => Value::Nil,
         }
-    );
-    publish_on_change!(
-        "song-manual-latch",
-        manual_latch,
-        Value::Bool(next.manual_latch)
     );
     publish_on_change!(
         "song-edit-error",

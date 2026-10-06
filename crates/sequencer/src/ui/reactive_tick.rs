@@ -393,10 +393,6 @@ pub(crate) fn sync_reactive_tick(
             ctx.meters.cached_cpu_load_bits = ctx.shared.state.transport.cpu_load_pct.load(Ordering::Relaxed);
             ctx.meters.last_cpu_ui_poll_at = Instant::now();
         }
-        let cpu_load_bits = ctx.meters.cached_cpu_load_bits;
-        let output_latency_seconds = ctx.shared.state.pdc_latency_seconds();
-        let output_latency_bits = output_latency_seconds.to_bits();
-        let transport_playhead = ctx.shared.state.transport.playhead.load(Ordering::Relaxed);
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
         let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
@@ -621,14 +617,6 @@ pub(crate) fn sync_reactive_tick(
                     ctx.shared.state.pattern.track_params[ct].get_num_steps(),
                 );
             }
-            // Always published: the tracker package lights the playing copy
-            // of a repeating step from this count even with the transport
-            // bar hidden.
-            rt.set_reactive(
-                "SEQ",
-                "transport-playhead",
-                Value::Number(transport_playhead as f64),
-            );
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
             sync_piano_roll_state(
                 rt,
@@ -712,7 +700,6 @@ pub(crate) fn sync_reactive_tick(
             sync_sidebar_browser(rt, &app, ct);
             ctx.frame.prev_current_track = ct;
             ctx.frame.prev_playhead = playhead;
-            ctx.frame.prev_transport_playhead = transport_playhead;
             ctx.frame.prev_pattern_epoch = epoch;
             needs_reactive_cycle = true;
         }
@@ -825,100 +812,19 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_bpm = bpm;
             needs_reactive_cycle = true;
         }
-        if output_latency_bits != ctx.frame.prev_output_latency_bits {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "output-latency-ms",
-                    Value::Number((output_latency_seconds * 1000.0) as f64),
-                )
-                .effects_dirty;
-            ctx.frame.prev_output_latency_bits = output_latency_bits;
-        }
-        if transport_visible && cpu_load_bits != ctx.frame.prev_cpu_load_bits {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "cpu-load-pct",
-                    Value::Number(f32::from_bits(cpu_load_bits) as f64),
-                )
-                .effects_dirty;
-            ctx.frame.prev_cpu_load_bits = cpu_load_bits;
-        }
-        if !transport_visible && cpu_load_bits != ctx.frame.prev_cpu_load_bits {
-            ctx.frame.prev_cpu_load_bits = cpu_load_bits;
-        }
         // Poll the event count every UI tick, independently of the smoothed
-        // percentage. Publish both edges even while the transport is hidden
-        // so reopening it cannot retain an expired warning.
-        let deadline_misses = ctx.shared.state.transport.audio_deadline_misses.load(Ordering::Relaxed);
-        if let Some(overloaded) = ctx.frame.cpu_overload.update(deadline_misses, Instant::now()) {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive("SEQ", "cpu-overloaded", Value::Bool(overloaded))
-                .effects_dirty;
-        }
-        let master_rec_on = ctx.shared.master_recording.load(Ordering::Acquire);
-        app.ui.master_recording = master_rec_on;
-        if transport_visible && master_rec_on != ctx.frame.prev_master_recording {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive("SEQ", "master-recording", Value::Bool(master_rec_on))
-                .effects_dirty;
-            ctx.frame.prev_master_recording = master_rec_on;
-        }
-        if !transport_visible && master_rec_on != ctx.frame.prev_master_recording {
-            ctx.frame.prev_master_recording = master_rec_on;
-        }
-        // Roll mode + rate (docs/rolling-core-spec.md 8): the atomics are the
-        // source of truth (rate keys write them without touching the runtime),
-        // so the transport display diffs them per frame like master-recording.
-        let roll_mode_on = ctx
+        // percentage: `engine.overloaded` (the host kinds) shows both edges,
+        // so reopening the transport cannot retain an expired warning.
+        let deadline_misses = ctx
             .shared
             .state
             .transport
-            .roll_mode
+            .audio_deadline_misses
             .load(Ordering::Relaxed);
-        if roll_mode_on != ctx.frame.prev_roll_mode {
-            if transport_visible {
-                needs_reactive_cycle |= editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "roll-mode", Value::Bool(roll_mode_on))
-                    .effects_dirty;
-            }
-            ctx.frame.prev_roll_mode = roll_mode_on;
-        }
-        let roll_rate_raw = ctx
-            .shared
-            .state
-            .transport
-            .roll_rate
-            .load(Ordering::Relaxed);
-        if roll_rate_raw != ctx.frame.prev_roll_rate {
-            if transport_visible {
-                let label = roll_rate_label(roll_rate_raw);
-                needs_reactive_cycle |= editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "roll-rate", Value::String(label.to_string()))
-                    .effects_dirty;
-            }
-            ctx.frame.prev_roll_rate = roll_rate_raw;
-        }
-        let sequence_rolling = ctx
-            .shared
-            .state
-            .transport
-            .sequence_rolling
-            .load(Ordering::Relaxed);
-        if sequence_rolling != ctx.frame.prev_sequence_rolling {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive("SEQ", "sequence-rolling", Value::Bool(sequence_rolling))
-                .effects_dirty;
-            ctx.frame.prev_sequence_rolling = sequence_rolling;
-        }
+        ctx.frame
+            .cpu_overload
+            .update(deadline_misses, Instant::now());
+        app.ui.master_recording = ctx.shared.master_recording.load(Ordering::Acquire);
         let roll_window_bits: Vec<(u64, u64)> = (0..app.tracks.len().min(
             ctx.shared.state.transport.roll_window_starts.len(),
         ))
@@ -1826,7 +1732,6 @@ pub(crate) fn sync_reactive_tick(
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);
             let master_rec_on = ctx.shared.master_recording.load(Ordering::Acquire);
             rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
-            rt.set_reactive("SEQ", "master-recording", Value::Bool(master_rec_on));
             rt.set_reactive(
                 "SEQ",
                 "delete-target-version",
@@ -1861,7 +1766,6 @@ pub(crate) fn sync_reactive_tick(
             // Sync to app for TUI recording logic
             app.ui.recording = rec_on;
             app.ui.master_recording = master_rec_on;
-            ctx.frame.prev_master_recording = master_rec_on;
             for (i, a) in armed.iter().enumerate() {
                 if i < app.graph.record_armed.len() {
                     app.graph.record_armed[i] = *a;
@@ -1905,21 +1809,6 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_fx_epoch = fx_ep;
             ctx.frame.prev_fx_value_epoch = fx_value_ep;
             needs_reactive_cycle = true;
-        }
-        // Custom views (including the tracker's ghost rows) may consume this
-        // outside *transport*. Hidden readers alone must not request a frame.
-        if transport_playhead != ctx.frame.prev_transport_playhead
-            && editor.runtime().has_live_reactive_consumers("SEQ", "transport-playhead")
-        {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "transport-playhead",
-                    Value::Number(transport_playhead as f64),
-                )
-                .effects_dirty;
-            ctx.frame.prev_transport_playhead = transport_playhead;
         }
         {
             let analysis_generation = app.sample_analysis.cache().generation();

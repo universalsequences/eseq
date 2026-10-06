@@ -812,8 +812,9 @@ mod tests {
         }
     }
 
-    /// `when` and `toggle!` come from content/core/init.lisp (kind-bindings
-    /// spec §6) and must be visible from inside a `(module ...)` too.
+    /// `when`, `unless` and `toggle!` come from content/core/init.lisp
+    /// (kind-bindings spec §6) and must be visible from inside a `(module
+    /// ...)` too.
     #[test]
     fn core_init_when_and_toggle_macros() {
         let init = include_str!("../../../content/core/init.lisp");
@@ -843,6 +844,20 @@ mod tests {
             Some(Value::Number(11.0))
         );
         assert_eq!(eval(&mut runtime, "(when false 1)"), Some(Value::Nil));
+
+        // unless: the body runs only on a falsy condition (nil too).
+        assert_eq!(
+            eval(&mut runtime, "(unless false (set! hits (+ hits 1)) hits)"),
+            Some(Value::Number(12.0))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(unless nil 2)"),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(unless true (set! hits 99)) hits"),
+            Some(Value::Number(12.0))
+        );
 
         // toggle!: a plain variable.
         assert_eq!(

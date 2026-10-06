@@ -75,23 +75,21 @@ pub(crate) fn meter_display_level(peak: f32) -> f64 {
     quantize_meter_level(master_meter_level(peak))
 }
 
-/// Publish the loaded scene and its bank topology before resetting presentation
-/// state. This is a project replacement boundary, not a playback update.
-pub(crate) fn sync_project_scene_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
+/// A project replaced the previous one (a load, a new project): publish its
+/// patterns and reset the rack panel's view (its generation). Not a playback
+/// update. The scene bank view resets through the host kinds: a load
+/// replaces every bank instance.
+pub(crate) fn sync_project_replacement(rt: &mut Runtime, state: &Arc<SequencerState>) {
     sync_pattern_state(rt, state);
-    // Load completion renders before the next sync_song_state pass. The bank
-    // reset must resolve against this project's spans, not the previous ones.
-    let banks = state.with_project_scenes(|scenes| {
-        super::song_state::build_scene_banks_value(scenes.scene_banks())
-    });
-    rt.set_reactive("SEQ", "scene-banks", banks);
-    for field in ["scene-bank-view-generation", "rack-panel-view-generation"] {
-        let generation = match rt.reactive_field_value("SEQ", field) {
-            Some(Value::Number(value)) => *value,
-            _ => 0.0,
-        };
-        rt.set_reactive("SEQ", field, Value::Number(generation + 1.0));
-    }
+    let generation = match rt.reactive_field_value("SEQ", "rack-panel-view-generation") {
+        Some(Value::Number(value)) => *value,
+        _ => 0.0,
+    };
+    rt.set_reactive(
+        "SEQ",
+        "rack-panel-view-generation",
+        Value::Number(generation + 1.0),
+    );
 }
 
 pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {

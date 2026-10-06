@@ -135,7 +135,9 @@ No metronome exists today; it's a small audio-callback addition.
   `SequencerState`; optional `metronome_gain` later. Reactive seed
   `("metronome", false)` in `state_values.rs`; host command
   `"toggle-metronome"` in `ui/main.rs` flips the atomic and mirrors it into
-  `SEQ.metronome`.
+  `SEQ.metronome`. (Since eseq-0l17.12 the toggle is `transport.metronome`'s
+  setter, the absolute `"set-metronome"` command; `toggle-metronome` and
+  `SEQ.metronome` are gone.)
 - **Click synthesis**: in `audio_callback` (`audio.rs:~6670`), **after**
   `data.master_recorder.capture(output)` so WAV exports stay click-free, and
   only while playing + enabled. The callback already knows
@@ -151,7 +153,8 @@ No metronome exists today; it's a small audio-callback addition.
 - **UI**: a toggle in the transport near the two quantize dropdowns, styled
   like the existing "WAV" label-button in `transport.lisp` (~line 600):
   `(label "CLK")` (or a metronome glyph) with `:color (if SEQ.metronome
-  :white :gray)`, `:on-click` → `(host-command "toggle-metronome")`.
+  :white :gray)`, `:on-click` → `(host-command "toggle-metronome")` (now
+  `(toggle! transport.metronome)`).
 
 ### Phase 6 — tests
 
@@ -164,7 +167,7 @@ No metronome exists today; it's a small audio-callback addition.
   steps; wrap at pattern end.
 - Scheduler already has chord-delay playback tests; no changes expected there.
 - Metronome: layout test that the CLK toggle exists and routes
-  `toggle-metronome`; an audio-side unit test that a rendered block with the
+  `toggle-metronome` (now `set-metronome`); an audio-side unit test that a rendered block with the
   metronome enabled contains nonzero samples at the beat boundary while the
   master recorder's captured buffer does not.
 

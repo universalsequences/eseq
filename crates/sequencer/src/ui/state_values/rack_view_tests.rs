@@ -82,7 +82,7 @@ fn rack_views_follow_stable_tracks_and_reset_on_project_replacement() {
     show_track(&mut editor, &app, 0);
     assert_view(&mut editor, true, true, true);
 
-    sync_project_scene_state(editor.runtime_mut(), &app.state);
+    sync_project_replacement(editor.runtime_mut(), &app.state);
     editor.runtime_mut().run_reactive_cycle();
     assert_view(&mut editor, true, false, true);
     show_track(&mut editor, &app, 1);

@@ -21,7 +21,8 @@
 //! `ModelRevision`), the project's name (the `App`'s) and the content
 //! library epoch (`browser.library-epoch`). Live (computed only while
 //! observed): `browser.preview-playing` / `preview-position` (the preview
-//! player) and `retro.playing` / `position` (the audition mailbox).
+//! player) and `retro.playing` / `position` / `playhead` (the audition
+//! mailbox).
 //!
 //! **Identity.** Sounds are keyed (track instance id, patch id): registered
 //! for the palette's track, dropped when the palette leaves it or closes, so

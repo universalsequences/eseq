@@ -235,6 +235,25 @@ impl Harness {
         self.editor.runtime()
     }
 
+    /// The instance of singleton kind `kind`.
+    fn singleton(&self, kind: &str) -> InstanceId {
+        self.rt().singleton_instance(kind).expect(kind)
+    }
+
+    /// The instances of a list value.
+    fn instances(&self, value: Value) -> Vec<InstanceId> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Instance(id) => *id,
+                    other => panic!("not an instance: {other:?}"),
+                })
+                .collect(),
+            other => panic!("not a list: {other:?}"),
+        }
+    }
+
     fn track_id(&self, index: u64) -> InstanceId {
         self.rt()
             .keyed_instance(TRACK, &[index])
@@ -347,4 +366,5 @@ mod schema;
 mod settings;
 mod steps;
 mod tracks;
+mod transport;
 mod views;

@@ -42,7 +42,7 @@
         set-bar-transpose! mod-in-level
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options swing-resolution-options
-        roll-rate-options
+        roll-rate-options launch-quantize-options record-quantize-options
         launch-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
@@ -71,6 +71,9 @@
 (def mono-trigger-options '("retrig" "legato"))
 (def swing-resolution-options '("1/16" "1/8" "1/4" "1/2"))
 (def roll-rate-options '("4" "4T" "8" "8T" "16" "16T" "32" "32T"))
+;; transport.launch-quantize's and transport.record-quantize's choices.
+(def launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+(def record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 ;; A drum rack pad's explicit role keys (pad.role; "" is Standard: the role
 ;; the standard layout infers from the note), and a groove's time scales.
 (def pad-role-options '("kick" "snare" "rim" "clap" "closed-hat" "pedal-hat" "open-hat"
@@ -107,6 +110,7 @@
 (def set-transport-metronome (tr v) (host-command "set-metronome" v))
 (def set-transport-roll-mode (tr v) (host-command "set-roll-mode" v))
 (def set-transport-record-quantize (tr v) (host-command "set-record-quantize" v))
+(def set-transport-launch-quantize (tr v) (host-command "set-scene-launch-quantize" v))
 (def set-master-recording (m v) (seq-set-master-recording v))
 ;; Track settings (the track panel): absolute, addressed by the track's stable
 ;; id so a reorder before the command lands cannot retarget it. One undo entry
@@ -1043,6 +1047,8 @@
 (def-kind bank
   :key (index)
   :host ((index   :int    :doc "Position in the bank list, from 0")
+         (bid     :int    :doc "The bank's stable id (the scene-bank commands' :bank-id)")
+         (name    :string :doc "The bank's own name; empty when it has none")
          (label   :string :doc "A, B, … with the bank name after a dash when it has one")
          (scenes  (list-of scene))
          (playing :bool   :doc "Holds the playing scene")))
@@ -1053,7 +1059,8 @@
          (recording       :bool :set set-transport-recording)
          (scene           scene :doc "The playing scene")
          (queued          scene :doc "The scene a quantized launch waits for, or nil")
-         (launch-quantize :string :doc "Scene launch quantization: off, 1 bar, …")
+         (launch-quantize :string :set set-transport-launch-quantize
+                          :doc "Scene launch quantization: off, 1/16, …, 1 bar")
          (bpm             :int    :range (20 300) :set set-transport-bpm)
          (position        :int    :doc "Transport step counter")
          (metronome       :bool   :set set-transport-metronome)
@@ -1301,7 +1308,8 @@
          (truncated :bool   :doc "The history ran past its window")
          (error     :string)
          (playing   :bool   :doc "An audition plays")
-         (position  :number :doc "The audition's position, seconds")))
+         (position  :number :doc "The audition's position in its loop, 0 to 1")
+         (playhead  :number :doc "Where the audition plays, seconds into the capture; -1 idle")))
 
 ;; The song export modal (export is a module form, hence song-export).
 (def-kind song-export
@@ -1444,10 +1452,14 @@
 (def graph-max-poly-selection-options
   '("deterministic" "propagation" "random" "markov" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 
+;; The transport's launch quantization; "off" until the host publishes it.
+(def launch-quantize ()
+  (let ((q transport.launch-quantize))
+    (if (or (= q nil) (= q "")) "off" q)))
+
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)
-  (host-command "switch-pattern"
-    (dict :idx s.index :quantize transport.launch-quantize)))
+  (host-command "switch-pattern" (dict :idx s.index :quantize (launch-quantize))))
 
 ;; Copy scene s to a new scene at the end of its bank, which then plays.
 (def clone-scene! (s) (host-command "clone-pattern" (dict :idx s.index)))
@@ -1466,7 +1478,7 @@
 ;; current scene resolve when the command lands.
 (def launch-cell! (c)
   (host-command "set-scene-cell"
-    (dict :track-id c.track.tid :pattern-id c.pid :quantize transport.launch-quantize)))
+    (dict :track-id c.track.tid :pattern-id c.pid :quantize (launch-quantize))))
 
 ;; Select the region from track t1 to track t2 (either order) between beats
 ;; start and end (song.region); a degenerate one clears it. :scene-lane true
@@ -1564,12 +1576,12 @@
 ;; quantization (one undo entry, as a clip launch).
 (def launch-rack-clip! (rc)
   (host-command "launch-rack-clip"
-    (dict :group-id rc.group.gid :clip-id rc.cid :quantize transport.launch-quantize)))
+    (dict :group-id rc.group.gid :clip-id rc.cid :quantize (launch-quantize))))
 
 ;; Silence rack g in the current scene.
 (def silence-rack! (g)
   (host-command "launch-rack-clip"
-    (dict :group-id g.gid :clip-id 0 :quantize transport.launch-quantize)))
+    (dict :group-id g.gid :clip-id 0 :quantize (launch-quantize))))
 
 ;; Save what rack g plays as a new clip named name.
 (def save-rack-clip-as! (g name)

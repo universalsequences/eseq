@@ -440,8 +440,6 @@ scene-macro-options	eseq.macros/scene-macro-options	content/ui/macros.lisp
 scene-macro-track-mask-with	eseq.macros/scene-macro-track-mask-with	content/ui/macros.lisp
 scene-push-begin	eseq.transport/scene-push-begin	content/ui/transport.lisp
 scene-push-drag	eseq.transport/scene-push-drag	content/ui/transport.lisp
-scene-push-target	eseq.transport/scene-push-target	content/ui/transport.lisp
-scene-push-value	eseq.transport/scene-push-value	content/ui/transport.lisp
 select-all-steps	eseq.step-grid-interactions/select-all-steps	content/ui/step-grid-interactions.lisp
 selected-bus	eseq.seq-core-state/selected-bus	content/ui/seq-core-state.lisp
 selected-bus-name	eseq.seq-core-state/selected-bus-name	content/ui/seq-core-state.lisp

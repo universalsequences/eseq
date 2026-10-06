@@ -10,17 +10,14 @@ pub(crate) struct CpuOverloadIndicator {
 }
 
 impl CpuOverloadIndicator {
-    pub(crate) fn update(&mut self, misses: u64, now: Instant) -> Option<bool> {
+    /// Note the audio thread's deadline-miss count: a new miss shows the
+    /// warning for two seconds (`engine.overloaded` reads [`Self::displayed`]).
+    pub(crate) fn update(&mut self, misses: u64, now: Instant) {
         if misses != self.seen_misses {
             self.seen_misses = misses;
             self.hold_until = Some(now + Duration::from_secs(2));
         }
-        let active = self.hold_until.is_some_and(|deadline| now < deadline);
-        if active == self.displayed {
-            return None;
-        }
-        self.displayed = active;
-        Some(active)
+        self.displayed = self.hold_until.is_some_and(|deadline| now < deadline);
     }
 
     /// Whether the warning shows (as of the last [`Self::update`]).
@@ -157,7 +154,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_playing: bool,
     pub(crate) prev_bpm: u32,
     pub(crate) prev_playhead: u32,
-    pub(crate) prev_transport_playhead: u32,
     pub(crate) prev_pattern_epoch: u64,
     /// Diffed against `App::song_row_mirror_epoch` so mirrored song-row
     /// transitions (which never bump the real pattern epoch) still trigger
@@ -174,9 +170,7 @@ pub(crate) struct FrameDiffState {
     /// the rack menu read it; owner names follow rack renames).
     pub(crate) prev_instances_fingerprint: u64,
     pub(crate) prev_current_track: usize,
-    pub(crate) prev_cpu_load_bits: u32,
     pub(crate) cpu_overload: CpuOverloadIndicator,
-    pub(crate) prev_output_latency_bits: u32,
     pub(crate) prev_peak_l_level: f64,
     pub(crate) prev_peak_r_level: f64,
     /// Whether the recording-take undo transaction is open. Mirrors
@@ -184,10 +178,6 @@ pub(crate) struct FrameDiffState {
     /// `App::sync_recording_history_boundary`; force it false whenever
     /// recording is forced off outside that seam.
     pub(crate) recording_history_open: bool,
-    pub(crate) prev_master_recording: bool,
-    pub(crate) prev_roll_mode: bool,
-    pub(crate) prev_roll_rate: u32,
-    pub(crate) prev_sequence_rolling: bool,
     pub(crate) prev_roll_windows: Vec<(u64, u64)>,
     pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
@@ -264,7 +254,6 @@ pub(crate) struct FrameDiffState {
     /// Browser sample preview: last published playing flag; the playhead
     /// republishes every tick while true.
     pub(crate) prev_browser_preview_playing: bool,
-    pub(crate) prev_queued_transport_scene: Option<usize>,
     /// Per-track pattern id (-1 = none) with a pending quantized clip
     /// launch, for the mixer grid's queued-cell blink.
     pub(crate) prev_queued_track_clips: Vec<i64>,
@@ -391,26 +380,36 @@ pub(crate) struct LoopCtx<'a> {
 mod cpu_overload_tests {
     use super::*;
 
+    /// Whether the warning shows after noting `misses` at `at`.
+    fn shown(indicator: &mut CpuOverloadIndicator, misses: u64, at: Instant) -> bool {
+        indicator.update(misses, at);
+        indicator.displayed()
+    }
+
     #[test]
     fn isolated_miss_is_held_and_later_misses_extend_the_hold() {
         let mut indicator = CpuOverloadIndicator::default();
         let now = Instant::now();
-        assert_eq!(indicator.update(0, now), None);
-        assert_eq!(indicator.update(1, now), Some(true));
-        assert_eq!(indicator.update(1, now + Duration::from_millis(1999)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_millis(1999)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_secs(2)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_millis(3999)), Some(false));
-        assert_eq!(indicator.update(2, now + Duration::from_secs(5)), None);
+        assert!(!shown(&mut indicator, 0, now));
+        assert!(shown(&mut indicator, 1, now));
+        assert!(shown(&mut indicator, 1, now + Duration::from_millis(1999)));
+        assert!(shown(&mut indicator, 2, now + Duration::from_millis(1999)));
+        assert!(shown(&mut indicator, 2, now + Duration::from_secs(2)));
+        assert!(!shown(&mut indicator, 2, now + Duration::from_millis(3999)));
+        assert!(!shown(&mut indicator, 2, now + Duration::from_secs(5)));
     }
 
     #[test]
     fn delayed_poll_observes_accumulated_misses_and_counter_wrap() {
         let mut indicator = CpuOverloadIndicator::default();
         let now = Instant::now();
-        assert_eq!(indicator.update(u64::MAX, now), Some(true));
-        assert_eq!(indicator.update(u64::MAX, now + Duration::from_secs(2)), Some(false));
-        assert_eq!(indicator.update(0, now + Duration::from_secs(3)), Some(true));
-        assert_eq!(indicator.update(0, now + Duration::from_secs(5)), Some(false));
+        assert!(shown(&mut indicator, u64::MAX, now));
+        assert!(!shown(
+            &mut indicator,
+            u64::MAX,
+            now + Duration::from_secs(2)
+        ));
+        assert!(shown(&mut indicator, 0, now + Duration::from_secs(3)));
+        assert!(!shown(&mut indicator, 0, now + Duration::from_secs(5)));
     }
 }

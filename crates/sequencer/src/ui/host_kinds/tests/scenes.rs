@@ -60,3 +60,62 @@ fn clone_scene_copies_the_clicked_scene_into_its_bank_without_a_view_switch() {
     assert_eq!(h.app.state.current_scene_index(), 0, "scene 1 still plays");
     assert!(!h.shared.state.pattern.patterns[0].is_active(5));
 }
+
+#[test]
+fn banks_follow_bank_edits_with_their_ids_and_names() {
+    // The bank structure the transport strip shows (formerly SEQ.scene-banks):
+    // creating, renaming, filling, undoing and deleting a bank re-push its
+    // fields; `bid` addresses the scene-bank commands, `name` is the bank's
+    // own name ("" when it has none), `label` the shown one.
+    let mut h = Harness::new();
+    h.command("clone-pattern", Value::Nil);
+    h.command("clone-pattern", Value::Nil);
+    h.sync();
+    let bank = |h: &mut Harness, i: usize, field: &str| {
+        h.eval(&format!("(let ((b (nth (banks) {i}))) b.{field})"))
+    };
+    assert_eq!(h.eval("(len (banks))"), Value::Number(1.0));
+    let first_bid = h.app.state.scene_banks()[0].id.0;
+    assert_eq!(bank(&mut h, 0, "bid"), Value::Number(first_bid as f64));
+    assert_eq!(bank(&mut h, 0, "name"), s(""));
+    assert_eq!(bank(&mut h, 0, "label"), s("A"));
+    assert_eq!(
+        h.eval("(len (let ((b (first (banks)))) b.scenes))"),
+        Value::Number(3.0)
+    );
+
+    h.command("create-scene-bank", Value::Nil);
+    h.sync();
+    let created = h.app.state.scene_banks()[1].id.0;
+    assert_eq!(bank(&mut h, 1, "bid"), Value::Number(created as f64));
+    assert_eq!(bank(&mut h, 1, "label"), s("B"));
+    let rename = h.eval(&format!("(dict :bank-id {created} :name \"Peak\")"));
+    h.command("rename-scene-bank", rename);
+    h.sync();
+    assert_eq!(bank(&mut h, 1, "name"), s("Peak"));
+    assert_eq!(bank(&mut h, 1, "label"), s("B — Peak"));
+
+    let size = |h: &mut Harness, i: usize| {
+        h.eval(&format!("(len (let ((b (nth (banks) {i}))) b.scenes))"))
+    };
+    let mv = h.eval(&format!("(dict :scene 0 :bank-id {created})"));
+    h.command("move-scene-to-scene-bank", mv);
+    h.sync();
+    assert_eq!(
+        (size(&mut h, 0), size(&mut h, 1)),
+        (Value::Number(2.0), Value::Number(1.0))
+    );
+    assert!(matches!(
+        sequencer::app::edit::undo(&mut h.app),
+        sequencer::app::history::HistoryReplay::Applied(_)
+    ));
+    h.sync();
+    assert_eq!(
+        (size(&mut h, 0), size(&mut h, 1)),
+        (Value::Number(3.0), Value::Number(0.0))
+    );
+    let delete = h.eval(&format!("(dict :bank-id {created})"));
+    h.command("delete-scene-bank", delete);
+    h.sync();
+    assert_eq!(h.eval("(len (banks))"), Value::Number(1.0));
+}

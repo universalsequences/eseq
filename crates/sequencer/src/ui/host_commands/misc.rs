@@ -5,17 +5,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-metronome",
     "set-roll-mode",
     "set-scroll-inertia",
-    "toggle-metronome",
     "toggle-roll-mode",
 ];
-
-/// Publish a transport flag (or label) to `SEQ` and repaint.
-fn publish_seq_flag(editor: &mut Editor, name: &str, value: Value) {
-    editor.runtime_mut().set_reactive("SEQ", name, value);
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
-    editor.mark_needs_redraw();
-}
 
 /// The bool payload of `name`, or an error event and `None`.
 fn expect_bool(payload: &Value, name: &str, editor: &mut Editor) -> Option<bool> {
@@ -39,7 +30,8 @@ pub(super) fn set_roll_mode(state: &SequencerState, editor: &mut Editor, on: boo
         // (docs/rolling-core-spec.md 7).
         state.push_roll_command(sequencer::sequencer::RollCommand::ClearAll);
     }
-    publish_seq_flag(editor, "roll-mode", Value::Bool(on));
+    // The host kinds' next tick pushes `transport.roll-mode`: draw it.
+    editor.mark_needs_redraw();
     true
 }
 
@@ -52,7 +44,8 @@ pub(super) fn toggle_roll_mode(state: &SequencerState, editor: &mut Editor) -> b
 /// Turn the metronome on or off; nothing happens when it already is.
 fn set_metronome(state: &SequencerState, editor: &mut Editor, on: bool) {
     if state.transport.metronome_enabled.swap(on, Ordering::AcqRel) != on {
-        publish_seq_flag(editor, "metronome", Value::Bool(on));
+        // The next tick pushes `transport.metronome`.
+        editor.mark_needs_redraw();
     }
 }
 
@@ -87,11 +80,8 @@ pub(super) fn handle(
                 .transport
                 .record_quantize
                 .store(quantize as u32, Ordering::Release);
-            publish_seq_flag(
-                editor,
-                "record-quantize",
-                Value::String(quantize.transport_label().to_string()),
-            );
+            // The next tick pushes `transport.record-quantize`.
+            editor.mark_needs_redraw();
         }
         "set-scroll-inertia" => {
             // App-side scroll momentum, for compositors that provide none
@@ -116,10 +106,6 @@ pub(super) fn handle(
                 set_metronome(&state, editor, on);
             }
         }
-        "toggle-metronome" => {
-            let on = !state.transport.metronome_enabled.load(Ordering::Acquire);
-            set_metronome(&state, editor, on);
-        }
         _ => {}
     }
 }
@@ -132,13 +118,7 @@ mod tests {
     #[test]
     fn direct_roll_toggle_updates_transport_without_deferred_host_dispatch() {
         let state = SequencerState::new(1, vec![]);
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![("roll-mode", Value::Bool(false))],
-            true,
-        );
-        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
 
         assert!(toggle_roll_mode(&state, &mut editor));
         assert!(state.transport.roll_mode.load(Ordering::Acquire));

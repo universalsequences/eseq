@@ -710,16 +710,25 @@ impl App {
     }
 
     /// Play or stop through the state machine (the `seq-set-playing`
-    /// route): toggles only when the transport is not already `playing`.
+    /// route, `transport.playing`'s setter). It compares against what
+    /// `transport.playing` shows, the raw transport flag, so a click is never
+    /// a no-op: Play with a mode left engaged over a stopped transport stops
+    /// that mode and plays again; nothing happens when already so.
     pub fn song_transport_set_playing(
         &mut self,
         playing: bool,
         record: bool,
     ) -> Result<Option<String>, String> {
-        if self.transport_engaged() == playing {
+        if self.state.is_playing() == playing {
             return Ok(None);
         }
-        self.song_transport_toggle_play(record)
+        if !playing {
+            return self.song_transport_stop();
+        }
+        if self.transport_engaged() {
+            self.song_transport_stop()?;
+        }
+        self.song_transport_play(record).map(|_| None)
     }
 
     /// Cancel arrangement capture (spec 13): discard the take, preserve the
@@ -1931,6 +1940,28 @@ mod tests {
         app.song_transport_toggle_play(false).expect("toggle stops");
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         assert!(!app.state.is_playing());
+    }
+
+    #[test]
+    fn set_playing_follows_the_shown_transport_flag() {
+        let mut app = app_with_song();
+        app.song_transport_set_playing(true, false).expect("play");
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
+        app.song_transport_set_playing(true, false)
+            .expect("already playing");
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
+        // The transport stopped under the machine (song end, a legacy stop):
+        // `transport.playing` shows false, so Play must not be a no-op.
+        app.state.stop_playback();
+        app.song_transport_set_playing(true, false)
+            .expect("play again");
+        assert!(app.state.is_playing());
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
+        app.song_transport_set_playing(false, false).expect("stop");
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
+        assert!(!app.state.is_playing());
+        app.song_transport_set_playing(false, false)
+            .expect("already stopped");
     }
 
     #[test]

@@ -147,7 +147,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             assert!(editor.switch_active_tile_to_buffer_named(if phase == "scroll" { "*sequencer*" } else { "*fx*" }));
         }
         editor.mark_needs_redraw();
-        let hidden_fields = ["track-events", "track-event-current-beat", "track-active-notes", "track-process-scopes", "transport-playhead"];
+        let hidden_fields = ["track-events", "track-event-current-beat", "track-active-notes", "track-process-scopes"];
         let hidden_snapshot = (phase == "scratch").then(|| hidden_fields.map(|field|
             editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone)));
         let compressor_keys = editor.visible_widget_layouts().iter().flat_map(|layout|

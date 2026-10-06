@@ -110,7 +110,7 @@ fn a_defwidget_with_instance_state_reads_host_kinds_and_only_repaints() {
 const MINI_DAW: &str = include_str!("../../../../../../docs/examples/mini-daw.lisp");
 
 /// Every map in a widget tree that carries `prop` (a depth-first walk).
-fn widgets_with_prop(tree: &Value, prop: &str, out: &mut Vec<HashMap<String, Value>>) {
+pub(super) fn widgets_with_prop(tree: &Value, prop: &str, out: &mut Vec<HashMap<String, Value>>) {
     match tree {
         Value::Map(map) => {
             if map.contains_key(prop) {
@@ -176,6 +176,55 @@ fn has_symbol_starting_with(code: &str, prefix: &str) -> bool {
     })
 }
 
+/// The legacy reactive forms `source` uses (kind-bindings spec §13 stage
+/// 8): string-key bindings, legacy namespaces read dotted, `:bindable`,
+/// view state outside kinds. A ported view uses none of them.
+pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
+    // Comments and string contents say nothing about the code.
+    let mut code = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in strip_lisp_comments(source).chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+                code.push(ch);
+            }
+            continue;
+        }
+        in_string = ch == '"';
+        code.push(ch);
+    }
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut found: Vec<&'static str> = [
+        "bind-seq",
+        "bind-nth",
+        "(bind ",
+        "bind-graph",
+        "reactive-get",
+        "reactive-set",
+        "reactive-value",
+        ":bindable",
+        "defstate",
+        "(state ",
+    ]
+    .into_iter()
+    .filter(|form| flat.contains(form))
+    .collect();
+    found.extend(
+        [
+            "SEQ.", "SEQV.", "RETRO.", "EXPORT.", "AUDIO.", "MIDI.", "AGENT.", "GRAPH.",
+        ]
+        .into_iter()
+        .filter(|namespace| has_symbol_starting_with(&code, namespace)),
+    );
+    found
+}
+
 #[test]
 fn mini_daw_example_has_no_string_key_bindings() {
     let code = strip_lisp_comments(MINI_DAW);
@@ -184,28 +233,11 @@ fn mini_daw_example_has_no_string_key_bindings() {
         "strings survive stripping"
     );
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
-    for forbidden in [
-        "bind-seq",
-        "(bind ",
-        "reactive-get",
-        "with-color",
-        "tr-r",
-        "tr-g",
-        "tr-b",
-        "b01",
-        ":bindable",
-        "defstate",
-        ":key (str ",
-    ] {
+    assert_eq!(legacy_forms(MINI_DAW), Vec::<&str>::new(), "mini-daw.lisp");
+    for forbidden in ["with-color", "tr-r", "tr-g", "tr-b", "b01", ":key (str "] {
         assert!(
             !flat.contains(forbidden),
             "mini-daw.lisp uses {forbidden:?}"
-        );
-    }
-    for field in ["SEQ.", "SEQV."] {
-        assert!(
-            !has_symbol_starting_with(&code, field),
-            "mini-daw.lisp reads {field}"
         );
     }
     assert!(has_symbol_starting_with("(len SEQ.steps)", "SEQ."));
@@ -230,7 +262,7 @@ fn mini_daw_example_has_no_string_key_bindings() {
 
 impl Harness {
     /// A buffer's widget tree and its revision.
-    fn buffer_tree(&self, name: &str) -> (Value, u64) {
+    pub(super) fn buffer_tree(&self, name: &str) -> (Value, u64) {
         let buffer = self
             .editor
             .buffers

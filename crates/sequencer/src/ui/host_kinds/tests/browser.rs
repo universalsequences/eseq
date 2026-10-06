@@ -28,8 +28,9 @@ impl Harness {
 
     /// A singleton's field, as its cell holds it.
     fn single(&self, kind: &str, field: &str) -> Value {
-        let id = self.rt().singleton_instance(kind).expect(kind);
-        self.rt().instance_field(id, field).expect(field)
+        self.rt()
+            .instance_field(self.singleton(kind), field)
+            .expect(field)
     }
 
     fn cell(&self, id: InstanceId, field: &str) -> Value {
@@ -49,19 +50,6 @@ impl Harness {
 
     fn status_7f(&self) -> String {
         self.editor.minibuffer.clone().unwrap_or_default()
-    }
-
-    fn instances(&self, value: Value) -> Vec<InstanceId> {
-        match value {
-            Value::List(items) => items
-                .iter()
-                .map(|item| match &*item.borrow() {
-                    Value::Instance(id) => *id,
-                    other => panic!("not an instance: {other:?}"),
-                })
-                .collect(),
-            other => panic!("not a list: {other:?}"),
-        }
     }
 
     /// The legacy sound palette publish, as the tick runs it.
@@ -559,7 +547,6 @@ fn retro_capture_rows_and_the_live_audition() {
     // An error a capture command reports (no capture open) shows here.
     h.command("retrospective-detect", Value::Nil);
     h.sync();
-    assert_eq!(h.single(RETRO, "error"), h.legacy_in("RETRO", "error"));
     assert_ne!(h.single(RETRO, "error"), s(""));
     // The audition is live: computed only while observed.
     let before = h.computed(f::RETRO_PLAYING);
@@ -569,6 +556,31 @@ fn retro_capture_rows_and_the_live_audition() {
     h.sync();
     assert!(h.computed(f::RETRO_PLAYING) > before);
     assert_eq!(h.slot("auditioning"), 0.0);
+    // The playhead is where the audition plays, in seconds of the capture
+    // (its crop's span); -1 while none plays.
+    h.eval_7f("(def audition-head #'retro.playhead)");
+    h.sync();
+    assert_eq!(h.slot("audition-head"), -1.0);
+    let track = h.app.track_registry.id_at(0).unwrap();
+    h.app.retrospective.draft = Some(sequencer::app::retrospective::CaptureDraft {
+        notes: vec![sequencer::app::retrospective::CapturedNote {
+            track,
+            transpose: 0.0,
+            velocity: 1.0,
+            start: 1.0,
+            end: 1.1,
+        }],
+        duration: 4.0,
+        truncated: false,
+        scene: h.app.state.current_scene_id().unwrap(),
+    });
+    h.app.audition_retrospective(1.0, 3.0, 1).unwrap();
+    h.sync();
+    let head = h.slot("audition-head");
+    assert!((1.0..3.0).contains(&head), "playhead {head}");
+    h.app.state.note_audition.stop();
+    h.sync();
+    assert_eq!(h.slot("audition-head"), -1.0);
 }
 
 #[test]

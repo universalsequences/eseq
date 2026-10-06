@@ -20,13 +20,9 @@ pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
         }
         capture_bar_count(*duration, *bars as usize).map(|bars| Value::Number(bars as f64))
     });
-    let mut fields = crate::presented::retro_registration();
-    fields.extend([
-        ("playing", Value::Bool(false)),
-        ("position", Value::Number(0.0)),
-    ]);
-    // Presentation only; capture fixtures seed a preview (`present-fixture`).
-    runtime.register_reactive("RETRO", fields, true);
+    // The capture's presentation is the `retro` kind (the host kinds push
+    // it from `presented`); capture fixtures seed a preview
+    // (`present-fixture`).
 }
 
 pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft) -> Result<(), String> {
@@ -79,8 +75,10 @@ pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft)
             error: String::new(),
         }
     });
+    // The crop spans the capture from its first note; the roll's zoom takes
+    // the duration from here (the tick has not pushed `retro.duration` yet).
     let open = rt.global_value("eseq.retrospective/open").ok_or("MIDI capture UI is unavailable")?;
-    rt.invoke(open, vec![Value::Number(start), Value::Number(end)])
+    rt.invoke(open, vec![Value::Number(start), Value::Number(end), Value::Number(end)])
         .map_err(|error| format!("{error:?}"))?;
     apply_guess(editor, draft)?;
     editor.refresh_runtime_side_effects();
@@ -157,14 +155,15 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
     editor.mark_needs_redraw();
 }
 
+/// An audition error, into the capture's `error`. The audition's `playing`,
+/// `position` and `playhead` are the `retro` kind's live fields (the host
+/// kinds read the mailbox while something observes them).
 pub(crate) fn sync(runtime: &mut eseqlisp::Runtime, app: &app::App) -> bool {
-    let mut changed = runtime.set_reactive("RETRO", "playing",
-        Value::Bool(app.state.note_audition.generation() != 0)).effects_dirty;
-    if app.retrospective.draft.is_some() {
-        changed |= runtime.set_reactive("RETRO", "position", Value::Number(app.state.note_audition.position())).effects_dirty;
-        if let Some(error) = app.state.note_audition.take_error() {
-            changed |= present_retro(runtime, |r| r.error = error);
-        }
+    if app.retrospective.draft.is_none() {
+        return false;
     }
-    changed
+    match app.state.note_audition.take_error() {
+        Some(error) => present_retro(runtime, |r| r.error = error),
+        None => false,
+    }
 }

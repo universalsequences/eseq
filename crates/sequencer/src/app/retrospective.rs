@@ -427,7 +427,7 @@ impl App {
             current.scene_slots.clone(), Default::default());
         snapshot.transport.bpm = prepared.bpm;
         self.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
-            snapshot, steps: prepared.steps,
+            snapshot, steps: prepared.steps, span: (start, end),
         });
         Ok(())
     }

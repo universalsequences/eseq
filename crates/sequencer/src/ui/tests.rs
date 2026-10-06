@@ -6678,15 +6678,6 @@
                                 next_playhead,
                                 STEP_COUNT,
                             );
-                            // The rest of the real tick's per-frame playing
-                            // work that moves with the playhead.
-                            rt.set_reactive(
-                                "SEQ",
-                                "transport-playhead",
-                                Value::Number(
-                                    state.transport.playhead.load(Ordering::Relaxed) as f64,
-                                ),
-                            );
                         }
                         let _ = sync_piano_roll_playhead(
                             editor.runtime_mut(),

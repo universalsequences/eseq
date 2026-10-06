@@ -599,6 +599,7 @@ pub(super) fn live_value<S: KindStore>(
             }),
             f::RETRO_PLAYING => Value::Bool(sources.state.note_audition.generation() != 0),
             f::RETRO_POSITION => number(sources.state.note_audition.position()),
+            f::RETRO_PLAYHEAD => number(sources.state.note_audition.playhead()),
             f::SONG_SCENE_LATCHED => Value::Bool(sources.state.song_scene_latch()),
             f::SELECTION_AUTO_FOLLOW => {
                 Value::Bool(auto_follow_enabled(&sources.auto_follow_override_until))

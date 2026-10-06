@@ -11,7 +11,7 @@
 //! fields only when that generation moved (`host_kinds::presentation`).
 //!
 //! The legacy reactive names (`SEQ.editor-*`, `SEQ.learn-*`, `EXPORT`,
-//! `AUDIO`, `MIDI`, `AGENT`, `RETRO`) are a mirror: after each typed edit the
+//! `AUDIO`, `MIDI`, `AGENT`) are a mirror: after each typed edit the
 //! mutator writes the legacy fields that changed, derived from the record by
 //! [`legacy`], which holds every legacy name. Their registrations derive
 //! their defaults from the record too. Removing the legacy names
@@ -26,8 +26,7 @@ mod legacy;
 
 pub(crate) use fixture::register as register_fixture_native;
 pub(crate) use legacy::{
-    agent_registration, export_registration, retro_registration, seq_registration,
-    settings_registration,
+    agent_registration, export_registration, seq_registration, settings_registration,
 };
 
 use crate::app::sound_palette::{PaletteEntry, PaletteTarget};
@@ -137,7 +136,7 @@ pub(crate) fn present_learn(rt: &mut Runtime, edit: impl FnOnce(&mut LearnView))
 
 /// Edit the MIDI capture.
 pub(crate) fn present_retro(rt: &mut Runtime, edit: impl FnOnce(&mut RetroView)) -> bool {
-    present(rt, |p| &mut p.retro, edit, legacy::mirror_retro)
+    present(rt, |p| &mut p.retro, edit, legacy::unmirrored)
 }
 
 /// Edit the song export.

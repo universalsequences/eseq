@@ -5,4 +5,4 @@
 
 (load "retrospective-preview.lisp")
 (def capture-after-sync ()
-  (eseq.retrospective/open 20 24))
+  (eseq.retrospective/open 20 24 30))
