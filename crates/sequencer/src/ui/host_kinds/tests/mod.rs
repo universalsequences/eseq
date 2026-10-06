@@ -450,6 +450,7 @@ mod scenes;
 mod schema;
 mod settings;
 mod steps;
+mod table_editor;
 mod tracks;
 mod transport;
 mod views;

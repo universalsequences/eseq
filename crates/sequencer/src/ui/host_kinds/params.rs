@@ -765,6 +765,7 @@ impl HostKinds {
         let registered = {
             let mut shared = pusher.shared.borrow_mut();
             shared.devices.insert(device_id, source.clone());
+            shared.devices_generation += 1;
             if same_desc && existing.is_some() {
                 return false;
             }

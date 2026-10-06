@@ -2,10 +2,9 @@ use super::*;
 
 /// Editor-session props for a Filter Table device (eseq-dtx.8): present on
 /// the fx map as `:editor` only when the single active response-editor
-/// session is bound to this node. Band geometry is translated to the
-/// response-curve-editor's axes here (freq = harmonic-bin position
-/// `2^center_oct * 24`, q = `2 / width_oct`) so the lisp stays arithmetic-
-/// free.
+/// session is bound to this node. Band geometry is on the
+/// response-curve-editor's axes (`ParametricNode::curve_band`, shared with
+/// the host kinds' `table-editor`) so the lisp stays arithmetic-free.
 fn filter_table_editor_value(node_id: i32) -> Option<Value> {
     use std::collections::HashMap;
     let ui = sequencer::effects::filter_table_editor::session_ui_state()?;
@@ -20,32 +19,24 @@ fn filter_table_editor_value(node_id: i32) -> Option<Value> {
     put("frames", Value::Number(ui.frames as f64));
     put("selected-frame", Value::Number(ui.selected_frame as f64));
     // wavetable-viewer highlights via a normalized 0..1 wave position.
-    let normalized = if ui.frames > 1 {
-        ui.selected_frame as f64 / (ui.frames - 1) as f64
-    } else {
-        0.0
-    };
-    put("selected-frame-normalized", Value::Number(normalized));
+    put(
+        "selected-frame-normalized",
+        Value::Number(ui.selected_frame_normalized()),
+    );
     put("can-undo", Value::Bool(ui.can_undo));
     put("can-redo", Value::Bool(ui.can_redo));
     put("dirty", Value::Bool(ui.dirty));
     put("op-count", Value::Number(ui.op_count as f64));
     if let Some(node) = ui.band {
+        let curve = node.curve_band();
         let mut band: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         let mut put_band = |key: &str, value: Value| {
             band.insert(key.to_string(), Rc::new(RefCell::new(value)));
         };
-        let reference = sequencer::effects::filter_table::REFERENCE_HARMONIC as f64;
-        put_band("kind", Value::String(node.kind.tag().to_string()));
-        put_band(
-            "freq",
-            Value::Number((f64::from(node.center_oct).exp2() * reference).clamp(1.0, 1024.0)),
-        );
-        put_band("gain", Value::Number(f64::from(node.gain_db)));
-        put_band(
-            "q",
-            Value::Number((2.0 / f64::from(node.width_oct)).clamp(0.25, 16.0)),
-        );
+        put_band("kind", Value::String(curve.kind.tag().to_string()));
+        put_band("freq", Value::Number(curve.freq));
+        put_band("gain", Value::Number(curve.gain));
+        put_band("q", Value::Number(curve.q));
         put("band", Value::Map(band));
     }
     Some(Value::Map(map))

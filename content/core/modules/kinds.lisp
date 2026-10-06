@@ -58,7 +58,10 @@
         piano-roll add-note! delete-notes! pitch-min pitch-max
         graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
         set-group-coupling! gate-generator! graph-timebase-options graph-quantize-options
-        graph-max-poly-selection-options)
+        graph-max-poly-selection-options
+        table-editor table-editor-open! table-editor-close! table-editor-band!
+        table-editor-op! table-editor-add-node! table-editor-frame! table-editor-undo!
+        table-editor-redo! table-editor-save!)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -300,6 +303,10 @@
   (host-command "sound-rename" (dict :track-id s.track.tid :kind "patch" :entity s.patch-id :name v)))
 (def set-editor-run-mode (e v)
   (host-command "set-draft-instrument-run-mode" (dict :run-mode v)))
+;; The Filter Table response editor's frame: a whole number below te.frames
+;; (else an error that changes nothing); needs an open session.
+(def set-table-editor-selected-frame (te v)
+  (host-command "filter-table-editor-frame" (dict :frame v)))
 ;; Patch Learn's training settings: one of the method or refine mode options,
 ;; an integer in the field's range (cma-population 0 or at least 4), a sigma
 ;; above 0 up to 10, a positive pitch or gate length; anything else is an error.
@@ -616,6 +623,28 @@
          (index  :int)
          (slot   :int    :doc "The modulation source (1-4) it is")
          (label  :string :doc "The name the panel shows")))
+
+;; The Filter Table response editor session: one at a time, bound to one
+;; Filter Table device ((table-editor-open! d)); its edits are the
+;; table-editor-…! actions. While closed every field reads nil, false, 0 or
+;; empty. The band is the newest edit when it is a parametric node, on the
+;; response-curve-editor's axes.
+(def-kind table-editor
+  :key ()
+  :host ((device device :doc "The Filter Table it edits; nil while closed")
+         (open :bool :doc "A session is open")
+         (frames :int :doc "The document's frame count")
+         (selected-frame :int :set set-table-editor-selected-frame
+                         :doc "The frame frame ops act on, from 0")
+         (selected-frame-normalized :number :doc "selected-frame as a 0-1 wave position (a wavetable-viewer's :wave)")
+         (can-undo :bool :doc "The editor's own history can step back")
+         (can-redo :bool)
+         (dirty :bool :doc "Edits not saved yet (closing rolls them back)")
+         (op-count :int :doc "Edits in the document")
+         (band-kind :string :doc "The band's kind: peak, notch, lowpass, highpass or tilt; empty when the newest edit is no parametric node")
+         (band-freq :number :doc "The band's position as a harmonic bin, 1-1024 (a response-curve-editor band's :freq); 0 without a band")
+         (band-gain :number :doc "The band's gain in dB; 0 without a band")
+         (band-q :number :doc "The band's q, 0.25-16 (2 / its width in octaves); 0 without a band")))
 
 ;; A process class of the library (process-library.classes): what
 ;; (add-process! t c) adds.
@@ -1859,3 +1888,37 @@
 (def learn-method-options
   '("Local fit + basin check" "Evolutionary search only" "Evolutionary search + training"))
 (def learn-refine-mode-options '("Batched" "Scalar" "Auto"))
+
+;; ── The Filter Table response editor ──
+
+;; Open the response editor on Filter Table d (a track's or a bus's effect),
+;; closing (and rolling back) a session open elsewhere.
+(def table-editor-open! (d)
+  (host-command "filter-table-editor-open" (device-target d)))
+;; Close the session; unsaved edits are rolled back.
+(def table-editor-close! () (host-command "filter-table-editor-close" (dict)))
+;; Drag the band to freq (a harmonic bin), gain (dB) and q, as kind: the
+;; newest edit when it is a band, else a new one. phase change auditions
+;; without an edit; commit makes it one.
+(def table-editor-band! (kind freq gain q &key (phase "change"))
+  (host-command "filter-table-editor-band"
+    (dict :phase phase :kind kind :freq freq :gain gain :q q)))
+;; Apply op kind (smooth-spectral, smooth-temporal, normalize, tilt, shift,
+;; stretch, insert-frame, duplicate-frame, delete-frame, move-frame,
+;; interpolate, draw) with its options (:frame-start, :frame-end, :value,
+;; :radius, :to, :start, :end, :frame, :points-json); frame ops act on
+;; te.selected-frame.
+(def table-editor-op! (kind &rest options)
+  (host-command "filter-table-editor-op" (apply merge (dict :kind kind) options)))
+;; Add a band of kind (peak, notch, lowpass, highpass, tilt) at its default.
+(def table-editor-add-node! (kind)
+  (host-command "filter-table-editor-add-node" (dict :kind kind)))
+;; Select frame (as (set! te.selected-frame frame)).
+(def table-editor-frame! (frame) (set-table-editor-selected-frame nil frame))
+;; Step the editor's own history (not the project's).
+(def table-editor-undo! () (host-command "filter-table-editor-undo" (dict)))
+(def table-editor-redo! () (host-command "filter-table-editor-redo" (dict)))
+;; Save the document as a user table asset named name (nil: the table's
+;; name) and load it into the device: one project undo entry.
+(def table-editor-save! (&key (name nil))
+  (host-command "filter-table-editor-save" (if name (dict :name name) (dict))))

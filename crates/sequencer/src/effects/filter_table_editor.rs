@@ -22,7 +22,8 @@
 //! table load.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -161,6 +162,30 @@ impl ParametricNode {
         }
         Ok(())
     }
+
+    /// This node on the response-curve-editor's axes (the band handle the
+    /// panel draws): what the effects panel's `:editor` map and the
+    /// `table-editor` kind both show.
+    pub fn curve_band(&self) -> CurveBand {
+        let reference = REFERENCE_HARMONIC as f64;
+        CurveBand {
+            kind: self.kind,
+            freq: (f64::from(self.center_oct).exp2() * reference).clamp(1.0, 1024.0),
+            gain: f64::from(self.gain_db),
+            q: (2.0 / f64::from(self.width_oct)).clamp(0.25, 16.0),
+        }
+    }
+}
+
+/// A [`ParametricNode`] on the response-curve-editor's axes: `freq` the
+/// harmonic-bin position `2^center_oct * REFERENCE_HARMONIC` (1–1024), `gain`
+/// in dB, `q` = `2 / width_oct` (0.25–16).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveBand {
+    pub kind: ParametricKind,
+    pub freq: f64,
+    pub gain: f64,
+    pub q: f64,
 }
 
 /// One undoable edit. Frame ranges are inclusive and validated against the
@@ -874,16 +899,51 @@ pub struct EditorSession {
 
 static SESSION: Mutex<Option<EditorSession>> = Mutex::new(None);
 
+/// Moved, while the lock is held, by every access that can change the
+/// session: a [`with_session`] of a live session (which may mutate it;
+/// read-only accesses use [`read_session`] or [`session_ui_state`], which
+/// move nothing), [`set_session`], and a [`take_session_for_node`] that took
+/// one. A reader that saw a revision and then reads the session sees at
+/// least that state, so comparing revisions is the cheap "did it change"
+/// check (the host kinds' `table-editor`).
+static REVISION: AtomicU64 = AtomicU64::new(0);
+
+fn lock_session() -> MutexGuard<'static, Option<EditorSession>> {
+    SESSION.lock().expect("editor session lock")
+}
+
+fn bump_revision() {
+    REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The session's revision (see [`REVISION`]).
+pub fn session_revision() -> u64 {
+    REVISION.load(Ordering::Relaxed)
+}
+
+/// Read the session without moving its revision (nothing here can change
+/// it).
+pub fn read_session<T>(reader: impl FnOnce(Option<&EditorSession>) -> T) -> T {
+    reader(lock_session().as_ref())
+}
+
 pub fn with_session<T>(
     reader: impl FnOnce(Option<&mut EditorSession>) -> T,
 ) -> T {
-    let mut guard = SESSION.lock().expect("editor session lock");
-    reader(guard.as_mut())
+    let mut guard = lock_session();
+    let live = guard.is_some();
+    let result = reader(guard.as_mut());
+    if live {
+        bump_revision();
+    }
+    result
 }
 
 pub fn set_session(session: Option<EditorSession>) -> Option<EditorSession> {
-    let mut guard = SESSION.lock().expect("editor session lock");
-    std::mem::replace(&mut *guard, session)
+    let mut guard = lock_session();
+    let replaced = std::mem::replace(&mut *guard, session);
+    bump_revision();
+    replaced
 }
 
 /// Take the session bound to `node_id` out of the registry, leaving no
@@ -891,17 +951,18 @@ pub fn set_session(session: Option<EditorSession>) -> Option<EditorSession> {
 /// destroyed (rolling back would write to a dead node) and to carry one
 /// across a node rebuild — see `App::set_track_filter_table_engine`.
 pub fn take_session_for_node(node_id: i32) -> Option<EditorSession> {
-    let mut guard = SESSION.lock().expect("editor session lock");
+    let mut guard = lock_session();
     if guard.as_ref().is_some_and(|session| session.node_id == node_id) {
+        bump_revision();
         guard.take()
     } else {
         None
     }
 }
 
-/// Session info for the effects-panel value builder: `(target, node_id,
-/// frame_count, selected_frame, can_undo, can_redo, dirty, last parametric
-/// node if that is the newest op)`.
+/// Session info for the effects-panel value builder and the host kinds'
+/// `table-editor`: the target, its node, the frame count and selection, the
+/// history flags, and the newest op's parametric node when it is one.
 pub struct SessionUiState {
     pub target: EditorTarget,
     pub node_id: i32,
@@ -914,22 +975,33 @@ pub struct SessionUiState {
     pub band: Option<ParametricNode>,
 }
 
+impl SessionUiState {
+    /// The selected frame as a 0..1 wave position (what the
+    /// wavetable-viewer highlights); 0 for a one-frame document.
+    pub fn selected_frame_normalized(&self) -> f64 {
+        if self.frames > 1 {
+            self.selected_frame as f64 / (self.frames - 1) as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+/// The session's state, read without moving its revision.
 pub fn session_ui_state() -> Option<SessionUiState> {
-    with_session(|session| {
-        session.map(|session| SessionUiState {
-            target: session.target,
-            node_id: session.node_id,
-            frames: session.doc.frame_count(),
-            selected_frame: session.selected_frame,
-            can_undo: session.doc.can_undo(),
-            can_redo: session.doc.can_redo(),
-            dirty: session.dirty,
-            op_count: session.doc.op_count(),
-            band: match session.doc.last_applied() {
-                Some(EditOp::Parametric { node, .. }) => Some(*node),
-                _ => None,
-            },
-        })
+    lock_session().as_ref().map(|session| SessionUiState {
+        target: session.target,
+        node_id: session.node_id,
+        frames: session.doc.frame_count(),
+        selected_frame: session.selected_frame,
+        can_undo: session.doc.can_undo(),
+        can_redo: session.doc.can_redo(),
+        dirty: session.dirty,
+        op_count: session.doc.op_count(),
+        band: match session.doc.last_applied() {
+            Some(EditOp::Parametric { node, .. }) => Some(*node),
+            _ => None,
+        },
     })
 }
 
@@ -1053,6 +1125,74 @@ mod tests {
         );
         crate::effects::filter_table::clear_instance(node_id);
         assert!(session_ui_state().is_none(), "session outlived its node");
+    }
+
+    #[test]
+    fn the_session_revision_moves_with_every_access_that_can_change_it() {
+        let _registry = crate::effects::filter_table::tests::registry_lock();
+        let node_id = i32::MAX - 29;
+        set_session(None);
+        let closed = session_revision();
+        with_session(|session| assert!(session.is_none()));
+        assert_eq!(session_revision(), closed, "no session, nothing to change");
+        set_session(Some(EditorSession {
+            target: EditorTarget::Bus { bus: 0, slot: 1 },
+            node_id,
+            doc: flat_doc(-12.0),
+            selected_frame: 0,
+            original_table: std::sync::Arc::new(default_table()),
+            original_ref: crate::effects::filter_table::DEFAULT_TABLE_REF.to_string(),
+            original_name: "table".to_string(),
+            dirty: false,
+        }));
+        let open = session_revision();
+        assert_ne!(open, closed);
+        assert!(session_ui_state().is_some());
+        read_session(|session| assert!(session.is_some()));
+        assert_eq!(session_revision(), open, "reading the state moves nothing");
+        with_session(|session| session.expect("session").selected_frame = 1);
+        let edited = session_revision();
+        assert_ne!(edited, open);
+        assert!(take_session_for_node(node_id + 1).is_none());
+        assert_eq!(session_revision(), edited, "another node's teardown");
+        assert!(take_session_for_node(node_id).is_some());
+        assert_ne!(session_revision(), edited);
+    }
+
+    #[test]
+    fn a_band_and_the_frame_selection_translate_to_the_curve_editors_axes() {
+        let node = ParametricNode {
+            kind: ParametricKind::Notch,
+            center_oct: 1.0,
+            width_oct: 0.5,
+            gain_db: -9.0,
+        };
+        let band = node.curve_band();
+        assert_eq!(band.kind, ParametricKind::Notch);
+        assert_eq!(band.freq, 2.0 * REFERENCE_HARMONIC as f64);
+        assert_eq!((band.gain, band.q), (-9.0, 4.0));
+        let clamped = ParametricNode {
+            center_oct: 12.0,
+            width_oct: 8.0,
+            ..node
+        }
+        .curve_band();
+        assert_eq!((clamped.freq, clamped.q), (1024.0, 0.25));
+        let mut ui = SessionUiState {
+            target: EditorTarget::Track { track: 0, slot: 0 },
+            node_id: 1,
+            frames: 5,
+            selected_frame: 2,
+            can_undo: false,
+            can_redo: false,
+            dirty: false,
+            op_count: 0,
+            band: None,
+        };
+        assert_eq!(ui.selected_frame_normalized(), 0.5);
+        ui.frames = 1;
+        ui.selected_frame = 0;
+        assert_eq!(ui.selected_frame_normalized(), 0.0);
     }
 
     #[test]

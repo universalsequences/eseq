@@ -460,6 +460,15 @@ pub(super) fn handle(
             let track = extract_usize_from_payload(&payload, "track");
             let slot = extract_usize_from_payload(&payload, "slot");
             let result = (|| -> Result<(), String> {
+                // A host kinds' `device-target` (`table-editor-open!`): the
+                // device by its owner's stable id and did, resolved now.
+                if let Value::Map(map) = &payload {
+                    if map.contains_key("device") {
+                        let addressed = super::devices::addressed(app, map)?;
+                        let target = filter_table_editor_target(app, &addressed)?;
+                        return app.open_filter_table_editor(target);
+                    }
+                }
                 let slot = slot.ok_or_else(|| "need a slot".to_string())?;
                 let target = if let Some(bus) = bus {
                     EditorTarget::Bus { bus, slot }
@@ -586,8 +595,7 @@ pub(super) fn handle(
             }
         }
         "filter-table-editor-frame" => {
-            let result = extract_usize_from_payload(&payload, "frame")
-                .ok_or_else(|| "need a frame".to_string())
+            let result = filter_table_editor_frame_from_payload(&payload)
                 .and_then(|frame| app.filter_table_editor_select_frame(frame));
             match result {
                 Ok(()) => {
@@ -2550,6 +2558,45 @@ fn refresh_filter_table_editor_panels(
         }
         None => {}
     }
+}
+
+/// A `filter-table-editor-frame` payload's `:frame`: a whole number from 0
+/// (the value rule: a fraction or a negative is an error, never truncated).
+fn filter_table_editor_frame_from_payload(payload: &Value) -> Result<usize, String> {
+    let Value::Map(map) = payload else {
+        return Err("need a frame".to_string());
+    };
+    let frame = map.get("frame").map(|cell| cell.borrow().clone());
+    match frame {
+        Some(Value::Number(frame)) if frame >= 0.0 && frame.fract() == 0.0 => Ok(frame as usize),
+        Some(Value::Number(frame)) => Err(format!("frame {frame} is not a frame index")),
+        _ => Err("need a frame".to_string()),
+    }
+}
+
+/// The editor target of an addressed device: a track's or a bus's Filter
+/// Table (the session targets nothing else).
+fn filter_table_editor_target(
+    app: &app::App,
+    addressed: &super::devices::Addressed,
+) -> Result<sequencer::effects::filter_table_editor::EditorTarget, String> {
+    use sequencer::effects::filter_table_editor::EditorTarget;
+    let owner = addressed.owner;
+    let target = match addressed.device {
+        DeviceSlot::Effect(slot) => EditorTarget::Track { track: owner, slot },
+        DeviceSlot::BusEffect(slot) => EditorTarget::Bus { bus: owner, slot },
+        DeviceSlot::Instrument
+        | DeviceSlot::MidiFx(_)
+        | DeviceSlot::RackSlot(_)
+        | DeviceSlot::RackEffect { .. } => {
+            return Err("only a track's or a bus's effect has a response editor".to_string())
+        }
+    };
+    let desc = addressed.device.descriptor(app, owner, &[]);
+    if !desc.is_some_and(|desc| desc.name == sequencer::effects::filter_table::NAME) {
+        return Err("not a Filter Table".to_string());
+    }
+    Ok(target)
 }
 
 /// Translate a `filter-table-editor-band` payload (response-curve-editor

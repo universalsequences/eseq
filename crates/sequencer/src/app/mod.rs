@@ -1158,6 +1158,9 @@ pub struct App {
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
     pub sound_binding_epoch: usize,
+    /// Where the Filter Table editor saves its assets; `None` is the user
+    /// library (tests point it at scratch space).
+    pub filter_table_save_dir: Option<std::path::PathBuf>,
 }
 
 struct RecordingHistoryTransaction {
@@ -2948,6 +2951,7 @@ impl App {
             pending_drag: None,
             history_replays: 0,
             sound_binding_epoch: 0,
+            filter_table_save_dir: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

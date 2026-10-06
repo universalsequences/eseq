@@ -33,6 +33,9 @@ pub(crate) struct KindsShared {
     /// What each device instance's params read, as of the last model sync
     /// (descriptors and where the values live; see [`DeviceSource`]).
     pub(super) devices: HashMap<InstanceId, Rc<DeviceSource>>,
+    /// Moved whenever `devices` gains, replaces or loses an entry (what a
+    /// device resolved by its effect node reads: `table-editor.device`).
+    pub(super) devices_generation: u64,
     /// The devices whose params are registered (`d.params` read or
     /// observed once); their `params` is then a model field.
     pub(super) param_devices: HashSet<InstanceId>,
@@ -612,6 +615,7 @@ pub(super) fn live_value<S: KindStore>(
         VARIANT => variant_live_value(store, sources, shared, id, key)?,
         PROCESS | STATE_CELL => lane_live_value(sources, shared, id, key)?,
         GRAPH | GRAPH_NODE => graph_live_value(store, sources, shared, id, key)?,
+        TABLE_EDITOR => table_editor_live_value(store, sources, shared, key)?,
         RACK_MACRO => rack_macro_live_value(store, sources, shared, id, key)?,
         PARAM => {
             let &[device_id, index] = store.key_of(id)? else {

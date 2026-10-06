@@ -29,7 +29,11 @@ impl HostKinds {
         {
             let rt = &*pusher.rt;
             let mut shared = pusher.shared.borrow_mut();
+            let listed = shared.devices.len();
             shared.devices.retain(|id, _| rt.instance_is_live(*id));
+            if shared.devices.len() != listed {
+                shared.devices_generation += 1;
+            }
             shared.param_devices.retain(|id| rt.instance_is_live(*id));
             shared.effect_slots.clear();
             let slots = app.graph.effect_descriptors.iter().map(Vec::len);

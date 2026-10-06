@@ -2554,7 +2554,7 @@ Built (7b-3):
   (waveform buffer, slices, onsets, analysis, selection times), the
   sound-binding badge and display name, a modulator instrument's phase and
   level, the fixed modulators' labels, param UI metadata, effect tables and
-  IR names, the built-in effect editors (eseq-0l17.56), the meter selector,
+  IR names, the built-in effect editors (eseq-0l17.56, built: §14.2p), the meter selector,
   scene macro config setters and `step.variant`. Rack macro edits are not
   undoable (eseq-0l17.44).
 - eseqlisp strings have no `\"` escape: a quote escaped in a string (a
@@ -3239,8 +3239,79 @@ Built (7b-4):
   so a variant gone since never leaves a stale instance behind.
 - **Not covered:** the built-in effect editors' host state, the Filter
   Table response editor session (`filter_table_editor_value`, the fx
-  dict's `:editor`; eseq-0l17.56). EQ8's editor reads no host state but its
-  params and `device.meter`.
+  dict's `:editor`; eseq-0l17.56, built: §14.2p). EQ8's editor reads no
+  host state but its params and `device.meter`.
+
+### 14.2p Built in stage 7b-5 (eseq-0l17.56)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `table-editor` | `()` | all (L): `device device` (nil while closed), `open :bool`, `frames :int`, `selected-frame :int` [`filter-table-editor-frame`], `selected-frame-normalized :number`, `can-undo`, `can-redo`, `dirty :bool`, `op-count :int`, `band-kind :string` (empty: no band), `band-freq`, `band-gain`, `band-q :number` (0: no band) |
+
+Actions (the legacy `filter-table-editor-*` host commands, their payload
+shapes): `(table-editor-open! d)`, `(table-editor-close!)`,
+`(table-editor-band! kind freq gain q &key (phase "change"))`,
+`(table-editor-op! kind &rest options)` (`:frame-start`, `:frame-end`,
+`:value`, `:radius`, `:to`, `:start`, `:end`, `:frame`, `:points-json`),
+`(table-editor-add-node! kind)`, `(table-editor-frame! frame)`,
+`(table-editor-undo!)`, `(table-editor-redo!)`,
+`(table-editor-save! &key (name nil))`.
+
+Built (7b-5):
+
+- **A singleton, not device fields.** The session is one global
+  (`filter_table_editor`), outside the `App`, bound to one effect node, so
+  it is the `:key ()` `table-editor` kind with its own observed mask (the
+  device kind's live mask is full) rather than `d.editor-*` fields nil on
+  every other device. `device` is the device instance whose effect node
+  the session edits (`editor_device`: a registered Filter Table whose
+  `effect_node` is the session's node); nil while closed, or while no
+  registered device names the node. `open` is whether a session exists
+  (the legacy map is present only on its device's panel: `te.device`
+  says which). While closed every field reads nil, false, 0 or empty.
+- **The band is flat.** The legacy `:band` map becomes `band-kind`,
+  `band-freq`, `band-gain`, `band-q` (the newest edit when it is a
+  parametric node; `band-kind` empty and the numbers 0 otherwise), on the
+  response-curve-editor's axes through `ParametricNode::curve_band` (freq
+  the harmonic-bin position `2^center_oct * 24`, 1–1024; q `2 / width`,
+  0.25–16), which the legacy `filter_table_editor_value` now shares, as it
+  shares `SessionUiState::selected_frame_normalized`.
+- **Feeds.** Every field is live. The session now has a revision
+  (`filter_table_editor::session_revision`), moved while the lock is held
+  by every access that can change it (a `with_session` of a live session,
+  `set_session`, a `take_session_for_node` that took one); read-only
+  accesses (`session_ui_state`, `read_session`: a band drag's preview, the
+  save's snapshot) move nothing, so a drag's previews read nothing (they
+  change nothing the kind shows). While a field is observed the tick
+  (`HostKinds::sync_table_editor`) compares (revision, the device sources'
+  generation `KindsShared::devices_generation`, the observed mask) with
+  its last read, and while a session is open checks the device binding:
+  the resolved device still names the session's node (one node read; a
+  bus effect's node comes from the bus mirror, which lags an engine swap
+  the session was reattached across), or, while none does, whether one
+  does now (a walk over the Filter Table devices). Only when one of those
+  moved does it read the session once, resolve the device and push the
+  observed fields (each compared with its cell). Unobserved, it reads
+  nothing; a cold read goes through the reader hook (`device`'s the only
+  one that walks the device sources).
+- **Actions and the setter.** Each action is the legacy host command with
+  its payload, so it applies, previews, coalesces (a band drag's commits
+  replace the band they started from) and refreshes the panels exactly as
+  the legacy view's buttons do; the editor's history is its own, and only
+  a save is a project undo entry (the recorded table load). Errors (no
+  session open, an unknown node kind or op) reach the status line.
+  `table-editor-open!` sends the device's `device-target`:
+  `filter-table-editor-open` now also takes `:track-id` / `:bus-id` and
+  `:device`, resolved when it lands (`devices::addressed`); only a
+  track's or a bus's Filter Table has an editor (another device is an
+  error). `(set! te.selected-frame n)` (and `table-editor-frame!`, the
+  same setter) is `filter-table-editor-frame` under the value rule: a
+  whole number below `frames` (a fraction or a negative is an error,
+  never truncated; out of range too; the current frame is a no-op).
+  `App::filter_table_save_dir` redirects saves (tests: scratch space; the
+  user library otherwise).
+- **Not ported:** the view (`content/ui/effects/builtin/filter-table.lisp`
+  still reads the fx dict's `:editor`); eseq-0l17.14 ports it.
 
 ### 14.3 Follow-up beads
 
@@ -3255,7 +3326,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-2c | eseq-0l17.54 (built) | a rack slot's base note (base, display, lock) and max-polyphony p-locks on the rack slot device | .14 .19 |
 | 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7b-4 | eseq-0l17.43 (built) | the rest of the panel data: sampler media (rack slot selection included), sound binding, display name, meter selector, fixed modulators and the modulator envelope, tables and IR names, param UI metadata, scene macro config setters and `diff-count`, `step.variant` | .14 .18 |
-| 7b-5 | eseq-0l17.56 | the built-in effect editors' host state (the Filter Table response editor session) | .14 |
+| 7b-5 | eseq-0l17.56 (built) | the built-in effect editors' host state: the `table-editor` singleton (the Filter Table response editor session) and its actions | .14 |
 | 7b-3a | eseq-0l17.44 | recorded (undoable) drum rack macro edits | .18 |
 | 7c | eseq-0l17.29 (built) | `process` (a track's chain), `lane`, `inlet`, `port`, `fanout`, `state-cell`, `process-class`, `process-library`; `track.processes` / `lanes` | .11 .14 .20 |
 | 7c-2 | eseq-0l17.45 | graph-node process slot probes and run errors (the node bay's scopes); needs 7g-2 | .11 .20 |
@@ -3376,7 +3447,7 @@ builds the field name.
 | `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels) | .13 .14 |
-| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) .56 | built (.28, .37, .43) | .14 .18 |
+| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) → table-editor (its `:band` → band-kind / band-freq / band-gain / band-q; which device: table-editor.device), the `filter-table-editor-*` commands → the `table-editor-…!` actions and `(set! te.selected-frame n)` (built .56) | built (.28, .37, .43, .56) | .14 .18 |
 | `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now) | .14 .17 .18 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) (built .37); a scene macro's `:target-scene` / `:morph-params` / `:steal-patterns` / `:quantize` / `:track-mask` → macro.target-scene / morph-params / steal-patterns / quantize / tracks, settable (`macro-scene-config` → their `set!`s), `:diff-count` → macro.diff-count (built .43) | built (.37, .43) | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |

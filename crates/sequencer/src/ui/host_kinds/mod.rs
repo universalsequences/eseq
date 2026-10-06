@@ -79,8 +79,9 @@
 //! tables, sampler media), `lanes`
 //! (process lanes), `presentation` (the browser, the sound palette, the
 //! editor and the app's views, from `ui::presented`), `notes` (the piano
-//! roll and its notes) and `graphs` (graph sequencers, active notes) the
-//! per-kind syncs.
+//! roll and its notes), `graphs` (graph sequencers, active notes) and
+//! `table_editor` (the Filter Table response editor session) the per-kind
+//! syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -104,6 +105,7 @@ mod registry;
 mod scenes;
 mod settings;
 mod steps;
+mod table_editor;
 mod tracks;
 mod variants;
 
@@ -126,6 +128,7 @@ use racks::RackState;
 use registry::*;
 use settings::*;
 use steps::*;
+use table_editor::*;
 use variants::*;
 
 /// The module declaring the host kinds.
@@ -200,6 +203,7 @@ pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
 pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
 pub(crate) const GRAPH_PARAM: &str = "eseq.kinds:graph-param";
 pub(crate) const MODULATOR: &str = "eseq.kinds:modulator";
+pub(crate) const TABLE_EDITOR: &str = "eseq.kinds:table-editor";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -894,6 +898,21 @@ pub(crate) mod f {
     pub(crate) const MODULATOR_SLOT: FieldKey = (MODULATOR, "slot");
     pub(crate) const MODULATOR_LABEL: FieldKey = (MODULATOR, "label");
 
+    pub(crate) const TABLE_EDITOR_DEVICE: FieldKey = (TABLE_EDITOR, "device");
+    pub(crate) const TABLE_EDITOR_OPEN: FieldKey = (TABLE_EDITOR, "open");
+    pub(crate) const TABLE_EDITOR_FRAMES: FieldKey = (TABLE_EDITOR, "frames");
+    pub(crate) const TABLE_EDITOR_SELECTED_FRAME: FieldKey = (TABLE_EDITOR, "selected-frame");
+    pub(crate) const TABLE_EDITOR_SELECTED_FRAME_NORMALIZED: FieldKey =
+        (TABLE_EDITOR, "selected-frame-normalized");
+    pub(crate) const TABLE_EDITOR_CAN_UNDO: FieldKey = (TABLE_EDITOR, "can-undo");
+    pub(crate) const TABLE_EDITOR_CAN_REDO: FieldKey = (TABLE_EDITOR, "can-redo");
+    pub(crate) const TABLE_EDITOR_DIRTY: FieldKey = (TABLE_EDITOR, "dirty");
+    pub(crate) const TABLE_EDITOR_OP_COUNT: FieldKey = (TABLE_EDITOR, "op-count");
+    pub(crate) const TABLE_EDITOR_BAND_KIND: FieldKey = (TABLE_EDITOR, "band-kind");
+    pub(crate) const TABLE_EDITOR_BAND_FREQ: FieldKey = (TABLE_EDITOR, "band-freq");
+    pub(crate) const TABLE_EDITOR_BAND_GAIN: FieldKey = (TABLE_EDITOR, "band-gain");
+    pub(crate) const TABLE_EDITOR_BAND_Q: FieldKey = (TABLE_EDITOR, "band-q");
+
     pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
     pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
     pub(crate) const PARAM_NAME: FieldKey = (PARAM, "name");
@@ -1329,6 +1348,22 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::MODULATOR_INDEX, ":int", Model),
     (f::MODULATOR_SLOT, ":int", Model),
     (f::MODULATOR_LABEL, ":string", Model),
+    // The Filter Table response editor session (`table_editor`): the one
+    // global session, read per tick while observed when its revision (or
+    // the device sources) moved.
+    (f::TABLE_EDITOR_DEVICE, "device", Live),
+    (f::TABLE_EDITOR_OPEN, ":bool", Live),
+    (f::TABLE_EDITOR_FRAMES, ":int", Live),
+    (f::TABLE_EDITOR_SELECTED_FRAME, ":int", Live),
+    (f::TABLE_EDITOR_SELECTED_FRAME_NORMALIZED, ":number", Live),
+    (f::TABLE_EDITOR_CAN_UNDO, ":bool", Live),
+    (f::TABLE_EDITOR_CAN_REDO, ":bool", Live),
+    (f::TABLE_EDITOR_DIRTY, ":bool", Live),
+    (f::TABLE_EDITOR_OP_COUNT, ":int", Live),
+    (f::TABLE_EDITOR_BAND_KIND, ":string", Live),
+    (f::TABLE_EDITOR_BAND_FREQ, ":number", Live),
+    (f::TABLE_EDITOR_BAND_GAIN, ":number", Live),
+    (f::TABLE_EDITOR_BAND_Q, ":number", Live),
     (f::PARAM_DEVICE, "device", Model),
     (f::PARAM_INDEX, ":int", Model),
     (f::PARAM_NAME, ":string", Model),
@@ -1983,6 +2018,8 @@ pub(super) static PIANO_ROLL_LIVE: LazyLock<LiveFields> =
 pub(super) static GRAPH_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(GRAPH));
 pub(super) static GRAPH_NODE_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(GRAPH_NODE));
+pub(super) static TABLE_EDITOR_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(TABLE_EDITOR));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -2323,6 +2360,8 @@ pub(crate) struct HostKinds {
     pub(crate) piano_roll: PianoRollState,
     /// Graph sequencers: graphs, nodes, edges, params; active notes.
     pub(crate) graphs: GraphState,
+    /// The Filter Table response editor session.
+    pub(crate) table_editor: TableEditorState,
 }
 
 impl HostKinds {
@@ -2410,6 +2449,7 @@ impl HostKinds {
             self.presented.invalidate();
             self.piano_roll.invalidate();
             self.graphs.invalidate(&self.shared);
+            self.table_editor.invalidate();
         }
         if self
             .song
@@ -2524,6 +2564,7 @@ impl HostKinds {
         self.sync_cell_live(&mut pusher);
         self.sync_rack_live(&mut pusher);
         self.sync_graph_live(&mut pusher);
+        self.sync_table_editor(&mut pusher);
         let singletons = [
             (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
