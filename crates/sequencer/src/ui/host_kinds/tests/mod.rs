@@ -437,6 +437,7 @@ mod arrangement;
 mod browser;
 mod browser_view;
 mod devices;
+mod focus_steps;
 mod graph;
 mod lanes;
 mod mixer;

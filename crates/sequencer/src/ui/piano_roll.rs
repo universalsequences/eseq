@@ -6,7 +6,7 @@ use eseqlisp::Runtime;
 
 use sequencer::app::focus::EditFocus;
 use sequencer::sequencer::{
-    PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS,
+    PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS, NUM_PARAMS,
 };
 
 use super::state_values::{held_plock_value, rack_macro_name_field, rack_macro_short_name_field};
@@ -16,6 +16,12 @@ pub(crate) const PIANO_ROLL_ID_STRIDE: usize = 16;
 pub(crate) const PIANO_ROLL_MIN_TRANSPOSE: i32 = -48;
 pub(crate) const PIANO_ROLL_MAX_TRANSPOSE: i32 = 48;
 pub(crate) const PIANO_ROLL_MIN_DURATION: f32 = 0.03125;
+
+/// One step's parameters, by `StepParam::index`.
+pub(crate) type StepValues = [f32; NUM_PARAMS];
+
+/// One step's notes and parameters ([`PianoRollLanes::step_rows_batch`]).
+pub(crate) type StepRow = (Vec<PianoRollNote>, StepValues);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PianoRollNote {
@@ -221,20 +227,20 @@ impl PianoRollLanes {
         )
     }
 
-    /// [`Self::note_entries_batch`] with each step's velocity, read under
-    /// the same lock.
-    pub(crate) fn note_rows_batch(&self, num_steps: usize) -> Vec<(Vec<PianoRollNote>, f32)> {
-        let velocity = StepParam::Velocity;
+    /// [`Self::note_entries_batch`] with each step's parameters (by
+    /// `StepParam::index`), read under the same lock.
+    pub(crate) fn step_rows_batch(&self, num_steps: usize) -> Vec<StepRow> {
         self.steps_batch(
             num_steps,
             |step| {
-                let value = self.state.pattern.step_data[self.track].get(step, velocity);
-                (live_note_entries(&self.state, self.track, step), value)
+                let data = &self.state.pattern.step_data[self.track];
+                let values = StepParam::ALL.map(|param| data.get(step, param));
+                (live_note_entries(&self.state, self.track, step), values)
             },
             |data, step| {
-                let value = (data.step_data.get(step))
-                    .map_or(velocity.default_value(), |params| params[velocity.index()]);
-                (data_note_entries(data, step), value)
+                let values = (data.step_data.get(step).copied())
+                    .unwrap_or_else(|| StepParam::ALL.map(StepParam::default_value));
+                (data_note_entries(data, step), values)
             },
         )
     }
@@ -1489,6 +1495,22 @@ fn automation_column_row(
     map_value(entries)
 }
 
+/// Where `step`'s notes sound on the focus axis (the automation lane's
+/// point): from its earliest note's onset to where its last note ends;
+/// `(step, step)` when it holds none. Shared by the legacy lane and the
+/// host kinds' `focus-step.start` / `end`.
+pub(crate) fn piano_roll_step_span(step: usize, notes: &[PianoRollNote]) -> (f32, f32) {
+    let at = step as f32;
+    let Some(delay) = notes.iter().map(|note| note.delay).reduce(f32::min) else {
+        return (at, at);
+    };
+    let start = at + piano_roll_sanitize_delay(delay);
+    let end = (notes.iter())
+        .map(|note| at + note.delay + note.duration)
+        .fold(start, f32::max);
+    (start, end)
+}
+
 /// The lane body for `key`: scale, edit permission and one point per
 /// contributing step. Falls back to velocity when the key no longer resolves
 /// (the lock that put a device param in the list was cleared, or the track's
@@ -1556,19 +1578,7 @@ pub(crate) fn build_piano_roll_automation_value(
                     }
                 }
             };
-            let delay = notes
-                .iter()
-                .map(|note| note.delay)
-                .fold(f32::INFINITY, f32::min);
-            let start = if active {
-                step as f32 + piano_roll_sanitize_delay(delay)
-            } else {
-                step as f32
-            };
-            let end = notes
-                .iter()
-                .map(|note| step as f32 + note.delay + note.duration)
-                .fold(start, f32::max);
+            let (start, end) = piano_roll_step_span(step, &notes);
             points.push(map_value([
                 ("step", Value::Number(step as f64)),
                 ("start", Value::Number(start as f64)),

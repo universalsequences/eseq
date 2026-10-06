@@ -56,7 +56,9 @@
 //! macros keyed (rack instrument device instance id, index), macro mappings
 //! (macro instance id, position). The piano roll's notes are keyed (track instance id,
 //! note id), an id the host allocates per (step, transpose, offset) while a
-//! note sits there and the note setters move with it (`notes`). Graph
+//! note sits there and the note setters move with it (`notes`); its focus
+//! steps are positional, keyed (track instance id, index) under the piano
+//! roll's track and lazy like steps (`focus_steps`). Graph
 //! sequencers are positional, kept by sequencer id (replaced on a project
 //! load), their nodes keyed (graph instance id, node index), edges (node
 //! instance id, target index) and params (node or edge instance id, a key
@@ -81,9 +83,9 @@
 //! tables, sampler media), `lanes`
 //! (process lanes), `presentation` (the browser, the sound palette, the
 //! editor and the app's views, from `ui::presented`), `notes` (the piano
-//! roll and its notes), `graphs` (graph sequencers, active notes) and
-//! `table_editor` (the Filter Table response editor session) the per-kind
-//! syncs.
+//! roll and its notes), `focus_steps` (the piano roll's steps), `graphs`
+//! (graph sequencers, active notes) and `table_editor` (the Filter Table
+//! response editor session) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -98,6 +100,7 @@ mod live;
 mod macros;
 mod media;
 mod mixer;
+mod focus_steps;
 mod notes;
 mod panel;
 mod params;
@@ -111,6 +114,8 @@ mod table_editor;
 mod tracks;
 mod variants;
 
+pub(crate) use self::focus_steps::focus_step_param;
+use self::focus_steps::*;
 use self::notes::*;
 pub(crate) use self::notes::{NoteKey, NoteShared, NoteSource};
 use arrangement::SongState;
@@ -200,6 +205,7 @@ pub(crate) const MIDI_DEVICE: &str = "eseq.kinds:midi-device";
 pub(crate) const AGENT: &str = "eseq.kinds:agent";
 pub(crate) const NOTE: &str = "eseq.kinds:note";
 pub(crate) const PIANO_ROLL: &str = "eseq.kinds:piano-roll";
+pub(crate) const FOCUS_STEP: &str = "eseq.kinds:focus-step";
 pub(crate) const GRAPH: &str = "eseq.kinds:graph";
 pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
 pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
@@ -550,6 +556,21 @@ pub(crate) mod f {
     pub(crate) const PIANO_ROLL_WINDOW_REPEAT: FieldKey = (PIANO_ROLL, "window-repeat");
     pub(crate) const PIANO_ROLL_PLAYHEAD: FieldKey = (PIANO_ROLL, "playhead");
     pub(crate) const PIANO_ROLL_NOTES: FieldKey = (PIANO_ROLL, "notes");
+    pub(crate) const PIANO_ROLL_STEPS: FieldKey = (PIANO_ROLL, "steps");
+    pub(crate) const FOCUS_STEP_TRACK: FieldKey = (FOCUS_STEP, "track");
+    pub(crate) const FOCUS_STEP_INDEX: FieldKey = (FOCUS_STEP, "index");
+    pub(crate) const FOCUS_STEP_ACTIVE: FieldKey = (FOCUS_STEP, "active");
+    pub(crate) const FOCUS_STEP_START: FieldKey = (FOCUS_STEP, "start");
+    pub(crate) const FOCUS_STEP_END: FieldKey = (FOCUS_STEP, "end");
+    pub(crate) const FOCUS_STEP_DURATION: FieldKey = (FOCUS_STEP, "duration");
+    pub(crate) const FOCUS_STEP_VELOCITY: FieldKey = (FOCUS_STEP, "velocity");
+    pub(crate) const FOCUS_STEP_DELAY: FieldKey = (FOCUS_STEP, "delay");
+    pub(crate) const FOCUS_STEP_AUX_A: FieldKey = (FOCUS_STEP, "aux-a");
+    pub(crate) const FOCUS_STEP_TRANSPOSE: FieldKey = (FOCUS_STEP, "transpose");
+    pub(crate) const FOCUS_STEP_PAN: FieldKey = (FOCUS_STEP, "pan");
+    pub(crate) const FOCUS_STEP_SYNC: FieldKey = (FOCUS_STEP, "sync");
+    pub(crate) const FOCUS_STEP_RETRIG: FieldKey = (FOCUS_STEP, "retrig");
+    pub(crate) const FOCUS_STEP_RETRIG_RATE: FieldKey = (FOCUS_STEP, "retrig-rate");
 
     pub(crate) const CLASS_INDEX: FieldKey = (PROCESS_CLASS, "index");
     pub(crate) const CLASS_NAME: FieldKey = (PROCESS_CLASS, "name");
@@ -1075,6 +1096,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_ACCUMULATOR_OPTIONS: FieldKey = (PROJECT, "accumulator-options");
     pub(crate) const PROJECT_OUTPUT_OPTIONS: FieldKey = (PROJECT, "output-options");
     pub(crate) const PROJECT_STEP_PARAM_OPTIONS: FieldKey = (PROJECT, "step-param-options");
+    pub(crate) const PROJECT_FOCUS_STEP_PARAMS: FieldKey = (PROJECT, "focus-step-params");
     pub(crate) const PROJECT_GROOVE_POOL: FieldKey = (PROJECT, "groove-pool");
     pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
     pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
@@ -1891,6 +1913,24 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::NOTE_SELECTED, ":bool", Model),
     (f::NOTE_LABEL, ":string", Model),
     (f::NOTE_HIDDEN, ":bool", Model),
+    // The piano roll's focus steps (`focus_steps`): registered on the first
+    // read of `steps` and re-read with the notes' triggers.
+    (f::PIANO_ROLL_STEPS, "(list-of focus-step)", Model),
+    (f::PROJECT_FOCUS_STEP_PARAMS, "(list-of :any)", Model),
+    (f::FOCUS_STEP_TRACK, "track", Model),
+    (f::FOCUS_STEP_INDEX, ":int", Model),
+    (f::FOCUS_STEP_ACTIVE, ":bool", Model),
+    (f::FOCUS_STEP_START, ":number", Model),
+    (f::FOCUS_STEP_END, ":number", Model),
+    (f::FOCUS_STEP_DURATION, ":number", Model),
+    (f::FOCUS_STEP_VELOCITY, ":number", Model),
+    (f::FOCUS_STEP_DELAY, ":number", Model),
+    (f::FOCUS_STEP_AUX_A, ":number", Model),
+    (f::FOCUS_STEP_TRANSPOSE, ":number", Model),
+    (f::FOCUS_STEP_PAN, ":number", Model),
+    (f::FOCUS_STEP_SYNC, ":number", Model),
+    (f::FOCUS_STEP_RETRIG, ":number", Model),
+    (f::FOCUS_STEP_RETRIG_RATE, ":number", Model),
     // Graph sequencers (`graphs`): the graphs, their nodes and registered
     // parts when the graph key moved (re-derived per graph only when its
     // manifest, overrides or rack members changed); edges and params

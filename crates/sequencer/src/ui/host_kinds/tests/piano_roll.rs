@@ -42,7 +42,7 @@ impl Harness {
 
     /// Write `notes` (transpose, duration, offset) on `step` of `track`'s
     /// live pattern and publish the track, as an edit does.
-    fn write_notes(&mut self, track: usize, step: usize, notes: &[(f32, f32, f32)]) {
+    pub(super) fn write_notes(&mut self, track: usize, step: usize, notes: &[(f32, f32, f32)]) {
         let lanes = PianoRollLanes::live(&self.shared.state, track);
         let notes: Vec<PianoRollNote> = (notes.iter())
             .map(|&(transpose, duration, delay)| PianoRollNote {
@@ -56,7 +56,7 @@ impl Harness {
     }
 
     /// The notes on `step` of `track`'s live pattern.
-    fn live_notes(&self, track: usize, step: usize) -> Vec<(f32, f32, f32)> {
+    pub(super) fn live_notes(&self, track: usize, step: usize) -> Vec<(f32, f32, f32)> {
         let lanes = PianoRollLanes::live(&self.shared.state, track);
         (lanes.note_entries(step).iter())
             .map(|note| (note.transpose, note.duration, note.delay))

@@ -125,6 +125,8 @@ pub(crate) struct KindsShared {
     pub(crate) lanes: LaneShared,
     /// The piano roll's notes: their source, ids and instances (`piano_roll`).
     pub(crate) notes: NoteShared,
+    /// The piano roll's focus steps (`focus_steps`).
+    pub(crate) focus_steps: FocusStepShared,
     /// The graphs' sources and registered parts (`graphs`).
     pub(crate) graphs: GraphShared,
 }
@@ -874,6 +876,11 @@ pub(super) fn install_reader(
         if field == f::PIANO_ROLL_NOTES.1 && vm.instance_kind(id) == Some(PIANO_ROLL) {
             // A model field, but registered on the first read.
             return cold_piano_roll_notes(vm, &sources, &shared);
+        }
+        if field == f::PIANO_ROLL_STEPS.1 && vm.instance_kind(id) == Some(PIANO_ROLL) {
+            // A model field, but registered on the first read (`t.steps`
+            // shares the name: a live field, answered below).
+            return cold_piano_roll_steps(vm, &sources, &shared);
         }
         let parts = [
             f::GRAPH_NODE_PARAMS,

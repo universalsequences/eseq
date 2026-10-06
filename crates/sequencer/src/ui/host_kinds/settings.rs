@@ -219,7 +219,8 @@ impl HostKinds {
     }
 
     /// `project.accumulator-options`, pushed when the list changed (and the
-    /// fixed `fts-options`, `sync-options` and `step-param-options` once).
+    /// fixed `fts-options`, `sync-options`, `step-param-options` and
+    /// `focus-step-params` once).
     /// Returns whether the accumulator list changed.
     pub(super) fn sync_accumulator_options(
         &mut self,
@@ -242,6 +243,11 @@ impl HostKinds {
             let step_params = crate::param_words::step_param_target_names();
             let step_params = list_value(step_params.map(|name| Value::String(name.to_string())));
             pusher.push(project, f::PROJECT_STEP_PARAM_OPTIONS, step_params);
+            pusher.push(
+                project,
+                f::PROJECT_FOCUS_STEP_PARAMS,
+                focus_step_params_value(),
+            );
             options.pushed = true;
         }
         let list = list_value(accumulators.iter().cloned().map(Value::String));

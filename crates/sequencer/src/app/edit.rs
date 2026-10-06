@@ -4928,6 +4928,7 @@ impl FocusStepGesture {
     }
 
     pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        app.focus_step_edits += 1;
         let mut first_error = None;
         for part in self.parts {
             if let Err(error) = part.rollback(app) {
@@ -4943,6 +4944,7 @@ impl FocusStepGesture {
     /// Commit every touched pattern as ONE history entry: a plain step-cells
     /// patch for a single target, a composite for a multi-chunk take gesture.
     pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        app.focus_step_edits += 1;
         let label = self.label;
         let focus = self.focus;
         let track = focus.track();
@@ -10685,12 +10687,14 @@ fn commit_rack_groove_drag(app: &mut App, drag: RackGrooveDrag) {
     );
 }
 
-/// One script note drag in flight (kind-bindings spec §14, stage 7e): the
-/// focus steps it touched, captured before its first write; every frame
-/// restores them and rebuilds the drag from there, and the whole drag lands
+/// One script drag of the piano roll's source in flight (kind-bindings spec
+/// §14): the focus steps it touched, captured before its first write, land
 /// as ONE undo entry when the gesture finishes (pointer release, idle
-/// timeout, the next edit), the same shape as [`ProcessLaneDrag`].
-pub(crate) struct NoteDrag {
+/// timeout, the next edit), the same shape as [`ProcessLaneDrag`]. A note
+/// drag (stage 7e, [`note_drag_frame`]) restores them every frame and
+/// rebuilds from there; a focus step param drag (7e-2,
+/// [`focus_step_param_drag`]) writes over them.
+pub(crate) struct FocusStepDrag {
     pub(crate) merge_key: MergeKey,
     pub(crate) gesture: FocusStepGesture,
 }
@@ -10701,7 +10705,8 @@ pub(crate) struct NoteDrag {
 pub(crate) enum PendingDrag {
     ProcessLane(ProcessLaneDrag),
     RackGroove(RackGrooveDrag),
-    Note(NoteDrag),
+    Note(FocusStepDrag),
+    FocusSteps(FocusStepDrag),
 }
 
 impl PendingDrag {
@@ -10709,7 +10714,7 @@ impl PendingDrag {
         match self {
             Self::ProcessLane(drag) => &drag.merge_key,
             Self::RackGroove(drag) => &drag.merge_key,
-            Self::Note(drag) => &drag.merge_key,
+            Self::Note(drag) | Self::FocusSteps(drag) => &drag.merge_key,
         }
     }
 
@@ -10720,13 +10725,16 @@ impl PendingDrag {
                 app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane")
             }
             Self::RackGroove(drag) => commit_rack_groove_drag(app, drag),
-            Self::Note(drag) => commit_note_drag(app, drag),
+            Self::Note(drag) => commit_focus_step_drag(app, drag, "Note drag"),
+            Self::FocusSteps(drag) => commit_focus_step_drag(app, drag, "Step drag"),
         }
     }
 }
 
 /// The merge key every script note drag shares.
 pub const NOTE_DRAG_KEY: &str = "kinds-notes";
+/// The merge key every script focus step param drag shares.
+pub const FOCUS_STEP_DRAG_KEY: &str = "kinds-focus-steps";
 
 /// A fresh history gesture id (a script drag mints its own before it opens).
 pub fn next_gesture_id() -> GestureId {
@@ -10773,7 +10781,7 @@ pub fn note_drag_frame(
                 merge_key: merge_key.clone(),
             })
             .map_err(|_| "Another edit gesture is still active".to_string())?;
-        app.pending_drag = Some(PendingDrag::Note(NoteDrag { merge_key, gesture }));
+        app.pending_drag = Some(PendingDrag::Note(FocusStepDrag { merge_key, gesture }));
     }
     let Some(PendingDrag::Note(mut drag)) = app.pending_drag.take() else {
         unreachable!("the note drag was just opened");
@@ -10791,6 +10799,7 @@ pub fn note_drag_frame(
     });
     let focus = drag.gesture.focus();
     app.pending_drag = Some(PendingDrag::Note(drag));
+    app.focus_step_edits += 1;
     if result? {
         app.state.publish_scheduler_snapshot();
     } else if focus.is_live() {
@@ -10799,11 +10808,78 @@ pub fn note_drag_frame(
     Ok(())
 }
 
-/// Commits a finished note drag as one history entry.
-fn commit_note_drag(app: &mut App, drag: NoteDrag) {
+/// A script drag of focus step params on `focus` (kind-bindings spec §14,
+/// stage 7e-2): continues the open one on the same focus (else closes any
+/// other gesture and opens one), captures the `steps` it has not yet (as
+/// they are: the drag has not written them), runs `write` and publishes a
+/// live focus's track; `label` names its undo entry. A drag whose focus
+/// moved under it (a scene launched in follow mode) is committed with what
+/// it wrote, and a new one opens. An error (the steps cannot be captured)
+/// leaves `write` unrun.
+pub fn focus_step_param_drag(
+    app: &mut App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    label: &'static str,
+    write: impl FnOnce(&mut App),
+) -> Result<(), String> {
+    let merge_key = MergeKey::new(FOCUS_STEP_DRAG_KEY);
+    let open = app
+        .history
+        .active_gesture()
+        .is_some_and(|active| active.merge_key == merge_key);
+    let mut drag = match app.pending_drag.take() {
+        Some(PendingDrag::FocusSteps(drag)) if open && drag.gesture.focus() == focus => Some(drag),
+        other => {
+            app.pending_drag = other;
+            None
+        }
+    };
+    if let Some(mut open) = drag.take() {
+        app.history.touch_active_gesture();
+        match open.gesture.capture_additional_steps(app, steps) {
+            Ok(()) => drag = Some(open),
+            Err(_) => {
+                // Another source under the same focus: the open drag ends
+                // with every write it made.
+                app.pending_drag = Some(PendingDrag::FocusSteps(open));
+                finish_active_gesture(app);
+            }
+        }
+    }
+    let drag = match drag {
+        Some(drag) => drag,
+        None => {
+            // Closes any other gesture (an earlier focus step drag commits
+            // through the hook in `finish_active_gesture`).
+            finish_active_gesture(app);
+            let gesture = FocusStepGesture::begin(app, focus, steps, label)
+                .map_err(|error| format!("could not begin the step drag: {error:?}"))?;
+            let id = next_gesture_id();
+            app.history
+                .begin_gesture(ActiveGesture {
+                    id,
+                    merge_key: merge_key.clone(),
+                })
+                .map_err(|_| "Another edit gesture is still active".to_string())?;
+            FocusStepDrag { merge_key, gesture }
+        }
+    };
+    app.pending_drag = Some(PendingDrag::FocusSteps(drag));
+    write(app);
+    app.focus_step_edits += 1;
+    if focus.is_live() {
+        app.state.publish_scheduler_track(focus.track());
+    }
+    Ok(())
+}
+
+/// Commits a finished focus step drag (a note or a focus step param drag,
+/// `what` in the status a failure shows) as one history entry.
+fn commit_focus_step_drag(app: &mut App, drag: FocusStepDrag, what: &str) {
     if let Err(error) = drag.gesture.commit(app) {
         app.editor.status_message = Some((
-            format!("Note drag could not be recorded: {error:?}"),
+            format!("{what} could not be recorded: {error:?}"),
             Instant::now(),
         ));
     }
@@ -11043,8 +11119,11 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         return Ok(false);
     };
     match app.pending_drag.take() {
-        Some(PendingDrag::Note(drag)) if drag.merge_key == gesture.merge_key => {
-            // A script note drag: put its steps back, record nothing.
+        Some(PendingDrag::Note(drag) | PendingDrag::FocusSteps(drag))
+            if drag.merge_key == gesture.merge_key =>
+        {
+            // A script note or focus step drag: put its steps back, record
+            // nothing.
             let focus = drag.gesture.focus();
             drag.gesture.rollback(app)?;
             app.history.finish_active_gesture();

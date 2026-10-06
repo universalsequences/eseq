@@ -27,12 +27,14 @@
 //! (`sync_piano_roll_state`). The notes are registered lazily, on the first
 //! read of `piano-roll.notes` (the reader hook, or the tick once observed),
 //! like a device's params; then the tick re-reads them
-//! (`PianoRollLanes::note_rows_batch`, the legacy items' batch read with
-//! the step velocities) only when the scheduler published the source's
-//! track again (a live focus: the published track snapshot moved), the
-//! scenes or pool content revision, the pattern epoch or the source moved,
-//! an undo or redo replayed (`App::history_replays`), or a setter edited
-//! them: an idle tick loads a few counters. The selection (`note.selected`) is the legacy
+//! (`PianoRollLanes::step_rows_batch`, the legacy items' batch read with
+//! the step parameters) only when their [`ContentKey`] moved (the scheduler
+//! published the source's track again (a live focus: the published track
+//! snapshot moved), the scenes or pool content revision, the pattern epoch
+//! or the source moved, an undo or redo replayed: `App::history_replays`,
+//! a focus step edit committed, rolled back or dragged:
+//! `App::focus_step_edits`): an idle tick loads a few counters. The focus
+//! steps (`focus_steps`) share the key and the read. The selection (`note.selected`) is the legacy
 //! piano roll's, compared every tick while notes are registered.
 //! `piano-roll.playhead` is live: the focus playhead
 //! (`App::focus_playhead_step`) while observed; a cold read of a pinned
@@ -134,9 +136,9 @@ pub(crate) struct NoteShared {
     /// The tick has pushed `piano-roll.notes` since they were (re)registered.
     pushed: bool,
     /// The source the rows are of, and the one the tick resolved last (a
-    /// cold read registers against it).
+    /// cold read registers against it, the focus steps' too).
     pub(crate) source: Option<NoteSource>,
-    focus: Option<NoteSource>,
+    pub(super) focus: Option<NoteSource>,
     /// Each note's id by its key, while it sits there, and the reverse.
     ids: HashMap<NoteKey, u64>,
     keys: HashMap<u64, NoteKey>,
@@ -146,8 +148,6 @@ pub(crate) struct NoteShared {
     /// The notes a script drag lies over: kept registered (unlisted,
     /// `hidden`) until it ends.
     pub(crate) held: HashSet<u64>,
-    /// A setter edited the notes: re-read them at the next tick.
-    dirty: bool,
     /// The focus playhead last computed (a cold read of a pinned focus).
     playhead: f64,
     /// Note re-reads and script drag frames, for tests.
@@ -174,14 +174,24 @@ impl NoteShared {
     /// Note `nid` now sits at `to`; a note known at `to` before is replaced
     /// (its handle goes stale at the next sync).
     pub(crate) fn rekey(&mut self, nid: u64, to: NoteKey) {
-        if let Some(from) = self.keys.remove(&nid) {
-            self.ids.remove(&from);
+        self.move_notes(&[(nid, to)]);
+    }
+
+    /// Each note of `moves` now sits at its key (all lifted first, so notes
+    /// may trade places); a note known at one of those keys before and not
+    /// moved is replaced (its handle goes stale at the next sync).
+    pub(crate) fn move_notes(&mut self, moves: &[(u64, NoteKey)]) {
+        for (nid, _) in moves {
+            if let Some(from) = self.keys.remove(nid) {
+                self.ids.remove(&from);
+            }
         }
-        if let Some(other) = self.ids.insert(to, nid) {
-            self.keys.remove(&other);
+        for (nid, to) in moves {
+            if let Some(other) = self.ids.insert(*to, *nid) {
+                self.keys.remove(&other);
+            }
+            self.keys.insert(*nid, *to);
         }
-        self.keys.insert(nid, to);
-        self.dirty = true;
     }
 
     /// Notes `nids` are gone.
@@ -191,7 +201,6 @@ impl NoteShared {
                 self.ids.remove(&key);
             }
         }
-        self.dirty = true;
     }
 
     /// The ids during a script drag: `ids` as the drag computed them, and
@@ -200,7 +209,6 @@ impl NoteShared {
         self.keys = ids.iter().map(|(key, nid)| (*nid, *key)).collect();
         self.ids = ids;
         self.held = held;
-        self.dirty = true;
     }
 
     fn id_for(&mut self, key: NoteKey) -> u64 {
@@ -235,13 +243,15 @@ impl NoteShared {
 /// docs): register the new ones, push every field (each compared with its
 /// cell), drop the gone ones but those a script drag lies over while
 /// `keep_held` (`hidden`). After an undo or redo (`replayed`) that changed
-/// the notes, every note gets a fresh id. Returns the listed instances and
-/// whether anything changed.
+/// the notes, every note gets a fresh id. `steps` is the source's
+/// ([`source_rows`]). Returns the listed instances and whether anything
+/// changed.
 pub(super) fn sync_notes<S: KindStore>(
     store: &mut S,
     sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     source: NoteSource,
+    steps: &[StepRow],
     keep_held: bool,
     replayed: bool,
 ) -> (Vec<InstanceId>, bool) {
@@ -257,13 +267,12 @@ pub(super) fn sync_notes<S: KindStore>(
     if let Some(old) = replaced {
         changed |= reconcile_children(store, old.track_id, NOTE, &[], |_, _, _| {}).1;
     }
-    let lanes = source.lanes(&sources.state);
     // The listed notes: a repeat of a key gets no instance.
     let mut seen = HashSet::new();
-    let steps = lanes.note_rows_batch(lanes.num_steps());
-    let listed: Vec<(NoteKey, usize, PianoRollNote, f32)> = (steps.into_iter().enumerate())
-        .flat_map(|(step, (notes, velocity))| {
-            let notes = notes.into_iter().enumerate();
+    let listed: Vec<(NoteKey, usize, PianoRollNote, f32)> = (steps.iter().enumerate())
+        .flat_map(|(step, (notes, values))| {
+            let velocity = values[StepParam::Velocity.index()];
+            let notes = notes.iter().copied().enumerate();
             notes.map(move |(voice, note)| (NoteKey::of(step, &note), voice, note, velocity))
         })
         .filter(|(key, ..)| seen.insert(*key))
@@ -340,7 +349,6 @@ pub(super) fn sync_notes<S: KindStore>(
     // fresh id, never the old handle.
     notes.keep_only(&wanted.iter().copied().collect());
     notes.rows = rows;
-    notes.dirty = false;
     notes.syncs += 1;
     let listed = notes.rows.iter().map(|row| row.id).collect();
     (listed, changed)
@@ -354,6 +362,13 @@ fn push_selected(pusher: &mut Pusher<'_>, selection: &HashSet<u64>) {
         let selected = selection.contains(&piano_roll_item_id(row.key.step, row.voice));
         pusher.push(row.id, f::NOTE_SELECTED, Value::Bool(selected));
     }
+}
+
+/// `source`'s steps: each one's notes and parameters (one batch read, which
+/// the notes and the focus steps share).
+pub(super) fn source_rows(sources: &KindsHandles, source: NoteSource) -> Vec<StepRow> {
+    let lanes = source.lanes(&sources.state);
+    lanes.step_rows_batch(lanes.num_steps())
 }
 
 /// A cold read of `piano-roll.notes` (the reader hook): registers the notes
@@ -379,7 +394,8 @@ pub(super) fn cold_piano_roll_notes<S: KindStore>(
         notes.focus?
     };
     shared.borrow_mut().notes.registered = true;
-    let (listed, _) = sync_notes(store, sources, shared, source, false, false);
+    let rows = source_rows(sources, source);
+    let (listed, _) = sync_notes(store, sources, shared, source, &rows, false, false);
     shared.borrow_mut().count(f::PIANO_ROLL_NOTES);
     Some(instance_list(listed))
 }
@@ -413,26 +429,37 @@ struct FocusKey {
     structure: u64,
 }
 
-/// What the notes were last read under, beside the published track
-/// snapshot ([`PianoRollState::snapshot`]).
+/// What the source's notes (and its focus steps) were last read under:
+/// re-read when it moves.
 #[derive(Clone, Copy, PartialEq)]
-struct NotesKey {
+pub(super) struct ContentKey {
     source: NoteSource,
     scenes: u64,
     pool: u64,
     epoch: u64,
     num_steps: usize,
+    /// A live focus's source track published again
+    /// ([`PianoRollState::publishes`]); 0 for a pinned one.
+    publishes: u64,
+    /// `App::history_replays` (an undo or redo).
+    replays: u64,
+    /// `App::focus_step_edits`: a setter's, a script drag's or a rolled
+    /// back edit (a pinned source's pool writes move no other counter).
+    edits: u64,
 }
 
 /// The piano roll sync's state (in [`HostKinds`]).
 #[derive(Default)]
 pub(crate) struct PianoRollState {
     focus: Option<FocusKey>,
-    notes: Option<NotesKey>,
+    notes: Option<ContentKey>,
+    /// What the focus steps were last read under.
+    pub(super) steps: Option<ContentKey>,
     /// The scheduler snapshot version last looked at, and the source
-    /// track's published snapshot then (a live focus's notes moved when it
-    /// is another one).
+    /// track's published snapshot then; how many times that snapshot was
+    /// another one (a live focus's content moved).
     snapshot: Option<(u64, Option<Arc<SequencerTrackSnapshot>>)>,
+    publishes: u64,
     /// The selection last pushed.
     selection: Option<HashSet<u64>>,
     /// `App::history_replays` as the notes were last read.
@@ -446,24 +473,27 @@ impl PianoRollState {
     pub(super) fn invalidate(&mut self) {
         self.focus = None;
         self.notes = None;
+        self.steps = None;
         self.selection = None;
     }
 }
 
 /// The fields a piano roll's observed mask covers: its live fields (bit
-/// `i` is `PIANO_ROLL_LIVE.keys[i]`), then `notes` ([`NOTES_BIT`]).
+/// `i` is `PIANO_ROLL_LIVE.keys[i]`), then `notes` ([`NOTES_BIT`]) and
+/// `steps` ([`STEPS_BIT`]).
 static PIANO_ROLL_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     let mut names = PIANO_ROLL_LIVE.names.clone();
-    names.push(f::PIANO_ROLL_NOTES.1);
+    names.extend([f::PIANO_ROLL_NOTES.1, f::PIANO_ROLL_STEPS.1]);
     names
 });
 static NOTES_BIT: LazyLock<u32> = LazyLock::new(|| 1 << PIANO_ROLL_LIVE.keys.len());
+static STEPS_BIT: LazyLock<u32> = LazyLock::new(|| 1 << (PIANO_ROLL_LIVE.keys.len() + 1));
 
 impl HostKinds {
     /// The piano roll: its focus fields when [`FocusKey`] moved, its notes
-    /// once registered when their source or a counter moved, the selection
-    /// when it changed, the playhead while observed. Runs after the song
-    /// sync (`piano-roll.clip` is a clip instance).
+    /// and focus steps once registered when their [`ContentKey`] moved, the
+    /// selection when it changed, the playhead while observed. Runs after
+    /// the song sync (`piano-roll.clip` is a clip instance).
     pub(super) fn sync_piano_roll(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
         let Some(roll) = pusher.singleton(PIANO_ROLL) else {
             return;
@@ -484,14 +514,33 @@ impl HostKinds {
             shared.borrow_mut().notes.reset();
             self.piano_roll.notes = None;
         }
+        if shared.borrow_mut().focus_steps.drop_if_stale(pusher.rt) {
+            self.piano_roll.steps = None;
+        }
         self.sync_piano_roll_focus(pusher, app, roll, source);
         let mask = pusher.rt.host_fields_observed(roll, &PIANO_ROLL_OBSERVED);
         if mask & *NOTES_BIT != 0 {
             shared.borrow_mut().notes.registered = true;
         }
-        if shared.borrow().notes.registered {
-            if let Some(source) = source {
-                self.sync_piano_roll_notes(pusher, app, roll, source);
+        if mask & *STEPS_BIT != 0 {
+            shared.borrow_mut().focus_steps.register();
+        }
+        let (notes, steps) = {
+            let shared = shared.borrow();
+            (shared.notes.registered, shared.focus_steps.registered())
+        };
+        if let Some(source) = source.filter(|_| notes || steps) {
+            let key = self.content_key(pusher.sources, app, source);
+            let notes_due = notes && self.notes_due(shared, app, source, key);
+            let steps_due = steps && self.steps_due(shared, key);
+            // One read of the source for both.
+            let rows = (notes_due || steps_due).then(|| source_rows(sources, source));
+            if notes {
+                let rows = rows.as_deref().filter(|_| notes_due);
+                self.sync_piano_roll_notes(pusher, app, roll, source, key, rows);
+            }
+            if let Some(rows) = rows.as_deref().filter(|_| steps_due) {
+                self.sync_piano_roll_steps(pusher, roll, source, key, rows);
             }
         }
         let playhead = PIANO_ROLL_LIVE.bit(f::PIANO_ROLL_PLAYHEAD);
@@ -579,64 +628,90 @@ impl HostKinds {
         pusher.push(roll, f::PIANO_ROLL_WINDOW_REPEAT, number(repeat));
     }
 
-    /// The registered notes, re-read when their source, a counter or the
-    /// source track's published snapshot moved, or a setter edited them;
-    /// the selection when it changed.
+    /// What `source`'s content is read under now: the counters, and
+    /// whether the scheduler published its track again (a live focus's
+    /// notes and steps move then; compared by snapshot, once per version).
+    fn content_key(
+        &mut self,
+        sources: &KindsHandles,
+        app: &app::App,
+        source: NoteSource,
+    ) -> ContentKey {
+        let state = &sources.state;
+        let version = state.scheduler_snapshot_version();
+        let roll_state = &mut self.piano_roll;
+        if !matches!(&roll_state.snapshot, Some((seen, _)) if *seen == version) {
+            let latest = state.latest_scheduler_snapshot();
+            let track = latest.tracks.get(source.track).cloned();
+            let before = (roll_state.snapshot.as_ref()).and_then(|(_, track)| track.as_ref());
+            let moved = match (before, &track) {
+                (Some(before), Some(now)) => !Arc::ptr_eq(before, now),
+                (None, None) => false,
+                _ => true,
+            };
+            roll_state.publishes += u64::from(moved);
+            roll_state.snapshot = Some((version, track));
+        }
+        let live = source.focus == PianoRollFocusSpec::Live;
+        ContentKey {
+            source,
+            scenes: state.project_scenes_revision(),
+            pool: state.pool_content_revision(),
+            epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            num_steps: sources.num_steps(source.track),
+            publishes: if live { roll_state.publishes } else { 0 },
+            replays: app.history_replays,
+            edits: app.focus_step_edits,
+        }
+    }
+
+    /// Whether the registered notes are to be re-read: their [`ContentKey`]
+    /// moved, they were never pushed, or a script drag ended over some.
+    fn notes_due(
+        &self,
+        shared: &RefCell<KindsShared>,
+        app: &app::App,
+        source: NoteSource,
+        key: ContentKey,
+    ) -> bool {
+        let notes = &shared.borrow().notes;
+        let dragging = app.active_note_drag().is_some();
+        self.piano_roll.notes != Some(key)
+            || !notes.pushed
+            || notes.source != Some(source)
+            || (!dragging && !notes.held.is_empty())
+    }
+
+    /// The registered notes, re-read from `rows` (the source's steps) when
+    /// they are due ([`Self::notes_due`]); the selection when it changed.
     fn sync_piano_roll_notes(
         &mut self,
         pusher: &mut Pusher<'_>,
         app: &app::App,
         roll: InstanceId,
         source: NoteSource,
+        key: ContentKey,
+        rows: Option<&[StepRow]>,
     ) {
         let (sources, shared) = (pusher.sources, pusher.shared);
-        let state = &sources.state;
-        let version = state.scheduler_snapshot_version();
-        let republished = match &self.piano_roll.snapshot {
-            Some((seen, _)) if *seen == version => false,
-            previous => {
-                let latest = state.latest_scheduler_snapshot();
-                let track = latest.tracks.get(source.track).cloned();
-                let moved = match (
-                    previous.as_ref().and_then(|(_, track)| track.as_ref()),
-                    &track,
-                ) {
-                    (Some(before), Some(now)) => !Arc::ptr_eq(before, now),
-                    (None, None) => false,
-                    _ => true,
-                };
-                self.piano_roll.snapshot = Some((version, track));
-                moved
-            }
-        };
-        let key = NotesKey {
-            source,
-            scenes: state.project_scenes_revision(),
-            pool: state.pool_content_revision(),
-            epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-            num_steps: sources.num_steps(source.track),
-        };
-        let dragging = app.active_note_drag().is_some();
-        let replayed = self.piano_roll.replays != app.history_replays;
-        let due = {
-            let notes = &shared.borrow().notes;
-            (republished && source.focus == PianoRollFocusSpec::Live)
-                || replayed
-                || self.piano_roll.notes != Some(key)
-                || notes.dirty
-                || !notes.pushed
-                || notes.source != Some(source)
-                || (!dragging && !notes.held.is_empty())
-        };
         // Compared in place: an idle tick copies nothing.
         let selected = {
             let selection = sources.piano_roll_selection.lock().unwrap();
-            (due || self.piano_roll.selection.as_ref() != Some(&*selection))
+            (rows.is_some() || self.piano_roll.selection.as_ref() != Some(&*selection))
                 .then(|| selection.clone())
         };
-        if due {
-            let (listed, changed) =
-                sync_notes(&mut *pusher.rt, sources, shared, source, dragging, replayed);
+        if let Some(rows) = rows {
+            let dragging = app.active_note_drag().is_some();
+            let replayed = self.piano_roll.replays != app.history_replays;
+            let (listed, changed) = sync_notes(
+                &mut *pusher.rt,
+                sources,
+                shared,
+                source,
+                rows,
+                dragging,
+                replayed,
+            );
             pusher.changed |= changed;
             self.piano_roll.replays = app.history_replays;
             pusher.push(roll, f::PIANO_ROLL_NOTES, instance_list(listed));

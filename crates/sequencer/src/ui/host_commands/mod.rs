@@ -10,6 +10,7 @@ pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequence
 mod effects;
 pub(crate) mod export;
 mod file_menu;
+mod focus_steps;
 pub(crate) mod graph_node_processes;
 mod graphs;
 pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};

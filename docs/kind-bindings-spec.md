@@ -357,7 +357,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`, since 7f `browser preset-file slot-presets sound sound-palette editor editor-macro editor-asset asset-info learn learn-plan-param learn-epoch-param learn-delta retro retro-lane retro-item song-export settings midi-device agent`, since 7e `note piano-roll`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`, since 7f `browser preset-file slot-presets sound sound-palette editor editor-macro editor-asset asset-info learn learn-plan-param learn-epoch-param learn-delta retro retro-lane retro-item song-export settings midi-device agent`, since 7e `note piano-roll`, since 7e-2 `focus-step`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -1038,6 +1038,10 @@ its instance and field.
    window, its playhead) and its `note`s, with note setters, script note
    drags and `add-note!` / `delete-notes!`; the tracker's lock cells
    (`param.step-locks`, `rack-macro.step-locks`) (§14.2j).
+   Built (stage 7e-2, eseq-0l17.47): the piano roll's focus steps
+   (`piano-roll.steps` → `focus-step`, the source's steps on its axis with
+   their step params and setters), so the automation lane is a view
+   (§14.2r).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -2984,7 +2988,7 @@ Built (7e):
 - **Not covered:** the automation lane under the piano roll
   (`SEQ.piano-roll-automation`, `-automation-params`): the focus axis's step
   params (a pinned source's steps, which `step` does not reach) and the
-  lane's points: eseq-0l17.47. View-local (port .16): the piano roll's
+  lane's points: eseq-0l17.47 (built, §14.2r). View-local (port .16): the piano roll's
   arrangement mode (`SEQV.piano-roll-arrangement-mode`), scroll, zoom, tool,
   cursor and marquee.
 
@@ -3437,6 +3441,105 @@ fields, `process.error` and `state-cell.values` (§14.2h).
   the newest last; an empty history reads as before the first fire, the
   legacy nil entry: "waiting for a fire").
 
+### 14.2r Built in stage 7e-2 (eseq-0l17.47)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `piano-roll` | `()` | `steps (list-of focus-step)` (lazy; then Model) |
+| `project` | `()` | `focus-step-params (list-of :any)` (one dict per step param: `:name` (its field), `:label`, `:min`, `:max`, `:default`, `:increment`) |
+| `focus-step` | `(track index)` | `track track` (the piano roll's), `index :int` (on the source's axis), `active :bool` (holds a note), `start :number` (its earliest note's onset; `index` without notes), `end :number` (where its last note ends; `start` without notes), `duration`, `velocity`, `delay`, `aux-a`, `transpose`, `pan`, `sync`, `retrig`, `retrig-rate :number` [f] |
+
+[f] = the `set-focus-step` host command (`:track-id`, `:index`, `:field`,
+`:value`; `host_commands/focus_steps.rs`); `(set-focus-step! fs name v)` is
+the same by name. `(focus-step-params)` is `project.focus-step-params`, the
+step params in the legacy lane picker's order (`StepParam::VISIBLE`),
+which the host builds from `FOCUS_STEP_PARAMS` (each visible param's
+`focus-step` field in `PUBLISHED`, by its `step_param_named` name) and
+pushes once, with the other fixed option lists. `(focus-step-value fs
+name)` reads a param by name from a table of readers (one of the `:name`s;
+any other is an error).
+
+Built (7e-2):
+
+- **The lane is a view.** Legacy `SEQ.piano-roll-automation-params` is
+  `project.focus-step-params` (the step params) plus the track's device
+  params and rack macros with `has-locks` (`t.devices`' and
+  `t.midi-devices`' `params`, a rack's `device.macros`), labelled by the
+  view (`p.name`, `rm.name`; the group a device's `name`). Legacy
+  `SEQ.piano-roll-automation` is derived per selected parameter: a step
+  param's points are the active focus steps (`start`, `end`, the param's
+  value, locked); a device param's (live focus only, as the legacy lane:
+  device locks are the live pattern's) are each focus step holding a lock
+  in `p.step-locks` (its lock, locked) and each other active one (`p.base`,
+  unlocked: the legacy `held_plock_value` walk stops at an active step at
+  once, so an active step without a lock always showed the base). The
+  scale is the param's (`min`, `max`, `default`; `focus-step-params`' for a
+  step param). The lane's selected parameter is view state (port .16: a
+  piano-roll view singleton replacing the pinned
+  `eseq.vanilla/piano-roll-automation-param` and the
+  `piano-roll-automation-refresh` command). `piano_roll_step_span` (a
+  step's span over its notes) is shared by the legacy lane and
+  `focus-step.start` / `end`; the tests hold the derivation to
+  `build_piano_roll_automation_value`'s points for step and effect params.
+- **Identity.** Positional (D2): keyed (track instance id, index) under the
+  piano roll's track, registered for that track alone (another track's
+  are dropped when the piano roll moves to it) and dropped past the
+  source's length. Another source of the same track (a clip pinned, a
+  scene launched) keeps the instances; only the values move, as `step`
+  under a scene switch. (A singleton cannot be a keyed parent, so the
+  steps hang off the track, beside its `step`s.)
+- **Feeds.** Model fields, registered on the first read of
+  `piano-roll.steps` (the reader hook, or the tick once observed), like the
+  notes, then re-read with the notes' triggers: one `ContentKey` (the
+  source, the scenes and pool content revisions, the pattern epoch, the
+  live length, a live focus's track republished, `App::history_replays`,
+  `App::focus_step_edits`), computed once per tick while either is
+  registered. `App::focus_step_edits` moves with every
+  `FocusStepGesture` commit or rollback and every script note or focus
+  step drag frame: a pinned source's pool writes move no other counter, so
+  without it a note setter's edit, a focus step setter's or an Esc would
+  leave the other kind (or both) stale; it replaces the notes' and focus
+  steps' dirty flags. When either is due the tick reads the source once
+  (`source_rows`: `PianoRollLanes::step_rows_batch`, the notes' batch
+  read, now with every step param) and both sync from that read, each
+  field compared with its cell; an idle tick loads a few counters
+  (`FocusStepShared::syncs` counts).
+- **Setters.** `set-focus-step` resolves the track by `TrackId` and the step
+  by its index on the track's edit focus when it lands (positional, as
+  `step`'s setters: a source change in flight lands on the new source).
+  The value rule (§14.2c): a finite number in the param's range
+  (`StepParam::min` to `max`, no clamping); the current value always
+  works and changes nothing; an index past the source's length or a field
+  a focus step does not set is an error. It goes through the legacy lane's
+  path (`app::edit::apply_recorded_focus_step_mutation`, one undo entry,
+  undo restores; a transpose or duration moves the step's chord with it,
+  `PianoRollLanes::set_step_param`) and lands like the piano roll's edits
+  (`piano_roll_edit_landed`). A pinned pattern's or take's step writes the
+  pool, never the live pattern. A transpose (or a lone note's delay) moves
+  the step's notes, whose keys (step, transpose, offset) change: their
+  note ids move with them (`NoteShared::move_notes`, by voice), so note
+  handles follow, as through the note setters.
+- **Script drags.** While the pointer is down (no user gesture active,
+  `ScriptEdit::drags`) every focus step `set!` of one focus (any field, any
+  step) joins ONE undo entry: `app::edit::focus_step_param_drag` opens a
+  `FocusStepGesture` under `PendingDrag::FocusSteps` (the note drag's
+  `FocusStepDrag`, now shared: `PendingDrag::Note` holds one too), captures
+  each step before its first write and writes in place (a live focus
+  publishes its track per write), as the legacy
+  `update-automation-step-param` gesture; the gesture commits on release
+  (`finish_active_gesture`'s hook). A source moved under the drag (a scene
+  launched in follow mode) commits the open drag and opens another; Esc
+  rolls it back (`cancel_active_gesture`, "Parameter edit canceled"; the
+  notes it moved then get fresh handles, as after an undo). The drag's
+  entry is labelled as a one-shot edit's ("Edit piano-roll automation");
+  a drag that cannot be recorded says "Step drag could not be recorded"
+  (a note drag "Note drag …").
+- **Not covered:** writing a device param's or rack macro's lane points.
+  A device param's are `lock-param!` / `unlock-param!` on the live steps
+  (one undo entry per call: a drag of them is an entry per frame), a rack
+  macro's have no kinds action yet (legacy `set-track-plock-entry` /
+  `clear-track-plock-entry` with `:target rack-macro`).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3457,7 +3560,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
 | 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation) | .16 .20 |
-| 7e-2 | eseq-0l17.47 | the piano roll's automation lane: focus-axis step params, lane points | .16 |
+| 7e-2 | eseq-0l17.47 (built) | the piano roll's automation lane: `focus-step` (focus-axis step params, `piano-roll.steps`), the lane a view | .16 |
 | 7e-3 | eseq-0l17.48 | model note ids (handles kept through undo and legacy edits) | — |
 | 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 (built) | `graph`, `graph-node`, `graph-edge`, `graph-param` (the GRAPH namespace, graph playback), `project.graphs`, `track.active-notes` | .13 .14 .20 |
@@ -3627,8 +3730,8 @@ builds the field name.
 | `SEQ.focus-window-marker` | 1 | piano-roll | piano_roll.rs | model | piano-roll.window-marker | built (.31) | .16 |
 | `SEQ.focus-window-repeat` | 1 | piano-roll | piano_roll.rs | model | piano-roll.window-repeat | built (.31) | .16 |
 | `SEQ.focus-window-span` | 1 | piano-roll | piano_roll.rs | model | piano-roll.window-span | built (.31) | .16 |
-| `SEQ.piano-roll-automation` | 1 | piano-roll | piano_roll.rs | model | piano-roll automation lane (focus steps, lane points) | .47 | .16 |
-| `SEQ.piano-roll-automation-params` | 1 | piano-roll | piano_roll.rs | model | step params (constant) + param.has-locks / rack-macro.has-locks | .47 | .16 |
+| `SEQ.piano-roll-automation` | 1 | piano-roll | piano_roll.rs | model | view derivation: piano-roll.steps → focus-step (start, end, active, the step params) + param.step-locks / base, rack-macro.step-locks / base; selected param → piano-roll view singleton | built (.47) | .16 |
+| `SEQ.piano-roll-automation-params` | 1 | piano-roll | piano_roll.rs | model | project.focus-step-params + param.has-locks / rack-macro.has-locks | built (.47) | .16 |
 | `SEQ.piano-roll-items` | 8 | piano-roll | sv/topology_and_visualization.rs | model | piano-roll.notes → note | built (.31) | .16 |
 | `SEQ.piano-roll-lanes` | 2 | piano-roll | natives.rs | model | view derivation from pitch-min / pitch-max (lane = pitch-max − note.pitch) | built (.31) | .16 |
 | `SEQ.piano-roll-playhead` | 1 | piano-roll | piano_roll.rs | live | piano-roll.playhead (live) | built (.31) | .16 |

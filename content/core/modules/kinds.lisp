@@ -13,9 +13,10 @@
 ;; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
-;; or `t.lanes`, the piano roll's notes on first read of `piano-roll.notes`, a
-;; graph node's edges, params and processes on first read of `n.edges` /
-;; `n.params` / `n.processes`, an edge's params on first read of `e.params`),
+;; or `t.lanes`, the piano roll's notes and focus steps on first read of
+;; `piano-roll.notes` / `piano-roll.steps`, a graph node's edges, params and
+;; processes on first read of `n.edges` / `n.params` / `n.processes`, an
+;; edge's params on first read of `e.params`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -56,6 +57,7 @@
         apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
         learn-method-options learn-refine-mode-options
         piano-roll add-note! delete-notes! pitch-min pitch-max
+        focus-step-params focus-step-value set-focus-step!
         graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
         set-group-coupling! gate-generator! graph-timebase-options graph-quantize-options
         graph-max-poly-selection-options
@@ -205,6 +207,15 @@
 (def note-setter (field)
   (lambda (n v)
     (host-command "set-note" (dict :track-id n.track.tid :nid n.nid :field field :value v))))
+;; A focus step by its track's id and its index on the piano roll's source
+;; axis (spec §14, stage 7e-2), set where it lands: step index of the track's
+;; piano roll source then. One undo entry each; a drag's set!s join one.
+;; Values (spec §14.2c): a number in the param's range (focus-step-params).
+(def set-focus-step! (fs name v)
+  (host-command "set-focus-step"
+    (dict :track-id fs.track.tid :index fs.index :field name :value v)))
+(def focus-step-setter (field)
+  (lambda (fs v) (set-focus-step! fs field v)))
 ;; A device by stable ids: its track's id (a chain device, a MIDI effect, a
 ;; drum rack slot or one of its effects) or its bus's (a bus effect), and its
 ;; did, so a reorder before the command lands cannot retarget it.
@@ -1519,6 +1530,31 @@
          (label    :string :doc "Its pitch name, with its offset when off the step: C4, D#3 +0.50")
          (hidden   :bool   :doc "A script drag's note lies over it: unlisted until the drag ends (or moves on); its set! and delete are errors meanwhile")))
 
+;; A step of the piano roll's source on its axis: (nth piano-roll.steps 5),
+;; a pinned pattern's or take's step too (step, the live pattern's, reaches
+;; none of those). Positional: another source of the track (a clip pinned, a
+;; scene launched) changes only the values; another track's piano roll drops
+;; them. The automation lane is a view over them, the notes and the device
+;; params' step-locks / has-locks. The parameters are the host's units (the
+;; ranges: (focus-step-params)); set! goes through the piano roll's history.
+;; A transpose moves the step's notes; their note handles follow them.
+(def-kind focus-step
+  :key (track index)
+  :host ((track  track   :doc "The piano roll's track")
+         (index  :int    :doc "Step on the source's axis, from 0")
+         (active :bool   :doc "Holds a note")
+         (start  :number :doc "Where its notes start (its earliest note's onset: index plus its offset); index when it holds none")
+         (end    :number :doc "Where its last note ends; start when it holds none")
+         (duration    :number :set (focus-step-setter "duration") :doc "Length in steps")
+         (velocity    :number :set (focus-step-setter "velocity"))
+         (delay       :number :set (focus-step-setter "delay"))
+         (aux-a       :number :set (focus-step-setter "aux-a"))
+         (transpose   :number :set (focus-step-setter "transpose") :doc "Moves the step's chord notes with it")
+         (pan         :number :set (focus-step-setter "pan"))
+         (sync        :number :set (focus-step-setter "sync"))
+         (retrig      :number :set (focus-step-setter "retrig"))
+         (retrig-rate :number :set (focus-step-setter "retrig-rate"))))
+
 ;; The piano roll: what the current track's note editor edits (its edit
 ;; focus) and the notes there. Model fields but playhead.
 (def-kind piano-roll
@@ -1533,7 +1569,8 @@
          (window-span (list-of :number) :doc "(start end) of the window the clip plays when shorter than its source; empty otherwise")
          (window-repeat :number :doc "How many times the clip plays its source over, when more than once; 0 otherwise")
          (playhead   :number :doc "The playing step on the source's axis; -1 while hidden (a pinned source the song does not play)")
-         (notes      (list-of note) :doc "The source's notes, by step, then pitch and offset; (add-note! …), (delete-notes! …)")))
+         (notes      (list-of note) :doc "The source's notes, by step, then pitch and offset; (add-note! …), (delete-notes! …)")
+         (steps      (list-of focus-step) :doc "The source's steps on its axis (focus-num-steps of them)")))
 
 ;; The collections, for (tracks), (scenes), (banks), (buses), (groups) and
 ;; (routes), and the option lists the host owns.
@@ -1550,6 +1587,7 @@
          (accumulator-options (list-of :string) :doc "Built-in and script accumulators, for track.accumulator")
          (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")
          (step-param-options (list-of :string) :doc "The step params a process port may write (bind-port! pt name)")
+         (focus-step-params (list-of :any) :doc "The step params a focus step holds, in the automation lane's order: (dict :name :label :min :max :default :increment) each")
          (groove-pool (list-of pool-groove) :doc "The project's grooves, in pool order")
          (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
          (macros (list-of macro) :doc "The project's macros, in macro order")
@@ -1873,6 +1911,32 @@
       (dict :track-id (note-track-id (first notes))
             :track-ids (map note-track-id notes)
             :nids (map (lambda (x) x.nid) notes)))))
+
+;; The step params a focus step holds, in the automation lane's order: each
+;; a dict of its field (:name), :label, :min, :max, :default and :increment
+;; (project.focus-step-params, the host's).
+(def focus-step-params () project.focus-step-params)
+
+;; How to read each focus step param, by its field name.
+(def focus-step-readers
+  (list (list "duration" (lambda (fs) fs.duration))
+        (list "velocity" (lambda (fs) fs.velocity))
+        (list "delay" (lambda (fs) fs.delay))
+        (list "aux-a" (lambda (fs) fs.aux-a))
+        (list "transpose" (lambda (fs) fs.transpose))
+        (list "pan" (lambda (fs) fs.pan))
+        (list "sync" (lambda (fs) fs.sync))
+        (list "retrig" (lambda (fs) fs.retrig))
+        (list "retrig-rate" (lambda (fs) fs.retrig-rate))))
+
+;; Focus step fs's param name (one of focus-step-params' :name; any other is
+;; an error); set it with (set-focus-step! fs name v).
+(def focus-step-value (fs name)
+  (let ((row (first (filter (lambda (r) (= (first r) name)) focus-step-readers))))
+    (if (= row nil)
+      (seq-error (str "a focus step has no param " name))
+      (let ((reader (nth row 1)))
+        (reader fs)))))
 
 ;; ── The sound palette and Patch Learn ──
 

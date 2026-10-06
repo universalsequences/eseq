@@ -1154,6 +1154,11 @@ pub struct App {
     /// Bumped by every undo and redo that replays an entry (the host kinds
     /// forget the note ids of a source a replay changed).
     pub history_replays: u64,
+    /// Bumped by every focus step edit that commits, rolls back or writes a
+    /// drag frame (`edit::FocusStepGesture`, the script note and focus step
+    /// drags): a pinned source's pool writes move no other counter, so the
+    /// host kinds re-read the piano roll's notes and steps when it moves.
+    pub focus_step_edits: u64,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
@@ -2950,6 +2955,7 @@ impl App {
             pending_song_row_invalidation: None,
             pending_drag: None,
             history_replays: 0,
+            focus_step_edits: 0,
             sound_binding_epoch: 0,
             filter_table_save_dir: None,
             graph: GraphState {
