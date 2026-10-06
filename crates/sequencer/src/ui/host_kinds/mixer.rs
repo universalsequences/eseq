@@ -83,11 +83,7 @@ impl HostKinds {
         }
         pusher.shared.borrow_mut().bus_ids = model;
         if let Some(project) = pusher.singleton(PROJECT) {
-            pusher.push(
-                project,
-                f::PROJECT_BUSES,
-                instance_list(buses.iter().flatten().copied()),
-            );
+            pusher.push(project, f::PROJECT_BUSES, listed_instances(&buses));
         }
         self.sync_output_options(pusher, &buses);
         self.bus_ids = buses;
@@ -179,7 +175,7 @@ impl HostKinds {
             );
         }
         if let Some(project) = pusher.singleton(PROJECT) {
-            let list = instance_list(routes.iter().flatten().copied());
+            let list = listed_instances(&routes);
             pusher.push(project, f::PROJECT_ROUTES, list);
         }
         pusher.shared.borrow_mut().routes = sources;
@@ -255,11 +251,7 @@ impl HostKinds {
         }
         pusher.shared.borrow_mut().group_gids = model;
         if let Some(project) = pusher.singleton(PROJECT) {
-            pusher.push(
-                project,
-                f::PROJECT_GROUPS,
-                instance_list(groups.iter().flatten().copied()),
-            );
+            pusher.push(project, f::PROJECT_GROUPS, listed_instances(&groups));
         }
         if groups != self.group_ids {
             self.group_observed.reset();

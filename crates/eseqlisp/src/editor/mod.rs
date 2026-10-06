@@ -2,7 +2,7 @@ mod commands;
 mod minibuffer;
 mod natives;
 mod runtime_context;
-pub use natives::{asset_metadata_lisp_value, asset_option_labels};
+pub use natives::{AssetMetadata, asset_metadata, asset_metadata_lisp_value, asset_option_labels};
 pub(crate) mod widget_focus;
 mod widget_interaction;
 

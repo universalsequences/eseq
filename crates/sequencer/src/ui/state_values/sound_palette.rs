@@ -674,7 +674,9 @@ fn cached_surface_glyph_hash(
     hash
 }
 
-fn glyph_key(track: usize, patch: u64) -> String {
+/// The sound-glyph source key of a track's patch (the palette rows' and the
+/// `sound` kind's `glyph-key`).
+pub(crate) fn sound_glyph_key(track: usize, patch: u64) -> String {
     format!("sound-glyph:track:{track}:patch:{patch}")
 }
 
@@ -996,7 +998,7 @@ pub(super) fn collect_glyph_frames(
         }
         let mut misses = Vec::new();
         for (index, entry) in resolved.iter().enumerate() {
-            let key = glyph_key(track, entry.patch.0);
+            let key = sound_glyph_key(track, entry.patch.0);
             active.insert(key.clone());
             let is_anchor = anchor_patch == Some(entry.patch);
             let mut hasher = DefaultHasher::new();
@@ -1392,7 +1394,7 @@ fn build_palette_value(
             );
             row.insert(
                 "glyph-key".to_string(),
-                Rc::new(RefCell::new(Value::String(glyph_key(track, entry.patch.0)))),
+                Rc::new(RefCell::new(Value::String(sound_glyph_key(track, entry.patch.0)))),
             );
             row.insert(
                 "preset".to_string(),
@@ -1486,6 +1488,12 @@ pub(crate) fn sync_sound_palette(
                         build_palette_value(snapshot.0, snapshot.1, &snapshot.2, &snapshot.3),
                     )
                     .effects_dirty;
+                crate::presented::present_palette(Some(crate::presented::Palette {
+                    track: snapshot.0,
+                    target: snapshot.1,
+                    instrument: snapshot.2.clone(),
+                    entries: snapshot.3.clone(),
+                }));
                 frame.cached = Some(snapshot);
                 frame.published_open = true;
             }
@@ -1495,6 +1503,7 @@ pub(crate) fn sync_sound_palette(
                 dirty |= rt
                     .set_reactive("SEQ", "sound-palette", Value::Nil)
                     .effects_dirty;
+                crate::presented::present_palette(None);
                 frame.cached = None;
                 frame.published_open = false;
                 retain_sound_glyph_frames("sound-glyph:", &HashSet::new());

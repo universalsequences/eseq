@@ -6,7 +6,9 @@
 ;; (a track's chain, MIDI effects and drum rack slots, a bus's effects),
 ;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves,
 ;; tensors, p-lock variants, project and drum rack macros and their mappings,
-;; process classes; steps on first read of `t.steps`, params (with their
+;; process classes, the browser's preset files and rack slots, the open sound
+;; palette's sounds, the editor's macros and assets, Patch Learn's rows, a MIDI
+;; capture's lanes and notes, MIDI inputs; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
 ;; or `t.lanes`),
@@ -44,7 +46,10 @@
         duplicate-groove! delete-groove! save-groove-to-library!
         process-library set-process-enabled! set-inlet! set-lane-steps! move-process!
         add-process! remove-process! bind-port! add-fanout! unbind-port! clear-port!
-        remove-fanout!)
+        remove-fanout!
+        browser sound-palette editor learn retro song-export settings agent
+        apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
+        learn-method-options learn-refine-mode-options)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -250,6 +255,22 @@
 ;; Set inlet i to v; :all true sets the shared project lane's.
 (def set-inlet! (i v &key (all false))
   (edit-process (process-target i.process) "inlet" :inlet i.name :value v :all all))
+
+;; The browser, the sound palette, the editor and the app's views (spec
+;; §14.2i). A sound by its track's stable id and its patch id, a MIDI input by
+;; its device id, resolved when the command lands.
+(def set-sound-name (s v)
+  (host-command "sound-rename" (dict :track-id s.track.tid :kind "patch" :entity s.patch-id :name v)))
+(def set-editor-run-mode (e v)
+  (host-command "set-draft-instrument-run-mode" (dict :run-mode v)))
+;; Patch Learn's training settings: one of the method or refine mode options,
+;; an integer in the field's range (cma-population 0 or at least 4), a sigma
+;; above 0 up to 10, a positive pitch or gate length; anything else is an error.
+(def learn-setter (field)
+  (lambda (l v) (host-command "set-learn" (dict :field field :value v))))
+(def set-audio-workers-choice (st v) (host-command "audio-set-workers" (dict :choice v :strict true)))
+(def set-midi-device-enabled (d v)
+  (host-command "midi-set-enabled" (dict :id d.device-id :enabled v)))
 
 ;; ── Kinds ──
 
@@ -594,6 +615,7 @@
          (playhead  :int    :doc "The playing step, -1 while stopped")
          (timebase  :string :doc "Step timebase: 1/16, 1/8T, …")
          (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
+         (instrument-id :string :doc "The instrument it plays, as the browser's Instruments tab names it (builtin:sampler, …); empty for an empty track or a drum rack")
          (rack      :bool   :doc "A drum rack track")
          (group     group   :doc "The group holding the track, or nil")
          (sends     (list-of send))
@@ -927,6 +949,260 @@
          (rack-slot :int :doc "The current drum rack's selected slot, -1 when the current track is no rack")
          (auto-follow :bool :doc "The view follows the playhead (paused for a while after an edit)")))
 
+;; ── The browser, the sound palette, the editor and the app's views ──
+
+;; A saved Sound or kit of the browser's Sounds and Kits tabs:
+;; (nth browser.sound-presets 0). Positional; the instance follows its file.
+(def-kind preset-file
+  :key (index)
+  :host ((index  :int    :doc "Position in its listing, from 0")
+         (type   :string :doc "sound or kit")
+         (icon   :string :doc "The browser icon: piano, waveform, sine or sampler")
+         (name   :string)
+         (path   :string :doc "The file (load-sound-onto-track and load-kit take it)")
+         (pads   :int    :doc "A kit's pad count; 0 for a Sound")
+         (author :string)
+         (tags   (list-of :string))))
+
+;; A drum rack slot's presets, for the browser's Presets tab: (nth
+;; browser.rack-slots 0). The instance follows its slot device.
+(def-kind slot-presets
+  :key (index)
+  :host ((index  :int    :doc "The slot's position in the rack, from 0")
+         (device device  :doc "The rack slot device; nil until the device sync has it")
+         (instrument :string :doc "The slot's instrument")
+         (instrument-label :string :doc "Its display name")
+         (presets (list-of :string) :doc "The presets it can load")
+         (user-presets (list-of :string) :doc "The ones the user saved (listed under Library)")
+         (preset :string :doc "Its loaded preset; empty when none")))
+
+;; The browser sidebar: what the shown track plays and can load, the saved
+;; Sounds and kits, the sample preview.
+(def-kind browser
+  :key ()
+  :host ((track track :doc "The track the sidebar shows (the current track)")
+         (instrument-kind :string :doc "sampler, instrument or empty")
+         (instrument :string :doc "Its instrument (a drum rack track's name); empty for a sampler")
+         (instrument-label :string :doc "The instrument's display name")
+         (preset :string :doc "Its loaded preset; empty when none")
+         (presets (list-of :string) :doc "The presets it can load (a drum rack's: the rack presets)")
+         (user-presets (list-of :string) :doc "The ones the user saved (listed under Library)")
+         (sample :string :doc "A sampler's sample file; empty otherwise")
+         (rack-slots (list-of slot-presets) :doc "A drum rack's slots, with their presets")
+         (engines (list-of :string) :doc "The instrument engines the project uses")
+         (sound-presets (list-of preset-file) :doc "The saved Sounds")
+         (kit-presets (list-of preset-file) :doc "The saved kits")
+         (library-epoch :int :doc "Moves when the instrument or effect library changes on disk; read it to re-list a library tree")
+         (preview-playing :bool :doc "A sample preview plays")
+         (preview-position :number :doc "The preview's position in seconds; 0 while stopped")))
+
+;; A sound (a patch of a track's pool) as the sound palette lists it:
+;; (nth sound-palette.sounds 0). Keyed by its patch id.
+(def-kind sound
+  :key (track patch-id)
+  :host ((track     track  :doc "The track whose pool holds it")
+         (patch-id  :int   :doc "The host's stable patch id")
+         (mix-id    :int   :doc "The mix its first use pairs it with; -1 when unknown")
+         (name      :string :set set-sound-name :doc "Non-empty; one undo entry")
+         (referents :string :doc "Where it is used: Scene 1, Pattern 5, …; unused for a library orphan")
+         (referents-short :string :doc "The same, abbreviated: S1 P5 T2")
+         (base      :bool  :doc "The scene-effective sound")
+         (track-sound :bool :doc "The track's own sound")
+         (current   :bool  :doc "The palette target's current sound")
+         (preset    :string :doc "The preset it was loaded from (* when edited since); empty when unknown")
+         (sample    :string :doc "A sampler sound's sample name; empty otherwise")
+         (diff-up   :int   :doc "Params higher than the current sound's")
+         (diff-down :int   :doc "Params lower than the current sound's")
+         (colored   :bool  :doc "It has a palette color")
+         (color     :rgb   :doc "Its palette color, themed; the timeline's gray without one")
+         (glyph-key :string :doc "The sound-glyph source key of its glyph")))
+
+;; The sound palette overlay: (open-sound-palette! t), (apply-sound! s).
+(def-kind sound-palette
+  :key ()
+  :host ((open       :bool   :doc "The overlay is open")
+         (track      track   :doc "The track whose sounds it shows; nil while closed")
+         (target     :string :doc "What apply and fork act on: take, pattern or cell")
+         (target-id  :int    :doc "The take or pattern id; -1 for cell")
+         (instrument :string :doc "The track's instrument, for the header")
+         (sounds     (list-of sound))))
+
+;; A defmacro of the patch editor's macro sidebar: the patch's own, or the
+;; saved library's. Positional; the instance follows its name.
+(def-kind editor-macro
+  :key (index)
+  :host ((name    :string)
+         (library :bool   :doc "A saved library macro (else the patch's own)")
+         (params  (list-of :string))
+         (calls   (list-of :string) :doc "The macros its body calls (a library macro's imports)")
+         (outputs (list-of :string) :doc "A library macro's outputs")
+         (summary :string :doc "A library macro's summary")
+         (used    :bool   :doc "A library macro the patch imports")))
+
+;; A file-backed tensor asset the patch can use. The instance follows its
+;; reference.
+(def-kind editor-asset
+  :key (index)
+  :host ((index       :int    :doc "Position in editor.assets, from 0")
+         (reference   :string :doc "What a tensor node names")
+         (tier        :string :doc "draft, user or factory")
+         (source-path :string)))
+
+;; The selected file-backed tensor node's asset (editor.selected-asset).
+(def-kind asset-info
+  :key ()
+  :host ((reference   :string)
+         (tensor-kind :string :doc "Its declared kind; empty when none")
+         (layout      :string :doc "Its declared layout; empty when none")
+         (shape       (list-of :int))
+         (source      :string :doc "Where it came from; empty when unknown")
+         (wave-count  :int)
+         (waves-per-set :int  :doc "0 when it declares no grouping")
+         (set-count   :int)
+         (sets        (list-of :string) :doc "The set labels it declares")
+         (wave-names  (list-of :string) :doc "The wave names it declares")))
+
+;; The instrument and effect editor.
+(def-kind editor
+  :key ()
+  :host ((mode      :string :doc "Empty, new-instrument, edit-instrument, new-effect or edit-effect")
+         (surface   :string :doc "patch or code")
+         (buffer    :string :doc "The edited buffer's name")
+         (error     :string :doc "The last compile or save error; empty when none")
+         (canceling :bool)
+         (run-mode  :string :set set-editor-run-mode :doc "A draft instrument's run mode: instrument or free_patch")
+         (active-macro :string :doc "The macro view's macro a library action applies to")
+         (active-macro-action :string :doc "save-to-library, fork or empty")
+         (open-macro :string :doc "The macro view open in the patcher; empty at the root")
+         (patch-macros (list-of editor-macro) :doc "The patch's own defmacros")
+         (library-macros (list-of editor-macro) :doc "The saved defmacro library")
+         (assets    (list-of editor-asset))
+         (selected-asset asset-info :doc "The selected file-backed tensor node's asset, or nil")))
+
+;; Patch Learn's plan, epoch and result rows: (nth learn.plan-params 0).
+;; Positional.
+(def-kind learn-plan-param
+  :key (index)
+  :host ((index  :int)
+         (name   :string)
+         (status :string :doc "learnable, frozen or unsupported")
+         (reason :string :doc "Why it is frozen or unsupported")))
+(def-kind learn-epoch-param
+  :key (index)
+  :host ((index  :int)
+         (name   :string)
+         (from   :number :doc "The seeded value")
+         (value  :number :doc "The value at the latest epoch")
+         (change :number)
+         (step   :number)))
+(def-kind learn-delta
+  :key (index)
+  :host ((index  :int)
+         (name   :string)
+         (from   :number)
+         (to     :number)
+         (change :number)))
+
+;; Patch Learn: the target, the training settings, progress and the result.
+(def-kind learn
+  :key ()
+  :host ((target-path :string :doc "The target sample; empty when none")
+         (target-name :string)
+         (phase :string :doc "pick, planning, configure, training, result or error")
+         (method :string :set (learn-setter "method") :doc "One of learn-method-options")
+         (epochs :int :range (1 2000) :set (learn-setter "epochs"))
+         (cma-generations :int :range (1 1000) :set (learn-setter "cma-generations"))
+         (cma-population :int :range (0 4096) :set (learn-setter "cma-population") :doc "0 for auto, else at least 4")
+         (cma-sigma :number :range (0 10) :set (learn-setter "cma-sigma") :doc "Above 0")
+         (cma-seed :int :range (0 4294967295) :set (learn-setter "cma-seed"))
+         (cma-forward-batch :int :range (0 4096) :set (learn-setter "cma-forward-batch") :doc "0 for auto")
+         (local-epochs :int :range (0 2000) :set (learn-setter "local-epochs"))
+         (cma-continue :int :range (0 4096) :set (learn-setter "cma-continue"))
+         (cma-refine-epochs :int :range (0 2000) :set (learn-setter "cma-refine-epochs"))
+         (cma-refine-mode :string :set (learn-setter "cma-refine-mode") :doc "One of learn-refine-mode-options")
+         (cma-final-epochs :int :range (0 2000) :set (learn-setter "cma-final-epochs"))
+         (pitch-hz :number :set (learn-setter "pitch-hz") :doc "The target's pitch; 0 until known")
+         (gate-frames :int :set (learn-setter "gate-frames") :doc "The note length in frames; 0 until known")
+         (stage :string)
+         (current-epoch :int)
+         (total-epochs :int)
+         (loss :number)
+         (losses (list-of :number) :doc "Per epoch")
+         (optimization-losses (list-of :number) :doc "Per optimizer iteration")
+         (plan-params (list-of learn-plan-param))
+         (epoch-params (list-of learn-epoch-param))
+         (improvement-pct :number)
+         (abs-distance :number)
+         (basin-check :string)
+         (result-deltas (list-of learn-delta))
+         (seeded-wav :string)
+         (final-wav :string)
+         (applied :bool :doc "The result was applied to the instrument")
+         (error :string)))
+
+;; A frozen MIDI capture's lane (one per played track and pitch) and note.
+(def-kind retro-lane
+  :key (index)
+  :host ((index :int)
+         (label :string :doc "Track · pitch")))
+(def-kind retro-item
+  :key (index)
+  :host ((index :int)
+         (lane  retro-lane)
+         (start :number :doc "Seconds into the capture")
+         (end   :number)))
+
+;; MIDI capture (Capture MIDI): the frozen live history and its audition.
+(def-kind retro
+  :key ()
+  :host ((lanes     (list-of retro-lane))
+         (items     (list-of retro-item))
+         (duration  :number :doc "Seconds")
+         (truncated :bool   :doc "The history ran past its window")
+         (error     :string)
+         (playing   :bool   :doc "An audition plays")
+         (position  :number :doc "The audition's position, seconds")))
+
+;; The song export modal (export is a module form, hence song-export).
+(def-kind song-export
+  :key ()
+  :host ((default-name :string :doc "The suggested file name")
+         (project      :string :doc "The saved project it exports")
+         (folder       :string :doc "The recordings folder")
+         (end          :number :doc "The arrangement's end beat")
+         (busy         :bool   :doc "An export runs")
+         (done         :bool   :doc "The last export completed")
+         (message      :string)
+         (percent      :number :doc "Render progress; -1 while not rendering")
+         (output-name  :string :doc "The file being written")
+         (reveal-label :string :doc "Show in Finder, or Open folder")))
+
+;; A MIDI input: (nth settings.midi-devices 0). The instance follows its
+;; device id.
+(def-kind midi-device
+  :key (index)
+  :host ((index     :int)
+         (device-id :string :doc "The service's stable device id")
+         (name      :string)
+         (enabled   :bool   :set set-midi-device-enabled)
+         (connected :bool)
+         (status    :string)))
+
+;; Settings: the audio workers and the MIDI inputs.
+(def-kind settings
+  :key ()
+  :host ((audio-workers-choice :string :set set-audio-workers-choice
+                               :doc "One of project.audio-workers-options; applies at the next launch")
+         (audio-workers-note :string :doc "What runs now and after a restart")
+         (midi-devices (list-of midi-device))
+         (midi-error :string)
+         (midi-persistent :bool :doc "Device choices are saved")))
+
+;; The agent.
+(def-kind agent
+  :key ()
+  :host ((generation :int :doc "Moves whenever an agent session changes")))
+
 ;; The collections, for (tracks), (scenes), (banks), (buses), (groups) and
 ;; (routes), and the option lists the host owns.
 (def-kind project
@@ -944,7 +1220,9 @@
          (step-param-options (list-of :string) :doc "The step params a process port may write (bind-port! pt name)")
          (groove-pool (list-of pool-groove) :doc "The project's grooves, in pool order")
          (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
-         (macros (list-of macro) :doc "The project's macros, in macro order")))
+         (macros (list-of macro) :doc "The project's macros, in macro order")
+         (name :string :doc "The project's name; empty while unsaved")
+         (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")))
 
 ;; ── Collections and actions ──
 
@@ -1178,3 +1456,33 @@
 ;; Remove fan-out entry fo.
 (def remove-fanout! (fo &key (all false))
   (edit-process (fanout-address fo) "remove-fanout" :all all))
+
+;; ── The sound palette and Patch Learn ──
+
+;; Open the sound palette on track t's sounds; target is take, pattern or
+;; cell (the track's bound sound when nil), id the take or pattern id.
+(def open-sound-palette! (t &key (target nil) (id nil))
+  (host-command "sound-palette-open"
+    (if target
+      (dict :track-id t.tid :target-kind target :target-id id)
+      (dict :track-id t.tid))))
+(def close-sound-palette! () (host-command "sound-palette-close" (dict)))
+
+;; Make sound s what the palette's target plays (by reference: later edits
+;; to s follow). One undo entry.
+(def apply-sound! (s)
+  (host-command "sound-apply" (dict :track-id s.track.tid :patch s.patch-id)))
+
+;; Apply s with the mix its first use pairs it with (none: an error).
+(def apply-sound-with-mix! (s)
+  (host-command "sound-apply-with-mix"
+    (dict :track-id s.track.tid :patch s.patch-id :mix s.mix-id)))
+
+;; Give track t's palette target its own copy of its current sound.
+(def fork-sound! (t) (host-command "sound-fork" (dict :track-id t.tid)))
+
+;; Patch Learn's methods and shortlist execution modes (the host checks they
+;; match its own).
+(def learn-method-options
+  '("Local fit + basin check" "Evolutionary search only" "Evolutionary search + training"))
+(def learn-refine-mode-options '("Batched" "Scalar" "Auto"))

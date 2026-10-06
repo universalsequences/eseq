@@ -68,16 +68,8 @@ impl HostKinds {
             pusher.push(id, f::SCENE_BANK, instance_or_nil(bank));
         }
         if let Some(project) = pusher.singleton(PROJECT) {
-            pusher.push(
-                project,
-                f::PROJECT_SCENES,
-                instance_list(scenes.iter().flatten().copied()),
-            );
-            pusher.push(
-                project,
-                f::PROJECT_BANKS,
-                instance_list(banks.iter().flatten().copied()),
-            );
+            pusher.push(project, f::PROJECT_SCENES, listed_instances(&scenes));
+            pusher.push(project, f::PROJECT_BANKS, listed_instances(&banks));
         }
         if let Some(transport) = pusher.singleton(TRANSPORT) {
             let scene = scenes.get(current).copied().flatten();

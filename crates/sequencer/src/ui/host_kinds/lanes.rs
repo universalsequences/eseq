@@ -224,14 +224,6 @@ fn flag(on: bool) -> Value {
     Value::Bool(on)
 }
 
-fn numbers(values: &[f32]) -> Value {
-    list_value(values.iter().map(|value| number(*value)))
-}
-
-fn strings<'a>(names: impl IntoIterator<Item = &'a String>) -> Value {
-    list_value(names.into_iter().map(|name| Value::String(name.clone())))
-}
-
 /// Pushes during one track's sync, each compared with its cell
 /// ([`put`]); `changed` says whether any landed.
 struct Puts<'a, S> {
@@ -990,7 +982,7 @@ impl HostKinds {
             pusher.push(id, f::CLASS_PORTS, strings(ports));
         }
         if let Some(library) = pusher.singleton(PROCESS_LIBRARY) {
-            let classes = instance_list(ids.iter().flatten().copied());
+            let classes = listed_instances(&ids);
             pusher.push(library, f::LIBRARY_CLASSES, classes);
         }
         self.lanes.classes = ids;

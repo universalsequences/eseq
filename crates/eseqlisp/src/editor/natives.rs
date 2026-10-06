@@ -179,112 +179,132 @@ pub fn asset_option_labels(
     .filter(|labels| !labels.is_empty())
 }
 
+/// A tensor asset's header metadata, as the `asset-metadata` native reports
+/// it: the declared fields (`None` when undeclared), the wave count, the
+/// grouping and the labels (truncated to the set and wave counts).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AssetMetadata {
+    pub shape: Vec<u64>,
+    pub kind: Option<String>,
+    pub layout: Option<String>,
+    pub source: Option<String>,
+    pub wave_count: usize,
+    pub waves_per_set: Option<usize>,
+    pub set_count: usize,
+    pub sets: Option<Vec<String>>,
+    pub wave_names: Option<Vec<String>>,
+}
+
+impl From<TensorAssetHeader> for AssetMetadata {
+    fn from(header: TensorAssetHeader) -> Self {
+        let wave_count = header.shape[1..]
+            .iter()
+            .try_fold(1usize, |product, dimension| {
+                usize::try_from(*dimension)
+                    .ok()
+                    .and_then(|dimension| product.checked_mul(dimension))
+            })
+            .expect("validated tensor shape product");
+        let waves_per_set = header
+            .waves_per_set
+            .and_then(|value| usize::try_from(value).ok());
+        let set_count = match waves_per_set {
+            Some(value) => (wave_count / value).max(1),
+            // `waves_per_set` is independently optional: with no grouping declared,
+            // the declared label list itself is the set count. Never truncate valid labels.
+            None => header
+                .sets
+                .as_ref()
+                .map(|sets| sets.len())
+                .unwrap_or(1)
+                .max(1),
+        };
+        let truncate = |labels: Option<Vec<String>>, limit: usize| {
+            labels.map(|labels| labels.into_iter().take(limit).collect())
+        };
+        Self {
+            shape: header.shape,
+            kind: header.kind,
+            layout: header.layout,
+            source: header.source,
+            wave_count,
+            waves_per_set,
+            set_count,
+            sets: truncate(header.sets, set_count),
+            wave_names: truncate(header.wave_names, wave_count),
+        }
+    }
+}
+
+impl AssetMetadata {
+    /// The `asset-metadata` native's map (an undeclared field nil).
+    pub fn value(&self) -> Value {
+        fn cell(value: Value) -> Rc<RefCell<Value>> {
+            Rc::new(RefCell::new(value))
+        }
+        fn list(values: impl IntoIterator<Item = Value>) -> Value {
+            Value::List(values.into_iter().map(cell).collect())
+        }
+        fn optional_string(value: &Option<String>) -> Value {
+            value.clone().map(Value::String).unwrap_or(Value::Nil)
+        }
+        fn optional_strings(value: &Option<Vec<String>>) -> Value {
+            value
+                .as_ref()
+                .map(|values| list(values.iter().cloned().map(Value::String)))
+                .unwrap_or(Value::Nil)
+        }
+        let shape = self
+            .shape
+            .iter()
+            .map(|dimension| Value::Number(*dimension as f64));
+        let fields = HashMap::from([
+            ("shape".to_string(), cell(list(shape))),
+            ("kind".to_string(), cell(optional_string(&self.kind))),
+            ("layout".to_string(), cell(optional_string(&self.layout))),
+            ("source".to_string(), cell(optional_string(&self.source))),
+            (
+                "wave-count".to_string(),
+                cell(Value::Number(self.wave_count as f64)),
+            ),
+            (
+                "waves-per-set".to_string(),
+                cell(
+                    self.waves_per_set
+                        .map(|value| Value::Number(value as f64))
+                        .unwrap_or(Value::Nil),
+                ),
+            ),
+            (
+                "set-count".to_string(),
+                cell(Value::Number(self.set_count as f64)),
+            ),
+            ("sets".to_string(), cell(optional_strings(&self.sets))),
+            (
+                "wave-names".to_string(),
+                cell(optional_strings(&self.wave_names)),
+            ),
+        ]);
+        Value::Map(fields)
+    }
+}
+
 /// Resolve an asset reference against the draft root and shared library
-/// precedence, returning its metadata as the same Lisp map shape as the
-/// `asset-metadata` native (Nil when missing or invalid). Lets the host mirror
-/// selected-asset metadata into reactive state without a Lisp round-trip.
+/// precedence, returning its metadata (`None` when missing or invalid). Lets
+/// the host present selected-asset metadata without a Lisp round-trip.
+pub fn asset_metadata(reference: &str, draft_root: Option<&Path>) -> Option<AssetMetadata> {
+    let path = crate::widget_render::patcher::resolve_asset_reference(reference, draft_root)?;
+    load_asset_metadata(&path).map(AssetMetadata::from)
+}
+
+/// [`asset_metadata`] as the `asset-metadata` native's Lisp map (Nil when
+/// missing or invalid).
 pub fn asset_metadata_lisp_value(reference: &str, draft_root: Option<&Path>) -> Value {
-    let Some(path) =
-        crate::widget_render::patcher::resolve_asset_reference(reference, draft_root)
-    else {
-        return Value::Nil;
-    };
-    load_asset_metadata(&path)
-        .map(asset_metadata_value)
-        .unwrap_or(Value::Nil)
+    asset_metadata(reference, draft_root).map_or(Value::Nil, |metadata| metadata.value())
 }
 
 fn asset_metadata_value(header: TensorAssetHeader) -> Value {
-    fn list(values: impl IntoIterator<Item = Value>) -> Value {
-        Value::List(
-            values
-                .into_iter()
-                .map(|value| Rc::new(RefCell::new(value)))
-                .collect(),
-        )
-    }
-    fn optional_string(value: Option<String>) -> Value {
-        value.map(Value::String).unwrap_or(Value::Nil)
-    }
-    fn optional_strings(value: Option<Vec<String>>, limit: usize) -> Value {
-        value
-            .map(|values| list(values.into_iter().take(limit).map(Value::String)))
-            .unwrap_or(Value::Nil)
-    }
-
-    let wave_count = header.shape[1..]
-        .iter()
-        .try_fold(1usize, |product, dimension| {
-            usize::try_from(*dimension)
-                .ok()
-                .and_then(|dimension| product.checked_mul(dimension))
-        })
-        .expect("validated tensor shape product");
-    let waves_per_set = header
-        .waves_per_set
-        .and_then(|value| usize::try_from(value).ok());
-    let set_count = match waves_per_set {
-        Some(value) => (wave_count / value).max(1),
-        // `waves_per_set` is independently optional: with no grouping declared,
-        // the declared label list itself is the set count. Never truncate valid labels.
-        None => header
-            .sets
-            .as_ref()
-            .map(|sets| sets.len())
-            .unwrap_or(1)
-            .max(1),
-    };
-    let fields = HashMap::from([
-        (
-            "shape".to_string(),
-            Rc::new(RefCell::new(list(
-                header
-                    .shape
-                    .into_iter()
-                    .map(|dimension| Value::Number(dimension as f64)),
-            ))),
-        ),
-        (
-            "kind".to_string(),
-            Rc::new(RefCell::new(optional_string(header.kind))),
-        ),
-        (
-            "layout".to_string(),
-            Rc::new(RefCell::new(optional_string(header.layout))),
-        ),
-        (
-            "source".to_string(),
-            Rc::new(RefCell::new(optional_string(header.source))),
-        ),
-        (
-            "wave-count".to_string(),
-            Rc::new(RefCell::new(Value::Number(wave_count as f64))),
-        ),
-        (
-            "waves-per-set".to_string(),
-            Rc::new(RefCell::new(
-                waves_per_set
-                    .map(|value| Value::Number(value as f64))
-                    .unwrap_or(Value::Nil),
-            )),
-        ),
-        (
-            "set-count".to_string(),
-            Rc::new(RefCell::new(Value::Number(set_count as f64))),
-        ),
-        (
-            "sets".to_string(),
-            Rc::new(RefCell::new(optional_strings(header.sets, set_count))),
-        ),
-        (
-            "wave-names".to_string(),
-            Rc::new(RefCell::new(optional_strings(
-                header.wave_names,
-                wave_count,
-            ))),
-        ),
-    ]);
-    Value::Map(fields)
+    AssetMetadata::from(header).value()
 }
 
 fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabSpec>, String> {

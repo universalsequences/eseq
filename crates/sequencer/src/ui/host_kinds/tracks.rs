@@ -72,6 +72,11 @@ impl HostKinds {
                 f::TRACK_INSTRUMENT_TYPE,
                 Value::String(instrument.to_string()),
             );
+            pusher.push(
+                id,
+                f::TRACK_INSTRUMENT_ID,
+                Value::String(track_instrument_id(app, track)),
+            );
             pusher.push(id, f::TRACK_RACK, Value::Bool(racks[track]));
             let sends = sync_sends(pusher, app, id, &self.buses);
             self.send_ids.extend_from_slice(&sends);
@@ -94,11 +99,7 @@ impl HostKinds {
             }
         }
         if let Some(project) = pusher.singleton(PROJECT) {
-            pusher.push(
-                project,
-                f::PROJECT_TRACKS,
-                instance_list(tracks.iter().flatten().copied()),
-            );
+            pusher.push(project, f::PROJECT_TRACKS, listed_instances(&tracks));
         }
         self.sync_route_model(pusher, app, &tracks);
         self.track_ids = tracks;

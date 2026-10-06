@@ -203,41 +203,38 @@ pub(crate) fn instrument_type_label(
     }
 }
 
-/// Per track, the id of the instrument it plays, in the Instruments tab's
-/// `:instrument-id` form: the canonical saved-instrument id for custom
-/// tracks, `builtin:<name>` for samplers and modulators, and "" otherwise
-/// (empty tracks and racks, which the tab does not load in place).
+/// Per track, the id of the instrument it plays ([`track_instrument_id`]).
 pub(crate) fn build_track_instrument_ids(app: &app::App) -> Value {
-    let items = app
-        .graph
-        .track_instrument_types
-        .iter()
-        .enumerate()
-        .map(|(track, instrument_type)| {
-            let id = match instrument_type {
-                sequencer::sequencer::InstrumentType::Sampler => {
-                    crate::browser::builtin_instrument_id("sampler")
-                }
-                sequencer::sequencer::InstrumentType::Modulator => {
-                    crate::browser::builtin_instrument_id("modulator")
-                }
-                sequencer::sequencer::InstrumentType::Custom => app
-                    .graph
-                    .track_engine_ids
-                    .get(track)
-                    .copied()
-                    .flatten()
-                    .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
-                    .map(|engine| {
-                        crate::instrument_favorites::canonical_instrument_id(None, &engine.name)
-                    })
-                    .unwrap_or_default(),
-                _ => String::new(),
-            };
-            Rc::new(RefCell::new(Value::String(id)))
-        })
+    let items = (0..app.graph.track_instrument_types.len())
+        .map(|track| Rc::new(RefCell::new(Value::String(track_instrument_id(app, track)))))
         .collect();
     Value::List(items)
+}
+
+/// The id of the instrument `track` plays, in the Instruments tab's
+/// `:instrument-id` form: the canonical saved-instrument id for custom
+/// tracks, `builtin:<name>` for samplers and modulators, and "" otherwise
+/// (empty tracks and racks, which the tab does not load in place). Shared by
+/// `SEQ.track-instrument-ids` and `track.instrument-id`.
+pub(crate) fn track_instrument_id(app: &app::App, track: usize) -> String {
+    match app.graph.track_instrument_types.get(track) {
+        Some(sequencer::sequencer::InstrumentType::Sampler) => {
+            crate::browser::builtin_instrument_id("sampler")
+        }
+        Some(sequencer::sequencer::InstrumentType::Modulator) => {
+            crate::browser::builtin_instrument_id("modulator")
+        }
+        Some(sequencer::sequencer::InstrumentType::Custom) => app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .copied()
+            .flatten()
+            .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
+            .map(|engine| crate::instrument_favorites::canonical_instrument_id(None, &engine.name))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 pub(crate) fn build_track_mod_output_available(app: &app::App) -> Value {

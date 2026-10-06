@@ -581,6 +581,15 @@ pub(super) fn live_value<S: KindStore>(
                 number(displayed_song_position_beats(position))
             }
             f::SONG_MANUAL_LATCH => Value::Bool(song_manual_latch(&sources.state)),
+            f::BROWSER_PREVIEW_PLAYING => Value::Bool(sequencer::audio::preview::is_playing()),
+            // 0 while stopped, as the legacy `browser-preview-playhead`.
+            f::BROWSER_PREVIEW_POSITION => number(if sequencer::audio::preview::is_playing() {
+                sequencer::audio::preview::position_seconds()
+            } else {
+                0.0
+            }),
+            f::RETRO_PLAYING => Value::Bool(sources.state.note_audition.generation() != 0),
+            f::RETRO_POSITION => number(sources.state.note_audition.position()),
             f::SONG_SCENE_LATCHED => Value::Bool(sources.state.song_scene_latch()),
             f::SELECTION_AUTO_FOLLOW => {
                 Value::Bool(auto_follow_enabled(&sources.auto_follow_override_until))

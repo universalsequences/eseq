@@ -331,8 +331,9 @@ pub(crate) fn run_event_loop(
         match sequencer::midi_input::service::Service::start(wake) {
             Ok(service) => Some(service),
             Err(error) => {
-                editor.runtime_mut().set_reactive("MIDI", "error",
-                    Value::String(format!("Could not start MIDI service: {error}")));
+                present_settings(editor.runtime_mut(), |s| {
+                    s.midi_error = format!("Could not start MIDI service: {error}")
+                });
                 None
             }
         }
@@ -726,11 +727,7 @@ pub(crate) fn run_event_loop(
             frame.prev_agent_generation_watermark = agent_generation;
             {
                 let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "AGENT",
-                    "generation",
-                    Value::Number(agent_generation as f64),
-                );
+                present_agent(rt, agent_generation);
                 rt.run_reactive_cycle();
             }
             editor.refresh_runtime_side_effects();
@@ -2042,11 +2039,7 @@ pub(crate) fn run_event_loop(
                         }
                         sessions.editor_mode = None;
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                        rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                        present_editor_closed(rt);
                         rt.set_reactive(
                             "SEQ",
                             "instrument-panel",
@@ -2065,12 +2058,10 @@ pub(crate) fn run_event_loop(
                     Err(error) => {
                         sessions.instrument_edit_session = Some(session);
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(format!("Failed to restore instrument: {error}")),
-                        );
+                        present_editor(rt, |e| {
+                            e.canceling = false;
+                            e.error = format!("Failed to restore instrument: {error}");
+                        });
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -2079,12 +2070,10 @@ pub(crate) fn run_event_loop(
                 Err(error) => {
                     sessions.instrument_edit_session = Some(session);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!("Failed to restore instrument: {error}")),
-                    );
+                    present_editor(rt, |e| {
+                        e.canceling = false;
+                        e.error = format!("Failed to restore instrument: {error}");
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.mark_needs_redraw();
@@ -2160,15 +2149,7 @@ pub(crate) fn run_event_loop(
                             }
                             sessions.editor_mode = None;
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-buffer-name",
-                                Value::String(String::new()),
-                            );
+                            present_editor_closed(rt);
                             match session.target {
                                 EffectEditTarget::Track { track, .. } => {
                                     rt.set_reactive(
@@ -2208,12 +2189,10 @@ pub(crate) fn run_event_loop(
                         Err(error) => {
                             sessions.effect_edit_session = Some(session);
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!("Failed to restore effect: {error}")),
-                            );
+                            present_editor(rt, |e| {
+                                e.canceling = false;
+                                e.error = format!("Failed to restore effect: {error}");
+                            });
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
@@ -2223,12 +2202,10 @@ pub(crate) fn run_event_loop(
                 Err(error) => {
                     sessions.effect_edit_session = Some(session);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!("Failed to restore effect: {error}")),
-                    );
+                    present_editor(rt, |e| {
+                        e.canceling = false;
+                        e.error = format!("Failed to restore effect: {error}");
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.mark_needs_redraw();
@@ -2269,11 +2246,7 @@ pub(crate) fn run_event_loop(
                                         session.visible_revision_valid = true;
                                         replan_after_preview = session.learn_target_path.is_some();
                                         let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "editor-error",
-                                            Value::String(String::new()),
-                                        );
+                                        present_editor(rt, |e| e.error.clear());
                                         rt.set_reactive(
                                             "SEQ",
                                             "instrument-panel",
@@ -2293,22 +2266,12 @@ pub(crate) fn run_event_loop(
                                     }
                                     Err(error) => {
                                         session.visible_revision_valid = false;
-                                        let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "editor-error",
-                                            Value::String(error),
-                                        );
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
+                                        editor_error(&mut editor, error);
                                     }
                                 },
                                 Err(error) => {
                                     session.visible_revision_valid = false;
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                                    editor_error(&mut editor, error);
                                 }
                             }
                         }
@@ -2317,14 +2280,7 @@ pub(crate) fn run_event_loop(
                 Err(()) => {
                     if let Some(session) = sessions.instrument_edit_session.as_mut() {
                         session.visible_revision_valid = false;
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String("Instrument preview compile thread crashed".to_string()),
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
+                        editor_error(&mut editor, "Instrument preview compile thread crashed");
                     }
                 }
             }
@@ -2340,22 +2296,15 @@ pub(crate) fn run_event_loop(
                     ) {
                         Ok(job) => {
                             replace_learn_job(&mut sessions.pending_learn_job, job);
-                            editor.runtime_mut().set_reactive(
-                                "SEQ",
-                                "learn-phase",
-                                Value::String("planning".to_string()),
-                            );
+                            present_learn(editor.runtime_mut(), |l| {
+                                l.phase = "planning".to_string()
+                            });
                             editor.runtime_mut().run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                         }
                         Err(error) => {
                             let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "learn-phase",
-                                Value::String("error".to_string()),
-                            );
-                            rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                            present_learn_error(rt, error);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                         }
@@ -2400,11 +2349,7 @@ pub(crate) fn run_event_loop(
                                             session.last_valid_layout = layout_override.or(layout);
                                             session.visible_revision_valid = true;
                                             let rt = editor.runtime_mut();
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "editor-error",
-                                                Value::String(String::new()),
-                                            );
+                                            present_editor(rt, |e| e.error.clear());
                                             match session.target {
                                                 EffectEditTarget::Track { track, .. } => {
                                                     rt.set_reactive(
@@ -2444,23 +2389,13 @@ pub(crate) fn run_event_loop(
                                         }
                                         Err(error) => {
                                             session.visible_revision_valid = false;
-                                            let rt = editor.runtime_mut();
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "editor-error",
-                                                Value::String(error),
-                                            );
-                                            rt.run_reactive_cycle();
-                                            editor.refresh_runtime_side_effects();
+                                            editor_error(&mut editor, error);
                                         }
                                     }
                                 }
                                 Err(error) => {
                                     session.visible_revision_valid = false;
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                                    editor_error(&mut editor, error);
                                 }
                             }
                         }
@@ -2469,14 +2404,7 @@ pub(crate) fn run_event_loop(
                 Err(()) => {
                     if let Some(session) = sessions.effect_edit_session.as_mut() {
                         session.visible_revision_valid = false;
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String("Effect preview compile thread crashed".to_string()),
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
+                        editor_error(&mut editor, "Effect preview compile thread crashed");
                     }
                 }
             }

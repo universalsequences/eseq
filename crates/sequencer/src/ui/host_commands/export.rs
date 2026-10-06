@@ -1,3 +1,4 @@
+use crate::presented::ExportView;
 use crate::*;
 use sequencer::bounce::{
     job::{ExportJob, ExportJobSettings, WorkerStatus},
@@ -16,9 +17,7 @@ thread_local! {
 }
 
 fn message(editor: &mut Editor, text: String) {
-    editor
-        .runtime_mut()
-        .set_reactive("EXPORT", "export-message", Value::String(text));
+    present_export(editor.runtime_mut(), |x| x.message = text);
     refresh(editor);
 }
 
@@ -48,14 +47,11 @@ pub(crate) fn publish_job_status(editor: &mut Editor, status: &WorkerStatus, run
         WorkerStatus::Completed { .. } => 100.0,
         _ => -1.0,
     };
-    let rt = editor.runtime_mut();
-    rt.set_reactive("EXPORT", "export-busy", Value::Bool(running));
-    rt.set_reactive(
-        "EXPORT",
-        "export-done",
-        Value::Bool(!running && matches!(status, WorkerStatus::Completed { .. })),
-    );
-    rt.set_reactive("EXPORT", "export-percent", Value::Number(percent));
+    present_export(editor.runtime_mut(), |x| {
+        x.busy = running;
+        x.done = !running && matches!(status, WorkerStatus::Completed { .. });
+        x.percent = percent;
+    });
     message(editor, text);
 }
 
@@ -81,29 +77,23 @@ pub(super) fn handle(
                         .map_err(|e| e.to_string())?;
                     JOB.with(|value| *value.borrow_mut() = None);
                     let rt = editor.runtime_mut();
-                    for (key, value) in [
-                        ("export-default-name", Value::String(filename)),
-                        ("export-project", Value::String(name.to_owned())),
-                        ("export-folder", Value::String(folder.display().to_string())),
-                        ("export-end", Value::Number(end)),
-                        ("export-busy", Value::Bool(false)),
-                        ("export-done", Value::Bool(false)),
-                        ("export-message", Value::String(String::new())),
-                        ("export-percent", Value::Number(-1.0)),
-                        (
-                            "export-reveal-label",
-                            Value::String(
-                                if cfg!(target_os = "macos") {
-                                    "Show in Finder"
-                                } else {
-                                    "Open folder"
-                                }
-                                .into(),
-                            ),
-                        ),
-                    ] {
-                        rt.set_reactive("EXPORT", key, value);
-                    }
+                    present_export(rt, |x| {
+                        *x = ExportView {
+                            default_name: filename,
+                            project: name.to_owned(),
+                            folder: folder.display().to_string(),
+                            end,
+                            reveal_label: if cfg!(target_os = "macos") {
+                                "Show in Finder"
+                            } else {
+                                "Open folder"
+                            }
+                            .into(),
+                            // Kept until the next export starts.
+                            output_name: std::mem::take(&mut x.output_name),
+                            ..ExportView::default()
+                        }
+                    });
                     rt.eval_str("(eseq.export-song/reset)")
                         .map_err(|e| format!("{e:?}"))?;
                 }
@@ -158,17 +148,10 @@ pub(super) fn handle(
                     },
                 )
                 .map_err(|e| e.to_string())?;
-                editor.runtime_mut().set_reactive(
-                    "EXPORT",
-                    "export-output-name",
-                    Value::String(
-                        job.destination
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                );
+                let output_name = job.destination.file_name().unwrap().to_string_lossy();
+                present_export(editor.runtime_mut(), |x| {
+                    x.output_name = output_name.into_owned()
+                });
                 JOB.with(|value| *value.borrow_mut() = Some(job));
                 publish_job_status(editor, &WorkerStatus::Preparing, true);
             }

@@ -68,8 +68,9 @@
 //! `racks` (drum rack pads, rack clips, grooves), `devices` (devices
 //! beyond the track chain), `panel` (the device panel extras: modulation
 //! lanes and display, process mapping, key locks, tensors), `variants`
-//! (p-lock variants) and `macros` (project and drum rack macros) the
-//! per-kind syncs.
+//! (p-lock variants), `macros` (project and drum rack macros), `lanes`
+//! (process lanes) and `presentation` (the browser, the sound palette, the
+//! editor and the app's views, from `ui::presented`) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -84,6 +85,7 @@ mod macros;
 mod mixer;
 mod panel;
 mod params;
+mod presentation;
 mod racks;
 mod registry;
 mod scenes;
@@ -102,6 +104,7 @@ pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
 use panel::*;
 use params::*;
+use presentation::PresentedState;
 use racks::RackState;
 use registry::*;
 use settings::*;
@@ -153,6 +156,26 @@ pub(crate) const INLET: &str = "eseq.kinds:inlet";
 pub(crate) const PORT: &str = "eseq.kinds:port";
 pub(crate) const FANOUT: &str = "eseq.kinds:fanout";
 pub(crate) const STATE_CELL: &str = "eseq.kinds:state-cell";
+pub(crate) const BROWSER: &str = "eseq.kinds:browser";
+pub(crate) const PRESET_FILE: &str = "eseq.kinds:preset-file";
+pub(crate) const SLOT_PRESETS: &str = "eseq.kinds:slot-presets";
+pub(crate) const SOUND: &str = "eseq.kinds:sound";
+pub(crate) const SOUND_PALETTE: &str = "eseq.kinds:sound-palette";
+pub(crate) const EDITOR: &str = "eseq.kinds:editor";
+pub(crate) const EDITOR_MACRO: &str = "eseq.kinds:editor-macro";
+pub(crate) const EDITOR_ASSET: &str = "eseq.kinds:editor-asset";
+pub(crate) const ASSET_INFO: &str = "eseq.kinds:asset-info";
+pub(crate) const LEARN: &str = "eseq.kinds:learn";
+pub(crate) const LEARN_PLAN_PARAM: &str = "eseq.kinds:learn-plan-param";
+pub(crate) const LEARN_EPOCH_PARAM: &str = "eseq.kinds:learn-epoch-param";
+pub(crate) const LEARN_DELTA: &str = "eseq.kinds:learn-delta";
+pub(crate) const RETRO: &str = "eseq.kinds:retro";
+pub(crate) const RETRO_LANE: &str = "eseq.kinds:retro-lane";
+pub(crate) const RETRO_ITEM: &str = "eseq.kinds:retro-item";
+pub(crate) const SONG_EXPORT: &str = "eseq.kinds:song-export";
+pub(crate) const SETTINGS: &str = "eseq.kinds:settings";
+pub(crate) const MIDI_DEVICE: &str = "eseq.kinds:midi-device";
+pub(crate) const AGENT: &str = "eseq.kinds:agent";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +253,192 @@ pub(crate) mod f {
     pub(crate) const TRACK_VARIANTS: FieldKey = (TRACK, "variants");
     pub(crate) const TRACK_PROCESSES: FieldKey = (TRACK, "processes");
     pub(crate) const TRACK_LANES: FieldKey = (TRACK, "lanes");
+    pub(crate) const TRACK_INSTRUMENT_ID: FieldKey = (TRACK, "instrument-id");
+
+    pub(crate) const BROWSER_TRACK: FieldKey = (BROWSER, "track");
+    pub(crate) const BROWSER_INSTRUMENT_KIND: FieldKey = (BROWSER, "instrument-kind");
+    pub(crate) const BROWSER_INSTRUMENT: FieldKey = (BROWSER, "instrument");
+    pub(crate) const BROWSER_INSTRUMENT_LABEL: FieldKey = (BROWSER, "instrument-label");
+    pub(crate) const BROWSER_PRESET: FieldKey = (BROWSER, "preset");
+    pub(crate) const BROWSER_PRESETS: FieldKey = (BROWSER, "presets");
+    pub(crate) const BROWSER_USER_PRESETS: FieldKey = (BROWSER, "user-presets");
+    pub(crate) const BROWSER_SAMPLE: FieldKey = (BROWSER, "sample");
+    pub(crate) const BROWSER_SLOTS: FieldKey = (BROWSER, "rack-slots");
+    pub(crate) const BROWSER_ENGINES: FieldKey = (BROWSER, "engines");
+    pub(crate) const BROWSER_SOUND_PRESETS: FieldKey = (BROWSER, "sound-presets");
+    pub(crate) const BROWSER_KIT_PRESETS: FieldKey = (BROWSER, "kit-presets");
+    pub(crate) const BROWSER_LIBRARY_EPOCH: FieldKey = (BROWSER, "library-epoch");
+    pub(crate) const BROWSER_PREVIEW_PLAYING: FieldKey = (BROWSER, "preview-playing");
+    pub(crate) const BROWSER_PREVIEW_POSITION: FieldKey = (BROWSER, "preview-position");
+
+    pub(crate) const PRESET_FILE_INDEX: FieldKey = (PRESET_FILE, "index");
+    pub(crate) const PRESET_FILE_TYPE: FieldKey = (PRESET_FILE, "type");
+    pub(crate) const PRESET_FILE_ICON: FieldKey = (PRESET_FILE, "icon");
+    pub(crate) const PRESET_FILE_NAME: FieldKey = (PRESET_FILE, "name");
+    pub(crate) const PRESET_FILE_PATH: FieldKey = (PRESET_FILE, "path");
+    pub(crate) const PRESET_FILE_PADS: FieldKey = (PRESET_FILE, "pads");
+    pub(crate) const PRESET_FILE_AUTHOR: FieldKey = (PRESET_FILE, "author");
+    pub(crate) const PRESET_FILE_TAGS: FieldKey = (PRESET_FILE, "tags");
+
+    pub(crate) const SLOT_PRESETS_INDEX: FieldKey = (SLOT_PRESETS, "index");
+    pub(crate) const SLOT_PRESETS_DEVICE: FieldKey = (SLOT_PRESETS, "device");
+    pub(crate) const SLOT_PRESETS_INSTRUMENT: FieldKey = (SLOT_PRESETS, "instrument");
+    pub(crate) const SLOT_PRESETS_INSTRUMENT_LABEL: FieldKey = (SLOT_PRESETS, "instrument-label");
+    pub(crate) const SLOT_PRESETS_PRESETS: FieldKey = (SLOT_PRESETS, "presets");
+    pub(crate) const SLOT_PRESETS_USER_PRESETS: FieldKey = (SLOT_PRESETS, "user-presets");
+    pub(crate) const SLOT_PRESETS_PRESET: FieldKey = (SLOT_PRESETS, "preset");
+
+    pub(crate) const SOUND_TRACK: FieldKey = (SOUND, "track");
+    pub(crate) const SOUND_PATCH_ID: FieldKey = (SOUND, "patch-id");
+    pub(crate) const SOUND_MIX_ID: FieldKey = (SOUND, "mix-id");
+    pub(crate) const SOUND_NAME: FieldKey = (SOUND, "name");
+    pub(crate) const SOUND_REFERENTS: FieldKey = (SOUND, "referents");
+    pub(crate) const SOUND_REFERENTS_SHORT: FieldKey = (SOUND, "referents-short");
+    pub(crate) const SOUND_BASE: FieldKey = (SOUND, "base");
+    pub(crate) const SOUND_TRACK_SOUND: FieldKey = (SOUND, "track-sound");
+    pub(crate) const SOUND_CURRENT: FieldKey = (SOUND, "current");
+    pub(crate) const SOUND_PRESET: FieldKey = (SOUND, "preset");
+    pub(crate) const SOUND_SAMPLE: FieldKey = (SOUND, "sample");
+    pub(crate) const SOUND_DIFF_UP: FieldKey = (SOUND, "diff-up");
+    pub(crate) const SOUND_DIFF_DOWN: FieldKey = (SOUND, "diff-down");
+    pub(crate) const SOUND_COLORED: FieldKey = (SOUND, "colored");
+    pub(crate) const SOUND_COLOR: FieldKey = (SOUND, "color");
+    pub(crate) const SOUND_GLYPH_KEY: FieldKey = (SOUND, "glyph-key");
+
+    pub(crate) const PALETTE_OPEN: FieldKey = (SOUND_PALETTE, "open");
+    pub(crate) const PALETTE_TRACK: FieldKey = (SOUND_PALETTE, "track");
+    pub(crate) const PALETTE_TARGET: FieldKey = (SOUND_PALETTE, "target");
+    pub(crate) const PALETTE_TARGET_ID: FieldKey = (SOUND_PALETTE, "target-id");
+    pub(crate) const PALETTE_INSTRUMENT: FieldKey = (SOUND_PALETTE, "instrument");
+    pub(crate) const PALETTE_SOUNDS: FieldKey = (SOUND_PALETTE, "sounds");
+
+    pub(crate) const EDITOR_MODE: FieldKey = (EDITOR, "mode");
+    pub(crate) const EDITOR_SURFACE: FieldKey = (EDITOR, "surface");
+    pub(crate) const EDITOR_BUFFER: FieldKey = (EDITOR, "buffer");
+    pub(crate) const EDITOR_ERROR: FieldKey = (EDITOR, "error");
+    pub(crate) const EDITOR_CANCELING: FieldKey = (EDITOR, "canceling");
+    pub(crate) const EDITOR_RUN_MODE: FieldKey = (EDITOR, "run-mode");
+    pub(crate) const EDITOR_ACTIVE_MACRO: FieldKey = (EDITOR, "active-macro");
+    pub(crate) const EDITOR_ACTIVE_MACRO_ACTION: FieldKey = (EDITOR, "active-macro-action");
+    pub(crate) const EDITOR_OPEN_MACRO: FieldKey = (EDITOR, "open-macro");
+    pub(crate) const EDITOR_PATCH_MACROS: FieldKey = (EDITOR, "patch-macros");
+    pub(crate) const EDITOR_LIBRARY_MACROS: FieldKey = (EDITOR, "library-macros");
+    pub(crate) const EDITOR_ASSETS: FieldKey = (EDITOR, "assets");
+    pub(crate) const EDITOR_SELECTED_ASSET: FieldKey = (EDITOR, "selected-asset");
+
+    pub(crate) const EDITOR_MACRO_NAME: FieldKey = (EDITOR_MACRO, "name");
+    pub(crate) const EDITOR_MACRO_LIBRARY: FieldKey = (EDITOR_MACRO, "library");
+    pub(crate) const EDITOR_MACRO_PARAMS: FieldKey = (EDITOR_MACRO, "params");
+    pub(crate) const EDITOR_MACRO_CALLS: FieldKey = (EDITOR_MACRO, "calls");
+    pub(crate) const EDITOR_MACRO_OUTPUTS: FieldKey = (EDITOR_MACRO, "outputs");
+    pub(crate) const EDITOR_MACRO_SUMMARY: FieldKey = (EDITOR_MACRO, "summary");
+    pub(crate) const EDITOR_MACRO_USED: FieldKey = (EDITOR_MACRO, "used");
+
+    pub(crate) const EDITOR_ASSET_INDEX: FieldKey = (EDITOR_ASSET, "index");
+    pub(crate) const EDITOR_ASSET_REFERENCE: FieldKey = (EDITOR_ASSET, "reference");
+    pub(crate) const EDITOR_ASSET_TIER: FieldKey = (EDITOR_ASSET, "tier");
+    pub(crate) const EDITOR_ASSET_SOURCE_PATH: FieldKey = (EDITOR_ASSET, "source-path");
+
+    pub(crate) const ASSET_REFERENCE: FieldKey = (ASSET_INFO, "reference");
+    pub(crate) const ASSET_TENSOR_KIND: FieldKey = (ASSET_INFO, "tensor-kind");
+    pub(crate) const ASSET_LAYOUT: FieldKey = (ASSET_INFO, "layout");
+    pub(crate) const ASSET_SHAPE: FieldKey = (ASSET_INFO, "shape");
+    pub(crate) const ASSET_SOURCE: FieldKey = (ASSET_INFO, "source");
+    pub(crate) const ASSET_WAVE_COUNT: FieldKey = (ASSET_INFO, "wave-count");
+    pub(crate) const ASSET_WAVES_PER_SET: FieldKey = (ASSET_INFO, "waves-per-set");
+    pub(crate) const ASSET_SET_COUNT: FieldKey = (ASSET_INFO, "set-count");
+    pub(crate) const ASSET_SETS: FieldKey = (ASSET_INFO, "sets");
+    pub(crate) const ASSET_WAVE_NAMES: FieldKey = (ASSET_INFO, "wave-names");
+
+    pub(crate) const LEARN_TARGET_PATH: FieldKey = (LEARN, "target-path");
+    pub(crate) const LEARN_TARGET_NAME: FieldKey = (LEARN, "target-name");
+    pub(crate) const LEARN_PHASE: FieldKey = (LEARN, "phase");
+    pub(crate) const LEARN_METHOD: FieldKey = (LEARN, "method");
+    pub(crate) const LEARN_EPOCHS: FieldKey = (LEARN, "epochs");
+    pub(crate) const LEARN_CMA_GENERATIONS: FieldKey = (LEARN, "cma-generations");
+    pub(crate) const LEARN_CMA_POPULATION: FieldKey = (LEARN, "cma-population");
+    pub(crate) const LEARN_CMA_SIGMA: FieldKey = (LEARN, "cma-sigma");
+    pub(crate) const LEARN_CMA_SEED: FieldKey = (LEARN, "cma-seed");
+    pub(crate) const LEARN_CMA_FORWARD_BATCH: FieldKey = (LEARN, "cma-forward-batch");
+    pub(crate) const LEARN_LOCAL_EPOCHS: FieldKey = (LEARN, "local-epochs");
+    pub(crate) const LEARN_CMA_CONTINUE: FieldKey = (LEARN, "cma-continue");
+    pub(crate) const LEARN_CMA_REFINE_EPOCHS: FieldKey = (LEARN, "cma-refine-epochs");
+    pub(crate) const LEARN_CMA_REFINE_MODE: FieldKey = (LEARN, "cma-refine-mode");
+    pub(crate) const LEARN_CMA_FINAL_EPOCHS: FieldKey = (LEARN, "cma-final-epochs");
+    pub(crate) const LEARN_PITCH_HZ: FieldKey = (LEARN, "pitch-hz");
+    pub(crate) const LEARN_GATE_FRAMES: FieldKey = (LEARN, "gate-frames");
+    pub(crate) const LEARN_STAGE: FieldKey = (LEARN, "stage");
+    pub(crate) const LEARN_CURRENT_EPOCH: FieldKey = (LEARN, "current-epoch");
+    pub(crate) const LEARN_TOTAL_EPOCHS: FieldKey = (LEARN, "total-epochs");
+    pub(crate) const LEARN_LOSS: FieldKey = (LEARN, "loss");
+    pub(crate) const LEARN_LOSSES: FieldKey = (LEARN, "losses");
+    pub(crate) const LEARN_OPTIMIZATION_LOSSES: FieldKey = (LEARN, "optimization-losses");
+    pub(crate) const LEARN_PLAN_PARAMS: FieldKey = (LEARN, "plan-params");
+    pub(crate) const LEARN_EPOCH_PARAMS: FieldKey = (LEARN, "epoch-params");
+    pub(crate) const LEARN_IMPROVEMENT_PCT: FieldKey = (LEARN, "improvement-pct");
+    pub(crate) const LEARN_ABS_DISTANCE: FieldKey = (LEARN, "abs-distance");
+    pub(crate) const LEARN_BASIN_CHECK: FieldKey = (LEARN, "basin-check");
+    pub(crate) const LEARN_RESULT_DELTAS: FieldKey = (LEARN, "result-deltas");
+    pub(crate) const LEARN_SEEDED_WAV: FieldKey = (LEARN, "seeded-wav");
+    pub(crate) const LEARN_FINAL_WAV: FieldKey = (LEARN, "final-wav");
+    pub(crate) const LEARN_APPLIED: FieldKey = (LEARN, "applied");
+    pub(crate) const LEARN_ERROR: FieldKey = (LEARN, "error");
+
+    pub(crate) const PLAN_PARAM_INDEX: FieldKey = (LEARN_PLAN_PARAM, "index");
+    pub(crate) const PLAN_PARAM_NAME: FieldKey = (LEARN_PLAN_PARAM, "name");
+    pub(crate) const PLAN_PARAM_STATUS: FieldKey = (LEARN_PLAN_PARAM, "status");
+    pub(crate) const PLAN_PARAM_REASON: FieldKey = (LEARN_PLAN_PARAM, "reason");
+    pub(crate) const EPOCH_PARAM_INDEX: FieldKey = (LEARN_EPOCH_PARAM, "index");
+    pub(crate) const EPOCH_PARAM_NAME: FieldKey = (LEARN_EPOCH_PARAM, "name");
+    pub(crate) const EPOCH_PARAM_FROM: FieldKey = (LEARN_EPOCH_PARAM, "from");
+    pub(crate) const EPOCH_PARAM_VALUE: FieldKey = (LEARN_EPOCH_PARAM, "value");
+    pub(crate) const EPOCH_PARAM_CHANGE: FieldKey = (LEARN_EPOCH_PARAM, "change");
+    pub(crate) const EPOCH_PARAM_STEP: FieldKey = (LEARN_EPOCH_PARAM, "step");
+    pub(crate) const DELTA_INDEX: FieldKey = (LEARN_DELTA, "index");
+    pub(crate) const DELTA_NAME: FieldKey = (LEARN_DELTA, "name");
+    pub(crate) const DELTA_FROM: FieldKey = (LEARN_DELTA, "from");
+    pub(crate) const DELTA_TO: FieldKey = (LEARN_DELTA, "to");
+    pub(crate) const DELTA_CHANGE: FieldKey = (LEARN_DELTA, "change");
+
+    pub(crate) const RETRO_LANES: FieldKey = (RETRO, "lanes");
+    pub(crate) const RETRO_ITEMS: FieldKey = (RETRO, "items");
+    pub(crate) const RETRO_DURATION: FieldKey = (RETRO, "duration");
+    pub(crate) const RETRO_TRUNCATED: FieldKey = (RETRO, "truncated");
+    pub(crate) const RETRO_ERROR: FieldKey = (RETRO, "error");
+    pub(crate) const RETRO_PLAYING: FieldKey = (RETRO, "playing");
+    pub(crate) const RETRO_POSITION: FieldKey = (RETRO, "position");
+    pub(crate) const RETRO_LANE_INDEX: FieldKey = (RETRO_LANE, "index");
+    pub(crate) const RETRO_LANE_LABEL: FieldKey = (RETRO_LANE, "label");
+    pub(crate) const RETRO_ITEM_INDEX: FieldKey = (RETRO_ITEM, "index");
+    pub(crate) const RETRO_ITEM_LANE: FieldKey = (RETRO_ITEM, "lane");
+    pub(crate) const RETRO_ITEM_START: FieldKey = (RETRO_ITEM, "start");
+    pub(crate) const RETRO_ITEM_END: FieldKey = (RETRO_ITEM, "end");
+
+    pub(crate) const EXPORT_DEFAULT_NAME: FieldKey = (SONG_EXPORT, "default-name");
+    pub(crate) const EXPORT_PROJECT: FieldKey = (SONG_EXPORT, "project");
+    pub(crate) const EXPORT_FOLDER: FieldKey = (SONG_EXPORT, "folder");
+    pub(crate) const EXPORT_END: FieldKey = (SONG_EXPORT, "end");
+    pub(crate) const EXPORT_BUSY: FieldKey = (SONG_EXPORT, "busy");
+    pub(crate) const EXPORT_DONE: FieldKey = (SONG_EXPORT, "done");
+    pub(crate) const EXPORT_MESSAGE: FieldKey = (SONG_EXPORT, "message");
+    pub(crate) const EXPORT_PERCENT: FieldKey = (SONG_EXPORT, "percent");
+    pub(crate) const EXPORT_OUTPUT_NAME: FieldKey = (SONG_EXPORT, "output-name");
+    pub(crate) const EXPORT_REVEAL_LABEL: FieldKey = (SONG_EXPORT, "reveal-label");
+
+    pub(crate) const MIDI_DEVICE_INDEX: FieldKey = (MIDI_DEVICE, "index");
+    pub(crate) const MIDI_DEVICE_ID: FieldKey = (MIDI_DEVICE, "device-id");
+    pub(crate) const MIDI_DEVICE_NAME: FieldKey = (MIDI_DEVICE, "name");
+    pub(crate) const MIDI_DEVICE_ENABLED: FieldKey = (MIDI_DEVICE, "enabled");
+    pub(crate) const MIDI_DEVICE_CONNECTED: FieldKey = (MIDI_DEVICE, "connected");
+    pub(crate) const MIDI_DEVICE_STATUS: FieldKey = (MIDI_DEVICE, "status");
+
+    pub(crate) const SETTINGS_AUDIO_WORKERS_CHOICE: FieldKey = (SETTINGS, "audio-workers-choice");
+    pub(crate) const SETTINGS_AUDIO_WORKERS_NOTE: FieldKey = (SETTINGS, "audio-workers-note");
+    pub(crate) const SETTINGS_MIDI_DEVICES: FieldKey = (SETTINGS, "midi-devices");
+    pub(crate) const SETTINGS_MIDI_ERROR: FieldKey = (SETTINGS, "midi-error");
+    pub(crate) const SETTINGS_MIDI_PERSISTENT: FieldKey = (SETTINGS, "midi-persistent");
+
+    pub(crate) const AGENT_GENERATION: FieldKey = (AGENT, "generation");
 
     pub(crate) const CLASS_INDEX: FieldKey = (PROCESS_CLASS, "index");
     pub(crate) const CLASS_NAME: FieldKey = (PROCESS_CLASS, "name");
@@ -678,6 +887,8 @@ pub(crate) mod f {
     pub(crate) const PROJECT_GROOVE_POOL: FieldKey = (PROJECT, "groove-pool");
     pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
     pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
+    pub(crate) const PROJECT_NAME: FieldKey = (PROJECT, "name");
+    pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -1179,6 +1390,185 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STATE_CELL_INDEX, ":int", Model),
     (f::STATE_CELL_NAME, ":string", Model),
     (f::STATE_CELL_VALUES, "(list-of :number)", Live),
+    // The track's instrument for the browser, at the track model sync.
+    (f::TRACK_INSTRUMENT_ID, ":string", Model),
+    // The project's name, compared every tick; the audio worker choices
+    // with the settings (`presented`).
+    (f::PROJECT_NAME, ":string", Model),
+    (f::PROJECT_AUDIO_WORKERS_OPTIONS, "(list-of :string)", Model),
+    // The browser, the sound palette, the editor and the app's views
+    // (`presented`): pushed from what the legacy publishers record
+    // (`ui::presented`), each area when its generation moved; the sample
+    // preview and the capture audition live.
+    (f::BROWSER_TRACK, "track", Model),
+    (f::BROWSER_INSTRUMENT_KIND, ":string", Model),
+    (f::BROWSER_INSTRUMENT, ":string", Model),
+    (f::BROWSER_INSTRUMENT_LABEL, ":string", Model),
+    (f::BROWSER_PRESET, ":string", Model),
+    (f::BROWSER_PRESETS, "(list-of :string)", Model),
+    (f::BROWSER_USER_PRESETS, "(list-of :string)", Model),
+    (f::BROWSER_SAMPLE, ":string", Model),
+    (f::BROWSER_SLOTS, "(list-of slot-presets)", Model),
+    (f::BROWSER_ENGINES, "(list-of :string)", Model),
+    (f::BROWSER_SOUND_PRESETS, "(list-of preset-file)", Model),
+    (f::BROWSER_KIT_PRESETS, "(list-of preset-file)", Model),
+    (f::BROWSER_LIBRARY_EPOCH, ":int", Model),
+    (f::BROWSER_PREVIEW_PLAYING, ":bool", Live),
+    (f::BROWSER_PREVIEW_POSITION, ":number", Live),
+    (f::PRESET_FILE_INDEX, ":int", Model),
+    (f::PRESET_FILE_TYPE, ":string", Model),
+    (f::PRESET_FILE_ICON, ":string", Model),
+    (f::PRESET_FILE_NAME, ":string", Model),
+    (f::PRESET_FILE_PATH, ":string", Model),
+    (f::PRESET_FILE_PADS, ":int", Model),
+    (f::PRESET_FILE_AUTHOR, ":string", Model),
+    (f::PRESET_FILE_TAGS, "(list-of :string)", Model),
+    (f::SLOT_PRESETS_INDEX, ":int", Model),
+    (f::SLOT_PRESETS_DEVICE, "device", Model),
+    (f::SLOT_PRESETS_INSTRUMENT, ":string", Model),
+    (f::SLOT_PRESETS_INSTRUMENT_LABEL, ":string", Model),
+    (f::SLOT_PRESETS_PRESETS, "(list-of :string)", Model),
+    (f::SLOT_PRESETS_USER_PRESETS, "(list-of :string)", Model),
+    (f::SLOT_PRESETS_PRESET, ":string", Model),
+    (f::SOUND_TRACK, "track", Model),
+    (f::SOUND_PATCH_ID, ":int", Model),
+    (f::SOUND_MIX_ID, ":int", Model),
+    (f::SOUND_NAME, ":string", Model),
+    (f::SOUND_REFERENTS, ":string", Model),
+    (f::SOUND_REFERENTS_SHORT, ":string", Model),
+    (f::SOUND_BASE, ":bool", Model),
+    (f::SOUND_TRACK_SOUND, ":bool", Model),
+    (f::SOUND_CURRENT, ":bool", Model),
+    (f::SOUND_PRESET, ":string", Model),
+    (f::SOUND_SAMPLE, ":string", Model),
+    (f::SOUND_DIFF_UP, ":int", Model),
+    (f::SOUND_DIFF_DOWN, ":int", Model),
+    (f::SOUND_COLORED, ":bool", Model),
+    (f::SOUND_COLOR, ":rgb", Model),
+    (f::SOUND_GLYPH_KEY, ":string", Model),
+    (f::PALETTE_OPEN, ":bool", Model),
+    (f::PALETTE_TRACK, "track", Model),
+    (f::PALETTE_TARGET, ":string", Model),
+    (f::PALETTE_TARGET_ID, ":int", Model),
+    (f::PALETTE_INSTRUMENT, ":string", Model),
+    (f::PALETTE_SOUNDS, "(list-of sound)", Model),
+    (f::EDITOR_MODE, ":string", Model),
+    (f::EDITOR_SURFACE, ":string", Model),
+    (f::EDITOR_BUFFER, ":string", Model),
+    (f::EDITOR_ERROR, ":string", Model),
+    (f::EDITOR_CANCELING, ":bool", Model),
+    (f::EDITOR_RUN_MODE, ":string", Model),
+    (f::EDITOR_ACTIVE_MACRO, ":string", Model),
+    (f::EDITOR_ACTIVE_MACRO_ACTION, ":string", Model),
+    (f::EDITOR_OPEN_MACRO, ":string", Model),
+    (f::EDITOR_PATCH_MACROS, "(list-of editor-macro)", Model),
+    (f::EDITOR_LIBRARY_MACROS, "(list-of editor-macro)", Model),
+    (f::EDITOR_ASSETS, "(list-of editor-asset)", Model),
+    (f::EDITOR_SELECTED_ASSET, "asset-info", Model),
+    (f::EDITOR_MACRO_NAME, ":string", Model),
+    (f::EDITOR_MACRO_LIBRARY, ":bool", Model),
+    (f::EDITOR_MACRO_PARAMS, "(list-of :string)", Model),
+    (f::EDITOR_MACRO_CALLS, "(list-of :string)", Model),
+    (f::EDITOR_MACRO_OUTPUTS, "(list-of :string)", Model),
+    (f::EDITOR_MACRO_SUMMARY, ":string", Model),
+    (f::EDITOR_MACRO_USED, ":bool", Model),
+    (f::EDITOR_ASSET_INDEX, ":int", Model),
+    (f::EDITOR_ASSET_REFERENCE, ":string", Model),
+    (f::EDITOR_ASSET_TIER, ":string", Model),
+    (f::EDITOR_ASSET_SOURCE_PATH, ":string", Model),
+    (f::ASSET_REFERENCE, ":string", Model),
+    (f::ASSET_TENSOR_KIND, ":string", Model),
+    (f::ASSET_LAYOUT, ":string", Model),
+    (f::ASSET_SHAPE, "(list-of :int)", Model),
+    (f::ASSET_SOURCE, ":string", Model),
+    (f::ASSET_WAVE_COUNT, ":int", Model),
+    (f::ASSET_WAVES_PER_SET, ":int", Model),
+    (f::ASSET_SET_COUNT, ":int", Model),
+    (f::ASSET_SETS, "(list-of :string)", Model),
+    (f::ASSET_WAVE_NAMES, "(list-of :string)", Model),
+    (f::LEARN_TARGET_PATH, ":string", Model),
+    (f::LEARN_TARGET_NAME, ":string", Model),
+    (f::LEARN_PHASE, ":string", Model),
+    (f::LEARN_METHOD, ":string", Model),
+    (f::LEARN_EPOCHS, ":int", Model),
+    (f::LEARN_CMA_GENERATIONS, ":int", Model),
+    (f::LEARN_CMA_POPULATION, ":int", Model),
+    (f::LEARN_CMA_SIGMA, ":number", Model),
+    (f::LEARN_CMA_SEED, ":int", Model),
+    (f::LEARN_CMA_FORWARD_BATCH, ":int", Model),
+    (f::LEARN_LOCAL_EPOCHS, ":int", Model),
+    (f::LEARN_CMA_CONTINUE, ":int", Model),
+    (f::LEARN_CMA_REFINE_EPOCHS, ":int", Model),
+    (f::LEARN_CMA_REFINE_MODE, ":string", Model),
+    (f::LEARN_CMA_FINAL_EPOCHS, ":int", Model),
+    (f::LEARN_PITCH_HZ, ":number", Model),
+    (f::LEARN_GATE_FRAMES, ":int", Model),
+    (f::LEARN_STAGE, ":string", Model),
+    (f::LEARN_CURRENT_EPOCH, ":int", Model),
+    (f::LEARN_TOTAL_EPOCHS, ":int", Model),
+    (f::LEARN_LOSS, ":number", Model),
+    (f::LEARN_LOSSES, "(list-of :number)", Model),
+    (f::LEARN_OPTIMIZATION_LOSSES, "(list-of :number)", Model),
+    (f::LEARN_PLAN_PARAMS, "(list-of learn-plan-param)", Model),
+    (f::LEARN_EPOCH_PARAMS, "(list-of learn-epoch-param)", Model),
+    (f::LEARN_IMPROVEMENT_PCT, ":number", Model),
+    (f::LEARN_ABS_DISTANCE, ":number", Model),
+    (f::LEARN_BASIN_CHECK, ":string", Model),
+    (f::LEARN_RESULT_DELTAS, "(list-of learn-delta)", Model),
+    (f::LEARN_SEEDED_WAV, ":string", Model),
+    (f::LEARN_FINAL_WAV, ":string", Model),
+    (f::LEARN_APPLIED, ":bool", Model),
+    (f::LEARN_ERROR, ":string", Model),
+    (f::PLAN_PARAM_INDEX, ":int", Model),
+    (f::PLAN_PARAM_NAME, ":string", Model),
+    (f::PLAN_PARAM_STATUS, ":string", Model),
+    (f::PLAN_PARAM_REASON, ":string", Model),
+    (f::EPOCH_PARAM_INDEX, ":int", Model),
+    (f::EPOCH_PARAM_NAME, ":string", Model),
+    (f::EPOCH_PARAM_FROM, ":number", Model),
+    (f::EPOCH_PARAM_VALUE, ":number", Model),
+    (f::EPOCH_PARAM_CHANGE, ":number", Model),
+    (f::EPOCH_PARAM_STEP, ":number", Model),
+    (f::DELTA_INDEX, ":int", Model),
+    (f::DELTA_NAME, ":string", Model),
+    (f::DELTA_FROM, ":number", Model),
+    (f::DELTA_TO, ":number", Model),
+    (f::DELTA_CHANGE, ":number", Model),
+    (f::RETRO_LANES, "(list-of retro-lane)", Model),
+    (f::RETRO_ITEMS, "(list-of retro-item)", Model),
+    (f::RETRO_DURATION, ":number", Model),
+    (f::RETRO_TRUNCATED, ":bool", Model),
+    (f::RETRO_ERROR, ":string", Model),
+    (f::RETRO_PLAYING, ":bool", Live),
+    (f::RETRO_POSITION, ":number", Live),
+    (f::RETRO_LANE_INDEX, ":int", Model),
+    (f::RETRO_LANE_LABEL, ":string", Model),
+    (f::RETRO_ITEM_INDEX, ":int", Model),
+    (f::RETRO_ITEM_LANE, "retro-lane", Model),
+    (f::RETRO_ITEM_START, ":number", Model),
+    (f::RETRO_ITEM_END, ":number", Model),
+    (f::EXPORT_DEFAULT_NAME, ":string", Model),
+    (f::EXPORT_PROJECT, ":string", Model),
+    (f::EXPORT_FOLDER, ":string", Model),
+    (f::EXPORT_END, ":number", Model),
+    (f::EXPORT_BUSY, ":bool", Model),
+    (f::EXPORT_DONE, ":bool", Model),
+    (f::EXPORT_MESSAGE, ":string", Model),
+    (f::EXPORT_PERCENT, ":number", Model),
+    (f::EXPORT_OUTPUT_NAME, ":string", Model),
+    (f::EXPORT_REVEAL_LABEL, ":string", Model),
+    (f::MIDI_DEVICE_INDEX, ":int", Model),
+    (f::MIDI_DEVICE_ID, ":string", Model),
+    (f::MIDI_DEVICE_NAME, ":string", Model),
+    (f::MIDI_DEVICE_ENABLED, ":bool", Model),
+    (f::MIDI_DEVICE_CONNECTED, ":bool", Model),
+    (f::MIDI_DEVICE_STATUS, ":string", Model),
+    (f::SETTINGS_AUDIO_WORKERS_CHOICE, ":string", Model),
+    (f::SETTINGS_AUDIO_WORKERS_NOTE, ":string", Model),
+    (f::SETTINGS_MIDI_DEVICES, "(list-of midi-device)", Model),
+    (f::SETTINGS_MIDI_ERROR, ":string", Model),
+    (f::SETTINGS_MIDI_PERSISTENT, ":bool", Model),
+    (f::AGENT_GENERATION, ":int", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -1256,6 +1646,8 @@ pub(super) static RACK_MACRO_LIVE: LazyLock<LiveFields> =
 pub(super) static PROCESS_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PROCESS));
 pub(super) static STATE_CELL_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(STATE_CELL));
+pub(super) static BROWSER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(BROWSER));
+pub(super) static RETRO_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(RETRO));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -1396,6 +1788,15 @@ fn instance_list(ids: impl IntoIterator<Item = InstanceId>) -> Value {
     list_value(ids.into_iter().map(Value::Instance))
 }
 
+/// The instances of a reconciled listing (the failed ones left out).
+fn listed_instances(ids: &[Option<InstanceId>]) -> Value {
+    instance_list(ids.iter().flatten().copied())
+}
+
+pub(super) fn strings<'a>(items: impl IntoIterator<Item = &'a String>) -> Value {
+    list_value(items.into_iter().map(|item| text(item)))
+}
+
 fn rgb3([r, g, b]: [f32; 3]) -> Value {
     eseqlisp::vm::tagged_list("rgb", vec![number(r), number(g), number(b)])
 }
@@ -1429,11 +1830,18 @@ struct ModelRevision {
     device_registry: u64,
     /// The display tint and palette track colors go through (a theme change
     /// bumps no epoch).
-    track_tint: (
-        eseqlisp::backend::Color,
-        [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS],
-    ),
+    track_tint: ThemeTint,
+    /// The same for p-lock variant and sound palette colors (the sound
+    /// palette's sync compares it; read once per tick here).
+    variant_tint: ThemeTint,
 }
+
+/// A tint and the palette colors go through it (`eseqlisp::theme`'s display
+/// keys).
+pub(super) type ThemeTint = (
+    eseqlisp::backend::Color,
+    [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS],
+);
 
 impl ModelRevision {
     fn capture(app: &app::App, shared: &KindsHandles) -> Self {
@@ -1452,6 +1860,7 @@ impl ModelRevision {
             track_generation: app.track_registry.generation(),
             device_registry: app.device_registry.generation(),
             track_tint: eseqlisp::theme::track_display_key(),
+            variant_tint: eseqlisp::theme::variant_display_key(),
         }
     }
 }
@@ -1567,6 +1976,8 @@ pub(crate) struct HostKinds {
     pub(crate) macros: MacroState,
     /// Process lanes: the library's classes, the tracks' processes.
     pub(crate) lanes: LaneState,
+    /// The browser, the sound palette, the editor and the app's views.
+    pub(crate) presented: PresentedState,
 }
 
 impl HostKinds {
@@ -1642,6 +2053,7 @@ impl HostKinds {
             self.devices.invalidate();
             self.macros.invalidate();
             self.lanes.invalidate(&self.shared);
+            self.presented.invalidate();
         }
         if self
             .song
@@ -1673,6 +2085,7 @@ impl HostKinds {
             changed: false,
         };
         let revision = ModelRevision::capture(app, &sources);
+        let variant_tint = revision.variant_tint;
         let groups_moved = app.groups != self.model_groups;
         let model_due = self.model.as_ref() != Some(&revision)
             || app.track_registry.ids() != self.model_track_ids.as_slice()
@@ -1725,6 +2138,7 @@ impl HostKinds {
         self.sync_song_model(&mut pusher, app);
         self.sync_song_pushed(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
+        self.sync_presented(&mut pusher, app, &variant_tint);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
         self.sync_compiling(&mut pusher, app);
@@ -1746,6 +2160,8 @@ impl HostKinds {
             (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
             (SONG, &*SONG_LIVE),
+            (BROWSER, &*BROWSER_LIVE),
+            (RETRO, &*RETRO_LIVE),
         ];
         for (kind, fields) in singletons {
             if let Some(id) = pusher.singleton(kind) {

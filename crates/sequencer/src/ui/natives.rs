@@ -3813,57 +3813,11 @@ pub(crate) fn init_runtime(
                 ("current-project-name", Value::String(String::new())),
                 ("scene-bank-view-generation", Value::Number(0.0)),
                 ("rack-panel-view-generation", Value::Number(0.0)),
-                // Editor mode state (for inline instrument/effect creation/editing)
-                ("editor-active", Value::Bool(false)),
-                ("editor-canceling", Value::Bool(false)),
-                ("editor-error", Value::String(String::new())),
-                ("editor-mode", Value::String(String::new())),
-                ("editor-buffer-name", Value::String(String::new())),
-                ("editor-active-macro-name", Value::String(String::new())),
-                ("editor-active-macro-action", Value::String(String::new())),
-                ("learn-target-path", Value::String(String::new())),
-                ("learn-target-name", Value::String(String::new())),
-                ("learn-phase", Value::String("pick".to_string())),
-                ("learn-plan-params", Value::List(vec![])),
-                ("learn-method", Value::String("Local fit + basin check".to_string())),
-                ("learn-epochs", Value::Number(300.0)),
-                ("learn-cma-generations", Value::Number(12.0)),
-                ("learn-cma-population", Value::Number(0.0)),
-                ("learn-cma-sigma", Value::Number(0.2)),
-                ("learn-cma-seed", Value::Number(1.0)),
-                ("learn-cma-forward-batch", Value::Number(0.0)),
-                ("learn-local-epochs", Value::Number(0.0)),
-                ("learn-cma-continue", Value::Number(8.0)),
-                ("learn-cma-refine-epochs", Value::Number(5.0)),
-                ("learn-cma-refine-mode", Value::String("Batched".to_string())),
-                ("learn-cma-final-epochs", Value::Number(300.0)),
-                ("learn-pitch-hz", Value::Number(0.0)),
-                ("learn-gate-frames", Value::Number(0.0)),
-                ("learn-stage", Value::String(String::new())),
-                ("learn-current-epoch", Value::Number(0.0)),
-                ("learn-total-epochs", Value::Number(0.0)),
-                ("learn-loss", Value::Number(0.0)),
-                ("learn-losses", Value::List(vec![])),
-                ("learn-optimization-losses", Value::List(vec![])),
-                ("learn-epoch-params", Value::List(vec![])),
-                ("learn-checkpoint-wav", Value::String(String::new())),
-                ("learn-improvement-pct", Value::Number(0.0)),
-                ("learn-abs-distance", Value::Number(0.0)),
-                ("learn-basin-check", Value::String(String::new())),
-                ("learn-result-deltas", Value::List(vec![])),
-                ("learn-final-wav", Value::String(String::new())),
-                ("learn-error", Value::String(String::new())),
-                ("editor-patch-macros", Value::List(vec![])),
-                ("editor-library-macros", Value::List(vec![])),
-                ("editor-assets", Value::List(vec![])),
-                ("editor-selected-asset", Value::Nil),
-                ("editor-open-macro", Value::String(String::new())),
-                (
-                    "editor-instrument-run-mode",
-                    Value::String("instrument".to_string()),
-                ),
                 ("tuning-root-options", build_tuning_root_options()),
             ];
+            // The editor's and Patch Learn's legacy fields, as the record
+            // (`presented`) holds them.
+            fields.extend(crate::presented::seq_registration());
             fields.extend(tuning_reactive_fields(&state.pattern.track_params[0]));
             for idx in 0..track_count {
                 fields.push((
@@ -4010,7 +3964,7 @@ pub(crate) fn init_runtime(
     crate::retrospective::register_state(&mut runtime);
     crate::host_commands::resample::register_state(&mut runtime);
     crate::host_commands::factory_promote::register_state(&mut runtime);
-    runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
+    runtime.register_reactive("AGENT", crate::presented::agent_registration(), false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
     }
@@ -7547,7 +7501,8 @@ pub(crate) fn init_runtime(
     crate::host_commands::packages::register_package_import_natives(&mut runtime);
     crate::host_commands::packages::register_package_export_natives(&mut runtime);
     crate::host_commands::packages::register_package_tree_natives(&mut runtime, state.clone());
-    runtime.register_reactive("EXPORT", vec![], true);
+    runtime.register_reactive("EXPORT", crate::presented::export_registration(), true);
+    crate::presented::register_fixture_native(&mut runtime);
 
     let sample_db_for_search = sample_db.clone();
     runtime.register_native("seq-search-samples", move |args, _ctx| {

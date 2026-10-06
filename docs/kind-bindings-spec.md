@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7f, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -357,7 +357,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`, since 7f `browser preset-file slot-presets sound sound-palette editor editor-macro editor-asset asset-info learn learn-plan-param learn-epoch-param learn-delta retro retro-lane retro-item song-export settings midi-device agent`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -1022,6 +1022,13 @@ its instance and field.
    (`process`), their lanes, inlets, ports, fan-out entries and state
    cells, the process library (`process-class`, `process-library`) and
    `track.processes` / `track.lanes` (§14.2h).
+   Built (stage 7f, eseq-0l17.32): the browser, the sound palette, the
+   editor and the app's views: `browser` (with `preset-file`,
+   `slot-presets`), `sound-palette` and `sound`, `editor` (with
+   `editor-macro`, `editor-asset`, `asset-info`), `learn` (with its plan,
+   epoch and result rows), `retro` (with `retro-lane`, `retro-item`),
+   `song-export`, `settings` (with `midi-device`), `agent`, `project.name`,
+   `project.audio-workers-options` and `track.instrument-id` (§14.2i).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -2168,6 +2175,139 @@ Built (7c):
   (eseq-0l17.33). A class's ports are listed by name
   (`process-class.ports`); a process's ports carry the rest.
 
+### 14.2i Built in stage 7f (eseq-0l17.32)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `browser` | `()` | `track track` (the track the sidebar shows), `instrument-kind :string` (`sampler`, `instrument`, `empty`), `instrument`, `instrument-label`, `preset`, `sample :string`, `presets`, `user-presets`, `engines (list-of :string)`, `rack-slots (list-of slot-presets)`, `sound-presets`, `kit-presets (list-of preset-file)`, `library-epoch :int`, `preview-playing :bool` (L), `preview-position :number` (L) |
+| `preset-file` | `(index)` | `index :int`, `type :string` (`sound`, `kit`), `icon`, `name`, `path`, `author :string`, `pads :int`, `tags (list-of :string)` |
+| `slot-presets` | `(index)` | `index :int` (the slot), `device device` (the rack slot device), `instrument`, `instrument-label`, `preset :string`, `presets`, `user-presets (list-of :string)` |
+| `sound-palette` | `()` | `open :bool`, `track track` (nil while closed), `target :string` (`take`, `pattern`, `cell`), `target-id :int` (-1 for cell), `instrument :string`, `sounds (list-of sound)` |
+| `sound` | `(track patch-id)` | `track track`, `patch-id`, `mix-id :int` (-1: unknown), `name :string` [`sound-rename`], `referents`, `referents-short :string`, `base`, `track-sound`, `current :bool`, `preset`, `sample :string`, `diff-up`, `diff-down :int`, `colored :bool`, `color :rgb`, `glyph-key :string` |
+| `editor` | `()` | `mode`, `surface`, `buffer`, `error :string`, `canceling :bool`, `run-mode :string` [`set-draft-instrument-run-mode`], `active-macro`, `active-macro-action`, `open-macro :string`, `patch-macros`, `library-macros (list-of editor-macro)`, `assets (list-of editor-asset)`, `selected-asset asset-info` (nil: none) |
+| `editor-macro` | `(index)` | `name :string`, `library :bool`, `params`, `calls`, `outputs (list-of :string)`, `summary :string`, `used :bool` |
+| `editor-asset` | `(index)` | `index :int`, `reference`, `tier`, `source-path :string` |
+| `asset-info` | `()` | `reference`, `tensor-kind`, `layout`, `source :string`, `shape (list-of :int)`, `wave-count`, `waves-per-set`, `set-count :int`, `sets`, `wave-names (list-of :string)` |
+| `learn` | `()` | `target-path`, `target-name`, `phase :string`; settings [l]: `method`, `cma-refine-mode :string`, `epochs`, `cma-generations`, `cma-population`, `cma-seed`, `cma-forward-batch`, `local-epochs`, `cma-continue`, `cma-refine-epochs`, `cma-final-epochs`, `gate-frames :int`, `cma-sigma`, `pitch-hz :number`; progress and result: `stage :string`, `current-epoch`, `total-epochs :int`, `loss`, `improvement-pct`, `abs-distance :number`, `losses`, `optimization-losses (list-of :number)`, `plan-params (list-of learn-plan-param)`, `epoch-params (list-of learn-epoch-param)`, `result-deltas (list-of learn-delta)`, `basin-check`, `seeded-wav`, `final-wav`, `error :string`, `applied :bool` |
+| `learn-plan-param` / `learn-epoch-param` / `learn-delta` | `(index)` | `index :int`, `name :string`; `status`, `reason :string` / `from`, `value`, `change`, `step :number` / `from`, `to`, `change :number` |
+| `retro` | `()` | `lanes (list-of retro-lane)`, `items (list-of retro-item)`, `duration :number`, `truncated :bool`, `error :string`, `playing :bool` (L), `position :number` (L) |
+| `retro-lane` / `retro-item` | `(index)` | `index :int`, `label :string` / `index :int`, `lane retro-lane`, `start`, `end :number` |
+| `song-export` | `()` | `default-name`, `project`, `folder`, `message`, `output-name`, `reveal-label :string`, `end`, `percent :number` (-1: not rendering), `busy`, `done :bool` |
+| `settings` | `()` | `audio-workers-choice :string` [`audio-set-workers`], `audio-workers-note`, `midi-error :string`, `midi-persistent :bool`, `midi-devices (list-of midi-device)` |
+| `midi-device` | `(index)` | `index :int`, `device-id`, `name`, `status :string`, `enabled :bool` [`midi-set-enabled`], `connected :bool` |
+| `agent` | `()` | `generation :int` |
+| `project` | `()` | `name :string`, `audio-workers-options (list-of :string)` |
+| `track` | `(index)` | `instrument-id :string` (the Instruments tab's `:instrument-id`) |
+
+[l] = the `set-learn` host command (`:field`, `:value`;
+`host_commands/learn.rs`). Constants: `learn-method-options`,
+`learn-refine-mode-options` (the host's `LEARN_METHODS`,
+`LEARN_REFINE_MODES`). Actions: `(open-sound-palette! t :target k :id n)`,
+`(close-sound-palette!)`, `(apply-sound! s)`, `(apply-sound-with-mix! s)`
+(a sound with no known mix is an error), `(fork-sound! t)`: the palette
+commands (`sound-palette-open`, `sound-apply`, …) now also take `:track-id`,
+resolved when they land (`palette_track`).
+
+Built (7f):
+
+- **One record, the legacy names its mirror.** Nothing here has a model
+  counter: the sidebar, the listings, the palette, the editor, Patch Learn,
+  the capture, the export, the settings and the agent are presentation
+  state that the legacy publishers compute (`sync_sidebar_browser`,
+  `sync_project_state`'s listings, `sync_sound_palette`, the edit-session
+  tick) or that commands report (the editor's mode and errors, the learn
+  job's events, the export job's status, the MIDI service's snapshot).
+  `ui::presented` is their record and the source of truth. A command or
+  event edits an area through its typed mutator (`present_editor`,
+  `present_editor_sidebar`, `present_learn`, `present_retro`,
+  `present_export`, `present_settings`, `present_agent`, with the helpers
+  `present_editor_open` / `present_editor_closed`, `editor_error`, the
+  set-error-and-refresh every editor command shares, and
+  `present_learn_error`): job and session events build typed rows directly
+  (plan, epoch and delta rows, editor macros and assets, the selected
+  asset's `eseqlisp::editor::AssetMetadata`, MIDI devices, capture lanes
+  and items). A computed snapshot is recorded whole (`present_sidebar`,
+  `present_sound_presets` / `present_kit_presets`, `present_palette`).
+  Each area moves its own generation only when its value changed, and the
+  tick (`host_kinds::presentation`) pushes an area only when its
+  generation moved (`PresentedState::pushes` counts): an idle tick
+  compares counters and allocates nothing, and the kinds never list a
+  directory or read a file (the listings are the legacy publisher's, which
+  keeps its own triggers). The legacy reactive names (`SEQ.editor-*`,
+  `SEQ.learn-*`, `EXPORT`, `AUDIO`, `MIDI.devices` / `error` /
+  `persistent`, `AGENT`, `RETRO` but its live fields) are a mirror: after
+  each typed edit the mutator writes the legacy fields that changed,
+  derived from the record in one module, `presented/legacy.rs`, which
+  holds every legacy name, lists each area's fields once (the mirror and
+  the registrations share the list, so the legacy defaults are the
+  record's: `LearnView::default()`, `EditorView::default()`,
+  `ExportView::default()`, …), and never parses a legacy value back.
+  **eseq-0l17.22 deletes `presented/legacy.rs` and the mirror calls in
+  `presented` (the `mirror` argument of each mutator, the
+  `*_registration` calls); no call site changes then.** Capture fixtures
+  seed an area through `(present-fixture area fields)` (by the kind's
+  field names: `song-export`, `settings`, `retro`), which edits the record
+  as a command would, the mirror following. Compared every tick in place:
+  the sidebar's track and slot devices against the track and device
+  instances, the palette's track and the variant tint its colors go
+  through (`theme::variant_display_key`, read once per tick into the
+  `ModelRevision` with the track tint), `project.name` (the `App`'s) and
+  `browser.library-epoch` (the content library epoch). The stale check
+  (a hot reload) asks one instance per collection. Live:
+  `browser.preview-*` (the preview player) and `retro.playing` /
+  `position` (the audition mailbox).
+- **Identity.** Sounds are keyed (track instance id, patch id),
+  registered for the palette's track and dropped when the palette leaves
+  the track or closes: a held sound goes stale, never another patch.
+  Preset files are kept by (type, path), editor macros by (patch or
+  library, name), editor assets by reference, MIDI inputs by device id,
+  slot presets by their rack slot device: positional instances, each key
+  allocated an id while listed (`registry::KeyedRows`, shared with the
+  groove library; re-keyed on a reorder). Learn rows and capture lanes and items are positional (a new
+  plan or capture re-pushes the values). The Sound and kit listings share
+  `preset-file`, and the patch's and the library's macros share
+  `editor-macro`, each keyed over the concatenation of the two lists; a
+  `preset-file.index` is its place in its own list.
+- **Setters.** `sound.name` is the palette's rename (`sound-rename` by
+  the track's `tid` and the patch id; same-name is no edit, one undo
+  entry, undo restores). `editor.run-mode` is the draft run-mode command:
+  the label is case-insensitive, and the current mode (the session's, else
+  the record's) is a no-op before anything else is checked; another mode
+  needs a draft instrument edit session, else the status says so. Learn settings go
+  through `set-learn` under the value rule (§14.2c): a label among the
+  options (case-insensitive), an integer in the field's range (a
+  population 0 or at least 4), a sigma above 0 up to 10, a positive
+  pitch, a positive gate; the current value always works and changes
+  nothing; anything else is an error (no clamping, unlike the legacy
+  `configure-learn`, which clamps into the same ranges and then stores
+  only what the same rule, `validate_learn_setting`, accepts); no undo, as
+  the legacy settings. `settings.audio-workers-choice` sends
+  `audio-set-workers` with `:strict`: one of
+  `project.audio-workers-options`, case-insensitively (anything else,
+  `0` or a count past the options included, is an error that leaves the
+  note alone); it is saved for the next launch, as the legacy dropdown. `midi-device.enabled` is `midi-set-enabled` by
+  device id.
+- **Names.** `export` is a module form, so the export modal is
+  `song-export` (its fields drop the legacy `export-` prefix). `kind` is a
+  built-in field, so the sidebar's kind is `browser.instrument-kind`, an
+  asset's `asset-info.tensor-kind`, a preset file's `type`; `id` is too,
+  so a MIDI input's id is `device-id`. The audio worker choices are an
+  option list on `project` (§14.1). `SEQ.content-library-epoch` is
+  `browser.library-epoch`: the library trees (`seq-saved-instrument-tree`,
+  `seq-audio-effect-tree`) are natives taking a search filter, so the
+  view reads the epoch to re-list them.
+- **View-local.** Browser tabs, search, filters, selection, the preview
+  path and auto-preview, the export modal's drafts, the capture's crop and
+  view, the palette's rename draft, the macro sidebar's filter and
+  Settings' open flag are each read by one view (Lisp `defstate`s today):
+  `:state` singletons in their own modules when ported (.12, .17, .18),
+  not host kinds. Sample import and resample read no host state beyond the
+  preview (`browser.preview-*`).
+- **Not covered:** the legacy-only fields no content reads
+  (`SEQ.sidebar-preset-tree`, `MIDI.ports`; `learn-checkpoint-wav` and
+  `editor-active` are in the record, mirrored, but no kind pushes them),
+  and renaming a mix (the palette lists patches).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -2186,7 +2326,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
 | 7e | eseq-0l17.31 | `note`, `piano-roll` singleton, tracker rows and grid playheads | .16 .20 |
-| 7f | eseq-0l17.32 | `browser`, `sound`, `editor`, `learn`, `retro`, `export`, settings and agent singletons, `track.instrument-id` | .12 .17 .18 |
+| 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 | `graph-node`, neural networks, visualizations, generator marks, track events | .20 |
 | 7h | eseq-0l17.34 (built) | rack pads, rack clips, grooves (rack, clip, pad shares, pool, library), armed rack | .11 .13 .19 |
 | 7i | eseq-0l17.35 (built) | track settings (`tp-*`), scales (`tuning`, `degree`), routing (outputs, mod routes and levels), the project's option lists and option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
@@ -2362,95 +2502,95 @@ builds the field name.
 | `SEQ.track-grid-playhead-row-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | track grid playhead | .31 | .20 |
 | `SEQ.track-lock-targets` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | tracker lock targets | .31 | .20 |
 | `SEQ.tracker-rows` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | tracker rows | .31 | .20 |
-| `AGENT.generation` | 2 | agent | browser.rs | model | agent.generation | .32 | — |
-| `AUDIO.workers-choice` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-choice | .32 | .18 |
-| `AUDIO.workers-note` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-note | .32 | .18 |
-| `AUDIO.workers-options` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-options | .32 | .18 |
-| `EXPORT.export-busy` | 4 | export-song | host_commands/export.rs | model | export.export-busy | .32 | — |
-| `EXPORT.export-default-name` | 1 | export-song | host_commands/export.rs | model | export.export-default-name | .32 | — |
-| `EXPORT.export-done` | 3 | export-song | host_commands/export.rs | model | export.export-done | .32 | — |
-| `EXPORT.export-end` | 1 | export-song | host_commands/export.rs | model | export.export-end | .32 | — |
-| `EXPORT.export-folder` | 1 | export-song | host_commands/export.rs | model | export.export-folder | .32 | — |
-| `EXPORT.export-message` | 2 | export-song | host_commands/export.rs | model | export.export-message | .32 | — |
-| `EXPORT.export-output-name` | 1 | export-song | host_commands/export.rs | model | export.export-output-name | .32 | — |
-| `EXPORT.export-percent` | 1 | export-song | host_commands/export.rs | model | export.export-percent | .32 | — |
-| `EXPORT.export-project` | 1 | export-song | host_commands/export.rs | model | export.export-project | .32 | — |
-| `EXPORT.export-reveal-label` | 1 | export-song | host_commands/export.rs | model | export.export-reveal-label | .32 | — |
-| `MIDI.devices` | 1 | settings | midi_dispatch.rs | model | settings.midi-devices | .32 | .18 |
-| `MIDI.error` | 1 | settings | lisp_host/eseq/expr_process.rs | model | settings.midi-error | .32 | .18 |
-| `MIDI.persistent` | 1 | settings | midi_dispatch.rs | model | settings.midi-persistent | .32 | .18 |
-| `RETRO.duration` | 9 | retrospective | lisp_host/value_helpers.rs | model | retro.duration | .32 | .12 |
-| `RETRO.error` | 3 | retrospective | lisp_host/eseq/expr_process.rs | model | retro.error | .32 | .12 |
-| `RETRO.items` | 5 | retrospective | agent/network.rs | model | retro.items | .32 | .12 |
-| `RETRO.lanes` | 2 | retrospective | retrospective.rs | model | retro.lanes | .32 | .12 |
-| `RETRO.playing` | 5 | retrospective | sequencer/state/sequencer_state/scene_launch.rs | live | retro.playing | .32 | .12 |
-| `RETRO.position` | 1 | retrospective | retrospective.rs | live | retro.position | .32 | .12 |
-| `RETRO.truncated` | 1 | retrospective | retrospective.rs | model | retro.truncated | .32 | .12 |
-| `SEQ.browser-preview-playhead` | 3 | sample-import, browser, resample | reactive_tick.rs | live | browser.preview-position (live) | .32 | .17 |
-| `SEQ.browser-preview-playing` | 4 | browser, sample-import, resample | reactive_tick.rs | model | browser.preview-playing | .32 | .17 |
-| `SEQ.content-library-epoch` | 2 | browser | lisp_hot_reload.rs | model | implicit (browser collections) | .32 | .17 |
-| `SEQ.current-pNroject-name` | 1 | browser | - | model | project.name (typo in browser.lisp) | .32 | .17 |
-| `SEQ.current-project-name` | 4 | browser, application-menus | sv/project_state.rs | model | project.name | .32 | .17 .18 |
-| `SEQ.editor-active-macro-action` | 3 | browser | reactive_tick.rs | model | editor.active-macro-action | .32 | .17 |
-| `SEQ.editor-active-macro-name` | 1 | browser | reactive_tick.rs | model | editor.active-macro | .32 | .17 |
-| `SEQ.editor-assets` | 2 | patch-macros | reactive_tick.rs | model | editor.assets | .32 | .18 |
-| `SEQ.editor-buffer-name` | 1 | browser | event_loop.rs | model | editor.buffer | .32 | .17 |
-| `SEQ.editor-canceling` | 4 | browser | event_loop.rs | model | editor.canceling | .32 | .17 |
-| `SEQ.editor-error` | 5 | browser | event_loop.rs | model | editor.error | .32 | .17 |
-| `SEQ.editor-instrument-run-mode` | 4 | browser | host_commands/instrument_authoring.rs | model | editor.run-mode | .32 | .17 |
-| `SEQ.editor-library-macros` | 2 | patch-macros | reactive_tick.rs | model | editor.library-macros | .32 | .18 |
-| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | .32 | .11 .17 |
-| `SEQ.editor-open-macro` | 2 | patch-macros | reactive_tick.rs | model | editor.open-macro | .32 | .18 |
-| `SEQ.editor-patch-macros` | 4 | patch-macros | reactive_tick.rs | model | editor.patch-macros | .32 | .18 |
-| `SEQ.editor-selected-asset` | 1 | patch-macros | reactive_tick.rs | model | editor.selected-asset | .32 | .18 |
-| `SEQ.editor-surface` | 3 | browser | host_commands/instrument_authoring.rs | model | editor.surface | .32 | .17 |
-| `SEQ.kit-presets` | 2 | browser | host_commands/drum_rack_v2.rs | model | browser.kit-presets | .32 | .17 |
-| `SEQ.learn-abs-distance` | 1 | patch-learn | patch_learn.rs | model | learn.abs-distance | .32 | .18 |
-| `SEQ.learn-applied` | 1 | patch-learn | patch_learn.rs | model | learn.applied | .32 | .18 |
-| `SEQ.learn-basin-check` | 1 | patch-learn | patch_learn.rs | model | learn.basin-check | .32 | .18 |
-| `SEQ.learn-cma-continue` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-continue | .32 | .18 |
-| `SEQ.learn-cma-final-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-final-epochs | .32 | .18 |
-| `SEQ.learn-cma-forward-batch` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-forward-batch | .32 | .18 |
-| `SEQ.learn-cma-generations` | 3 | patch-learn | host_commands/learn.rs | model | learn.cma-generations | .32 | .18 |
-| `SEQ.learn-cma-population` | 6 | patch-learn | host_commands/learn.rs | model | learn.cma-population | .32 | .18 |
-| `SEQ.learn-cma-refine-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-refine-epochs | .32 | .18 |
-| `SEQ.learn-cma-refine-mode` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-refine-mode | .32 | .18 |
-| `SEQ.learn-cma-seed` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-seed | .32 | .18 |
-| `SEQ.learn-cma-sigma` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-sigma | .32 | .18 |
-| `SEQ.learn-current-epoch` | 1 | patch-learn | patch_learn.rs | model | learn.current-epoch | .32 | .18 |
-| `SEQ.learn-epoch-params` | 1 | patch-learn | patch_learn.rs | model | learn.epoch-params | .32 | .18 |
-| `SEQ.learn-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.epochs | .32 | .18 |
-| `SEQ.learn-error` | 1 | patch-learn | patch_learn.rs | model | learn.error | .32 | .18 |
-| `SEQ.learn-final-wav` | 1 | patch-learn | patch_learn.rs | model | learn.final-wav | .32 | .18 |
-| `SEQ.learn-gate-frames` | 4 | patch-learn | patch_learn.rs | model | learn.gate-frames | .32 | .18 |
-| `SEQ.learn-improvement-pct` | 1 | patch-learn | patch_learn.rs | model | learn.improvement-pct | .32 | .18 |
-| `SEQ.learn-local-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.local-epochs | .32 | .18 |
-| `SEQ.learn-loss` | 1 | patch-learn | patch_learn.rs | model | learn.loss | .32 | .18 |
-| `SEQ.learn-losses` | 1 | patch-learn | patch_learn.rs | model | learn.losses | .32 | .18 |
-| `SEQ.learn-method` | 7 | patch-learn | host_commands/learn.rs | model | learn.method | .32 | .18 |
-| `SEQ.learn-optimization-losses` | 1 | patch-learn | patch_learn.rs | model | learn.optimization-losses | .32 | .18 |
-| `SEQ.learn-phase` | 5 | patch-learn | patch_learn.rs | model | learn.phase | .32 | .18 |
-| `SEQ.learn-pitch-hz` | 4 | patch-learn | patch_learn.rs | model | learn.pitch-hz | .32 | .18 |
-| `SEQ.learn-plan-params` | 2 | patch-learn | patch_learn.rs | model | learn.plan-params | .32 | .18 |
-| `SEQ.learn-result-deltas` | 1 | patch-learn | patch_learn.rs | model | learn.result-deltas | .32 | .18 |
-| `SEQ.learn-seeded-wav` | 1 | patch-learn | patch_learn.rs | model | learn.seeded-wav | .32 | .18 |
-| `SEQ.learn-stage` | 1 | patch-learn | patch_learn.rs | model | learn.stage | .32 | .18 |
-| `SEQ.learn-target-name` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-name | .32 | .18 |
-| `SEQ.learn-target-path` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-path | .32 | .18 |
-| `SEQ.learn-total-epochs` | 1 | patch-learn | patch_learn.rs | model | learn.total-epochs | .32 | .18 |
-| `SEQ.project-instrument-engines` | 1 | browser | sv/project_state.rs | model | browser.engines | .32 | .17 |
-| `SEQ.sidebar-instrument-display-name` | 2 | browser | sv/project_state.rs | model | browser.instrument-label | .32 | .17 |
-| `SEQ.sidebar-instrument-name` | 5 | browser, application-menus, effects/panel-frame | sv/project_state.rs | model | browser.instrument | .32 | .14 .17 .18 |
-| `SEQ.sidebar-kind` | 7 | browser | sv/project_state.rs | model | browser.kind | .32 | .17 |
-| `SEQ.sidebar-loaded-preset` | 3 | browser | sv/project_state.rs | model | browser.preset | .32 | .17 |
-| `SEQ.sidebar-presets` | 1 | browser | sv/project_state.rs | model | browser.presets | .32 | .17 |
-| `SEQ.sidebar-rack-slot-presets` | 1 | browser | sv/project_state.rs | model | browser.rack-slot-presets | .32 | .17 |
-| `SEQ.sidebar-selected-sample` | 7 | browser | sv/project_state.rs | model | browser.sample | .32 | .17 |
-| `SEQ.sidebar-track-index` | 4 | browser | sv/project_state.rs | model | browser.track | .32 | .17 |
-| `SEQ.sidebar-user-presets` | 1 | browser | sv/project_state.rs | model | browser.user-presets | .32 | .17 |
-| `SEQ.sound-palette` | 7 | sound-palette | sv/sound_palette.rs | model | sound kind | .32 | .17 |
-| `SEQ.sound-presets` | 2 | browser | sv/project_state.rs | model | browser.sound-presets | .32 | .17 |
-| `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | .32 | .17 |
+| `AGENT.generation` | 2 | agent | browser.rs | model | agent.generation | built (.32) | — |
+| `AUDIO.workers-choice` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-choice | built (.32) | .18 |
+| `AUDIO.workers-note` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-note | built (.32) | .18 |
+| `AUDIO.workers-options` | 1 | settings | host_commands/audio_settings.rs | model | project.audio-workers-options (an option list, §14.1) | built (.32) | .18 |
+| `EXPORT.export-busy` | 4 | export-song | host_commands/export.rs | model | song-export.busy | built (.32) | — |
+| `EXPORT.export-default-name` | 1 | export-song | host_commands/export.rs | model | song-export.default-name | built (.32) | — |
+| `EXPORT.export-done` | 3 | export-song | host_commands/export.rs | model | song-export.done | built (.32) | — |
+| `EXPORT.export-end` | 1 | export-song | host_commands/export.rs | model | song-export.end | built (.32) | — |
+| `EXPORT.export-folder` | 1 | export-song | host_commands/export.rs | model | song-export.folder | built (.32) | — |
+| `EXPORT.export-message` | 2 | export-song | host_commands/export.rs | model | song-export.message | built (.32) | — |
+| `EXPORT.export-output-name` | 1 | export-song | host_commands/export.rs | model | song-export.output-name | built (.32) | — |
+| `EXPORT.export-percent` | 1 | export-song | host_commands/export.rs | model | song-export.percent | built (.32) | — |
+| `EXPORT.export-project` | 1 | export-song | host_commands/export.rs | model | song-export.project | built (.32) | — |
+| `EXPORT.export-reveal-label` | 1 | export-song | host_commands/export.rs | model | song-export.reveal-label | built (.32) | — |
+| `MIDI.devices` | 1 | settings | midi_dispatch.rs | model | settings.midi-devices → midi-device (by device id) | built (.32) | .18 |
+| `MIDI.error` | 1 | settings | lisp_host/eseq/expr_process.rs | model | settings.midi-error | built (.32) | .18 |
+| `MIDI.persistent` | 1 | settings | midi_dispatch.rs | model | settings.midi-persistent | built (.32) | .18 |
+| `RETRO.duration` | 9 | retrospective | lisp_host/value_helpers.rs | model | retro.duration | built (.32) | .12 |
+| `RETRO.error` | 3 | retrospective | lisp_host/eseq/expr_process.rs | model | retro.error | built (.32) | .12 |
+| `RETRO.items` | 5 | retrospective | agent/network.rs | model | retro.items → retro-item | built (.32) | .12 |
+| `RETRO.lanes` | 2 | retrospective | retrospective.rs | model | retro.lanes → retro-lane | built (.32) | .12 |
+| `RETRO.playing` | 5 | retrospective | sequencer/state/sequencer_state/scene_launch.rs | live | retro.playing (live) | built (.32) | .12 |
+| `RETRO.position` | 1 | retrospective | retrospective.rs | live | retro.position (live) | built (.32) | .12 |
+| `RETRO.truncated` | 1 | retrospective | retrospective.rs | model | retro.truncated | built (.32) | .12 |
+| `SEQ.browser-preview-playhead` | 3 | sample-import, browser, resample | reactive_tick.rs | live | browser.preview-position (live) | built (.32) | .17 |
+| `SEQ.browser-preview-playing` | 4 | browser, sample-import, resample | reactive_tick.rs | model | browser.preview-playing (live) | built (.32) | .17 |
+| `SEQ.content-library-epoch` | 2 | browser | lisp_hot_reload.rs | model | browser.library-epoch (the library trees are natives taking a search filter, so a read of the epoch re-lists them) | built (.32) | .17 |
+| `SEQ.current-pNroject-name` | 1 | browser | - | model | project.name (typo in browser.lisp) | built (.32) | .17 |
+| `SEQ.current-project-name` | 4 | browser, application-menus | sv/project_state.rs | model | project.name | built (.32) | .17 .18 |
+| `SEQ.editor-active-macro-action` | 3 | browser | reactive_tick.rs | model | editor.active-macro-action | built (.32) | .17 |
+| `SEQ.editor-active-macro-name` | 1 | browser | reactive_tick.rs | model | editor.active-macro | built (.32) | .17 |
+| `SEQ.editor-assets` | 2 | patch-macros | reactive_tick.rs | model | editor.assets → editor-asset | built (.32) | .18 |
+| `SEQ.editor-buffer-name` | 1 | browser | event_loop.rs | model | editor.buffer | built (.32) | .17 |
+| `SEQ.editor-canceling` | 4 | browser | event_loop.rs | model | editor.canceling | built (.32) | .17 |
+| `SEQ.editor-error` | 5 | browser | event_loop.rs | model | editor.error | built (.32) | .17 |
+| `SEQ.editor-instrument-run-mode` | 4 | browser | host_commands/instrument_authoring.rs | model | editor.run-mode | built (.32) | .17 |
+| `SEQ.editor-library-macros` | 2 | patch-macros | reactive_tick.rs | model | editor.library-macros → editor-macro | built (.32) | .18 |
+| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | built (.32) | .11 .17 |
+| `SEQ.editor-open-macro` | 2 | patch-macros | reactive_tick.rs | model | editor.open-macro | built (.32) | .18 |
+| `SEQ.editor-patch-macros` | 4 | patch-macros | reactive_tick.rs | model | editor.patch-macros → editor-macro | built (.32) | .18 |
+| `SEQ.editor-selected-asset` | 1 | patch-macros | reactive_tick.rs | model | editor.selected-asset → asset-info (nil: none) | built (.32) | .18 |
+| `SEQ.editor-surface` | 3 | browser | host_commands/instrument_authoring.rs | model | editor.surface | built (.32) | .17 |
+| `SEQ.kit-presets` | 2 | browser | host_commands/drum_rack_v2.rs | model | browser.kit-presets → preset-file | built (.32) | .17 |
+| `SEQ.learn-abs-distance` | 1 | patch-learn | patch_learn.rs | model | learn.abs-distance | built (.32) | .18 |
+| `SEQ.learn-applied` | 1 | patch-learn | patch_learn.rs | model | learn.applied | built (.32) | .18 |
+| `SEQ.learn-basin-check` | 1 | patch-learn | patch_learn.rs | model | learn.basin-check | built (.32) | .18 |
+| `SEQ.learn-cma-continue` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-continue | built (.32) | .18 |
+| `SEQ.learn-cma-final-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-final-epochs | built (.32) | .18 |
+| `SEQ.learn-cma-forward-batch` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-forward-batch | built (.32) | .18 |
+| `SEQ.learn-cma-generations` | 3 | patch-learn | host_commands/learn.rs | model | learn.cma-generations | built (.32) | .18 |
+| `SEQ.learn-cma-population` | 6 | patch-learn | host_commands/learn.rs | model | learn.cma-population | built (.32) | .18 |
+| `SEQ.learn-cma-refine-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-refine-epochs | built (.32) | .18 |
+| `SEQ.learn-cma-refine-mode` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-refine-mode | built (.32) | .18 |
+| `SEQ.learn-cma-seed` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-seed | built (.32) | .18 |
+| `SEQ.learn-cma-sigma` | 2 | patch-learn | host_commands/learn.rs | model | learn.cma-sigma | built (.32) | .18 |
+| `SEQ.learn-current-epoch` | 1 | patch-learn | patch_learn.rs | model | learn.current-epoch | built (.32) | .18 |
+| `SEQ.learn-epoch-params` | 1 | patch-learn | patch_learn.rs | model | learn.epoch-params → learn-epoch-param | built (.32) | .18 |
+| `SEQ.learn-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.epochs | built (.32) | .18 |
+| `SEQ.learn-error` | 1 | patch-learn | patch_learn.rs | model | learn.error | built (.32) | .18 |
+| `SEQ.learn-final-wav` | 1 | patch-learn | patch_learn.rs | model | learn.final-wav | built (.32) | .18 |
+| `SEQ.learn-gate-frames` | 4 | patch-learn | patch_learn.rs | model | learn.gate-frames | built (.32) | .18 |
+| `SEQ.learn-improvement-pct` | 1 | patch-learn | patch_learn.rs | model | learn.improvement-pct | built (.32) | .18 |
+| `SEQ.learn-local-epochs` | 2 | patch-learn | host_commands/learn.rs | model | learn.local-epochs | built (.32) | .18 |
+| `SEQ.learn-loss` | 1 | patch-learn | patch_learn.rs | model | learn.loss | built (.32) | .18 |
+| `SEQ.learn-losses` | 1 | patch-learn | patch_learn.rs | model | learn.losses | built (.32) | .18 |
+| `SEQ.learn-method` | 7 | patch-learn | host_commands/learn.rs | model | learn.method | built (.32) | .18 |
+| `SEQ.learn-optimization-losses` | 1 | patch-learn | patch_learn.rs | model | learn.optimization-losses | built (.32) | .18 |
+| `SEQ.learn-phase` | 5 | patch-learn | patch_learn.rs | model | learn.phase | built (.32) | .18 |
+| `SEQ.learn-pitch-hz` | 4 | patch-learn | patch_learn.rs | model | learn.pitch-hz | built (.32) | .18 |
+| `SEQ.learn-plan-params` | 2 | patch-learn | patch_learn.rs | model | learn.plan-params → learn-plan-param | built (.32) | .18 |
+| `SEQ.learn-result-deltas` | 1 | patch-learn | patch_learn.rs | model | learn.result-deltas → learn-delta | built (.32) | .18 |
+| `SEQ.learn-seeded-wav` | 1 | patch-learn | patch_learn.rs | model | learn.seeded-wav | built (.32) | .18 |
+| `SEQ.learn-stage` | 1 | patch-learn | patch_learn.rs | model | learn.stage | built (.32) | .18 |
+| `SEQ.learn-target-name` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-name | built (.32) | .18 |
+| `SEQ.learn-target-path` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-path | built (.32) | .18 |
+| `SEQ.learn-total-epochs` | 1 | patch-learn | patch_learn.rs | model | learn.total-epochs | built (.32) | .18 |
+| `SEQ.project-instrument-engines` | 1 | browser | sv/project_state.rs | model | browser.engines | built (.32) | .17 |
+| `SEQ.sidebar-instrument-display-name` | 2 | browser | sv/project_state.rs | model | browser.instrument-label | built (.32) | .17 |
+| `SEQ.sidebar-instrument-name` | 5 | browser, application-menus, effects/panel-frame | sv/project_state.rs | model | browser.instrument | built (.32) | .14 .17 .18 |
+| `SEQ.sidebar-kind` | 7 | browser | sv/project_state.rs | model | browser.instrument-kind (`kind` is a built-in field) | built (.32) | .17 |
+| `SEQ.sidebar-loaded-preset` | 3 | browser | sv/project_state.rs | model | browser.preset | built (.32) | .17 |
+| `SEQ.sidebar-presets` | 1 | browser | sv/project_state.rs | model | browser.presets | built (.32) | .17 |
+| `SEQ.sidebar-rack-slot-presets` | 1 | browser | sv/project_state.rs | model | browser.rack-slots → slot-presets (each names its rack slot device) | built (.32) | .17 |
+| `SEQ.sidebar-selected-sample` | 7 | browser | sv/project_state.rs | model | browser.sample | built (.32) | .17 |
+| `SEQ.sidebar-track-index` | 4 | browser | sv/project_state.rs | model | browser.track | built (.32) | .17 |
+| `SEQ.sidebar-user-presets` | 1 | browser | sv/project_state.rs | model | browser.user-presets | built (.32) | .17 |
+| `SEQ.sound-palette` | 7 | sound-palette | sv/sound_palette.rs | model | sound-palette singleton; sound-palette.sounds → sound (track, patch-id) | built (.32) | .17 |
+| `SEQ.sound-presets` | 2 | browser | sv/project_state.rs | model | browser.sound-presets → preset-file | built (.32) | .17 |
+| `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | built (.32) | .17 |
 | `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | graph-node.‹ggm-route-color-field› | .33 | .20 |
 | `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | graph-node.‹gvr-route-color-field› | .33 | .20 |
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | neuron.selected | .33 | .20 |

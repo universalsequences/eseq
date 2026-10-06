@@ -1,3 +1,4 @@
+use crate::presented::{LearnDelta, LearnEpochParam, LearnPlanParam};
 use crate::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +15,6 @@ pub(crate) struct PendingLearnJob {
     pub(crate) saw_terminal: bool,
     pub(crate) saw_host_error: bool,
     pub(crate) cancel_requested: bool,
-    pub(crate) losses: Vec<f64>,
 }
 
 /// Engine-only instrument parameter values streamed by Patch Learn.
@@ -106,7 +106,6 @@ pub(crate) fn launch_learn_job(
         saw_terminal: false,
         saw_host_error: false,
         cancel_requested: false,
-        losses: Vec::new(),
     })
 }
 
@@ -118,27 +117,6 @@ pub(crate) fn replace_learn_job(
         let _ = previous.job.cancel();
     }
     *slot = Some(replacement);
-}
-
-pub(crate) fn reset_learn_reactive(rt: &mut Runtime) {
-    rt.set_reactive("SEQ", "learn-phase", Value::String("pick".to_string()));
-    rt.set_reactive("SEQ", "learn-plan-params", Value::List(vec![]));
-    rt.set_reactive("SEQ", "learn-stage", Value::String(String::new()));
-    rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(0.0));
-    rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(0.0));
-    rt.set_reactive("SEQ", "learn-loss", Value::Number(0.0));
-    rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
-    rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
-    rt.set_reactive("SEQ", "learn-epoch-params", Value::List(vec![]));
-    rt.set_reactive("SEQ", "learn-checkpoint-wav", Value::String(String::new()));
-    rt.set_reactive("SEQ", "learn-improvement-pct", Value::Number(0.0));
-    rt.set_reactive("SEQ", "learn-abs-distance", Value::Number(0.0));
-    rt.set_reactive("SEQ", "learn-basin-check", Value::String(String::new()));
-    rt.set_reactive("SEQ", "learn-result-deltas", Value::List(vec![]));
-    rt.set_reactive("SEQ", "learn-seeded-wav", Value::String(String::new()));
-    rt.set_reactive("SEQ", "learn-final-wav", Value::String(String::new()));
-    rt.set_reactive("SEQ", "learn-applied", Value::Bool(false));
-    rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
 }
 
 pub(crate) fn poll_learn_job(
@@ -211,8 +189,7 @@ pub(crate) fn poll_learn_job(
                     ) {
                         pending.saw_host_error = true;
                         let _ = pending.job.cancel();
-                        rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                        rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                        present_learn_error(rt, error);
                         clear_preview = true;
                     }
                 }
@@ -221,23 +198,22 @@ pub(crate) fn poll_learn_job(
             | sequencer::learn_job::LearnJobUpdate::IoError(error) => {
                 pending.saw_host_error = true;
                 clear_preview = true;
-                rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                present_learn_error(rt, error);
             }
             sequencer::learn_job::LearnJobUpdate::Exited { success, code } => {
                 if !pending.saw_terminal && !pending.saw_host_error {
                     if pending.kind == LearnLaunchKind::Plan && success && pending.saw_plan {
-                        rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
+                        present_learn(rt, |l| l.phase = "configure".to_string());
                     } else if pending.cancel_requested {
                         clear_preview = true;
-                        rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
-                        rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
+                        present_learn(rt, |l| {
+                            l.phase = "configure".to_string();
+                            l.error.clear();
+                        });
                     } else {
-                        rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                        rt.set_reactive(
-                            "SEQ",
-                            "learn-error",
-                            Value::String(format!("Learning job died without a terminal event (exit {code:?})")),
+                        present_learn_error(
+                            rt,
+                            format!("Learning job died without a terminal event (exit {code:?})"),
                         );
                     }
                 }
@@ -248,12 +224,7 @@ pub(crate) fn poll_learn_job(
     if disconnected {
         if !finished {
             let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-            rt.set_reactive(
-                "SEQ",
-                "learn-error",
-                Value::String("Learning job event stream disconnected".to_string()),
-            );
+            present_learn_error(rt, "Learning job event stream disconnected");
             dirty = true;
             clear_preview = true;
         }
@@ -458,21 +429,11 @@ fn take_learn_updates_through_epoch(
     }
 }
 
-fn number_list(values: &[f64]) -> Value {
-    Value::List(
-        values
-            .iter()
-            .map(|value| Rc::new(RefCell::new(Value::Number(*value))))
-            .collect(),
-    )
-}
-
-fn append_loss(losses: &mut Vec<f64>, loss: f64) -> Value {
-    losses.push(loss);
-    number_list(losses)
-}
-
-fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequencer::learn_job::LearnEvent) {
+fn publish_event(
+    rt: &mut Runtime,
+    pending: &mut PendingLearnJob,
+    event: &sequencer::learn_job::LearnEvent,
+) {
     use sequencer::learn_job::LearnEvent;
     match event {
         LearnEvent::Plan {
@@ -487,85 +448,74 @@ fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequen
             if let Some(error) = seed_echo_error(&pending.expected_seed, seed_echo) {
                 pending.saw_host_error = true;
                 let _ = pending.job.cancel();
-                rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                present_learn_error(rt, error);
                 return;
             }
-            rt.set_reactive(
-                "SEQ",
-                "learn-phase",
-                Value::String(if pending.kind == LearnLaunchKind::Plan { "configure" } else { "training" }.to_string()),
-            );
-            rt.set_reactive("SEQ", "learn-plan-params", plan_params_value(learnable, frozen, unsupported));
-            rt.set_reactive("SEQ", "learn-pitch-hz", Value::Number(*pitch_hz));
-            rt.set_reactive("SEQ", "learn-gate-frames", Value::Number(*gate_frames as f64));
+            present_learn(rt, |l| {
+                l.phase = if pending.kind == LearnLaunchKind::Plan {
+                    "configure"
+                } else {
+                    "training"
+                }
+                .to_string();
+                l.plan_params = plan_params(learnable, frozen, unsupported);
+                l.pitch_hz = *pitch_hz;
+                l.gate_frames = *gate_frames as f64;
+            });
         }
         LearnEvent::Stage { name, total } => {
-            pending.losses.clear();
-            rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
-            rt.set_reactive("SEQ", "learn-stage", Value::String(name.clone()));
-            rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(0.0));
-            rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
-            rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
-            rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
+            present_learn(rt, |l| {
+                l.phase = "training".to_string();
+                l.stage = name.clone();
+                l.current_epoch = 0.0;
+                l.total_epochs = *total as f64;
+                l.losses.clear();
+                l.optimization_losses.clear();
+            });
         }
         LearnEvent::OptimizationProgress { current, total, losses } => {
-            rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
-            rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(*current as f64));
-            rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
-            rt.set_reactive("SEQ", "learn-optimization-losses", number_list(losses));
-            if !losses.is_empty() {
-                let loss = losses[0];
-                rt.set_reactive("SEQ", "learn-loss", Value::Number(loss));
-                rt.set_reactive(
-                    "SEQ",
-                    "learn-losses",
-                    append_loss(&mut pending.losses, loss),
-                );
-            }
+            present_learn(rt, |l| {
+                l.phase = "training".to_string();
+                l.current_epoch = *current as f64;
+                l.total_epochs = *total as f64;
+                l.optimization_losses.clone_from(losses);
+                if let Some(&loss) = losses.first() {
+                    l.loss = loss;
+                    l.losses.push(loss);
+                }
+            });
         }
         LearnEvent::Epoch { epoch, total, loss, params, steps } => {
-            rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
-            rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(*epoch as f64));
-            rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
-            rt.set_reactive("SEQ", "learn-loss", Value::Number(*loss));
-            rt.set_reactive(
-                "SEQ",
-                "learn-losses",
-                append_loss(&mut pending.losses, *loss),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "learn-epoch-params",
-                epoch_params_value(&pending.expected_seed, params, steps),
-            );
+            present_learn(rt, |l| {
+                l.phase = "training".to_string();
+                l.current_epoch = *epoch as f64;
+                l.total_epochs = *total as f64;
+                l.loss = *loss;
+                l.losses.push(*loss);
+                l.epoch_params = epoch_params(&pending.expected_seed, params, steps);
+            });
         }
         LearnEvent::Checkpoint { wav, .. } => {
-            rt.set_reactive("SEQ", "learn-checkpoint-wav", Value::String(wav.to_string_lossy().into_owned()));
+            present_learn(rt, |l| {
+                l.checkpoint_wav = wav.to_string_lossy().into_owned()
+            });
         }
         LearnEvent::Result { improvement_pct, abs_distance, basin_check, deltas, seeded_wav, final_wav, .. } => {
-            rt.set_reactive("SEQ", "learn-phase", Value::String("result".to_string()));
-            rt.set_reactive("SEQ", "learn-improvement-pct", Value::Number(*improvement_pct));
-            rt.set_reactive("SEQ", "learn-abs-distance", Value::Number(*abs_distance));
-            rt.set_reactive("SEQ", "learn-basin-check", Value::String(basin_check.clone()));
-            rt.set_reactive("SEQ", "learn-result-deltas", deltas_value(deltas));
-            rt.set_reactive(
-                "SEQ",
-                "learn-seeded-wav",
-                Value::String(
-                    seeded_wav
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                ),
-            );
-            rt.set_reactive("SEQ", "learn-final-wav", Value::String(final_wav.to_string_lossy().into_owned()));
-            rt.set_reactive("SEQ", "learn-applied", Value::Bool(false));
+            present_learn(rt, |l| {
+                l.phase = "result".to_string();
+                l.improvement_pct = *improvement_pct;
+                l.abs_distance = *abs_distance;
+                l.basin_check.clone_from(basin_check);
+                l.result_deltas = result_deltas(deltas);
+                l.seeded_wav = seeded_wav
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                l.final_wav = final_wav.to_string_lossy().into_owned();
+                l.applied = false;
+            });
         }
-        LearnEvent::Error { message } => {
-            rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-            rt.set_reactive("SEQ", "learn-error", Value::String(message.clone()));
-        }
+        LearnEvent::Error { message } => present_learn_error(rt, message.clone()),
         LearnEvent::Unknown(_) => {}
     }
 }
@@ -601,64 +551,71 @@ fn seed_echo_error(
     }
 }
 
-fn plan_params_value(
+fn plan_params(
     learnable: &[String],
     frozen: &[sequencer::learn_job::FrozenParam],
     unsupported: &[serde_json::Value],
-) -> Value {
-    let mut rows = learnable
-        .iter()
-        .map(|name| values::map_value([
-            ("name", Value::String(name.clone())),
-            ("status", Value::String("learnable".to_string())),
-            ("reason", Value::String(String::new())),
-        ]))
-        .collect::<Vec<_>>();
-    rows.extend(frozen.iter().map(|param| values::map_value([
-        ("name", Value::String(param.name.clone())),
-        ("status", Value::String("frozen".to_string())),
-        ("reason", Value::String(param.reason.clone())),
-    ])));
+) -> Vec<LearnPlanParam> {
+    let row = |name: &str, status: &str, reason: &str| LearnPlanParam {
+        name: name.to_string(),
+        status: status.to_string(),
+        reason: reason.to_string(),
+    };
+    let mut rows: Vec<_> = (learnable.iter())
+        .map(|name| row(name, "learnable", ""))
+        .collect();
+    rows.extend(
+        frozen
+            .iter()
+            .map(|param| row(&param.name, "frozen", &param.reason)),
+    );
     rows.extend(unsupported.iter().map(|entry| {
         let name = entry.get("name").and_then(serde_json::Value::as_str)
             .or_else(|| entry.as_str()).unwrap_or("unsupported");
         let reason = entry.get("reason").and_then(serde_json::Value::as_str).unwrap_or("unsupported signal path");
-        values::map_value([
-            ("name", Value::String(name.to_string())),
-            ("status", Value::String("unsupported".to_string())),
-            ("reason", Value::String(reason.to_string())),
-        ])
+        row(name, "unsupported", reason)
     }));
-    Value::List(rows.into_iter().map(|value| Rc::new(RefCell::new(value))).collect())
+    rows
 }
 
-fn epoch_params_value(
+fn epoch_params(
     seed: &std::collections::BTreeMap<String, f64>,
     params: &std::collections::BTreeMap<String, f64>,
     steps: &std::collections::BTreeMap<String, f64>,
-) -> Value {
-    Value::List(params.iter().map(|(name, value)| Rc::new(RefCell::new(values::map_value([
-        ("name", Value::String(name.clone())),
-        ("from", Value::Number(seed.get(name).copied().unwrap_or(*value))),
-        ("value", Value::Number(*value)),
-        ("change", Value::Number(*value - seed.get(name).copied().unwrap_or(*value))),
-        ("step", Value::Number(steps.get(name).copied().unwrap_or(0.0))),
-    ])))).collect())
+) -> Vec<LearnEpochParam> {
+    params
+        .iter()
+        .map(|(name, value)| {
+            let from = seed.get(name).copied().unwrap_or(*value);
+            LearnEpochParam {
+                name: name.clone(),
+                from,
+                value: *value,
+                change: *value - from,
+                step: steps.get(name).copied().unwrap_or(0.0),
+            }
+        })
+        .collect()
 }
 
-fn deltas_value(deltas: &std::collections::BTreeMap<String, sequencer::learn_job::ParamDelta>) -> Value {
-    Value::List(deltas.iter().map(|(name, delta)| Rc::new(RefCell::new(values::map_value([
-        ("name", Value::String(name.clone())),
-        ("from", Value::Number(delta.from)),
-        ("to", Value::Number(delta.to)),
-        ("change", Value::Number(delta.to - delta.from)),
-    ])))).collect())
+fn result_deltas(
+    deltas: &std::collections::BTreeMap<String, sequencer::learn_job::ParamDelta>,
+) -> Vec<LearnDelta> {
+    deltas
+        .iter()
+        .map(|(name, delta)| LearnDelta {
+            name: name.clone(),
+            from: delta.from,
+            to: delta.to,
+            change: delta.to - delta.from,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_loss, apply_learn_param_preview, clear_learn_param_preview, seed_echo_error,
+        apply_learn_param_preview, clear_learn_param_preview, seed_echo_error,
         set_learn_param_preview,
         take_learn_updates_through_epoch,
     };
@@ -816,13 +773,17 @@ mod tests {
 
     #[test]
     fn loss_trajectory_retains_every_epoch() {
-        let mut losses = Vec::new();
-        let mut published = Value::Nil;
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", crate::presented::seq_registration(), true);
         for epoch in 0..250 {
-            published = append_loss(&mut losses, 1.0 / (epoch + 1) as f64);
+            crate::present_learn(&mut runtime, |l| l.losses.push(1.0 / (epoch + 1) as f64));
         }
+        let losses = crate::presented::presented(|p| p.learn.get().losses.clone());
         assert_eq!(losses.len(), 250);
-        let Value::List(values) = published else {
+        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
+            panic!("SEQ should be a map");
+        };
+        let Value::List(values) = seq["learn-losses"].borrow().clone() else {
             panic!("loss trajectory should be a list");
         };
         assert_eq!(values.len(), 250);

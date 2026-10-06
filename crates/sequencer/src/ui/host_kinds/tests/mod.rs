@@ -323,6 +323,7 @@ impl Harness {
 }
 
 mod arrangement;
+mod browser;
 mod devices;
 mod lanes;
 mod mixer;

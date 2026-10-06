@@ -297,11 +297,7 @@ impl HostKinds {
             pusher.push(id, f::MACRO_MAPPINGS, instance_list(mappings));
         }
         if let Some(project) = pusher.singleton(PROJECT) {
-            pusher.push(
-                project,
-                f::PROJECT_MACROS,
-                instance_list(ids.iter().flatten().copied()),
-            );
+            pusher.push(project, f::PROJECT_MACROS, listed_instances(&ids));
         }
         self.macros.instances = ids;
     }

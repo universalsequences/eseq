@@ -2026,17 +2026,10 @@ pub(crate) fn sync_reactive_tick(
             let editor_macro_action = editor_macro_action_strings(editor_macro_action.as_ref());
             ctx.frame.prev_editor_macro_action_fingerprint = editor_macro_action_fingerprint;
             if editor_macro_action != ctx.frame.prev_editor_macro_action {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-active-macro-name",
-                    Value::String(editor_macro_action.0.clone()),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-active-macro-action",
-                    Value::String(editor_macro_action.1.clone()),
-                );
+                present_editor(editor.runtime_mut(), |e| {
+                    e.active_macro.clone_from(&editor_macro_action.0);
+                    e.active_macro_action.clone_from(&editor_macro_action.1);
+                });
                 ctx.frame.prev_editor_macro_action = editor_macro_action;
                 refresh_visible_samples_after_cycle = true;
                 needs_reactive_cycle = true;
@@ -2085,22 +2078,11 @@ pub(crate) fn sync_reactive_tick(
                 Vec::new()
             };
             let assets = eseqlisp::widget_render::patcher::asset_sidebar_entries(editor_patch_path);
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "editor-patch-macros",
-                build_patch_macro_sidebar_value(&scan.locals),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-library-macros",
-                build_library_macro_sidebar_value(&library_macros, &scan.imports),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-assets",
-                build_asset_sidebar_value(&assets),
-            );
+            present_editor_sidebar(editor.runtime_mut(), |sidebar| {
+                sidebar.patch_macros = patch_macro_sidebar(scan.locals);
+                sidebar.library_macros = library_macro_sidebar(library_macros, &scan.imports);
+                sidebar.assets = asset_sidebar(assets);
+            });
             ctx.frame.prev_editor_macro_sidebar_fingerprint = sidebar_fingerprint;
             needs_reactive_cycle = true;
         }
@@ -2120,11 +2102,9 @@ pub(crate) fn sync_reactive_tick(
             .and_then(eseqlisp::widget_render::patcher::active_macro_view_for_path)
             .unwrap_or_default();
         if open_macro != ctx.frame.prev_editor_open_macro {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "editor-open-macro",
-                Value::String(open_macro.clone()),
-            );
+            present_editor(editor.runtime_mut(), |e| {
+                e.open_macro.clone_from(&open_macro)
+            });
             ctx.frame.prev_editor_open_macro = open_macro;
             needs_reactive_cycle = true;
         }
@@ -2136,30 +2116,18 @@ pub(crate) fn sync_reactive_tick(
         let selected_asset =
             editor_patch_path.and_then(eseqlisp::widget_render::patcher::selected_asset_for_path);
         if selected_asset != ctx.frame.prev_editor_selected_asset {
-            let value = selected_asset
-                .as_deref()
-                .map(|reference| {
-                    let draft_root = editor_patch_path.and_then(std::path::Path::parent);
-                    let metadata =
-                        eseqlisp::editor::asset_metadata_lisp_value(reference, draft_root);
-                    let mut fields = match metadata {
-                        Value::Map(fields) => fields,
-                        // Unresolvable or invalid: the inspector still shows
-                        // the reference with no metadata rows.
-                        _ => std::collections::HashMap::new(),
-                    };
-                    fields.insert(
-                        "reference".to_string(),
-                        std::rc::Rc::new(std::cell::RefCell::new(Value::String(
-                            reference.to_string(),
-                        ))),
-                    );
-                    Value::Map(fields)
-                })
-                .unwrap_or(Value::Nil);
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "editor-selected-asset", value);
+            let info = selected_asset.as_deref().map(|reference| {
+                let draft_root = editor_patch_path.and_then(std::path::Path::parent);
+                crate::presented::AssetInfo {
+                    reference: reference.to_string(),
+                    // Unresolvable or invalid: the inspector still shows the
+                    // reference with no metadata rows.
+                    metadata: eseqlisp::editor::asset_metadata(reference, draft_root),
+                }
+            });
+            present_editor_sidebar(editor.runtime_mut(), |sidebar| {
+                sidebar.selected_asset = info
+            });
             ctx.frame.prev_editor_selected_asset = selected_asset;
             needs_reactive_cycle = true;
         }

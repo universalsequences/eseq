@@ -104,6 +104,14 @@ impl<'a> SetValue<'a> {
         }
     }
 
+    /// `value`, named `what` in its errors.
+    pub(super) fn new(what: &'a str, value: Value) -> Self {
+        Self {
+            what: Cow::Borrowed(what),
+            value,
+        }
+    }
+
     /// A field setter's `:field` and its `:value`, named by the field.
     pub(super) fn field(map: &Payload) -> Result<(String, SetValue<'static>), String> {
         let field = map_string(map, "field").ok_or("needs a :field")?;
@@ -165,7 +173,7 @@ impl<'a> SetValue<'a> {
     }
 
     /// The index of the label among `options`, case-insensitively.
-    fn choice(&self, options: &[&str]) -> Result<usize, String> {
+    pub(super) fn choice(&self, options: &[&str]) -> Result<usize, String> {
         let label = self.label()?;
         options
             .iter()

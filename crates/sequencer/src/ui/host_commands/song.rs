@@ -96,6 +96,19 @@ pub(super) const COMMANDS: &[&str] = &[
     "sound-cleanup-unused",
 ];
 
+/// The track a palette command names: by its stable `:track-id` (resolved
+/// now, so a reorder before the command landed cannot retarget it; the
+/// `sound` kind's actions send it), else by its `:track` position.
+fn palette_track(
+    app: &app::App,
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<usize, String> {
+    if map.contains_key("track-id") {
+        return super::track_settings::command_track(app, map);
+    }
+    map_usize(map, "track").ok_or_else(|| "missing or invalid :track".to_string())
+}
+
 /// Palette gesture target from a payload's `:target-kind`/`:target-id`
 /// (§17.6): `take`/`pattern` with an id, `cell` for the track's effective
 /// sound here and now, or absent (`None`) — the caller falls back to the
@@ -748,7 +761,7 @@ fn run_transport(
         // list itself diffs by value each tick and needs no push.
         "sound-palette-open" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?;
             let target = app.palette_target_or_binding(track, target);
             app.sound_palette_open = Some((track, target));
@@ -760,7 +773,7 @@ fn run_transport(
         }
         "sound-apply" | "sound-apply-with-mix" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?.or_else(|| {
                 app.sound_palette_open
                     .filter(|(open_track, _)| *open_track == track)
@@ -779,7 +792,7 @@ fn run_transport(
         }
         "sound-fork" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?.or_else(|| {
                 app.sound_palette_open
                     .filter(|(open_track, _)| *open_track == track)
@@ -792,7 +805,7 @@ fn run_transport(
         }
         "sound-rename" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let kind = map_string(map, "kind").unwrap_or_else(|| "patch".to_string());
             let id = map_entity_id(map, "entity")?;
             let name_arg =

@@ -63,12 +63,8 @@ pub(super) struct RackState {
     /// Pool groove id → instance (dropped on a project load).
     pub(super) pool: HashMap<u64, InstanceId>,
     pool_ids: Vec<Option<InstanceId>>,
-    /// Library id → instance, the ids allocated per picker key, and the
-    /// listing last pushed.
-    library: HashMap<u64, InstanceId>,
-    library_keys: HashMap<String, u64>,
-    next_library_id: u64,
-    library_ids: Vec<Option<InstanceId>>,
+    /// The library's instances by picker key, and the listing last pushed.
+    library: KeyedRows,
     library_entries: Option<Vec<GrooveLibraryEntry>>,
     /// (UI epoch, library generation, has a rack or a pool groove) the
     /// library was last listed under.
@@ -87,7 +83,7 @@ impl RackState {
     /// reload drops a kind's instances together).
     pub(super) fn representatives(&self) -> impl Iterator<Item = &InstanceId> {
         let pool = self.pool_ids.iter().flatten().next();
-        let library = self.library_ids.iter().flatten().next();
+        let library = self.library.representative();
         (pool.into_iter())
             .chain(library)
             .chain(self.pads.first())
@@ -576,7 +572,7 @@ impl HostKinds {
             pusher.push(id, f::POOL_GROOVE_RACKS, instance_list(racks));
         }
         if let Some(project) = pusher.singleton(PROJECT) {
-            let list = instance_list(pool.iter().flatten().copied());
+            let list = listed_instances(&pool);
             pusher.push(project, f::PROJECT_GROOVE_POOL, list);
         }
         self.racks.pool_ids = pool;
@@ -607,30 +603,19 @@ impl HostKinds {
             .iter()
             .map(|entry| entry.choice().picker_key())
             .collect();
-        racks.library_keys.retain(|key, _| keys.contains(key));
-        let mut model = Vec::with_capacity(keys.len());
-        let mut listed = Vec::with_capacity(keys.len());
-        for (entry, key) in entries.iter().zip(keys) {
-            let id = *racks.library_keys.entry(key.clone()).or_insert_with(|| {
-                racks.next_library_id += 1;
-                racks.next_library_id
-            });
-            if !model.contains(&id) {
-                model.push(id);
-                listed.push((entry, key));
-            }
-        }
-        let library = reconcile(pusher, LIBRARY_GROOVE, &mut racks.library, &model);
-        for (index, ((entry, key), id)) in listed.into_iter().zip(&library).enumerate() {
+        let ids = racks.library.reconcile(pusher, LIBRARY_GROOVE, &keys);
+        // A repeated key is listed once, at its first entry.
+        let mut listed = HashSet::new();
+        let kept =
+            (entries.iter().zip(keys).zip(&ids)).filter(|((_, key), _)| listed.insert(key.clone()));
+        for (index, ((entry, key), id)) in kept.enumerate() {
             let Some(id) = *id else { continue };
             pusher.push(id, f::LIBRARY_GROOVE_INDEX, number(index as f64));
             pusher.push(id, f::LIBRARY_GROOVE_CHOICE, Value::String(key));
             pusher.push(id, f::LIBRARY_GROOVE_NAME, text(&entry.name));
             pusher.push(id, f::LIBRARY_GROOVE_TIER, text(entry.tier.key()));
         }
-        let list = instance_list(library.iter().flatten().copied());
-        pusher.push(project, f::PROJECT_GROOVE_LIBRARY, list);
-        racks.library_ids = library;
+        pusher.push(project, f::PROJECT_GROOVE_LIBRARY, listed_instances(&ids));
         racks.library_entries = Some(entries);
     }
 

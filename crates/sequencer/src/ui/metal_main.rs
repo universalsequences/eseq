@@ -17,6 +17,7 @@ mod native_menu;
 mod noui;
 mod param_words;
 mod piano_roll;
+mod presented;
 mod patch_learn;
 mod profile;
 mod ui_benchmark;
@@ -40,6 +41,11 @@ use lisp_hot_reload::*;
 use live_audio_analyzer::*;
 use natives::*;
 use piano_roll::*;
+use presented::{
+    editor_error, present_agent, present_editor, present_editor_closed, present_editor_open,
+    present_editor_sidebar, present_export, present_learn, present_learn_error, present_retro,
+    present_settings,
+};
 use patch_learn::*;
 use profile::*;
 use roll_record::*;

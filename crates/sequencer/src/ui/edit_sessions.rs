@@ -981,72 +981,50 @@ pub(super) fn scan_patch_macro_source(source: &str) -> PatchMacroScan {
     scan
 }
 
-pub(super) fn build_patch_macro_sidebar_value(
-    entries: &[(String, Vec<String>, Vec<String>)],
-) -> Value {
-    Value::List(
-        entries
-            .iter()
-            .map(|(name, params, calls)| {
-                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
-                    ("name", Value::String(name.clone())),
-                    ("params", values::build_string_list(params)),
-                    ("calls", values::build_string_list(calls)),
-                ])))
-            })
-            .collect(),
-    )
+/// The patch's own defmacros (name, params, calls), for the macro sidebar.
+pub(super) fn patch_macro_sidebar(
+    entries: Vec<(String, Vec<String>, Vec<String>)>,
+) -> Vec<crate::presented::EditorMacro> {
+    (entries.into_iter())
+        .map(|(name, params, calls)| crate::presented::EditorMacro {
+            name,
+            params,
+            calls,
+            ..Default::default()
+        })
+        .collect()
 }
 
-pub(super) fn build_asset_sidebar_value(
-    entries: &[eseqlisp::widget_render::patcher::PatcherAssetSidebarEntry],
-) -> Value {
-    Value::List(
-        entries
-            .iter()
-            .map(|entry| {
-                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
-                    ("label", Value::String(entry.reference.clone())),
-                    ("name", Value::String(entry.reference.clone())),
-                    ("kind", Value::String("patcher-asset".to_string())),
-                    ("detail", Value::String(entry.tier.to_string())),
-                    ("tier", Value::String(entry.tier.to_string())),
-                    ("file", Value::String(entry.reference.clone())),
-                    (
-                        "source-path",
-                        Value::String(entry.source_path.to_string_lossy().into_owned()),
-                    ),
-                    ("drag-type", Value::String("dgen-asset".to_string())),
-                    ("draggable", Value::Bool(true)),
-                    ("drop-target", Value::Bool(false)),
-                ])))
-            })
-            .collect(),
-    )
-}
-
-pub(super) fn build_library_macro_sidebar_value(
-    entries: &[eseqlisp::widget_render::patcher::MacroLibrarySidebarEntry],
+/// The saved defmacro library, each marked used when the patch imports it.
+pub(super) fn library_macro_sidebar(
+    entries: Vec<eseqlisp::widget_render::patcher::MacroLibrarySidebarEntry>,
     used: &[String],
-) -> Value {
-    Value::List(
-        entries
-            .iter()
-            .map(|(name, params, outputs, summary, imports)| {
-                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
-                    ("name", Value::String(name.clone())),
-                    ("params", values::build_string_list(params)),
-                    ("outputs", values::build_string_list(outputs)),
-                    (
-                        "summary",
-                        Value::String(summary.clone().unwrap_or_default()),
-                    ),
-                    ("calls", values::build_string_list(imports)),
-                    ("used", Value::Bool(used.contains(name))),
-                ])))
-            })
-            .collect(),
-    )
+) -> Vec<crate::presented::EditorMacro> {
+    (entries.into_iter())
+        .map(
+            |(name, params, outputs, summary, imports)| crate::presented::EditorMacro {
+                used: used.contains(&name),
+                name,
+                params,
+                calls: imports,
+                outputs,
+                summary: summary.unwrap_or_default(),
+            },
+        )
+        .collect()
+}
+
+/// The file-backed tensor assets the patch can use.
+pub(super) fn asset_sidebar(
+    entries: Vec<eseqlisp::widget_render::patcher::PatcherAssetSidebarEntry>,
+) -> Vec<crate::presented::EditorAsset> {
+    (entries.into_iter())
+        .map(|entry| crate::presented::EditorAsset {
+            reference: entry.reference,
+            tier: entry.tier.to_string(),
+            source_path: entry.source_path.to_string_lossy().into_owned(),
+        })
+        .collect()
 }
 
 pub(super) fn extract_macro_name_from_defmacro(source: &str) -> Option<String> {
@@ -1150,8 +1128,9 @@ pub(super) fn instrument_run_mode_label(run_mode: CustomInstrumentRunMode) -> &'
     }
 }
 
+/// A run mode by its label, case-insensitively.
 pub(super) fn instrument_run_mode_from_label(label: &str) -> Option<CustomInstrumentRunMode> {
-    CustomInstrumentRunMode::parse(label)
+    CustomInstrumentRunMode::parse(&label.to_ascii_lowercase())
 }
 
 pub(super) fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {

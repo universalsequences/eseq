@@ -340,6 +340,59 @@ pub(super) fn cached_union(rt: &Runtime, cache: Option<(u64, u32)>) -> Option<u3
     (seen == rt.instance_observer_epoch()).then_some(union)
 }
 
+/// Positional instances kept per string key while listed: each key is
+/// allocated a model id ([`reconcile`]'s) for as long as it is listed, so a
+/// reorder re-keys the instance rather than re-registering it.
+#[derive(Default)]
+pub(super) struct KeyedRows {
+    ids: HashMap<u64, InstanceId>,
+    keys: HashMap<String, u64>,
+    next: u64,
+}
+
+impl KeyedRows {
+    /// One of the instances (the stale check's representative).
+    pub(super) fn representative(&self) -> Option<&InstanceId> {
+        self.ids.values().next()
+    }
+
+    /// Reconcile `kind` with `keys` (in list order; a repeated key keeps its
+    /// first entry). Returns the instance of each entry (`None` for a
+    /// repeat or a failed registration).
+    pub(super) fn reconcile<K: AsRef<str>>(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        kind: &str,
+        keys: &[K],
+    ) -> Vec<Option<InstanceId>> {
+        let listed: HashSet<&str> = keys.iter().map(AsRef::as_ref).collect();
+        self.keys.retain(|key, _| listed.contains(key.as_str()));
+        let mut seen = HashSet::with_capacity(keys.len());
+        let mut model = Vec::with_capacity(keys.len());
+        let mut kept = Vec::with_capacity(keys.len());
+        for key in keys {
+            let key = key.as_ref();
+            let id = match self.keys.get(key) {
+                Some(id) => *id,
+                None => {
+                    self.next += 1;
+                    self.keys.insert(key.to_string(), self.next);
+                    self.next
+                }
+            };
+            let first = seen.insert(id);
+            kept.push(first);
+            if first {
+                model.push(id);
+            }
+        }
+        let mut ids = reconcile(pusher, kind, &mut self.ids, &model).into_iter();
+        (kept.into_iter())
+            .map(|kept| if kept { ids.next().flatten() } else { None })
+            .collect()
+    }
+}
+
 /// Bring the registry of index-keyed `kind` in line with `model` (stable
 /// model ids in display order): drop instances whose thing is gone,
 /// re-key moved ones in one step, register new ones. Returns the instance

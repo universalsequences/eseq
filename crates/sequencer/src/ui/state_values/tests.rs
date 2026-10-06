@@ -17008,6 +17008,7 @@ mod solo_binding_tests;
         let menu_state = crate::application_menu::register_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
         crate::retrospective::register_state(editor.runtime_mut());
+        crate::presented::register_fixture_native(editor.runtime_mut());
         crate::host_commands::resample::register_state(editor.runtime_mut());
         // Transport owns a real defscene value, so full-UI fixtures need the
         // same scene authoring natives as the application.
@@ -17314,7 +17315,11 @@ mod solo_binding_tests;
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
-        editor.runtime_mut().register_reactive("EXPORT", vec![], true);
+        editor.runtime_mut().register_reactive(
+            "EXPORT",
+            crate::presented::export_registration(),
+            true,
+        );
         for step in 0..16 {
             editor.runtime_mut().set_reactive(
                 "SEQ",
@@ -59497,6 +59502,17 @@ mod solo_binding_tests;
         let setup = &fixture[fixture.find("(def capture-after-sync").unwrap()..];
         editor.runtime_mut().eval_str(setup).unwrap();
         editor.runtime_mut().eval_str("(capture-after-sync)").unwrap();
+        // The fixture seeds the record (`present-fixture`), and its mirror.
+        let export = crate::presented::presented(|p| p.export.get().clone());
+        assert_eq!(export.default_name, "Night Drive (2)");
+        assert_eq!(export.end, 64.0);
+        let Some(Value::Map(legacy)) = editor.runtime_mut().global_value("EXPORT") else {
+            panic!("EXPORT");
+        };
+        assert_eq!(
+            *legacy["export-default-name"].borrow(),
+            Value::String("Night Drive (2)".into())
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.set_layout_viewport(160, 60);
