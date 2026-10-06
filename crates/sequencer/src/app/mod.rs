@@ -1084,12 +1084,14 @@ pub struct App {
     pub(crate) take_recording: Option<take_recording::TakeRecordingSession>,
     /// Change counter for PROVISIONAL capture content
     /// (docs/realtime-arrangement-feedback-spec.md 3.3): bumped by the
-    /// writers of pending take notes and captured launches, and by nothing
-    /// else. `SEQ.song-pending` rebuilds its dots only when this moves, so a
-    /// recording never invalidates the committed-lane caches per note. It is
-    /// deliberately neither `committed_song_revision` (nothing is committed
-    /// yet) nor `pool_content_revision` (slice 3's counter, for COMMITTED
-    /// pool edits).
+    /// writers of pending take notes and captured launches, and when a
+    /// capture take begins or ends (begin / discard / finish), and by
+    /// nothing else. `SEQ.song-pending` rebuilds its dots only when this (or
+    /// the pool / scenes content the launches name, `pending_content_key`)
+    /// moves, so a recording never invalidates the committed-lane caches
+    /// per note. It is deliberately neither `committed_song_revision`
+    /// (nothing is committed yet) nor `pool_content_revision` (slice 3's
+    /// counter, for COMMITTED pool edits).
     pub pending_revision: u64,
     /// Set after project load: the loaded per-track record-arm flags in
     /// `graph.record_armed` must be pushed INTO the UI-shared arm vector

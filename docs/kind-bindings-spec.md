@@ -357,7 +357,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`, since 7f `browser preset-file slot-presets sound sound-palette editor editor-macro editor-asset asset-info learn learn-plan-param learn-epoch-param learn-delta retro retro-lane retro-item song-export settings midi-device agent`, since 7e `note piano-roll`, since 7e-2 `focus-step`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`, since 7b-3 `mod-target tensor variant macro rack-macro macro-mapping`, since 7c `process-class process-library process lane inlet port fanout state-cell`, since 7f `browser preset-file slot-presets sound sound-palette editor editor-macro editor-asset asset-info learn learn-plan-param learn-epoch-param learn-delta retro retro-lane retro-item song-export settings midi-device agent`, since 7e `note piano-roll`, since 7e-2 `focus-step`, since 7d-2 `pending-lane pending-scene pending-launch`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -2052,7 +2052,7 @@ Built (7d):
   anything else (`set-clip: …`, `set-song: …`).
 - **Deferred to eseq-0l17.39:** `song.pending` (the provisional capture
   surface: pending take lanes, scene and track launches) as positional
-  sub-kinds.
+  sub-kinds. Built in 7d-2 (§14.2o).
 
 ### 14.2e Built in stage 7h (eseq-0l17.34)
 
@@ -3540,6 +3540,63 @@ Built (7e-2):
   macro's have no kinds action yet (legacy `set-track-plock-entry` /
   `clear-track-plock-entry` with `:target rack-macro`).
 
+### 14.2o Built in stage 7d-2 (eseq-0l17.39)
+
+| Kind | Key | New `:host` fields |
+|---|---|---|
+| `song` | `()` | `pending :bool` (a capture take exists), `pending-origin :number` (the capture's start beat), `pending-head :number` (the record head, floored to a 16th), `pending-lanes (list-of pending-lane)`, `pending-scenes (list-of pending-scene)`, `pending-launches (list-of pending-launch)` |
+| `pending-lane` | `(index)` | `index :int`, `track track`, `start :number` (punch-in), `end :number` (the growing edge), `num-steps :int`, `length :number` (beats), `events (list-of (list-of :number))` (as `clip.events`) |
+| `pending-scene` | `(index)` | `index :int`, `scene scene`, `start :number` |
+| `pending-launch` | `(index)` | `index :int`, `track track`, `start :number`, `cell cell` (the pattern it plays), `num-steps :int`, `length :number` (one cycle), `events (list-of (list-of :number))` |
+
+All read-only (provisional content is inert until the stop-commit,
+docs/realtime-arrangement-feedback-spec.md 7).
+
+Built (7d-2):
+
+- **Shared with the legacy surface.** The content is the legacy
+  publisher's: `pending_capture_content` (over `build_pending_content`),
+  the head `quantized_pending_head` (floored to `PENDING_HEAD_QUANTUM`),
+  a lane's end `PendingLaneSpan::end_beat` (the growing edge, floored to
+  the lane's step, never short of the music it holds; the span is all a
+  lane keeps between rebuilds, not its events) and the events
+  `pattern_events_value` (as `clip.events`), each now one function both
+  `sync_song_pending` and the host kinds call. Legacy `origin-beat`,
+  `head-beat`, `lanes` (`track`, `start-beat`, `end-beat`, `num-steps`,
+  `length-beats`, `events`), `scene-events` (`start-beat`, `scene`) and
+  `track-events` (`track`, `start-beat`, `pattern-id`, `num-steps`,
+  `length-beats`, `events`) map to the fields above; positions become
+  instances (`track`, `scene`, and a launch's pattern id its `cell`, the
+  7d cell of that track and pattern; nil if unregistered).
+- **Identity.** Positional (`(index)`, like `scene-span`): a new note or
+  launch re-pushes values in place (a held `pending-lane` handle is "the
+  i-th lane", not a lane), a shorter list drops the tail, and the capture
+  ending (stop, cancel or a failed commit, which all drop the capture take)
+  drops every instance explicitly and pushes `song.pending` false,
+  `pending-origin` / `pending-head` 0 and the lists empty. Positional
+  instances (`pending-*`, `scene-span`, the presentation rows) share
+  `registry::positional` (`reconcile` over `0..count`).
+- **Feeds** (`host_kinds/pending.rs`). No capture take: one bool per tick
+  (`quantized_pending_head` is `None`); the clear runs once, when the take
+  goes. While one exists the content is rebuilt (`PendingState::syncs`)
+  only when `pending_content_key` or the arrangement structure generation
+  (the track, scene and cell instances the content names) moved.
+  `pending_content_key` is `App::pending_revision` (a recorded note, a
+  captured launch, and a capture take beginning, being discarded or
+  finishing, so a capture started in the tick another ended never shows
+  the old one's content) with the pool-content and project-scenes
+  revisions (a launched pattern's steps, length or timebase; a scene's
+  cell assignment, which the whole-song start and every scene launch
+  expand through); the legacy `SEQ.song-pending` keys on the same
+  function. `pending-head` and each lane's `end` are re-pushed only when
+  the quantized head moves (`PendingState::head_pushes`; a sub-quantum
+  advance pushes nothing, and neither rebuilds the content). Every push
+  is compared with its cell; the stale check covers the first instance of
+  each kind.
+- **Not covered:** the view (`ui/arrangement.lisp`, port .15) still reads
+  `SEQ.song-pending`; .15 moves it to these fields and removes the legacy
+  publisher.
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3558,7 +3615,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7c | eseq-0l17.29 (built) | `process` (a track's chain), `lane`, `inlet`, `port`, `fanout`, `state-cell`, `process-class`, `process-library`; `track.processes` / `lanes` | .11 .14 .20 |
 | 7c-2 | eseq-0l17.45 (built) | graph-node process slot probes and run errors (the node bay's scopes): `process.error`, `state-cell.values` of `n.processes` | .11 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
-| 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
+| 7d-2 | eseq-0l17.39 (built) | `song.pending` (the provisional capture surface) as positional sub-kinds: `pending-lane`, `pending-scene`, `pending-launch` | .15 |
 | 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation) | .16 .20 |
 | 7e-2 | eseq-0l17.47 (built) | the piano roll's automation lane: `focus-step` (focus-axis step params, `piano-roll.steps`), the lane a view | .16 |
 | 7e-3 | eseq-0l17.48 | model note ids (handles kept through undo and legacy edits) | — |
@@ -3709,7 +3766,7 @@ builds the field name.
 | `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30); ported (.17: a bound clip's c.take / c.cell), kept: arrangement | .15 .17 |
 | `SEQ.song-manual-latch` | 2 | transport | sv/song_state.rs | model | song.manual-latch | built (.30); ported, legacy removed (.12) | .12 |
 | `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | built (.30); ported (.12), kept: arrangement (.15) | .12 .15 |
-| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending | .39 | .15 |
+| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending, pending-origin, pending-head, pending-lanes → pending-lane, pending-scenes → pending-scene, pending-launches → pending-launch | built (.39) | .15 |
 | `SEQ.song-position-beats` | 5 | arrangement, transport | sv/song_state.rs | live | song.position (live) | built (.30); ported (.12), kept: arrangement (.15) | .12 .15 |
 | `SEQ.song-region` | 31 | arrangement | sv/song_state.rs | model | song.region | built (.30) | .15 |
 | `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | built (.30) | .15 |

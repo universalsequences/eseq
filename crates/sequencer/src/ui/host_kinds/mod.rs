@@ -75,6 +75,7 @@
 //! the reader hook; `registry` the instance registry helpers and pushes;
 //! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes),
 //! `settings` (track settings), `arrangement` (song, clips, cells),
+//! `pending` (the song's provisional capture surface),
 //! `racks` (drum rack pads, rack clips, grooves), `devices` (devices
 //! beyond the track chain), `panel` (the device panel extras: modulation
 //! lanes and display, process mapping, key locks, tensors), `variants`
@@ -104,6 +105,7 @@ mod focus_steps;
 mod notes;
 mod panel;
 mod params;
+mod pending;
 mod presentation;
 mod racks;
 mod registry;
@@ -130,6 +132,7 @@ pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
 use panel::*;
 use params::*;
+use pending::PendingState;
 use presentation::PresentedState;
 use racks::RackState;
 use registry::*;
@@ -206,6 +209,9 @@ pub(crate) const AGENT: &str = "eseq.kinds:agent";
 pub(crate) const NOTE: &str = "eseq.kinds:note";
 pub(crate) const PIANO_ROLL: &str = "eseq.kinds:piano-roll";
 pub(crate) const FOCUS_STEP: &str = "eseq.kinds:focus-step";
+pub(crate) const PENDING_LANE: &str = "eseq.kinds:pending-lane";
+pub(crate) const PENDING_SCENE: &str = "eseq.kinds:pending-scene";
+pub(crate) const PENDING_LAUNCH: &str = "eseq.kinds:pending-launch";
 pub(crate) const GRAPH: &str = "eseq.kinds:graph";
 pub(crate) const GRAPH_NODE: &str = "eseq.kinds:graph-node";
 pub(crate) const GRAPH_EDGE: &str = "eseq.kinds:graph-edge";
@@ -764,6 +770,29 @@ pub(crate) mod f {
     pub(crate) const SONG_REGION: FieldKey = (SONG, "region");
     pub(crate) const SONG_BOUND_CLIP: FieldKey = (SONG, "bound-clip");
     pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
+    pub(crate) const SONG_PENDING: FieldKey = (SONG, "pending");
+    pub(crate) const SONG_PENDING_ORIGIN: FieldKey = (SONG, "pending-origin");
+    pub(crate) const SONG_PENDING_HEAD: FieldKey = (SONG, "pending-head");
+    pub(crate) const SONG_PENDING_LANES: FieldKey = (SONG, "pending-lanes");
+    pub(crate) const SONG_PENDING_SCENES: FieldKey = (SONG, "pending-scenes");
+    pub(crate) const SONG_PENDING_LAUNCHES: FieldKey = (SONG, "pending-launches");
+    pub(crate) const PENDING_LANE_INDEX: FieldKey = (PENDING_LANE, "index");
+    pub(crate) const PENDING_LANE_TRACK: FieldKey = (PENDING_LANE, "track");
+    pub(crate) const PENDING_LANE_START: FieldKey = (PENDING_LANE, "start");
+    pub(crate) const PENDING_LANE_END: FieldKey = (PENDING_LANE, "end");
+    pub(crate) const PENDING_LANE_NUM_STEPS: FieldKey = (PENDING_LANE, "num-steps");
+    pub(crate) const PENDING_LANE_LENGTH: FieldKey = (PENDING_LANE, "length");
+    pub(crate) const PENDING_LANE_EVENTS: FieldKey = (PENDING_LANE, "events");
+    pub(crate) const PENDING_SCENE_INDEX: FieldKey = (PENDING_SCENE, "index");
+    pub(crate) const PENDING_SCENE_SCENE: FieldKey = (PENDING_SCENE, "scene");
+    pub(crate) const PENDING_SCENE_START: FieldKey = (PENDING_SCENE, "start");
+    pub(crate) const PENDING_LAUNCH_INDEX: FieldKey = (PENDING_LAUNCH, "index");
+    pub(crate) const PENDING_LAUNCH_TRACK: FieldKey = (PENDING_LAUNCH, "track");
+    pub(crate) const PENDING_LAUNCH_START: FieldKey = (PENDING_LAUNCH, "start");
+    pub(crate) const PENDING_LAUNCH_CELL: FieldKey = (PENDING_LAUNCH, "cell");
+    pub(crate) const PENDING_LAUNCH_NUM_STEPS: FieldKey = (PENDING_LAUNCH, "num-steps");
+    pub(crate) const PENDING_LAUNCH_LENGTH: FieldKey = (PENDING_LAUNCH, "length");
+    pub(crate) const PENDING_LAUNCH_EVENTS: FieldKey = (PENDING_LAUNCH, "events");
 
     pub(crate) const REGION_TRACKS: FieldKey = (REGION, "tracks");
     pub(crate) const REGION_START: FieldKey = (REGION, "start");
@@ -1267,6 +1296,35 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_REGION, "region", Model),
     (f::SONG_BOUND_CLIP, "clip", Model),
     (f::SONG_SPANS, "(list-of scene-span)", Model),
+    // The provisional capture surface (`pending`): rebuilt with the pending
+    // content key, the lanes' ends with the quantized record head.
+    (f::SONG_PENDING, ":bool", Model),
+    (f::SONG_PENDING_ORIGIN, ":number", Model),
+    (f::SONG_PENDING_HEAD, ":number", Model),
+    (f::SONG_PENDING_LANES, "(list-of pending-lane)", Model),
+    (f::SONG_PENDING_SCENES, "(list-of pending-scene)", Model),
+    (f::SONG_PENDING_LAUNCHES, "(list-of pending-launch)", Model),
+    (f::PENDING_LANE_INDEX, ":int", Model),
+    (f::PENDING_LANE_TRACK, "track", Model),
+    (f::PENDING_LANE_START, ":number", Model),
+    (f::PENDING_LANE_END, ":number", Model),
+    (f::PENDING_LANE_NUM_STEPS, ":int", Model),
+    (f::PENDING_LANE_LENGTH, ":number", Model),
+    (f::PENDING_LANE_EVENTS, "(list-of (list-of :number))", Model),
+    (f::PENDING_SCENE_INDEX, ":int", Model),
+    (f::PENDING_SCENE_SCENE, "scene", Model),
+    (f::PENDING_SCENE_START, ":number", Model),
+    (f::PENDING_LAUNCH_INDEX, ":int", Model),
+    (f::PENDING_LAUNCH_TRACK, "track", Model),
+    (f::PENDING_LAUNCH_START, ":number", Model),
+    (f::PENDING_LAUNCH_CELL, "cell", Model),
+    (f::PENDING_LAUNCH_NUM_STEPS, ":int", Model),
+    (f::PENDING_LAUNCH_LENGTH, ":number", Model),
+    (
+        f::PENDING_LAUNCH_EVENTS,
+        "(list-of (list-of :number))",
+        Model,
+    ),
     (f::REGION_TRACKS, "(list-of track)", Model),
     (f::REGION_START, ":number", Model),
     (f::REGION_END, ":number", Model),
@@ -2595,6 +2653,7 @@ impl HostKinds {
         self.sync_groove_library(&mut pusher, app);
         self.sync_song_model(&mut pusher, app);
         self.sync_song_pushed(&mut pusher, app);
+        self.sync_song_pending(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
         self.sync_piano_roll(&mut pusher, app);
         self.sync_graph_model(&mut pusher, app);

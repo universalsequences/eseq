@@ -445,6 +445,7 @@ mod mixer_view;
 mod panel;
 mod panel_extras;
 mod params;
+mod pending;
 mod piano_roll;
 mod racks;
 mod scenes;

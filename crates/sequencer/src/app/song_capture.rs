@@ -253,6 +253,9 @@ impl App {
             timeline_start_beat,
             self.tracks.len(),
         ));
+        // A new take is new provisional content: a capture started in the
+        // same tick another ended must not show the old one's.
+        self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
     /// Discard the staging take (Cancel, spec 7.4.8). The committed song is
@@ -263,6 +266,7 @@ impl App {
         // Pending take content lives in detached buffers (takes spec 8.5
         // Cancel): dropping it touches neither the pattern pool nor the song.
         self.take_recording = None;
+        self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
     /// Record one successful audible launch. Called from
@@ -357,6 +361,7 @@ impl App {
         if result.is_ok() {
             self.take_recording = None;
         }
+        self.pending_revision = self.pending_revision.wrapping_add(1);
         if let Err(error) = &result {
             self.song_capture_failed = true;
             self.song_capture_error = Some(error.clone());

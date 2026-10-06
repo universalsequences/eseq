@@ -72,15 +72,18 @@ pub(super) struct SongState {
     cell_observed: ObservedList,
     pushed: SongPushed,
     governed: Option<GovernKey>,
+    /// The provisional capture surface (`pending`).
+    pub(super) pending: PendingState,
 }
 
 impl SongState {
     /// Instances that stand for their kinds in the stale check (a hot
-    /// reload drops a kind's instances together): the spans, the first clip
-    /// and the first cell.
+    /// reload drops a kind's instances together): the spans, the first clip,
+    /// the first cell and the first pending instance of each kind.
     pub(super) fn representatives(&self) -> impl Iterator<Item = &InstanceId> {
         let clip = self.clips.first().map(|row| &row.id);
-        self.spans.values().chain(clip).chain(self.cells.first())
+        let spans = self.spans.values().chain(clip).chain(self.cells.first());
+        spans.chain(self.pending.representatives())
     }
 
     /// Moves with every structure sync (the clip instances may have
@@ -100,6 +103,7 @@ impl SongState {
         self.cell_observed.reset();
         self.pushed = SongPushed::default();
         self.governed = None;
+        self.pending.invalidate();
     }
 }
 
@@ -405,13 +409,11 @@ impl HostKinds {
         fresh
     }
 
-    /// The scene span instances, positional (`reconcile` over the
-    /// positions, so a shorter lane drops the tail and a hot reload's
-    /// dropped instances are re-registered), their fields pushed. Returns
-    /// them in order.
+    /// The scene span instances, [`positional`] (a shorter lane drops the
+    /// tail and a hot reload's dropped instances are re-registered), their
+    /// fields pushed. Returns them in order.
     fn sync_spans(&mut self, pusher: &mut Pusher<'_>, spans: &[SceneSpan]) -> Vec<InstanceId> {
-        let positions: Vec<u64> = (0..spans.len() as u64).collect();
-        let ids = reconcile(pusher, SCENE_SPAN, &mut self.song.spans, &positions);
+        let ids = positional(pusher, SCENE_SPAN, &mut self.song.spans, spans.len());
         let mut list = Vec::with_capacity(spans.len());
         for (index, (span, id)) in spans.iter().zip(ids).enumerate() {
             let Some(id) = id else { continue };

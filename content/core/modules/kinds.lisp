@@ -1021,7 +1021,47 @@
          (region region :doc "The selected region, or nil; (select-region! t1 t2 start end [:scene-lane true]), (clear-region!)")
          (bound-clip clip :set set-song-bound-clip
                      :doc "The selected clip (its track's sound binds to it), or nil")
-         (spans (list-of scene-span) :doc "The scene lane, in time order")))
+         (spans (list-of scene-span) :doc "The scene lane, in time order")
+         ;; The provisional capture surface, while an arrangement capture
+         ;; runs (all empty / false otherwise).
+         (pending :bool :doc "An arrangement capture runs: the pending-* fields show what it would commit")
+         (pending-origin :number :doc "The beat the capture started at")
+         (pending-head :number :doc "The record head, in beats, floored to a 16th")
+         (pending-lanes (list-of pending-lane) :doc "The take lanes recording, in punch-in order")
+         (pending-scenes (list-of pending-scene) :doc "The scene launches captured, in time order")
+         (pending-launches (list-of pending-launch) :doc "The clips the captured launches put on track lanes, in time order")))
+
+;; One take lane an arrangement capture records: (nth song.pending-lanes 0).
+;; Provisional content has no ids, so pending instances are positional (a new
+;; note re-pushes values in place) and all go when the capture ends.
+(def-kind pending-lane
+  :key (index)
+  :host ((index :int)
+         (track track)
+         (start :number :doc "The punch-in beat")
+         (end :number :doc "Where the clip would end if capture stopped now (grows with the head a step at a time, never short of what it holds)")
+         (num-steps :int :doc "The steps recorded (the committed take's length)")
+         (length :number :doc "num-steps in beats")
+         (events (list-of (list-of :number)) :doc "(time transpose velocity duration) per note, times and durations in steps, as clip.events")))
+
+;; One captured scene launch: (nth song.pending-scenes 0).
+(def-kind pending-scene
+  :key (index)
+  :host ((index :int)
+         (scene scene)
+         (start :number :doc "The launch beat")))
+
+;; One clip a captured launch put on a track lane: (nth song.pending-launches 0).
+;; It runs to the next launch on its lane, or to the record head.
+(def-kind pending-launch
+  :key (index)
+  :host ((index :int)
+         (track track)
+         (start :number :doc "The launch beat")
+         (cell cell :doc "The pattern it plays")
+         (num-steps :int :doc "The pattern's length in steps")
+         (length :number :doc "One pattern cycle in beats")
+         (events (list-of (list-of :number)) :doc "One cycle's notes, as clip.events")))
 
 ;; The arrangement's selected region (song.region while one is selected).
 (def-kind region

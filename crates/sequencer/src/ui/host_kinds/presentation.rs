@@ -445,18 +445,6 @@ fn push_sounds(pusher: &mut Pusher<'_>, palette: &Palette, track: InstanceId) ->
     ids.into_iter().flatten().collect()
 }
 
-/// Positional rows of `kind`, one per index below `count` (the instances
-/// past it dropped).
-fn positional(
-    pusher: &mut Pusher<'_>,
-    kind: &str,
-    known: &mut HashMap<u64, InstanceId>,
-    count: usize,
-) -> Vec<Option<InstanceId>> {
-    let model: Vec<u64> = (0..count as u64).collect();
-    reconcile(pusher, kind, known, &model)
-}
-
 impl PresentedState {
     /// The editor's fields, and its macro sidebar's, each when its area
     /// moved.

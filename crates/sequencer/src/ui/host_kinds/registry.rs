@@ -459,6 +459,19 @@ pub(super) fn reconcile(
         .collect()
 }
 
+/// Positional rows of `kind` ([`reconcile`] over `0..count`): one per index
+/// below `count`, the instances past it dropped. Aligned with the indices
+/// (`None` where registering failed).
+pub(super) fn positional(
+    pusher: &mut Pusher<'_>,
+    kind: &str,
+    known: &mut HashMap<u64, InstanceId>,
+    count: usize,
+) -> Vec<Option<InstanceId>> {
+    let model: Vec<u64> = (0..count as u64).collect();
+    reconcile(pusher, kind, known, &model)
+}
+
 /// Whether a feed's key (a generation, or the state it was pushed under)
 /// moved since `seen` (`None` forces a push): records it and counts the
 /// push.
