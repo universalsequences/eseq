@@ -26,8 +26,8 @@ pub use instances::{
     KindKey, SCRATCH_KIND_PACKAGE, SdfStatePlan, kind_id, kind_name_of,
 };
 pub(crate) use instances::{
-    FIELD_TYPES_HINT, host_entry_shape_message, host_option_message, nil_default_message,
-    state_entry_shape_message,
+    FIELD_TYPES_HINT, builtin_field_message, builtin_fields_for, host_entry_shape_message,
+    host_option_message, nil_default_message, state_entry_shape_message,
 };
 pub use view_buffers::BoundView;
 
@@ -195,9 +195,25 @@ fn log_native_callback_error(vm: &VM, native_name: &str, index: usize, error: &V
     }
 }
 
-fn log_native_misuse(native_name: &str, message: &str) {
+pub(crate) fn log_native_misuse(native_name: &str, message: &str) {
     if debug_lisp_callback_errors_enabled() {
         eprintln!("[lisp-error][{native_name}] {message}");
+    }
+}
+
+/// Log a failed `(import …)` / `(load …)` with the errors the module queued
+/// while it failed (a compile error's message; eseq-0l17.60). The failure
+/// is also queued on `source_load_errors` and returned as the form's string
+/// value, but a host that evaluates a root with `eval_str` and never drains
+/// that queue (the distro boot) otherwise loses it: a module that failed to
+/// compile left nothing but its missing definitions behind.
+pub(crate) fn log_source_load_error(form: &str, message: &str, queued: &[String]) {
+    if debug_lisp_callback_errors_enabled() {
+        if queued.is_empty() {
+            eprintln!("[lisp-error][{form}] {message}");
+        } else {
+            eprintln!("[lisp-error][{form}] {message}: {}", queued.join("; "));
+        }
     }
 }
 
@@ -3613,17 +3629,22 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         if let Some(loaded) = loaded {
             let path_display = loaded.path.display().to_string();
+            let queued = vm.source_load_errors.len();
             return match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
                 Ok(_) => {
                     if !vm.declared_modules.contains_key(name) {
-                        vm.source_load_errors.push(format!(
+                        let message = format!(
                             "import {name}: {path_display} did not declare (module {name})"
-                        ));
+                        );
+                        log_source_load_error("import", &message, &[]);
+                        vm.source_load_errors.push(message);
                     }
                     Value::Nil
                 }
                 Err(e) => {
                     let message = format!("import {name}: {path_display}: eval error: {e:?}");
+                    let queued = vm.source_load_errors.get(queued..).unwrap_or_default();
+                    log_source_load_error("import", &message, queued);
                     vm.source_load_errors.push(message.clone());
                     Value::String(message)
                 }
@@ -3633,6 +3654,7 @@ pub fn register_core_natives(vm: &mut VM) {
             "import {name}: no module file found ({})",
             errors.join("; ")
         );
+        log_source_load_error("import", &message, &[]);
         vm.source_load_errors.push(message.clone());
         Value::String(message)
     });

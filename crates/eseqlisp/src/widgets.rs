@@ -536,6 +536,42 @@ fn prop_accepts_binding(
         .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop))
 }
 
+/// The error for a `defwidget` call that binds a ref (`#'x`, `bind`) to a
+/// prop the widget does not declare in `:state` (eseq-0l17.68). Such a prop
+/// never reaches the shader, and the widget used to be replaced by a
+/// diagnostic label that a port or cell layout could hide, so the widget
+/// just vanished: the call is an error naming the widget and the prop.
+/// An instance state handed a ref keeps its diagnostic (it is declared).
+pub(crate) fn undeclared_sdf_binding_error(widget_type: &str, args: &[Value]) -> Option<String> {
+    let definition = crate::widget_render::sdf_widget::sdf_widget_def(widget_type)?;
+    let state = &definition.state;
+    let declared = |prop: &str| {
+        state.names.iter().any(|name| name == prop)
+            || state.plan.scalars.iter().any(|name| name == prop)
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match (&args[i], args.get(i + 1)) {
+            (Value::Keyword(prop), Some(value)) => {
+                if matches!(value, Value::ReactiveRef { .. }) && !declared(prop) {
+                    let names = if state.names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        state.names.join(", ")
+                    };
+                    return Some(format!(
+                        "{widget_type}: :{prop} is bound to a ref, but '{prop}' is not in the \
+                         defwidget's :state ({names}); declare it there or pass a plain value"
+                    ));
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Every scalar state of an SDF widget accepts a binding ref (kind-bindings
 /// spec §7.3; `:bindable` is ignored): a declared `:state` name, read by the
 /// shader or not (the view may bind one only the host reads), or a captured

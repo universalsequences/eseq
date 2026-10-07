@@ -546,6 +546,68 @@ fn colliding_shader_uniform_names_are_an_error() {
     assert!(sdf_widget_def("clash").is_none());
 }
 
+/// eseq-0l17.68: a ref on a prop the defwidget does not declare in
+/// `:state` replaced the widget with a diagnostic label a port layout hid,
+/// so the widget vanished. It is an error naming the widget and the prop.
+#[test]
+fn a_ref_on_a_prop_outside_state_is_an_error_naming_the_widget_and_prop() {
+    let mut host = host();
+    host.runtime
+        .eval_str("(defwidget port-dot :state (active) :shader (sdf/circle (* 0.3 active)))")
+        .expect("defwidget");
+    assert_eq!(
+        error(&mut host.runtime, "(port-dot :active 1 :pending-port #'c0.active)"),
+        "port-dot: :pending-port is bound to a ref, but 'pending-port' is not in the \
+         defwidget's :state (active); declare it there or pass a plain value"
+    );
+    // In a view the render fails with the same message.
+    assert!(
+        error(
+            &mut host.runtime,
+            r#"(effect-buffer "*ports*" (port-dot :active 1 :pending-port #'c0.active))"#
+        )
+        .starts_with("port-dot: :pending-port is bound to a ref")
+    );
+    // A plain value there is an ordinary prop, and a declared state binds.
+    for code in [
+        "(port-dot :active 1 :pending-port 3)",
+        "(port-dot :active #'c0.active)",
+    ] {
+        let Some(Value::Map(map)) = host.runtime.eval_str(code).expect(code) else {
+            panic!("{code}: widget map");
+        };
+        assert!(!map.contains_key("__widget-diagnostic"), "{code}: {map:?}");
+    }
+}
+
+/// eseq-0l17.24: the widget-name check covers `defwidget`s, registered
+/// before the kind compiles or earlier in the same unit.
+#[test]
+fn a_kind_that_binds_a_defwidget_name_is_an_error() {
+    let mut runtime = Runtime::new();
+    runtime
+        .eval_str("(defwidget dial :state (v) :shader (sdf/circle v))")
+        .expect("defwidget");
+    assert_eq!(
+        runtime.eval_str("(def-kind dial :key (index) :state ((v 0)))"),
+        Err(VMError::CompileError)
+    );
+    assert!(
+        runtime
+            .take_source_load_errors()
+            .join("\n")
+            .contains("def-kind dial: 'dial' is a defwidget; a :key () or :key (index) kind")
+    );
+    assert!(
+        error(
+            &mut runtime,
+            "(defwidget gauge :state (v) :shader (sdf/circle v))
+             (def-kind gauge :key () :state ((v 0)))"
+        )
+        .starts_with("def-kind gauge: 'gauge' is a defwidget")
+    );
+}
+
 #[test]
 fn a_shader_that_does_not_compile_is_a_defwidget_error() {
     // A material macro whose module is not loaded is left as a call the
@@ -588,13 +650,14 @@ fn only_scalar_states_accept_a_binding_ref() {
             "step-cell: :cell does not accept reactive bindings".into()
         ))
     );
-    // A uniform name is never a prop.
+    // A uniform name is never a prop: binding one is the undeclared-prop
+    // error (eseq-0l17.68).
     assert!(
-        diagnostic(
+        error(
             &mut host.runtime,
             "(step-cell :cell c0 :cell.active #'c0.active)"
         )
-        .is_some()
+        .starts_with("step-cell: :cell.active is bound to a ref, but 'cell.active' is not in")
     );
     // A scalar state takes any ref, even one the shader never reads (a
     // view may bind a state only the host reads).

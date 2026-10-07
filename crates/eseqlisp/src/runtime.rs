@@ -1652,15 +1652,22 @@ impl Runtime {
                 Ok(loaded) => loaded,
                 Err(error) => {
                     let message = format!("load: {error}");
+                    crate::vm::log_source_load_error("load", &message, &[]);
                     vm.source_load_errors.push(message.clone());
                     return Value::String(message);
                 }
             };
             let loaded_path_display = loaded.path.display().to_string();
+            let queued = vm.source_load_errors.len();
             match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
                 Ok(v) => v.unwrap_or(Value::Bool(true)),
                 Err(e) => {
                     let message = format!("load: {loaded_path_display}: eval error: {e:?}");
+                    crate::vm::log_source_load_error(
+                        "load",
+                        &message,
+                        vm.source_load_errors.get(queued..).unwrap_or_default(),
+                    );
                     vm.source_load_errors.push(message.clone());
                     Value::String(message)
                 }
@@ -1798,6 +1805,15 @@ impl Runtime {
 
                 let widget_type = name.clone();
                 vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
+                    if let Some(message) =
+                        crate::widgets::undeclared_sdf_binding_error(&widget_type, &args)
+                    {
+                        // Logged too: a view re-run's error is otherwise
+                        // only traced (ESEQLISP_TRACE_UI).
+                        crate::vm::log_native_misuse(&widget_type, &message);
+                        vm.fail_native_call(crate::vm::VMError::Instance(message));
+                        return Value::Nil;
+                    }
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget

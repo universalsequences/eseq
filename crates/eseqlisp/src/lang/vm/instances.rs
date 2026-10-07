@@ -275,6 +275,31 @@ pub(crate) fn nil_default_message(kind: &str, slot: &str, field: &str) -> String
     )
 }
 
+/// The built-in fields of an instance of a kind with this key: what
+/// [`InstanceKindSchema::builtin_fields`] answers.
+pub(crate) fn builtin_fields_for(key: &KindKey) -> &'static [&'static str] {
+    match key {
+        KindKey::Created => &CREATED_BUILTIN_FIELDS,
+        KindKey::Singleton => &SINGLETON_BUILTIN_FIELDS,
+        KindKey::Indexed { .. } | KindKey::Under { .. } => &KEYED_BUILTIN_FIELDS,
+    }
+}
+
+/// The error for a declared field that a kind with this key already has as
+/// a built-in field (`key` on a keyed kind; eseq-0l17.60): rejected when
+/// `def-kind` compiles, before the form can run.
+pub(crate) fn builtin_field_message(kind: &str, slot: &str, field: &str, key: &KindKey) -> String {
+    let what = match key {
+        KindKey::Created => "a created kind",
+        KindKey::Singleton => "a singleton (:key ())",
+        KindKey::Indexed { .. } | KindKey::Under { .. } => "a keyed kind",
+    };
+    format!(
+        "def-kind {kind}: :{slot} field '{field}' is a built-in field of {what} ({}); rename it",
+        builtin_fields_for(key).join(", ")
+    )
+}
+
 /// The error for a malformed `:state`/`:document` entry.
 pub(crate) fn state_entry_shape_message(kind: &str, slot: &str) -> String {
     format!("def-kind {kind}: each :{slot} entry is (field default) or (field type :default d)")
@@ -757,11 +782,7 @@ impl InstanceKindSchema {
 
     /// The fields every instance of this kind answers before its own.
     pub fn builtin_fields(&self) -> &'static [&'static str] {
-        match &self.key {
-            KindKey::Created => &CREATED_BUILTIN_FIELDS,
-            KindKey::Singleton => &SINGLETON_BUILTIN_FIELDS,
-            KindKey::Indexed { .. } | KindKey::Under { .. } => &KEYED_BUILTIN_FIELDS,
-        }
+        builtin_fields_for(&self.key)
     }
 
     fn index_of(&self, field: &str) -> Option<usize> {
@@ -1772,6 +1793,9 @@ impl VM {
                     )));
                 }
             }
+        }
+        if let Some(message) = crate::compiler::kind_name_widget_collision(&name, &schema.key) {
+            return Err(VMError::Instance(message));
         }
         if schema.is_singleton() {
             return Ok(self.define_singleton_kind(schema)?);
@@ -3252,10 +3276,10 @@ mod tests {
             "kind 'scratch:menu' has no field 'owner'; fields: id, kind, open, label"
         );
         assert!(instance_error(&mut vm, "(set! menu.id 2)").contains("read-only"));
-        // `id`/`kind` cannot be declared.
+        // `id`/`kind` cannot be declared (a compile error since eseq-0l17.60).
         assert!(
-            instance_error(&mut vm, "(def-kind bad :key () :state ((kind 1)))")
-                .contains("built-in field")
+            compile_errors(&mut vm, "(def-kind bad :key () :state ((kind 1)))")
+                .contains("def-kind bad: :state field 'kind' is a built-in field")
         );
     }
 

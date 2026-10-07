@@ -1065,3 +1065,102 @@ fn subtree_keys_take_instances_and_lists_of_parts() {
         "{keys:?}"
     );
 }
+
+/// eseq-0l17.60: a field reusing a built-in field (`key` on a keyed kind)
+/// is a compile error naming the field and the kind, for every key shape.
+#[test]
+fn a_field_named_like_a_built_in_field_is_a_compile_error() {
+    let (mut vm, _) = vm();
+    for (code, expected) in [
+        (
+            "(def-kind gen-mark :key (index) :host ((key :number)))",
+            "def-kind gen-mark: :host field 'key' is a built-in field of a keyed kind \
+             (id, kind, key); rename it",
+        ),
+        (
+            "(def-kind gen-mark :key (index) :state ((kind 0)))",
+            "def-kind gen-mark: :state field 'kind' is a built-in field of a keyed kind",
+        ),
+        (
+            "(def-kind panel :key () :state ((id 0)))",
+            "def-kind panel: :state field 'id' is a built-in field of a singleton (:key ()) \
+             (id, kind)",
+        ),
+        (
+            "(def-kind thing :state ((owner 0)))",
+            "def-kind thing: :state field 'owner' is a built-in field of a created kind \
+             (id, kind, owner, label)",
+        ),
+        (
+            "(def-kind thing :document ((label \"x\")))",
+            "def-kind thing: :document field 'label' is a built-in field",
+        ),
+    ] {
+        let errors = compile_errors(&mut vm, code);
+        assert!(errors.contains(expected), "{code}: {errors}");
+    }
+    // Only a keyed kind has `key`, and only a created kind `owner`.
+    eval(&mut vm, "(def-kind panel :key () :state ((key 0) (owner 1)))");
+    assert_eq!(eval(&mut vm, "panel.key"), Value::Number(0.0));
+}
+
+/// eseq-0l17.60: the field above broke a whole module load with nothing
+/// to show for it. The import still fails (its string value and the load
+/// error queue name the module), and the queue now carries the compile
+/// error naming the field, which is also logged.
+#[test]
+fn a_module_whose_def_kind_reuses_a_built_in_field_reports_the_field() {
+    let mut vm = VM::new(Vec::new());
+    super::super::register_core_natives(&mut vm);
+    let dir = std::env::temp_dir().join(format!(
+        "eseqlisp-builtin-field-import-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("module dir");
+    std::fs::write(
+        dir.join("kbtest.bad-kinds.lisp"),
+        "(module kbtest.bad-kinds)\n\
+         (def-kind gen :key (index) :host ((name :string)))\n\
+         (def-kind gen-mark :key (gen index) :host ((key :number) (value :number)))",
+    )
+    .expect("write module");
+    vm.source_manager.set_module_load_roots(vec![dir.clone()]);
+    let value = vm.eval_str("(import kbtest.bad-kinds)").expect("import form");
+    let errors = vm.take_source_load_errors().join("\n");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matches!(&value, Some(Value::String(message))
+            if message.contains("import kbtest.bad-kinds")),
+        "{value:?}"
+    );
+    assert!(
+        errors.contains("def-kind gen-mark: :host field 'key' is a built-in field of a keyed kind"),
+        "{errors}"
+    );
+    assert!(vm.instance_kind_schema("kbtest.bad-kinds:gen").is_none());
+}
+
+/// eseq-0l17.24: an index-keyed kind named like a widget got widget source
+/// props on its constructor calls, so `(knob 0)` failed with "takes one
+/// non-negative integer". A singleton or index-keyed kind (both bind their
+/// name) may not take a widget's name; a parent-keyed kind binds nothing.
+#[test]
+fn a_kind_that_binds_a_widget_name_is_a_compile_error() {
+    let (mut vm, _) = vm();
+    for (code, name) in [
+        ("(def-kind knob :key (index) :host ((value :number)))", "knob"),
+        ("(def-kind label :key () :state ((open false)))", "label"),
+    ] {
+        let errors = compile_errors(&mut vm, code);
+        assert!(
+            errors.contains(&format!(
+                "def-kind {name}: '{name}' is a built-in widget; a :key () or :key (index) \
+                 kind binds its name"
+            )),
+            "{code}: {errors}"
+        );
+    }
+    eval(&mut vm, "(def-kind knob :key (track index) :host ((value :number)))");
+    assert!(vm.instance_kind_schema("scratch:knob").is_some());
+}

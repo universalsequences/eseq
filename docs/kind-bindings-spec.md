@@ -155,10 +155,30 @@ gets the host ones by importing them (§3.4). Kind *names* are a separate,
 global registry (as for `neural` and `jaki` today), which `defwidget :state`
 resolves through, so instance state works without any import.
 
+Because a singleton or an index-keyed kind binds its name, that name may
+not be a widget constructor's (eseq-0l17.24): `(def-kind knob :key (index)
+…)` is a compile error, `def-kind knob: 'knob' is a built-in widget; a :key
+() or :key (index) kind binds its name, which would shadow the widget (and
+`(knob …)` calls get widget source props); rename the kind`, and likewise
+`… is a defwidget` for a registered `defwidget` (checked again when the form
+runs, for a `defwidget` earlier in the same unit). It used to define the
+kind and then fail at the first `(knob 0)` with `takes one non-negative
+integer`, since source annotation adds widget source props to every call
+whose head is a widget name. A parent-keyed kind binds nothing and may take
+any name (`compiler::kind_name_widget_collision`).
+
 Keyed and singleton kinds opt out of what only created kinds need: no Packages
 tab rows, no `:view`/tabs/buffers, no `:on-create`, no manifest entry. Their
-built-in fields are `id` and `kind` only (no `owner`/`label`). Asking to
+built-in fields are `id` and `kind` only (no `owner`/`label`); a keyed
+kind adds `key`. Asking to
 create one is an error: `track instances come from the project; use (track i)`.
+Declaring a field with a built-in field's name (`key` on a keyed kind, `id`/
+`kind` on any, `owner`/`label` on a created kind) in `:host`, `:state` or
+`:document` is a compile error naming the field and the kind
+(eseq-0l17.60): `def-kind generator-mark: :host field 'key' is a built-in
+field of a keyed kind (id, kind, key); rename it`. The schema check
+(`InstanceKindSchema::validate`) still rejects the same at run time for
+schemas built in Rust.
 
 Built (stage 1, singletons): `(def-kind k :key () :state …)` compiles to
 `(def k (__def-singleton-kind 'k :state …))` and never calls the host's
@@ -714,9 +734,21 @@ Built (stage 5):
   :background`: a declared `:state` name that is not an instance head,
   read by the shader or not (`ui/mixer.lisp` binds `assigned` and
   `override`, which only the host reads), or a captured `defstate` the
-  shader reads. An instance state takes an instance and a uniform name is
-  never a prop, so `(step-cell :cell #'x)` gets the widget diagnostic
-  `step-cell: :cell does not accept reactive bindings`.
+  shader reads. An instance state takes an instance, so `(step-cell :cell
+  #'x)` gets the widget diagnostic `step-cell: :cell does not accept
+  reactive bindings`.
+- **A ref on an undeclared prop** (eseq-0l17.68). A `defwidget` call that
+  binds a ref to a prop that is neither a `:state` name nor a captured
+  `defstate` the shader reads (a uniform name such as `:cell.active`
+  included) is an evaluation error (`VMError::Instance`), also logged as
+  `[lisp-error][<widget>]` (a view re-run's error is otherwise only
+  traced): `lane-patch-port: :pending-port is bound to a ref, but
+  'pending-port' is not in the defwidget's :state (active, output,
+  selected); declare it there or pass a plain value`
+  (`widgets::undeclared_sdf_binding_error`). It used to replace the widget
+  with a diagnostic label that a port layout hid, so the widget silently
+  vanished (every patch out port, until `pending-port` was declared). A
+  plain value on an undeclared prop is still an ordinary prop.
 - **`box :background`.** The `box` constructor binds the background widget's
   instance fields the same way, so `(box :background "step-cell" :step s
   :track t)` works; scalar states pass through as props, as before.
@@ -866,6 +898,12 @@ Built (stage 4):
 ## 10. Diagnostics
 
 - Every schema error names the kind, the field and the known fields.
+- A failed `(import …)` / `(load …)` is logged as `[lisp-error][import]` /
+  `[lisp-error][load]` with the errors the module queued (a compile
+  error's message), besides its string value and the load-error queue
+  (eseq-0l17.60). A host that evaluates its root with `eval_str` (the
+  distro boot, `editor_setup.rs`) never drains that queue, so before this a
+  module that failed to compile left only its missing definitions behind.
 - Debug builds log the reason for each subtree re-render:
   `subtree track-3 re-rendered: track#41.muted read at view.lisp:212`.
   This makes an accidental by-value read in a hot view visible.
@@ -2901,7 +2939,10 @@ the other port beads follow it):
      one thing takes the instance (`:track t`, §7.3);
    - a prop a widget does not declare takes no binding (a box's `:active`
      is forwarded to its `:background` widget; one without that state
-     rejects a ref): pass a value there;
+     rejects a ref): pass a value there, or declare it in the `defwidget`'s
+     `:state`; a ref on an undeclared `defwidget` prop is an error naming
+     the widget and the prop (§7.3, eseq-0l17.68), no longer a vanished
+     widget;
    - `defstate` / `(state …)` view state → a `:key ()` `:state` singleton
      per concern in the view's module (a menu: `open`, `at :point`, its
      target as an instance); keep instances, not indices, unless the index
@@ -2978,8 +3019,11 @@ the other port beads follow it):
      singleton the items all bind, with the owner as a bound field the
      widget compares to its own key (the timeline's `:lane-key`); a
      by-value owner check would re-run every item on each change;
-   - `kind` and `id` are built-in instance fields: a `:state` field of
-     either name is a schema error;
+   - `kind` and `id` are built-in instance fields (and `key` on a keyed
+     kind): a field of any of these names is a compile error naming the
+     field and the kind (§3.1, eseq-0l17.60). Before, it failed when the
+     form ran, and a failed `(import eseq.kinds)` under the boot's
+     `eval_str` was silent: the whole module's kinds were just missing;
    - `menu-of` passes its items as one list, and a list nested in it is
      dropped: build conditional items as one list and `apply` it;
    - a subtree's key replaces its root widget's (qualified) `:key`: a
@@ -5514,7 +5558,8 @@ Helpers: `(generator-of x)` (a created instance or a sequencer id, like
 `graph-of`), `(generator-mark-named g key)` (nil before the key's first
 stamp), `(generator-mark-of x key)` (the two at once, nil without a
 generator; added by .20). Nothing is settable: marks are what a tick stamps. A mark's key
-field is `name` (`key` is every keyed instance's builtin field).
+field is `name` (`key` is every keyed instance's builtin field; declaring
+it is a compile error since eseq-0l17.60, §3.1).
 `generator-mark` is a sub-kind, so it is not exported (`generator` is).
 
 Built (7g-5):

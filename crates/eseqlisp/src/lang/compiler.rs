@@ -399,6 +399,52 @@ fn def_kind_entries(value: &Expression) -> Option<Vec<Expression>> {
     }
 }
 
+/// A singleton or index-keyed kind binds its name (to the instance, to the
+/// constructor `(name i)`), so a name that is a widget constructor (a
+/// built-in widget, or a `defwidget` already registered) would shadow the
+/// widget in the defining module, and source annotation, which adds widget
+/// source props to every call whose head is a widget name, broke
+/// `(knob 0)` with "takes one non-negative integer" (eseq-0l17.24). The
+/// error, if any; a parent-keyed kind binds nothing and may take any name.
+/// `def-kind` runs the same check again ([`crate::vm::VM`]'s
+/// `__def-keyed-kind`) for a `defwidget` earlier in the same unit, which
+/// registers only when it runs.
+pub(crate) fn kind_name_widget_collision(name: &str, key: &KindKey) -> Option<String> {
+    if !matches!(key, KindKey::Singleton | KindKey::Indexed { .. }) {
+        return None;
+    }
+    let what = if crate::widgets::is_builtin_widget_name(name) {
+        "a built-in widget"
+    } else if crate::widget_render::sdf_widget::sdf_widget_def(name).is_some() {
+        "a defwidget"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "def-kind {name}: '{name}' is {what}; a :key () or :key (index) kind binds its name, \
+         which would shadow the widget (and `({name} …)` calls get widget source props); \
+         rename the kind"
+    ))
+}
+
+/// A declared field may not reuse a built-in field of its kind's instances
+/// (`key` on a keyed kind, `owner` on a created one; eseq-0l17.60). The
+/// schema check (`InstanceKindSchema::validate`) rejects the same at run
+/// time; failing the compile names the field before anything runs.
+fn check_def_kind_field_name(
+    kind: &str,
+    slot: &str,
+    field: &str,
+    key: &KindKey,
+) -> Result<(), CompilerError> {
+    if crate::vm::builtin_fields_for(key).contains(&field) {
+        return Err(CompilerError::Message(crate::vm::builtin_field_message(
+            kind, slot, field, key,
+        )));
+    }
+    Ok(())
+}
+
 /// Compile-time check of a typed field entry's type (kind-bindings spec
 /// §3.3); `KindField::from_entry` parses the same data at runtime. `ty` is
 /// already free of source-origin wrappers.
@@ -2259,7 +2305,9 @@ impl<'a> Compiler<'a> {
                 // (docs/jaki-kind-spec.md §4); `:document` defaults evaluate
                 // like `:state` ones (§3).
                 "sequencer" | "generator" => self.compile_def_kind_sequencer(&name, &key, value)?,
-                "state" | "document" => self.compile_def_kind_state(&name, &key, value)?,
+                "state" | "document" => {
+                    self.compile_def_kind_state(&name, &key, &KindKey::Created, value)?
+                }
                 // `:keymap eseq.sequencer-keys/sequencer-keys` names a mode;
                 // a bare symbol is its name, never a variable read.
                 "keymap" => match strip_source_origin_wrappers(value.clone()) {
@@ -2294,6 +2342,9 @@ impl<'a> Compiler<'a> {
         key: &KindKey,
         slots: &[(String, &Expression)],
     ) -> Result<(), CompilerError> {
+        if let Some(message) = kind_name_widget_collision(name, key) {
+            return Err(CompilerError::Message(message));
+        }
         let name_idx = self.use_string_constant(name);
         self.emit(OpCode::PushSymbol(name_idx));
         let key_idx = self.use_string_constant("key");
@@ -2335,9 +2386,9 @@ impl<'a> Compiler<'a> {
                     let slot_idx = self.use_string_constant(slot);
                     self.emit(OpCode::PushKeyword(slot_idx));
                     if slot == "state" {
-                        self.compile_def_kind_state(name, slot, value)?;
+                        self.compile_def_kind_state(name, slot, key, value)?;
                     } else {
-                        self.compile_def_kind_host(name, value)?;
+                        self.compile_def_kind_host(name, key, value)?;
                     }
                     arity += 2;
                 }
@@ -2363,6 +2414,7 @@ impl<'a> Compiler<'a> {
     fn compile_def_kind_host(
         &mut self,
         kind: &str,
+        key: &KindKey,
         value: &Expression,
     ) -> Result<(), CompilerError> {
         let shape = || CompilerError::Message(crate::vm::host_entry_shape_message(kind));
@@ -2374,6 +2426,7 @@ impl<'a> Compiler<'a> {
             let [Expression::Symbol(field), ty, options @ ..] = entry.as_slice() else {
                 return Err(shape());
             };
+            check_def_kind_field_name(kind, "host", field, key)?;
             check_def_kind_field_type(ty).map_err(|error| {
                 CompilerError::Message(format!("def-kind {kind}: :host field '{field}': {error}"))
             })?;
@@ -2443,6 +2496,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         kind: &str,
         slot: &str,
+        key: &KindKey,
         value: &Expression,
     ) -> Result<(), CompilerError> {
         let items = def_kind_entries(value).ok_or_else(|| {
@@ -2471,6 +2525,7 @@ impl<'a> Compiler<'a> {
                     "def-kind {kind}: :{slot} field names must be symbols"
                 )));
             };
+            check_def_kind_field_name(kind, slot, field, key)?;
             let field_idx = self.use_string_constant(field);
             match entry.as_slice() {
                 [_] => return Err(nil_default(field)),
