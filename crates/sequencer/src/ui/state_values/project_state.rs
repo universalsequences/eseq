@@ -75,21 +75,21 @@ pub(crate) fn meter_display_level(peak: f32) -> f64 {
     quantize_meter_level(master_meter_level(peak))
 }
 
+/// The rack panel's view state reset on a project replacement
+/// (`content/ui/effects/state.lisp`).
+const RESET_RACK_PANEL_VIEWS: &str = "eseq.effects.state/reset-rack-panel-views!";
+
 /// A project replaced the previous one (a load, a new project): publish its
-/// patterns and reset the rack panel's view (its generation). Not a playback
-/// update. The scene bank view resets through the host kinds: a load
-/// replaces every bank instance.
+/// patterns and forget the rack panels' views (they are keyed by track ids,
+/// which restart with every project). Not a playback update. The scene bank
+/// view resets through the host kinds: a load replaces every bank instance.
 pub(crate) fn sync_project_replacement(rt: &mut Runtime, state: &Arc<SequencerState>) {
     sync_pattern_state(rt, state);
-    let generation = match rt.reactive_field_value("SEQ", "rack-panel-view-generation") {
-        Some(Value::Number(value)) => *value,
-        _ => 0.0,
-    };
-    rt.set_reactive(
-        "SEQ",
-        "rack-panel-view-generation",
-        Value::Number(generation + 1.0),
-    );
+    if rt.has_global(RESET_RACK_PANEL_VIEWS) {
+        if let Err(error) = rt.invoke_global(RESET_RACK_PANEL_VIEWS, Vec::new()) {
+            eprintln!("[project] could not reset the rack panel views: {error:?}");
+        }
+    }
 }
 
 pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {

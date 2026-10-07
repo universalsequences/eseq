@@ -26,7 +26,7 @@
 ;; Expr cards' edit buffers (the node bay's edit button, the error dot).
 (import eseq.expr-buffer)
 ;; Process-port arm/bind state shared with the fx panel (lane strip map button).
-(import eseq.effects.param-controls :as pc)
+(import eseq.effects.param-controls :as pc :refer (process-map))
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
@@ -1631,16 +1631,16 @@
 ;; A process map armed on this track whose port can take a step param.
 (def param-tab-map-armed? (track)
   (and (pc/process-map-active?)
-       (= pc/process-map-track track)
-       (or (= pc/process-map-target-kind "")
-           (= pc/process-map-target-kind "step-param"))))
+       (= process-map.track track)
+       (or (= process-map.target-kind "")
+           (= process-map.target-kind "step-param"))))
 
 (def param-tab-bind (track mode)
   ;; Disarm first: a failing bind must never leave the tabs stuck in the
   ;; armed tint. The bind's own error surfaces through the editor log.
-  (let ((map-track pc/process-map-track)
-        (map-instance pc/process-map-instance-id)
-        (map-port pc/process-map-port)
+  (let ((map-track process-map.track)
+        (map-instance process-map.instance-id)
+        (map-port process-map.port)
         (add (lane-armed-port-bound?))
         (param (param-tab-step-param mode)))
     (do
@@ -1970,9 +1970,9 @@
 ;; While mapping, a port that is already bound gains the clicked target as a
 ;; fan-out entry instead of replacing its binding.
 (def lane-armed-port-bound? ()
-  (let ((slot (track-process-slot pc/process-map-track pc/process-map-instance-id)))
+  (let ((slot (track-process-slot process-map.track process-map.instance-id)))
     (if slot
-      (let ((port (slot-port-named slot pc/process-map-port)))
+      (let ((port (slot-port-named slot process-map.port)))
         (and port (= (get port :status) "bound") true))
       false)))
 
@@ -3169,8 +3169,8 @@
 ;; their inlets as wire targets (bound through the writer's `wire` port).
 (def other-lanes-armed? (track)
   (and (pc/process-map-active?)
-       (= pc/process-map-track track)
-       (let ((slot (track-process-slot track pc/process-map-instance-id)))
+       (= process-map.track track)
+       (let ((slot (track-process-slot track process-map.instance-id)))
          (and slot (slot-port-named slot "wire") true))))
 
 (def other-lane-chip (track lane)
@@ -3181,7 +3181,7 @@
     :border-color :process-lane-accent
     :color :process-lane-accent
     :on-click (lambda (event)
-      (let ((map-instance pc/process-map-instance-id))
+      (let ((map-instance process-map.instance-id))
         (do
           (pc/process-map-clear)
           (if (lane-edit-all?)
@@ -3203,7 +3203,7 @@
   (if (other-lanes-armed? track)
     (h-stack :width :fill :gap 0.3 :align :center :padding 0.2
       (label "OTHER LANES" :font-size 8 :color :dim :bg :transparent)
-      (each (filter (lambda (lane) (not (= (get lane :instance-id) pc/process-map-instance-id)))
+      (each (filter (lambda (lane) (not (= (get lane :instance-id) process-map.instance-id)))
                     (eseq.seqv-track-params/seqv-track-process-lanes track))
             |lane|
         (other-lane-chip track lane)))

@@ -73,7 +73,7 @@
   (param-wrapper fx p "percent-knob"
     (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value-for fx p)
-    :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0 :unit "%"
+    :min (get p :min) :max (get p :max) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

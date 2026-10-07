@@ -1,7 +1,10 @@
 ;; Instrument, MIDI FX, and audio FX panel body selection.
 (module eseq.effects.panel-bodies)
 
-(import eseq.effects.state :as st)
+(import eseq.kinds :refer (stamp-key-variant!))
+(import eseq.effects.state :as st :refer (instrument-view key-lock-view))
+(import eseq.effects.devices :as dv)
+(import eseq.view-kit :refer (rgb-part color-rgba listed?))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.effect-modulation :as em)
@@ -35,10 +38,11 @@
 
 ;; Keys tab: a multi-octave `piano-keyboard` for choosing which notes the
 ;; synth knobs key-lock, plus the variant chips that stamp a lock set onto
-;; the selected keys. Live note activity rides SEQ.track-active-notes INSIDE
-;; the piano's own subtree, so playback only rebuilds the keyboard — the old
-;; per-key buttons read SEQ.instrument-active-notes from the panel body and
-;; rebuilt the whole instrument panel on every note.
+;; the selected keys. Live note activity rides the track's active-notes
+;; INSIDE the piano's own subtree, so playback only rebuilds the keyboard —
+;; the old per-key buttons read the active notes from the panel body and
+;; rebuilt the whole instrument panel on every note. The key locks and their
+;; variants are the instrument device's (eseq.kinds).
 (def instrument-key-white-width 1.3)
 (def instrument-key-piano-height 4.0)
 (def instrument-key-panel-padding 0.35)
@@ -47,110 +51,126 @@
 (def instrument-key-unlocked-mark-color (list 0.62 0.62 0.66))
 
 (def instrument-key-start-note ()
-  (* (+ st/instrument-key-lock-octave 1) 12))
+  (* (+ key-lock-view.octave 1) 12))
 
 ;; Whole octaves plus the closing C, so the view reads C3..C6.
 (def instrument-key-key-count ()
-  (+ (* st/instrument-key-lock-octave-count 12) 1))
+  (+ (* key-lock-view.octave-count 12) 1))
 
 (def instrument-key-piano-width ()
   (max instrument-key-min-piano-width
-    (* (+ (* st/instrument-key-lock-octave-count 7) 1) instrument-key-white-width)))
+    (* (+ (* key-lock-view.octave-count 7) 1) instrument-key-white-width)))
 
 (def instrument-key-panel-width ()
   (+ (instrument-key-piano-width) (* 2 instrument-key-panel-padding) 1.1))
 
 (def instrument-key-max-start-octave ()
-  (- 9 st/instrument-key-lock-octave-count))
+  (- 9 key-lock-view.octave-count))
 
 (def instrument-key-shift-octave (delta)
-  (set! st/instrument-key-lock-octave
-    (max -1 (min (instrument-key-max-start-octave) (+ st/instrument-key-lock-octave delta)))))
+  (set! key-lock-view.octave
+    (max -1 (min (instrument-key-max-start-octave) (+ key-lock-view.octave delta)))))
 
 (def instrument-key-set-octave-count (v)
   (do
-    (set! st/instrument-key-lock-octave-count
+    (set! key-lock-view.octave-count
       (max 1 (min instrument-key-max-octaves (round v))))
     (instrument-key-shift-octave 0)))
 
 (def instrument-key-range-label ()
-  (str "C" st/instrument-key-lock-octave
-       "–C" (+ st/instrument-key-lock-octave st/instrument-key-lock-octave-count)))
+  (str "C" key-lock-view.octave
+       "–C" (+ key-lock-view.octave key-lock-view.octave-count)))
 
+;; Whether `note` is one of the keys selected for key locks.
 (def instrument-key-note-selected? (note)
-  (pg/fx-list-contains? st/instrument-key-lock-selected-notes note))
+  (listed? note key-lock-view.notes))
 
+;; inst's key locks, resolved once per render: its instrument's variants,
+;; each variant-stamped note as a `(note variant)` row, and its locked notes.
+(def key-locks-of (inst)
+  (let ((d (dv/inst-device inst)))
+    (let ((variants (if d d.variants '())))
+      (dict :variants variants
+            :by-note (reduce (lambda (rows v) (append rows (map (lambda (n) (list n v)) v.notes)))
+                       '() variants)
+            :locked (if d d.key-locked-notes '())))))
+
+;; The variant of `keys` (key-locks-of) stamped on `note`, or nil.
+(def variant-at (keys note)
+  (let ((row (first (filter (lambda (row) (= (first row) note)) (get keys :by-note)))))
+    (when row (nth row 1))))
+
+;; The key-lock variant stamped on `note`, or nil.
 (def instrument-key-note-variant-row (inst note)
-  (nth
-    (filter |row| (= (get row :note) note)
-      (if (get inst :key-lock-note-variants) (get inst :key-lock-note-variants) '()))
-    0))
+  (variant-at (key-locks-of inst) note))
+
+(def color-list (c)
+  (list (rgb-part c 0) (rgb-part c 1) (rgb-part c 2)))
 
 ;; One `{:note :color}` per key-locked note: its variant color, or neutral
 ;; gray for locks that belong to no variant.
-(def instrument-key-note-marks (inst)
-  (let ((variant-rows (if (get inst :key-lock-note-variants) (get inst :key-lock-note-variants) '()))
-        (locked (if (get inst :key-locked-notes) (get inst :key-locked-notes) '())))
-    (append
-      (map (lambda (row)
-             (dict :note (get row :note)
-                   :color (list (get row :color-r) (get row :color-g) (get row :color-b))))
-        variant-rows)
-      (map (lambda (note) (dict :note note :color instrument-key-unlocked-mark-color))
-        (filter |note| (not (instrument-key-note-variant-row inst note)) locked)))))
+(def instrument-key-note-marks (keys)
+  (append
+    (map (lambda (row) (let ((v (nth row 1))) (dict :note (first row) :color (color-list v.color))))
+      (get keys :by-note))
+    (map (lambda (note) (dict :note note :color instrument-key-unlocked-mark-color))
+      (filter |note| (= (variant-at keys note) nil) (get keys :locked)))))
 
 ;; Notes currently sounding on the instrument's track, as the piano's
 ;; single-source `:notes-by-track`. Capture fixtures override this to light
 ;; keys without a running note source.
 (def instrument-key-active-notes (inst)
-  (let ((notes (nth SEQ.track-active-notes (get inst :track))))
-    (if notes notes '())))
+  (let ((t (dv/track-at (get inst :track))))
+    (if t t.active-notes '())))
 
 (def instrument-key-activity-color (inst)
-  (let ((c (nth SEQ.track-colors (get inst :track))))
-    (if c c (list 1.0 0.72 0.10))))
+  (let ((t (dv/track-at (get inst :track))))
+    (if t (color-list t.color) (list 1.0 0.72 0.10))))
+
+;; The chips of `keys`: the base (no variant, `def`), then each variant.
+(def key-lock-chips (keys)
+  (cons (dict :kind "def" :label "def" :variant nil)
+    (map (lambda (v) (dict :kind "variant" :label v.label :variant v))
+      (get keys :variants))))
 
 (def instrument-key-lock-variant-items (inst)
-  (if (get inst :key-lock-variants) (get inst :key-lock-variants) '()))
+  (key-lock-chips (key-locks-of inst)))
 
 (def instrument-key-lock-chip-color (chip alpha)
-  (let ((c (if (= (get chip :kind) "def")
-        THEME.plock_base
-        (list (get chip :color-r) (get chip :color-g) (get chip :color-b)))))
-    (rgba (nth c 0) (nth c 1) (nth c 2) alpha)))
+  (let ((v (get chip :variant)))
+    (if v
+      (color-rgba v.color alpha)
+      (rgba (nth THEME.plock_base 0) (nth THEME.plock_base 1) (nth THEME.plock_base 2) alpha))))
 
 (def instrument-key-lock-chip-label (chip)
-  (if (get chip :display)
-    (substring (get chip :display) 0 6)
-    (get chip :label)))
+  (let ((v (get chip :variant)))
+    (if v (substring v.name 0 6) "base")))
 
-(def instrument-key-lock-chip-note-matches? (inst chip note)
-  (let ((row (instrument-key-note-variant-row inst note))
-        (def-chip (= (get chip :kind) "def")))
-    (if def-chip
-      (if row false true)
-      (if row (= (get row :label) (get chip :label)) false))))
-
-(def instrument-key-lock-chip-current? (inst chip)
+;; Whether the chip is the selected keys' variant (every selected key
+;; stamped with it); with no key selected, the base chip.
+(def key-lock-chip-current? (keys chip)
   (if (pc/instrument-key-lock-has-selection?)
-    (= (len (filter |note| (instrument-key-lock-chip-note-matches? inst chip note)
-              st/instrument-key-lock-selected-notes))
-       (len st/instrument-key-lock-selected-notes))
+    (empty? (filter |note| (not (= (variant-at keys note) (get chip :variant)))
+              key-lock-view.notes))
     (= (get chip :kind) "def")))
 
-(def instrument-key-lock-chip-click (chip)
-  (do
-    ;; cool-off-follow is owned by the unconverted ui/seq-core-state.lisp —
-    ;; bare, the stage-3 heal covers the read.
-    (eseq.seq-core-state/cool-off-follow)
-    (host-command "stamp-key-lock-variant"
-      (dict :label (get chip :label)
-            :notes st/instrument-key-lock-selected-notes))))
+(def instrument-key-lock-chip-current? (inst chip)
+  (key-lock-chip-current? (key-locks-of inst) chip))
+
+;; Stamp the chip's variant (the base chip: none) onto the selected keys of
+;; inst's instrument.
+(def instrument-key-lock-chip-click (inst chip)
+  (let ((d (dv/inst-device inst)))
+    (do
+      ;; cool-off-follow is owned by the unconverted ui/seq-core-state.lisp —
+      ;; bare, the stage-3 heal covers the read.
+      (eseq.seq-core-state/cool-off-follow)
+      (if d (stamp-key-variant! d key-lock-view.notes (get chip :variant)) nil))))
 
 ;; Same boxy chip as the *step* buffer's p-lock variants (track-panels
 ;; plock-chip): fixed width, color tick, dark label on the current chip.
-(def instrument-key-lock-chip (inst chip)
-  (let ((current (instrument-key-lock-chip-current? inst chip))
+(def instrument-key-lock-chip (inst keys chip)
+  (let ((current (key-lock-chip-current? keys chip))
       (def-chip (= (get chip :kind) "def"))
       (c (instrument-key-lock-chip-color chip 1.0)))
     (box :key (str "instrument-key-lock-chip-" (get chip :kind) "-" (get chip :label))
@@ -164,7 +184,7 @@
       :border-width (if current 0.75 0.35)
       :border-color (if current c :mixer-strip-selected-bg)
       :corner-radius 4
-      :on-click |x y r| (instrument-key-lock-chip-click chip)
+      :on-click |x y r| (instrument-key-lock-chip-click inst chip)
       (h-stack :gap 0.16 :align :baseline
         (box :width 0.18 :height 0.28
           :corner-radius 2
@@ -178,7 +198,7 @@
         (box :width 0.2)))))
 
 (def instrument-key-audition (note)
-  (if (and st/instrument-key-lock-audition (instrument-key-note-selected? note))
+  (if (and key-lock-view.audition (instrument-key-note-selected? note))
     (host-command "audition-instrument-key" (dict :note note))
     false))
 
@@ -186,16 +206,16 @@
 ;; it); cmd toggles it into the selection; shift selects the range from the
 ;; last plain/cmd-clicked key.
 (def instrument-key-select-note (note additive extend)
-  (let ((selected st/instrument-key-lock-selected-notes)
-        (anchor st/instrument-key-lock-anchor)
+  (let ((selected key-lock-view.notes)
+        (anchor key-lock-view.anchor)
         (already (instrument-key-note-selected? note)))
     (do
       (if (and extend (>= anchor 0))
-        (set! st/instrument-key-lock-selected-notes
+        (set! key-lock-view.notes
           (range (min anchor note) (+ (max anchor note) 1)))
         (do
-          (set! st/instrument-key-lock-anchor note)
-          (set! st/instrument-key-lock-selected-notes
+          (set! key-lock-view.anchor note)
+          (set! key-lock-view.notes
             (if additive
               (if already
                 (filter |n| (not (= n note)) selected)
@@ -207,8 +227,8 @@
 
 (def instrument-key-unselect-all ()
   (do
-    (set! st/instrument-key-lock-selected-notes '())
-    (set! st/instrument-key-lock-anchor -1)))
+    (set! key-lock-view.notes '())
+    (set! key-lock-view.anchor -1)))
 
 (defwidget instrument-key-audition-icon
   :width 1.6 :height 1.1
@@ -243,15 +263,15 @@
         :tracks (list 0)
         :overlap-mode :loudest
         :press-depth 0.6
-        :selected-notes st/instrument-key-lock-selected-notes
-        :note-marks (instrument-key-note-marks inst)
+        :selected-notes key-lock-view.notes
+        :note-marks (instrument-key-note-marks (key-locks-of inst))
         :label-octaves true
         :on-click (lambda (info)
           (instrument-key-select-note (get info :note)
             (get info :additive-selection) (get info :shift)))))))
 
 (def instrument-key-lock-control-panel (inst)
-  (let ((selected-count (len st/instrument-key-lock-selected-notes)))
+  (let ((selected-count (len key-lock-view.notes)))
     (box :width (+ (instrument-key-panel-width) 2) :background-color :black :corner-radius 16 :padding 1
       (v-stack :debug-name "instrument-key-lock-control-panel"
         :width (instrument-key-panel-width) :height st/fx-panel-body-content-height
@@ -267,7 +287,7 @@
           (label "oct" :font-size 9 :width 1.8 :color :dim :bg :transparent)
           (number-picker :debug-name "instrument-key-octave-count"
             :width 2.4 :height 1.0 :noui true :font-size 9.5 :decimals 0 :step 1
-            :value st/instrument-key-lock-octave-count :min 1 :max instrument-key-max-octaves
+            :value key-lock-view.octave-count :min 1 :max instrument-key-max-octaves
             :on-change (lambda (v) (instrument-key-set-octave-count v)))
           (box :flex 1 :height 0.1)
           (if (> selected-count 0)
@@ -277,13 +297,14 @@
             (box :width 0 :height 0))
           (box :key "instrument-key-audition" :debug-name "instrument-key-audition"
             :width 1.8 :height 1.2 :align :center
-            :on-click |x y r| (set! st/instrument-key-lock-audition (not st/instrument-key-lock-audition))
-            (instrument-key-audition-icon :active (if st/instrument-key-lock-audition 1 0))))
+            :on-click |x y r| (toggle! key-lock-view.audition)
+            (instrument-key-audition-icon :active (if key-lock-view.audition 1 0))))
         (instrument-key-piano inst)
         (wrap :key "instrument-key-lock-variant-strip"
           :width :fill :gap 0.18 :row-gap 0.04 :align :start
-          (each (instrument-key-lock-variant-items inst) |chip idx|
-            (instrument-key-lock-chip inst chip)))))))
+          (let ((keys (key-locks-of inst)))
+            (each (key-lock-chips keys) |chip idx|
+              (instrument-key-lock-chip inst keys chip))))))))
 
 ;; The custom-*-ui dispatchers and custom-ui-current-kind are a host->script
 ;; protocol: src/ui/custom_ui.rs GENERATES headerless lisp that (re)defines
@@ -304,11 +325,11 @@
                   :h-align :start :v-align :stretch)
                 (box (pg/fx-param-grid (get inst :synth) false)
                   :debug-name "fallback-synth-wrapper"))))
-        (if (= st/instrument-panel-tab 1)
+        (if (= instrument-view.tab 1)
           (h-stack :debug-name "instrument-keys-inline-body" :height :fill :gap 0.45 :align :stretch
             (instrument-key-lock-control-panel inst)
             body)
-          (if st/instrument-mods-open
+          (if instrument-view.mods-open
           (h-stack :debug-name "instrument-mods-inline-body" :height :fill :gap 0.45 :align :stretch
             (im/mod-control-panel inst)
             body)
@@ -344,21 +365,10 @@
           body)
         body))))
 
+;; The effect is the delete target (Backspace deletes it).
 (def fx-panel-selected? (fx)
-  (do
-    SEQ.delete-target-version
-    (if (get fx :rack-fx)
-      (seq-delete-target? :fx-effect
-        (dict :chain "rack"
-              :track (get fx :track-idx)
-              :rack-slot (get fx :rack-slot)
-              :effect-slot (get fx :slot-idx)))
-      (if (get fx :midi-fx)
-      (seq-delete-target? :fx-effect (dict :chain "midi" :slot (get fx :slot-idx)))
-      (if (get fx :bus-fx)
-        (seq-delete-target? :fx-effect
-          (dict :chain "bus" :bus (get fx :bus-idx) :slot (get fx :slot-idx)))
-        (seq-delete-target? :fx-effect (dict :chain "audio" :slot (get fx :slot-idx))))))))
+  (let ((d (dv/fx-device fx)))
+    (if d d.delete-target false)))
 
 (def fx-panel-header-bg (selected)
   (if selected :fx-panel-header-selected-bg :fx-panel-header-bg))

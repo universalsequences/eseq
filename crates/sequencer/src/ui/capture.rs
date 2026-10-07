@@ -1452,9 +1452,13 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         app.graph.lg, &app, &state, Some(selected_track), selected_plock_step(&selected_steps),
         false, &mut HashSet::new(),
     );
-    sync_effect_mod_offset_field_delta(editor.runtime_mut(), &[], &mod_values.effects);
-    sync_instrument_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.instrument.as_ref());
-    sync_rack_slot_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
+    sync_effect_mod_phase_field_delta(editor.runtime_mut(), &[], &mod_values.effects);
+    sync_instrument_mod_phase_field_delta(
+        editor.runtime_mut(),
+        None,
+        mod_values.instrument.as_ref(),
+    );
+    sync_rack_slot_mod_phase_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
     let _ = sync_sound_palette(

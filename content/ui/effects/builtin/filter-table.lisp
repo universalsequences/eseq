@@ -19,8 +19,8 @@
         :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
         :value-scale value-scale :decimals decimals
         :base-value (pc/param-base-value-prop fx p)
-        :mod-offset (pc/param-mod-offset p)
-        :mod-scale (pc/param-mod-scale p)
+        :mod-offset (pc/param-mod-offset-for fx p)
+        :mod-scale (pc/param-mod-scale-for fx p)
         :unit (pc/param-control-unit fx p)
         :base-min (pc/param-base-min-prop fx p) :base-max (pc/param-base-max-prop fx p)
         :mod-range-0-slot (pc/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (pc/param-knob-mod-depth-prop fx p 0)
@@ -39,7 +39,7 @@
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)
-  (parameter-knob fx label-text p 0 100 "linear"))
+  (parameter-knob fx label-text p 0 (eseq.effects.param-controls/percent-scale fx p) "linear"))
 
 (def number-knob (fx label-text p decimals)
   (parameter-knob fx label-text p decimals 1 "linear"))
@@ -306,7 +306,7 @@
                 :waves-per-set 64 :set 0
                 :wave (if (get fx :editor)
                   (get (get fx :editor) :selected-frame-normalized)
-                  (pc/param-effective-value frame-p))
+                  (pc/param-effective-ratio frame-p))
                 :wave-normalized true
                 :wave-color :filter-table-wave
                 :inactive-color :filter-table-wave-inactive
@@ -323,9 +323,9 @@
                 :freq-min 20 :freq-max 20000
                 :response-min-db -48 :response-max-db 8
                 :response-data-key table-key
-                :response-frame (pc/param-effective-value frame-p)
+                :response-frame (pc/param-effective-ratio frame-p)
                 :response-cutoff (pc/param-effective-value cutoff-p)
-                :response-resonance (pc/param-effective-value res-p)
+                :response-resonance (pc/param-effective-ratio res-p)
                 :background-color :mixer-control-bg
                 :curve-color :filter-table-response
                 :spectrum-color :filter-table-spectrum

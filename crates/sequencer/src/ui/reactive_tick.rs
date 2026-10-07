@@ -1017,24 +1017,24 @@ pub(crate) fn sync_reactive_tick(
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
         }
-        // Effective-value bindings (eseq-dtx.13, eseq-hpc). Published whatever
-        // the panel visibility: the sampler already reports base values while
-        // the FX panel is hidden, so this is what leaves the fields holding
-        // base values for the next open, and it only writes on change.
+        // Modulator slot phases (the source editors' waveform markers). The
+        // per-param modulated values reach the panels as eseq.kinds param
+        // fields (mod-offset, mod-value, mod-scale); this only writes on
+        // change.
         if fx_visible && ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
-            needs_reactive_cycle |= sync_effect_mod_offset_field_delta(
+            needs_reactive_cycle |= sync_effect_mod_phase_field_delta(
                 editor.runtime_mut(),
                 &ctx.frame.prev_mod_display_values.effects,
                 &ctx.meters.cached_mod_display_values.effects,
             )
             .0;
-            needs_reactive_cycle |= sync_instrument_mod_offset_field_delta(
+            needs_reactive_cycle |= sync_instrument_mod_phase_field_delta(
                 editor.runtime_mut(),
                 ctx.frame.prev_mod_display_values.instrument.as_ref(),
                 ctx.meters.cached_mod_display_values.instrument.as_ref(),
             )
             .0;
-            needs_reactive_cycle |= sync_rack_slot_mod_offset_field_delta(
+            needs_reactive_cycle |= sync_rack_slot_mod_phase_field_delta(
                 editor.runtime_mut(),
                 ctx.frame.prev_mod_display_values.rack_slot.as_ref(),
                 ctx.meters.cached_mod_display_values.rack_slot.as_ref(),

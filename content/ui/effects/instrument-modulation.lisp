@@ -1,7 +1,7 @@
 ;; Instrument modulation source selection and editor controls.
 (module eseq.effects.instrument-modulation)
 
-(import eseq.effects.state :refer (instrument-selected-mod-slot))
+(import eseq.effects.state :refer (instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-lego :as lego)
@@ -69,11 +69,11 @@
           :width 3.9 :height 1.1
           :padding 0
           :font-size 9
-          :background-color (if (= eseq.effects.state/instrument-selected-mod-slot slot)
+          :background-color (if (= instrument-view.mod-slot slot)
             (rgba 0.95 0.48 0.18 0.82)
             :instrument-control-bg)
-          :color (if (= eseq.effects.state/instrument-selected-mod-slot slot) :white :dim)
-          :on-click (lambda (info) (set! eseq.effects.state/instrument-selected-mod-slot slot)))
+          :color (if (= instrument-view.mod-slot slot) :white :dim)
+          :on-click (lambda (info) (set! instrument-view.mod-slot slot)))
         (dropdown :value (if source-p (pc/fx-param-text-value-for false source-p) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))
@@ -248,9 +248,11 @@
              :corner-radius 8
           (lfo-shape-curve section shape pulse-width phase 11.7 5.25))))))
 
-(def source-type (section)
+;; A modulation source section's type (lfo, env, …; off when none), of an
+;; effect's section when fx is given.
+(def source-type (section &optional (fx false))
   (let ((source-p (get section :source-param)))
-    (if source-p (pc/fx-param-text-value-for false source-p) "off")))
+    (if source-p (pc/fx-param-text-value-for fx source-p) "off")))
 
 (def selected-mod-source-editor (inst)
   (let ((slot (pc/instrument-mod-selected-slot)))

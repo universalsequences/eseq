@@ -95,7 +95,31 @@ fn polyphony_header_right_click_applies_the_choice_to_all_scenes() {
 fn base_note_header_stays_editable_in_mods_and_routes_rack_targets() {
     let mut editor = full_grid_editor_for_scroll_tests();
     editor.set_layout_viewport(100, 20);
-    editor.runtime_mut().set_reactive("SEQ", "header-base-note", Value::Number(7.0));
+    // Track 2's instrument, a drum rack whose slot 3 the rack header edits:
+    // the base note shows the device's base-note-display (eseq.kinds).
+    let rt = editor.runtime_mut();
+    let mut tracks = project_list(rt, "tracks");
+    if tracks.len() < 3 {
+        tracks = register_kind_range(rt, "eseq.kinds:track", 3);
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "tracks", instance_list(tracks.iter().copied()));
+    }
+    let rack_device = rt
+        .register_keyed_instance("eseq.kinds:device", &[tracks[2], 0])
+        .unwrap();
+    let slot_device = rt
+        .register_keyed_instance("eseq.kinds:device", &[tracks[2], 4000])
+        .unwrap();
+    for (device, position) in [(rack_device, -1.0), (slot_device, 3.0)] {
+        set_field(rt, device, "track", Value::Instance(tracks[2]));
+        set_field(rt, device, "slot", Value::Number(position));
+        set_field(rt, device, "base-note-display", Value::Number(7.0));
+    }
+    set_field(rt, rack_device, "devices", instance_list([slot_device]));
+    set_field(rt, tracks[2], "devices", instance_list([rack_device]));
+    let selection = kind_singleton_rt(rt, "selection");
+    set_field(rt, selection, "track", Value::Instance(tracks[2]));
+    rt.run_reactive_cycle();
     for rack in [false, true] {
         for mods in [false, true] {
             for locked in [false, true] {
@@ -103,7 +127,7 @@ fn base_note_header_stays_editable_in_mods_and_routes_rack_targets() {
                 let target = if rack { ":rack-track 2 :rack-slot 3" } else { "" };
                 let buffer_name = format!("*base-note-{rack}-{mods}-{locked}*");
                 editor.runtime_mut().eval_str(&format!(r#"
-                    (set! eseq.effects.state/instrument-mods-open {mods})
+                    (let ((v eseq.effects.state/instrument-view)) (set! v.mods-open {mods}))
                     (effect-buffer "{buffer_name}"
                       (eseq.effects.instrument-panel/instrument-base-note-control
                         (dict :track 2 :rack-slot {slot} :synth
@@ -117,7 +141,13 @@ fn base_note_header_stays_editable_in_mods_and_routes_rack_targets() {
                 let layout = editor.widget_layout().unwrap();
                 let control = find_layout_node_by_debug_name(&layout, "instrument-base-note").unwrap();
                 assert_finite_nonzero_rect(control, "base note header");
-                assert!(matches!(control.props.get("value"), Some(Value::ReactiveRef { field, .. }) if field == "header-base-note"));
+                let device = if rack { slot_device } else { rack_device };
+                assert!(
+                    matches!(control.props.get("value"), Some(Value::ReactiveRef { namespace, field, .. })
+                    if field == "base-note-display" && *namespace == format!("%instance/{device}")),
+                    "{:?}",
+                    control.props.get("value")
+                );
                 assert_eq!(control.props.get("min"), Some(&Value::Number(-48.0)));
                 assert_eq!(control.props.get("max"), Some(&Value::Number(48.0)));
                 editor.drain_host_commands();

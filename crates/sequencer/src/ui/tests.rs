@@ -15915,51 +15915,25 @@
             offset_at(&modulated, FRAME)
         );
 
-        // Widget end: the delta sync writes the SEQ fields the panel binds —
-        // an offset for the knob dot and the absolute value for curves.
+        // Widget end: the per-param values reach the panels as eseq.kinds
+        // param fields; the delta sync writes only the slot phases (the
+        // source editor's waveform markers), and nothing while they rest.
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
         let (_, published) =
-            super::sync_effect_mod_offset_field_delta(&mut runtime, &[], &[modulated.clone()]);
+            super::sync_effect_mod_phase_field_delta(&mut runtime, &[], &[modulated.clone()]);
+        assert_eq!(published, SLOT_COUNT, "a first sample publishes the slot phases only");
         assert_eq!(
-            published, 10,
-            "a first sample publishes all three fields of both destinations plus the four slot phases"
+            runtime.reactive_field_value("SEQ", &super::effect_mod_value_field(node_id, FRAME)),
+            None,
+            "no per-param display field"
         );
-        let frame_field = super::effect_mod_value_field(node_id, FRAME);
-        let cutoff_field = super::effect_mod_value_field(node_id, CUTOFF);
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &frame_field),
-            Some(&Value::Number(at(&modulated, FRAME)))
-        );
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &cutoff_field),
-            Some(&Value::Number(at(&modulated, CUTOFF)))
-        );
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &super::effect_mod_offset_field(node_id, FRAME)),
-            Some(&Value::Number(offset_at(&modulated, FRAME)))
-        );
-
-        // Re-publishing an unchanged sample writes nothing: an idle modulated
-        // panel does not dirty the widget every tick (requirement (e)).
-        let (_, republished) = super::sync_effect_mod_offset_field_delta(
+        let (_, republished) = super::sync_effect_mod_phase_field_delta(
             &mut runtime,
             std::slice::from_ref(&modulated),
             std::slice::from_ref(&modulated),
         );
         assert_eq!(republished, 0, "an unchanged sample must write nothing");
-
-        // ... and a settled sample puts the base values back on the wire.
-        let (_, settled_published) = super::sync_effect_mod_offset_field_delta(
-            &mut runtime,
-            std::slice::from_ref(&modulated),
-            std::slice::from_ref(&settled),
-        );
-        assert!(settled_published > 0, "settling back must republish");
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &frame_field),
-            Some(&Value::Number(at(&settled, FRAME)))
-        );
     }
 
     /// The built-in Filter's cutoff lane is declared in *octaves* and its DSP

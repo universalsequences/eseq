@@ -809,9 +809,11 @@ pub(super) fn build_rack_slot_effect_value(
                     param_idx,
                     &param.name,
                 ),
-                current,
-                param.min,
-                param.max,
+                // Display units (a % param reads 0-100), as the eseq.kinds param the
+                // panel binds; the rack effect commands still take stored values.
+                param.stored_to_user(current),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
                 options,
                 modulation_targets.get(&param_idx),
                 RackModDisplay::Effect(snapshot.node_id as i32),

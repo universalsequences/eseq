@@ -142,7 +142,7 @@ fn param_type(pdesc: &ParamDescriptor) -> &'static str {
 /// panel placement ([`PanelSection`]) and UI metadata (as the legacy
 /// `insert_param_ui_metadata`: an unresolved options reference only where
 /// no option labels resolved).
-fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 15] {
+fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 16] {
     let user = |stored| number(DeviceSlot::to_user(pdesc, stored));
     let options = param_enum_labels(pdesc).into_iter().map(Value::String);
     let section = PanelSection::of(pdesc);
@@ -165,6 +165,7 @@ fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 15] {
             f::PARAM_UNIT,
             Value::String(param_unit(pdesc).unwrap_or_default()),
         ),
+        (f::PARAM_PERCENT, Value::Bool(pdesc.is_percent())),
         (f::PARAM_LABEL, Value::String(section.label(pdesc))),
         (f::PARAM_SECTION, text(section.name())),
         (f::PARAM_MOD_SLOT, number(section.mod_slot(pdesc) as f64)),
@@ -267,6 +268,7 @@ pub(super) struct ParamBits {
     pub(super) mod_offset: u32,
     pub(super) mod_value: u32,
     pub(super) mod_scale: u32,
+    pub(super) mod_ratio: u32,
     pub(super) process_mapped: u32,
     pub(super) process_value: u32,
     pub(super) process_clamped: u32,
@@ -281,7 +283,7 @@ impl ParamBits {
     }
 
     pub(super) fn mod_display(&self) -> u32 {
-        self.mod_offset | self.mod_value | self.mod_scale
+        self.mod_offset | self.mod_value | self.mod_scale | self.mod_ratio
     }
 
     pub(super) fn process(&self) -> u32 {
@@ -307,6 +309,7 @@ pub(super) static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
     mod_offset: PARAM_LIVE.bit(f::PARAM_MOD_OFFSET),
     mod_value: PARAM_LIVE.bit(f::PARAM_MOD_VALUE),
     mod_scale: PARAM_LIVE.bit(f::PARAM_MOD_SCALE),
+    mod_ratio: PARAM_LIVE.bit(f::PARAM_MOD_RATIO),
     process_mapped: PARAM_LIVE.bit(f::PARAM_PROCESS_MAPPED),
     process_value: PARAM_LIVE.bit(f::PARAM_PROCESS_VALUE),
     process_clamped: PARAM_LIVE.bit(f::PARAM_PROCESS_CLAMPED),

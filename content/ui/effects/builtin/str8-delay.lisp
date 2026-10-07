@@ -76,9 +76,8 @@
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
                 :target-node-id (get fx :target-node-id)
-                :updates (list
-                  (dict :param-idx (get freq-p :idx) :value (get event :freq))
-                  (dict :param-idx (get q-p :idx) :value (get event :q)))
+                :updates (eseq.effects.param-controls/effect-param-updates fx
+                  (list (list freq-p (get event :freq)) (list q-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
@@ -152,8 +151,8 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -176,10 +175,10 @@
     (subtree :key (str "str8-delay-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)

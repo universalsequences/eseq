@@ -739,7 +739,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
           (str "custom-ui-lego-micro-toggle-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
           (subtree :key (str "custom-ui-lego-micro-toggle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
@@ -1264,7 +1264,7 @@
     (if p
       ;; the value is read concretely, so it must be part of the subtree key
       ;; for the chip to rebuild when the param changes
-      (let ((idx (round (- (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) (get p :min))))
+      (let ((idx (round (- (eseq.effects.custom-ui-runtime/custom-ui-param-value p) (get p :min))))
             (n (length labels)))
         (subtree :key (str "custom-ui-lego-chip-cycle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name "-" idx)
           (box :width width :height 1.18 :v-align :end
@@ -1341,7 +1341,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (subtree :key (str "custom-ui-lego-chip-toggle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name "-" (if on 1 0))
           (box :width width :height 1.18 :v-align :end
             (button text

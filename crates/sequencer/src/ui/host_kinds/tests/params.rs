@@ -170,8 +170,13 @@ fn param_fields_read_after_sync_for_instrument_and_effect_params() {
     assert_eq!(h.eval_all("flt.did"), Value::Number(effect_id.0 as f64));
     assert_eq!(h.eval_all("t0.tid"), Value::Number(track_id.0 as f64));
     // A value read matches the legacy panel field (Hz: no unit change).
+    let step = displayed_plock_step(
+        &h.shared.state,
+        0,
+        selected_plock_step(&h.shared.selected_steps),
+    );
     let rt = h.editor.runtime_mut();
-    sync_fx_param_binding_fields(rt, &h.app, &h.shared.state, 0, &h.shared.selected_steps);
+    sync_track_effect_param_value_field(rt, &h.app, 0, 0, CUTOFF, step);
     let legacy = rt
         .reactive_field_value(
             "SEQ",
@@ -198,6 +203,18 @@ fn effect_and_instrument_params_speak_the_same_display_units() {
         "(def fx (first (let ((t (track 0))) t.devices))) (def p (nth fx.params {index}))"
     ));
     assert_eq!(h.eval_all("p.unit"), s("%"));
+    // `percent` says the device stores it as a fraction (the legacy effect
+    // commands' units); a param of another unit is not one.
+    assert_eq!(h.eval_all("p.percent"), Value::Bool(true));
+    let other = desc
+        .params
+        .iter()
+        .position(|param| !param.is_percent())
+        .expect("the Chorus has a non-percent param");
+    assert_eq!(
+        h.eval_all(&format!("(let ((q (nth fx.params {other}))) q.percent)")),
+        Value::Bool(false)
+    );
     assert!(close(h.eval_all("p.min"), f64::from(pdesc.min) * 100.0));
     assert!(close(h.eval_all("p.max"), f64::from(pdesc.max) * 100.0));
     assert!(close(
@@ -272,8 +289,13 @@ fn param_value_follows_the_selected_or_playing_steps_lock() {
     h.shared.current_track.store(0, Ordering::Relaxed);
     h.sync();
     check(&mut h, 500.0, true, "track 0 current again");
+    let step = displayed_plock_step(
+        &h.shared.state,
+        0,
+        selected_plock_step(&h.shared.selected_steps),
+    );
     let rt = h.editor.runtime_mut();
-    sync_fx_param_binding_fields(rt, &h.app, &h.shared.state, 0, &h.shared.selected_steps);
+    sync_track_effect_param_value_field(rt, &h.app, 0, 0, CUTOFF, step);
     let legacy = rt
         .reactive_field_value(
             "SEQ",

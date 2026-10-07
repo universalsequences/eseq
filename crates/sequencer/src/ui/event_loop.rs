@@ -1795,12 +1795,6 @@ pub(crate) fn run_event_loop(
             {
                 let mut print = shared.step_print.lock().unwrap();
                 print.release_device_param_gesture(&shared.state);
-                // The print overlay is a hold indicator: drop it on the same
-                // release that ends the gesture, without waiting for the next
-                // print tick (which may not run at all).
-                let dirty = sync_print_latch_rows(editor.runtime_mut(), &print);
-                drop(print);
-                flush_reactive_display_edit(&mut editor, dirty);
             }
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {

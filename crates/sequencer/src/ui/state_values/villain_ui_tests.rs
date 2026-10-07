@@ -70,6 +70,7 @@ fn check_villain_panel(panel: VillainPanel) {
     register_test_delete_target_natives(&mut editor, 1);
     editor.runtime_mut().eval_str(&ui).unwrap_or_else(|e| panic!("load {instrument} UI: {e:?}"));
     editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() { panic!("{instrument} UI: {status}"); }
     let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
@@ -92,7 +93,7 @@ fn check_villain_panel(panel: VillainPanel) {
         for child in &node.children { visit(child, panel, controls); }
     }
     let bound_name = |node: &eseqlisp::layout::LayoutNode| -> String {
-        let Some(Value::ReactiveRef { field, .. }) = node.props.get("value") else { panic!("unbound control"); };
+        let field = bound_field(node.props.get("value")).expect("unbound control");
         field.strip_prefix("vk-test-").expect("real parameter binding").to_string()
     };
 

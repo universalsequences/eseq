@@ -292,9 +292,7 @@ fn factory_device_uis_use_no_legacy_binding_forms() {
     // eseq-0l17.21: the factory instrument, effect and MIDI effect UIs read
     // params through the eseq.effects custom-UI vocabulary, values as
     // values (§8), with no `:bindable`. Their per-scope `defstate` lists are
-    // Lisp view state, not reactive bindings, and stay. The spatial harmonic
-    // delay's tap count keeps one COMPAT `reactive-get` until eseq-0l17.14
-    // ports the custom-UI param layer.
+    // Lisp view state, not reactive bindings, and stay.
     let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
     let mut files = Vec::new();
     for dir in ["instruments", "effects", "midi-fx"] {
@@ -310,9 +308,6 @@ fn factory_device_uis_use_no_legacy_binding_forms() {
         let found: Vec<_> = legacy_forms(&source)
             .into_iter()
             .filter(|form| *form != "defstate")
-            .filter(|form| {
-                !(*form == "reactive-get" && file.ends_with("spatial-harmonic-delay/ui.lisp"))
-            })
             .collect();
         assert_eq!(found, Vec::<&str>::new(), "{}", file.display());
     }

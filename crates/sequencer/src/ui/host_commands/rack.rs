@@ -2790,6 +2790,13 @@ mod tests {
         }
         // Only the host selection clear is irrelevant to this gesture test.
         rt.eval_str("(def eseq.effects.panel-frame/fx-clear-selected-effect () nil)").unwrap();
+        // No eseq.kinds params here: the batch sends its (unit-free EQ)
+        // values as they are instead of converting each through its param.
+        rt.eval_str(
+            "(def eseq.effects.param-controls/effect-param-updates (fx pairs)
+               (map (lambda (pair) (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1))) pairs))",
+        )
+        .unwrap();
         rt.eval_str(r#"
           (def eq8-test-params
             (list (dict :name "b1 freq" :idx 3)

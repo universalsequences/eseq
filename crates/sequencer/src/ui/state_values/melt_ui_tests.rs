@@ -68,6 +68,7 @@ fn melt_context_pages_have_bound_controls_and_editable_envelopes() {
         .eval_str(&custom_ui_source)
         .expect("load melt custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("melt fx lisp status after refresh: {status}");
@@ -95,7 +96,9 @@ fn melt_context_pages_have_bound_controls_and_editable_envelopes() {
             controls.push(node);
         }
         for value in node.props.values() {
-            if let Value::ReactiveRef { field, .. } = value { fields.insert(field.clone()); }
+            if let Some(field) = bound_field(Some(value)) {
+                fields.insert(field);
+            }
         }
         for child in &node.children { visit(child, panel, controls, fields); }
     }

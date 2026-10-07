@@ -332,7 +332,7 @@ fn s(text: &str) -> Value {
 }
 
 /// A map's field (nil when absent or not a map).
-pub(super) fn get(value: &Value, key: &str) -> Value {
+pub(crate) fn get(value: &Value, key: &str) -> Value {
     match value {
         Value::Map(map) => map
             .get(key)
@@ -342,7 +342,7 @@ pub(super) fn get(value: &Value, key: &str) -> Value {
 }
 
 /// A list's items (none when not a list).
-pub(super) fn items(value: &Value) -> Vec<Value> {
+pub(crate) fn items(value: &Value) -> Vec<Value> {
     match value {
         Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
         _ => Vec::new(),
@@ -444,6 +444,7 @@ mod mixer;
 mod mixer_view;
 mod panel;
 mod panel_extras;
+mod panels_view;
 mod params;
 mod pending;
 mod piano_roll;

@@ -1164,112 +1164,36 @@ fn read_rack_slot_mod_values(
     })
 }
 
-/// Publish the changed rack slot values. A slot (or track) change republishes
-/// every field, so the panel never shows the previous slot's modulation.
-pub(crate) fn sync_rack_slot_mod_offset_field_delta(
+/// Publish the changed rack slot modulator phases (the source editor's
+/// waveform marker). A slot (or track) change republishes every phase; a
+/// slot no longer sampled settles its phases to none. The per-param display
+/// values reach the panels as eseq.kinds param fields (`mod-offset`,
+/// `mod-value`, `mod-scale`), so no SEQ field carries them.
+pub(crate) fn sync_rack_slot_mod_phase_field_delta(
     rt: &mut Runtime,
     previous: Option<&RackSlotModValues>,
     current: Option<&RackSlotModValues>,
 ) -> (bool, usize) {
-    let mut effects_dirty = false;
-    let mut published = 0usize;
     let Some(current) = current else {
-        // Nothing to sample any more (slot deselected, rack removed, panel
-        // hidden). The fields the last sample wrote would otherwise keep their
-        // final values forever, freezing a dot beside an unmodulated knob, so
-        // settle them. Only fires on the transition.
-        if let Some(previous) = previous {
-            for sampled in &previous.values {
-                for (field, value) in [
-                    (
-                        rack_slot_mod_offset_field(
-                            previous.track,
-                            previous.slot_idx,
-                            sampled.param_idx,
-                        ),
-                        0.0,
-                    ),
-                    (
-                        rack_slot_mod_value_field(
-                            previous.track,
-                            previous.slot_idx,
-                            sampled.param_idx,
-                        ),
-                        0.0,
-                    ),
-                    (
-                        rack_slot_mod_scale_field(
-                            previous.track,
-                            previous.slot_idx,
-                            sampled.param_idx,
-                        ),
-                        1.0,
-                    ),
-                ] {
-                    published += 1;
-                    effects_dirty |= rt
-                        .set_reactive("SEQ", &field, Value::Number(value))
-                        .effects_dirty;
-                }
-            }
-            let (dirty, count) = publish_slot_phases(
+        return match previous {
+            Some(previous) => publish_slot_phases(
                 rt,
                 Some(&previous.slot_phases),
                 &NO_SLOT_PHASES,
                 |slot| rack_slot_mod_slot_phase_field(previous.track, previous.slot_idx, slot),
-            );
-            effects_dirty |= dirty;
-            published += count;
-        }
-        return (effects_dirty, published);
+            ),
+            None => (false, 0),
+        };
     };
     let previous = previous.filter(|previous| {
         previous.track == current.track && previous.slot_idx == current.slot_idx
     });
-    {
-        let (dirty, count) = publish_slot_phases(
-            rt,
-            previous.map(|previous| &previous.slot_phases),
-            &current.slot_phases,
-            |slot| rack_slot_mod_slot_phase_field(current.track, current.slot_idx, slot),
-        );
-        effects_dirty |= dirty;
-        published += count;
-    }
-    for sampled in &current.values {
-        let was = previous.and_then(|previous| {
-            previous
-                .values
-                .iter()
-                .find(|candidate| candidate.param_idx == sampled.param_idx)
-                .copied()
-        });
-        let mut publish = |field: String, value: f64, was: Option<f64>| {
-            if was == Some(value) {
-                return;
-            }
-            published += 1;
-            effects_dirty |= rt
-                .set_reactive("SEQ", &field, Value::Number(value))
-                .effects_dirty;
-        };
-        publish(
-            rack_slot_mod_offset_field(current.track, current.slot_idx, sampled.param_idx),
-            sampled.offset,
-            was.map(|was| was.offset),
-        );
-        publish(
-            rack_slot_mod_value_field(current.track, current.slot_idx, sampled.param_idx),
-            sampled.value,
-            was.map(|was| was.value),
-        );
-        publish(
-            rack_slot_mod_scale_field(current.track, current.slot_idx, sampled.param_idx),
-            sampled.scale,
-            was.map(|was| was.scale),
-        );
-    }
-    (effects_dirty, published)
+    publish_slot_phases(
+        rt,
+        previous.map(|previous| &previous.slot_phases),
+        &current.slot_phases,
+        |slot| rack_slot_mod_slot_phase_field(current.track, current.slot_idx, slot),
+    )
 }
 
 /// Everything the UI tick publishes for modulated-value display: per-effect
@@ -1398,134 +1322,36 @@ fn publish_slot_phases(
     (effects_dirty, published)
 }
 
-/// Publish the changed instrument offsets. Same delta contract as the effect
-/// half: zero writes while nothing moves, and a track change republishes every
-/// field so the panel never shows the previous instrument's modulation.
-pub(crate) fn sync_instrument_mod_offset_field_delta(
+/// Publish the changed instrument modulator phases, under both the current
+/// track's and the track-keyed fields. Same delta contract as the rack half:
+/// zero writes while nothing moves, a track change republishes every phase.
+pub(crate) fn sync_instrument_mod_phase_field_delta(
     rt: &mut Runtime,
     previous: Option<&InstrumentModValues>,
     current: Option<&InstrumentModValues>,
 ) -> (bool, usize) {
-    let mut effects_dirty = false;
-    let mut published = 0usize;
-    let Some(current) = current else {
-        // Same settling as the rack half: the previous sample's fields would
-        // otherwise hold their last values forever once the track stops being
-        // sampled, freezing a dot beside an unmodulated knob.
-        if let Some(previous) = previous {
-            for sampled in &previous.values {
-                for (field, value) in [
-                    (fx_instrument_mod_offset_field(sampled.param_idx), 0.0),
-                    (fx_instrument_mod_value_field(sampled.param_idx), 0.0),
-                    (fx_instrument_mod_scale_field(sampled.param_idx), 1.0),
-                    (
-                        instrument_mod_offset_field(previous.track, sampled.param_idx),
-                        0.0,
-                    ),
-                    (
-                        instrument_mod_value_field(previous.track, sampled.param_idx),
-                        0.0,
-                    ),
-                    (
-                        instrument_mod_scale_field(previous.track, sampled.param_idx),
-                        1.0,
-                    ),
-                ] {
-                    published += 1;
-                    effects_dirty |= rt
-                        .set_reactive("SEQ", &field, Value::Number(value))
-                        .effects_dirty;
-                }
-            }
-            let (dirty, count) = publish_slot_phases(
-                rt,
-                Some(&previous.slot_phases),
-                &NO_SLOT_PHASES,
-                fx_instrument_mod_slot_phase_field,
-            );
-            effects_dirty |= dirty;
-            published += count;
-            let (dirty, count) =
-                publish_slot_phases(rt, Some(&previous.slot_phases), &NO_SLOT_PHASES, |slot| {
-                    instrument_mod_slot_phase_field(previous.track, slot)
-                });
-            effects_dirty |= dirty;
-            published += count;
+    let (track, was, phases) = match (previous, current) {
+        (_, Some(current)) => {
+            let was = previous
+                .filter(|previous| previous.track == current.track)
+                .map(|previous| &previous.slot_phases);
+            (current.track, was, &current.slot_phases)
         }
-        return (effects_dirty, published);
+        (Some(previous), None) => (previous.track, Some(&previous.slot_phases), &NO_SLOT_PHASES),
+        (None, None) => return (false, 0),
     };
-    let previous = previous.filter(|previous| previous.track == current.track);
-    {
-        let was = previous.map(|previous| &previous.slot_phases);
-        let (dirty, count) = publish_slot_phases(
-            rt,
-            was,
-            &current.slot_phases,
-            fx_instrument_mod_slot_phase_field,
-        );
-        effects_dirty |= dirty;
-        published += count;
-        let (dirty, count) = publish_slot_phases(rt, was, &current.slot_phases, |slot| {
-            instrument_mod_slot_phase_field(current.track, slot)
-        });
-        effects_dirty |= dirty;
-        published += count;
-    }
-    for sampled in &current.values {
-        let was = previous.and_then(|previous| {
-            previous
-                .values
-                .iter()
-                .find(|candidate| candidate.param_idx == sampled.param_idx)
-                .copied()
-        });
-        let mut publish = |field: String, value: f64, was: Option<f64>| {
-            if was == Some(value) {
-                return;
-            }
-            published += 1;
-            effects_dirty |= rt
-                .set_reactive("SEQ", &field, Value::Number(value))
-                .effects_dirty;
-        };
-        publish(
-            fx_instrument_mod_offset_field(sampled.param_idx),
-            sampled.offset,
-            was.map(|was| was.offset),
-        );
-        publish(
-            fx_instrument_mod_value_field(sampled.param_idx),
-            sampled.value,
-            was.map(|was| was.value),
-        );
-        publish(
-            instrument_mod_offset_field(current.track, sampled.param_idx),
-            sampled.offset,
-            was.map(|was| was.offset),
-        );
-        publish(
-            fx_instrument_mod_scale_field(sampled.param_idx),
-            sampled.scale,
-            was.map(|was| was.scale),
-        );
-        publish(
-            instrument_mod_value_field(current.track, sampled.param_idx),
-            sampled.value,
-            was.map(|was| was.value),
-        );
-        publish(
-            instrument_mod_scale_field(current.track, sampled.param_idx),
-            sampled.scale,
-            was.map(|was| was.scale),
-        );
-    }
-    (effects_dirty, published)
+    let (dirty, count) = publish_slot_phases(rt, was, phases, fx_instrument_mod_slot_phase_field);
+    let (track_dirty, track_count) = publish_slot_phases(rt, was, phases, |slot| {
+        instrument_mod_slot_phase_field(track, slot)
+    });
+    (dirty || track_dirty, count + track_count)
 }
 
-/// Publish the changed offsets. Returns `(effects_dirty, published)`:
-/// `published` is zero whenever nothing moved, which is the check that an idle
-/// (or unmodulated) panel dirties no widget.
-pub(crate) fn sync_effect_mod_offset_field_delta(
+/// Publish the changed effect modulator phases (per sampled node). Returns
+/// `(effects_dirty, published)`: `published` is zero whenever nothing moved,
+/// which is the check that an idle panel dirties no widget. The per-param
+/// display values are eseq.kinds param fields, as for the rack half.
+pub(crate) fn sync_effect_mod_phase_field_delta(
     rt: &mut Runtime,
     previous: &[EffectModValues],
     current: &[EffectModValues],
@@ -1544,38 +1370,6 @@ pub(crate) fn sync_effect_mod_offset_field_delta(
         );
         effects_dirty |= dirty;
         published += count;
-        for sampled in &response.values {
-            let was = prev.and_then(|prev| {
-                prev.values
-                    .iter()
-                    .find(|candidate| candidate.param_idx == sampled.param_idx)
-                    .copied()
-            });
-            let mut publish = |field: String, value: f64, was: Option<f64>| {
-                if was == Some(value) {
-                    return;
-                }
-                published += 1;
-                effects_dirty |= rt
-                    .set_reactive("SEQ", &field, Value::Number(value))
-                    .effects_dirty;
-            };
-            publish(
-                effect_mod_offset_field(response.node_id, sampled.param_idx),
-                sampled.offset,
-                was.map(|was| was.offset),
-            );
-            publish(
-                effect_mod_value_field(response.node_id, sampled.param_idx),
-                sampled.value,
-                was.map(|was| was.value),
-            );
-            publish(
-                effect_mod_scale_field(response.node_id, sampled.param_idx),
-                sampled.scale,
-                was.map(|was| was.scale),
-            );
-        }
     }
     (effects_dirty, published)
 }

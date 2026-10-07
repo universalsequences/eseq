@@ -2,7 +2,7 @@
 (module eseq.effects.instrument-panel)
 
 (import eseq.macro-state :as ms)
-(import eseq.effects.state :as st)
+(import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
@@ -184,8 +184,8 @@
       (do
         (ms/clear-mapping-arm)
         (pc/process-map-clear)
-        (set! st/instrument-mods-open false)
-        (set! st/effect-mods-open false)
+        (set! instrument-view.mods-open false)
+        (set! effect-mods.open false)
         (set! ms/rack-mapping-selected next)
         ;; Hook natives register at runtime under flat names; inside a module,
         ;; reach hooks through the data-addressed flat keyspace (spec §10 e).
@@ -194,7 +194,7 @@
 
 (def rack-macro-control (track macro)
   (let ((target (dict :track track :target "rack-macro" :param-idx (get macro :id)))
-        (has-locks (pc/target-plock-any? target)))
+        (has-locks (tp/target-plock-any? target)))
     (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
@@ -420,7 +420,7 @@
 (def rack-slot-param-wrapper (slot param body)
   (let ((target (nth (filter |target| (= (get target :name) param)
                       (get slot :param-targets)) 0))
-        (has-locks (pc/target-plock-any? target)))
+        (has-locks (tp/target-plock-any? target)))
     (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
       :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
       :background-color :transparent

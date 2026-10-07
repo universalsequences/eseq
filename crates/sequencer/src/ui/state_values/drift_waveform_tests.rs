@@ -111,6 +111,7 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         .runtime_mut()
         .eval_str(&read_ui_source("effects.lisp").unwrap())
         .unwrap();
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("{status}");
@@ -173,8 +174,8 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "ui_epoch", Value::Number(i as f64));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
+        set_seeded_field(
+            &mut editor,
             "preview-lp_freq",
             Value::Number(500.0 + i as f64),
         );
@@ -196,14 +197,14 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         ("osc2_gain_db", 6.0),
         ("noise_gain_db", 54.0),
     ] {
-        editor.runtime_mut().set_reactive(
-            "SEQ",
+        set_seeded_field(
+            &mut editor,
             &format!("preview-{field}-mod"),
             Value::Number(offset),
         );
         assert_ne!(points(draw()), initial, "live modulation {field}");
-        editor.runtime_mut().set_reactive(
-            "SEQ",
+        set_seeded_field(
+            &mut editor,
             &format!("preview-{field}-mod"),
             Value::Number(0.0),
         );

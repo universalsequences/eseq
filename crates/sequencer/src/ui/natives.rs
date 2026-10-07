@@ -3717,7 +3717,6 @@ pub(crate) fn init_runtime(
                 ),
                 // Print latches are per-gesture; nothing can be armed at
                 // startup (bead eseq-4seq).
-                ("track-plock-printing", Value::List(vec![])),
                 (
                     "track-plock-variants",
                     if track_count == 0 {
@@ -3736,7 +3735,6 @@ pub(crate) fn init_runtime(
                 ("sidebar-instrument-name", Value::String(String::new())),
                 ("rack-clips", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
-                ("rack-panel-view-generation", Value::Number(0.0)),
                 ("tuning-root-options", build_tuning_root_options()),
             ];
             // The editor's and Patch Learn's legacy fields, as the record

@@ -82,6 +82,7 @@ fn identified_drum_display(instrument: &str) {
         .eval_str(&custom_ui_source)
         .expect("load kick808 custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("kick808 fx lisp status after refresh: {status}");
@@ -160,7 +161,7 @@ fn identified_drum_display(instrument: &str) {
                 assert!((value - 1200.0 * (0.44_f64 / 1.88).powi(2)).abs() < 0.001);
             }
             editor.runtime_mut().register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
-            editor.runtime_mut().set_reactive("SEQ", "kick808-test-sweep", Value::Number(300.0));
+            set_panel_param(&mut editor, &kinds, "kick808-test-sweep", Value::Number(300.0));
             editor.runtime_mut().run_reactive_cycle();
             let Value::ReactiveRef { slot, .. } = &visual.props["sweep"] else { panic!("binding"); };
             assert_eq!(eseqlisp::reactive::read_float_slot(slot), 300.0);

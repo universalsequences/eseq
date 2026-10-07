@@ -38,6 +38,7 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
     }
     editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+    seed_panel_kinds(&mut editor);
     editor
         .runtime_mut()
         .eval_str(r#"(set-layout (list :buf "*fx*" :hide-status true))"#)
@@ -119,12 +120,9 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         .runtime_mut()
         .eval_str(
             r#"
-        (set! eseq.effects.state/effect-mods-chain "audio")
-        (set! eseq.effects.state/effect-mods-track 0)
-        (set! eseq.effects.state/effect-mods-slot 0)
-        (set! eseq.effects.state/effect-mods-rack-slot -1)
-        (set! eseq.effects.state/effect-mods-bus -1)
-        (set! eseq.effects.state/effect-mods-open true)
+        (let ((m eseq.effects.state/effect-mods))
+          (do (set! m.chain "audio") (set! m.track 0) (set! m.slot 0)
+              (set! m.rack-slot -1) (set! m.bus -1) (set! m.open true)))
     "#,
         )
         .unwrap();
@@ -132,7 +130,7 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(set! eseq.effects.state/effect-selected-mod-slot {slot})"
+                "(let ((m eseq.effects.state/effect-mods)) (set! m.mod-slot {slot}))"
             ))
             .unwrap();
         for tab in 0..2 {

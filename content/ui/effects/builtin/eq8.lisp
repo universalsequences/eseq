@@ -121,10 +121,8 @@
           (dict :track (get fx :track-idx)
                 :rack-slot (get fx :rack-slot)
                 :effect-slot (get fx :slot-idx)
-                :updates (list
-                  (dict :param-idx (get freq-p :idx) :value freq)
-                  (dict :param-idx (get gain-p :idx) :value gain)
-                  (dict :param-idx (get q-p :idx) :value q))
+                :updates (eseq.effects.param-controls/effect-param-updates fx
+                  (list (list freq-p freq) (list gain-p gain) (list q-p q)))
                 :commit commit)))
       (do
         (eseq.effects.param-controls/fx-set-effect-value fx freq-p freq)

@@ -121,9 +121,8 @@
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
                 :target-node-id (get fx :target-node-id)
-                :updates (list
-                  (dict :param-idx (get cutoff-p :idx) :value (get event :freq))
-                  (dict :param-idx (get resonance-p :idx) :value (get event :q)))
+                :updates (eseq.effects.param-controls/effect-param-updates fx
+                  (list (list cutoff-p (get event :freq)) (list resonance-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
@@ -160,7 +159,7 @@
     (h-stack :gap 0.22 :align :baseline
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
       (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -296,7 +295,7 @@
       (h-stack :gap 0.18 :align :baseline
         (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
-          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
           :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
           :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)

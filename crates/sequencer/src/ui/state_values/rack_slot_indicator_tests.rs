@@ -100,7 +100,7 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
                         }, 0, 0, 160, 20, col, row);
                     }
                     assert_eq!(editor.runtime_mut().eval_str(
-                        "(not (= eseq.effects.param-controls/param-plock-menu nil))"),
+                        "(let ((m eseq.effects.param-controls/plock-menu)) m.open)"),
                         Ok(Some(Value::Bool(expected))), "right-click {key}");
                     if expected {
                         editor.drain_host_commands();

@@ -264,11 +264,6 @@ fn modulation_display_reads_the_tick_sample_in_display_units() {
         h.eval_panel("flt.mod-phases"),
         h.eval_panel("(list 0.25 -1 -1 -1)")
     );
-    // The legacy instrument field shows the same sample.
-    let rt = h.editor.runtime_mut();
-    sync_instrument_mod_offset_field_delta(rt, None, sample.instrument.as_ref());
-    let legacy = rt.reactive_field_value("SEQ", &instrument_mod_offset_field(2, START));
-    assert_eq!(legacy.cloned(), Some(Value::Number(10.0)));
     // Released: the tick may stop sampling.
     h.eval_panel(
         "(set! start-offset nil) (set! start-mod nil) (set! cutoff-offset nil) \

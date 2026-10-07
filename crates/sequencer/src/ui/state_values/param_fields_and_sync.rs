@@ -1040,54 +1040,10 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
                 );
             }
         }
-        if let Some(slots) = app.graph.effect_descriptors.get(track) {
-            for (slot_idx, desc) in slots.iter().enumerate() {
-                for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                    if param_supports_value_binding(pdesc) {
-                        needs_ui |= sync_track_effect_param_value_field_with_neural_selection(
-                            rt,
-                            app,
-                            track,
-                            slot_idx,
-                            param_idx,
-                            display_step,
-                            selected_neural_neurons,
-                        );
-                    }
-                }
-            }
-        }
-        for (slot_idx, name) in state.pattern.track_params[track]
-            .midi_fx_chain()
-            .iter()
-            .enumerate()
-        {
-            if let Some(desc) = sequencer::lisp_host::load_midi_fx_descriptor(name) {
-                for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                    if param_supports_value_binding(pdesc) {
-                        needs_ui |= sync_midi_fx_param_value_field(
-                            rt,
-                            state,
-                            track,
-                            slot_idx,
-                            param_idx,
-                            display_step,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    for (bus_idx, bus) in app.buses.iter().enumerate() {
-        for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
-            for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                if param_supports_value_binding(pdesc) {
-                    needs_ui |=
-                        sync_bus_effect_param_value_field(rt, app, bus_idx, slot_idx, param_idx);
-                }
-            }
-        }
+        // Track, MIDI and bus effect params publish no value field here: the
+        // panels read their eseq.kinds params (eseq-0l17.14). The print latch
+        // and the eval natives still write theirs until eseq-0l17.22 retires
+        // the publishers.
     }
     needs_ui
 }

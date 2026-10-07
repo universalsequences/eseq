@@ -84,6 +84,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         .eval_str(&custom_audio_ui_source)
         .expect("load initial custom audio FX UI");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    seed_panel_kinds(&mut editor);
     editor
         .runtime_mut()
         .eval_str(&custom_instrument_ui_source)
@@ -214,6 +215,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "track-plocks", test_list(rows));
+        seed_panel_kinds(&mut editor);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("selected control layout");
@@ -265,7 +267,8 @@ fn custom_controls_keep_owners_across_step_selection() {
                 "{key} must follow its own lock projection"
             );
             assert!(
-                matches!(control.props.get("value"), Some(Value::Number(value)) if value.is_finite()),
+                eseqlisp::widget_render::get_f32_prop(&control.props, "value", f32::NAN)
+                    .is_finite(),
                 "{key} must retain its value binding after selection changes"
             );
             if target == "effect" {

@@ -76,8 +76,8 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -100,10 +100,10 @@
     (subtree :key (str "roar-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -173,7 +173,7 @@
       (label "ROUTING" :font-size 8.0 :width 6.2 :color :dim :bg :transparent)
       (subtree :key "roar-routing-control"
         (option fx routing-p 6.4))
-      (routing-fields fx (round (eseq.effects.param-controls/fx-param-numeric-value routing-p)) blend-p xlow-p xhigh-p))))
+      (routing-fields fx (round (eseq.effects.param-controls/fx-param-numeric-value-for fx routing-p)) blend-p xlow-p xhigh-p))))
 
 ;; ── Stage box (tab row + shaper/filter views for the selected stage) ──
 
@@ -201,8 +201,8 @@
       ;; value follows an LFO on amount/bias (eseq-hpc), falling back to the
       ;; base value when nothing is modulating.
       :shaper (eseq.effects.param-controls/param-effective-value shaper-p)
-      :amount (eseq.effects.param-controls/param-effective-value amount-p)
-      :bias (eseq.effects.param-controls/param-effective-value bias-p))
+      :amount (eseq.effects.param-controls/param-effective-ratio amount-p)
+      :bias (eseq.effects.param-controls/param-effective-ratio bias-p))
     (subtree :key (str "roar-shaper-option-" stage)
       (option fx shaper-p 8.4))
     (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "levl" level-p)))
@@ -215,7 +215,7 @@
       :stage stage
       :filter (eseq.effects.param-controls/param-effective-value filter-p)
       :freq (eseq.effects.param-controls/param-effective-value freq-p)
-      :res (eseq.effects.param-controls/param-effective-value res-p))
+      :res (eseq.effects.param-controls/param-effective-ratio res-p))
     (subtree :key (str "roar-filter-option-" stage)
       (option fx filter-p 8.4))
     (h-stack :gap 0.30 :align :baseline
@@ -306,7 +306,7 @@
         (h-stack :gap 0.35 :align :start
           (input-box fx drive-p tone-p tone-freq-p tone-mode-p)
           (routing-box fx routing-p blend-p xlow-p xhigh-p)
-          (stage-box fx params (round (eseq.effects.param-controls/fx-param-numeric-value routing-p)))
+          (stage-box fx params (round (eseq.effects.param-controls/fx-param-numeric-value-for fx routing-p)))
           (feedback-box fx fbmode-p fbtime-p fbdiv-p fbamount-p fbinvert-p fbduck-p fbfreq-p fbwidth-p)
           (out-box fx compress-p schpf-p output-p mix-p))
         (eseq.effects.param-grid/fx-param-grid params fx)))))

@@ -44,6 +44,9 @@ mod midi_midimix_tests;
 mod mixer_hit_tests;
 #[path = "solo_binding_tests.rs"]
 mod solo_binding_tests;
+#[path = "panel_kinds_seed.rs"]
+mod panel_kinds_seed;
+use panel_kinds_seed::*;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -7330,6 +7333,10 @@ mod solo_binding_tests;
                 (def visible-params (params)
                   (filter |p| (not (= (get p :name) "enabled")) params))
                 (load "ui/effects/param-controls.lisp")
+                ;; No eseq.kinds params here: a batch sends its values as
+                ;; they are instead of converting each through its param.
+                (def eseq.effects.param-controls/effect-param-updates (fx pairs)
+                  (map (lambda (pair) (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1))) pairs))
                 (load "ui/effects/param-grid.lisp")
                 "#,
             )
@@ -8369,15 +8376,16 @@ mod solo_binding_tests;
             .expect("install keys tab test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 1) (set! eseq.effects.state/instrument-key-lock-selected-notes (list 69)))")
+            .eval_str("(do (let ((v eseq.effects.state/instrument-view)) (set! v.tab 1)) (let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69))))")
             .expect("select key");
 
         let selected_notes = |editor: &mut eseqlisp::Editor| -> Vec<f64> {
             match editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-key-lock-selected-notes")
+                .eval_str("(let ((v eseq.effects.state/key-lock-view)) v.notes)")
                 .expect("read selected keys")
             {
                 Some(Value::List(items)) => items
@@ -8444,7 +8452,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-key-lock-selected-notes (list 69))")
+            .eval_str("(let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69)))")
             .expect("restore selected key");
         editor
             .runtime_mut()
@@ -8468,7 +8476,7 @@ mod solo_binding_tests;
         let default_value = editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
             )
             .expect("read default value with no key selected");
         assert_eq!(default_value, Some(Value::Number(0.5)));
@@ -8499,7 +8507,7 @@ mod solo_binding_tests;
         }
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-key-lock-selected-notes (list 69))")
+            .eval_str("(let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69)))")
             .expect("restore selected key");
 
         editor.refresh_runtime_side_effects();
@@ -8548,6 +8556,11 @@ mod solo_binding_tests;
                 .iter()
                 .filter_map(|item| match &*item.borrow() {
                     Value::Number(n) => Some(*n),
+                    // An active-notes row: (note velocity trigger-id).
+                    Value::List(row) => match row.first().map(|note| note.borrow().clone()) {
+                        Some(Value::Number(n)) => Some(n),
+                        _ => None,
+                    },
                     Value::Map(map) => map.get("note").and_then(|note| match &*note.borrow() {
                         Value::Number(n) => Some(*n),
                         _ => None,
@@ -8566,12 +8579,12 @@ mod solo_binding_tests;
         };
         assert_eq!(active_notes(piano), vec![69.0]);
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-active-notes",
-            test_list(vec![test_list(vec![Value::Number(60.0)])]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        // Track 0's active notes (eseq.kinds track.active-notes).
+        let rt = editor.runtime_mut();
+        let track = project_list(rt, "tracks")[0];
+        let row = test_list(vec![Value::Number(60.0), Value::Number(1.0), Value::Number(0.0)]);
+        set_field(rt, track, "active-notes", test_list(vec![row]));
+        rt.run_reactive_cycle();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
         let updated_layout = editor.widget_layout().expect("updated keys tab layout");
         let updated_piano = find_layout_node_by_debug_name(&updated_layout, "instrument-key-piano")
@@ -8585,7 +8598,7 @@ mod solo_binding_tests;
         let variant_label = editor
             .runtime_mut()
             .eval_str(
-                "(get (eseq.effects.panel-bodies/instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69) :label)",
+                "(let ((v (eseq.effects.panel-bodies/instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69))) v.label)",
             )
             .expect("read key-lock note variant label");
         assert_eq!(variant_label, Some(Value::String("A".to_string())));
@@ -8593,7 +8606,7 @@ mod solo_binding_tests;
         let value = editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
             )
             .expect("read key lock value");
         assert_eq!(value, Some(Value::Number(0.8)));
@@ -8636,8 +8649,8 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str(
                 "(do
-                   (set! eseq.effects.state/instrument-key-lock-selected-notes (list 69 72))
-                   (eseq.effects.panel-bodies/instrument-key-lock-chip-click
+                   (let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69 72)))
+                   (eseq.effects.panel-bodies/instrument-key-lock-chip-click (nth SEQ.instrument-panel 0)
                      (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 1)))",
             )
             .expect("stamp selected keys with variant chip");
@@ -8645,7 +8658,7 @@ mod solo_binding_tests;
         assert_eq!(commands.len(), 1, "commands={commands:?}");
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "stamp-key-lock-variant");
+                assert_eq!(name, "stamp-key-variant");
                 let Value::Map(payload) = payload else {
                     panic!("stamp-key-lock-variant payload should be a dict: {payload:?}");
                 };
@@ -8716,10 +8729,20 @@ mod solo_binding_tests;
             .expect("install fx lisp test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
 
         let bound_param = r#"(dict :name "mode" :idx 0
                    :options (list "lowpass" "highpass" "bandpass")
                    :value-field "fx-instrument-param-0-mode")"#;
+        // The instrument's param 0 (eseq.kinds), at its published value.
+        let mut inst = test_instrument_map();
+        let param = editor.runtime_mut().eval_str(bound_param).unwrap().unwrap();
+        inst.insert("synth".into(), Rc::new(RefCell::new(test_list(vec![param]))));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "instrument-panel", test_list(vec![Value::Map(inst)]));
+        let kinds = seed_panel_kinds(&mut editor);
+        set_panel_param(&mut editor, &kinds, "fx-instrument-param-0-mode", Value::Number(1.0));
         let label = editor
             .runtime_mut()
             .eval_str(&format!(
@@ -8730,7 +8753,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-mods-open true)")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (set! v.mods-open true))")
             .expect("open the mods editor");
         let modulatable_param = r#"(dict :name "mode" :idx 0 :modulatable true
                    :options (list "lowpass" "highpass" "bandpass")
@@ -8749,7 +8772,7 @@ mod solo_binding_tests;
         );
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (set! v.mods-open false))")
             .expect("close the mods editor");
 
         // A stored value can be far outside the options list (a synced Delay
@@ -8757,11 +8780,7 @@ mod solo_binding_tests;
         // `nth` past the end returns nil and the dropdown renders "nil", so the
         // index must be clamped like the old Rust builder clamped it.
         for (stored, expected) in [(250.0, "bandpass"), (-4.0, "lowpass")] {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "fx-instrument-param-0-mode",
-                Value::Number(stored),
-            );
+            set_panel_param(&mut editor, &kinds, "fx-instrument-param-0-mode", Value::Number(stored));
             let label = editor
                 .runtime_mut()
                 .eval_str(&format!(
@@ -12048,7 +12067,6 @@ mod solo_binding_tests;
             ("track-plocks", test_list(vec![])),
             ("track-plock-variants", test_list(vec![])),
             ("track-plock-any", test_list(vec![])),
-            ("track-plock-printing", test_list(vec![])),
         ] {
             editor.runtime_mut().set_reactive("SEQ", field, value);
         }
@@ -12072,6 +12090,9 @@ mod solo_binding_tests;
             assert!(report.success, "load {path}: {}", report.failure_message());
             editor.process_lisp_reload_report(report);
         }
+        seed_panel_kinds(&mut editor);
+        let instrument_param = seeded_param(&editor, -1.0, 0);
+        let effect_param = seeded_param(&editor, 0.0, 0);
         editor
             .runtime_mut()
             .eval_str(
@@ -12139,17 +12160,11 @@ mod solo_binding_tests;
         };
         let unwrapped = body_rect(&mut editor);
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-printing",
-            Value::List(vec![plock_key_row("instrument", None, None, Some(0))]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-any",
-            Value::List(vec![plock_key_row("effect", Some(0), None, Some(0))]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        // The instrument's param 0 is latched for printing; the effect's
+        // param 0 is locked on some step (eseq.kinds param.printing /
+        // has-locks).
+        push_seeded(&mut editor, instrument_param, "printing", Value::Bool(true));
+        push_seeded(&mut editor, effect_param, "has-locks", Value::Bool(true));
         editor.refresh_runtime_side_effects();
         assert_eq!(
             print_wrappers(&mut editor),
@@ -12167,12 +12182,8 @@ mod solo_binding_tests;
             "only the p-locked effect param wears the presence flag"
         );
 
-        // Transport gate: the projection must retire both the overlay and its
-        // flag when record stops, even with the row list left standing.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "recording", Value::Bool(false));
-        editor.runtime_mut().run_reactive_cycle();
+        // Record stops: the host clears param.printing (its transport gate).
+        push_seeded(&mut editor, instrument_param, "printing", Value::Bool(false));
         editor.refresh_runtime_side_effects();
         assert_eq!(
             print_wrappers(&mut editor),
@@ -12180,12 +12191,7 @@ mod solo_binding_tests;
             "a stale print row must not survive record-off"
         );
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-any",
-            Value::List(vec![]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        push_seeded(&mut editor, effect_param, "has-locks", Value::Bool(false));
         editor.refresh_runtime_side_effects();
         assert_eq!(
             flagged_boxes(&mut editor),
@@ -12221,7 +12227,6 @@ mod solo_binding_tests;
         for (field, value) in [
             ("track-plocks", test_list(vec![])),
             ("track-plock-variants", test_list(vec![])),
-            ("track-plock-printing", test_list(vec![])),
             // Only the effect's param 0 carries automation.
             (
                 "track-plock-any",
@@ -12247,7 +12252,20 @@ mod solo_binding_tests;
             assert!(report.success, "load {path}: {}", report.failure_message());
             editor.process_lisp_reload_report(report);
         }
-        editor.runtime_mut().run_reactive_cycle();
+        // Only the effect's param 0 carries automation; steps 1 and 3 of
+        // the current track are selected (eseq.kinds).
+        seed_panel_kinds(&mut editor);
+        let effect_param = seeded_param(&editor, 0.0, 0);
+        push_seeded(&mut editor, effect_param, "has-locks", Value::Bool(true));
+        let rt = editor.runtime_mut();
+        let track = project_list(rt, "tracks")[0];
+        let steps: Vec<_> = [1u64, 3]
+            .iter()
+            .map(|&index| rt.register_keyed_instance("eseq.kinds:step", &[track, index]).unwrap())
+            .collect();
+        let selection = kind_singleton_rt(rt, "selection");
+        set_field(rt, selection, "steps", instance_list(steps));
+        rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.drain_host_commands();
 
@@ -12255,7 +12273,7 @@ mod solo_binding_tests;
         assert_eq!(
             editor.runtime_mut().eval_str(
                 r#"(eseq.effects.param-controls/open-param-plock-menu
-                     (dict :col 12 :row 5) false
+                     (dict :col 12 :row 5 :at (dict :col 12 :row 5)) false
                      (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"#
             ),
             Ok(Some(Value::Bool(false))),
@@ -12274,7 +12292,7 @@ mod solo_binding_tests;
             editor.runtime_mut().eval_str(
                 r#"(let ((fx (nth SEQ.effects 0)))
                      (eseq.effects.param-controls/open-param-plock-menu
-                       (dict :col 12 :row 5) fx (nth (get fx :params) 0)))"#
+                       (dict :col 12 :row 5 :at (dict :col 12 :row 5)) fx (nth (get fx :params) 0)))"#
             ),
             Ok(Some(Value::Bool(true))),
             "right-click on a p-locked param must open the menu"
@@ -12415,6 +12433,15 @@ mod solo_binding_tests;
             assert!(report.success, "load {path}: {}", report.failure_message());
             editor.process_lisp_reload_report(report);
         }
+        // The devices and project macro 7 as eseq.kinds publishes them.
+        seed_panel_kinds(&mut editor);
+        let cutoff = seeded_param(&editor, -1.0, 0);
+        let rt = editor.runtime_mut();
+        let project_macro = rt.register_keyed_instance("eseq.kinds:macro", &[0]).unwrap();
+        set_field(rt, project_macro, "mid", Value::Number(7.0));
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "macros", instance_list([project_macro]));
+        rt.run_reactive_cycle();
         editor
             .runtime_mut()
             .eval_str("(do (set! eseq.macro-state/mapping-open true) (set! eseq.macro-state/mapping-selected 7))")
@@ -12505,14 +12532,15 @@ mod solo_binding_tests;
         assert!(mapped_kinds.contains("instrument"), "commands={commands:?}");
         assert!(mapped_kinds.contains("effect"), "commands={commands:?}");
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![test_macro_value_with_mappings(vec![
-                test_macro_mapping_value(0, 0, "instrument", None, None, "cutoff", 0.2, 0.8, false),
-            ])]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        // Macro 7 now drives the instrument's cutoff.
+        let rt = editor.runtime_mut();
+        let mapping = rt
+            .register_keyed_instance("eseq.kinds:macro-mapping", &[project_macro, 0])
+            .unwrap();
+        set_field(rt, mapping, "macro", Value::Instance(project_macro));
+        set_field(rt, mapping, "target", Value::Instance(cutoff));
+        set_field(rt, project_macro, "mappings", instance_list([mapping]));
+        rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         assert_eq!(
             editor.runtime_mut().eval_str(
@@ -12566,18 +12594,18 @@ mod solo_binding_tests;
             .eval_str(
                 r#"
                 (do
-                  (set! eseq.effects.state/instrument-mods-open true)
-                  (set! eseq.effects.state/effect-mods-open true)
-                  (set! eseq.effects.param-controls/process-map-track 0)
-                  (set! eseq.effects.param-controls/process-map-instance-id 42)
-                  (set! eseq.effects.param-controls/process-map-port "shape")
+                  (let ((v eseq.effects.state/instrument-view)) (set! v.mods-open true))
+                  (let ((v eseq.effects.state/effect-mods)) (set! v.open true))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.track 0))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.instance-id 42))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.port "shape"))
                   (eseq.macros/macro-toggle-mapping-arm :player/delay-push))
                 "#,
             )
             .expect("enter macro mapping mode");
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(list eseq.macro-state/mapping-open eseq.effects.state/instrument-mods-open eseq.effects.state/effect-mods-open (eseq.effects.param-controls/process-map-active?))"
+                "(list eseq.macro-state/mapping-open (let ((v eseq.effects.state/instrument-view)) v.mods-open) (let ((v eseq.effects.state/effect-mods)) v.open) (eseq.effects.param-controls/process-map-active?))"
             ),
             Ok(Some(test_list(vec![
                 Value::Bool(true),
@@ -12611,7 +12639,7 @@ mod solo_binding_tests;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list eseq.macro-state/mapping-open eseq.effects.state/instrument-mods-open (eseq.effects.param-controls/process-map-active?))"),
+                .eval_str("(list eseq.macro-state/mapping-open (let ((v eseq.effects.state/instrument-view)) v.mods-open) (eseq.effects.param-controls/process-map-active?))"),
             Ok(Some(test_list(vec![
                 Value::Bool(false),
                 Value::Bool(true),
@@ -13282,6 +13310,7 @@ mod solo_binding_tests;
             .expect("install selected-step rack fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("rack fx lisp status after refresh: {status}");
@@ -13307,9 +13336,9 @@ mod solo_binding_tests;
         // track *and* slot. `sr` is a declared sampler mod destination, so its
         // knob binds the live dot to the rack slot's own published field.
         assert_eq!(
-            sr_knob.props.get("mod-offset").map(|value| match value {
-                Value::ReactiveRef { field, .. } => field.clone(),
-                other => panic!("rack sr knob should bind its live dot: {other:?}"),
+            sr_knob.props.get("mod-offset").map(|value| {
+                bound_field(Some(value))
+                    .unwrap_or_else(|| panic!("rack sr knob should bind its live dot: {value:?}"))
             }),
             Some(super::rack_slot_mod_offset_field(0, 0, 8)),
             "the dot must read the selected rack slot's field, not a track-wide one",
@@ -13399,6 +13428,7 @@ mod solo_binding_tests;
             .expect("install selected-step rack gain test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.drain_host_commands();
 
         editor
@@ -13546,9 +13576,10 @@ mod solo_binding_tests;
             .expect("install rack mods test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open true) (set! v.mod-slot 1)))")
             .expect("open rack sampler mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -13706,12 +13737,21 @@ mod solo_binding_tests;
             depth_idx,
             None,
         );
+        // The host pushes the rack slot's depth param (eseq.kinds), which
+        // the lane's depth binding reads.
+        set_seeded_field(&mut editor, &depth_value_field, Value::Number(updated_depth as f64));
         assert_eq!(
             editor.runtime_mut().eval_str(&format!(
-                "(reactive-value (eseq.effects.param-controls/instrument-mod-target-depth {depth_target_expression}))"
+                "(let ((p (nth
+                           (filter |candidate| (= (get candidate :idx) {speed_idx})
+                             (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :synth))
+                           0)))
+                   (+ 0 (eseq.effects.param-controls/mod-target-depth
+                          (first (filter (lambda (mt) (= mt.depth.index {depth_idx}))
+                                   (eseq.effects.param-controls/param-mod-targets false p))))))"
             )),
             Ok(Some(Value::Number(updated_depth as f64))),
-            "rack custom-UI modulation knobs must redraw from the targeted rack-slot sync"
+            "rack custom-UI modulation knobs must redraw from the rack slot's depth param"
         );
 
         editor
@@ -13923,6 +13963,7 @@ mod solo_binding_tests;
         sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, 0, None);
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("rack fx lisp status after refresh: {status}");
@@ -14044,13 +14085,10 @@ mod solo_binding_tests;
             sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
             0.75,
         ));
-        assert!(sync_rack_macro_target_value_fields(
-            editor.runtime_mut(),
-            &app,
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            None,
-        ));
+        // The host shows the mapped value in the slot's attack param
+        // (eseq.kinds param.value).
+        let attack = seeded_rack_slot_param(&editor, 0, 0);
+        push_seeded(&mut editor, attack, "value", Value::Number(25.0));
         editor.refresh_runtime_side_effects();
         let updated_layout = editor.widget_layout().expect("updated rack fx layout");
         let updated_sampler_panel =
@@ -14076,7 +14114,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.mods-open true) (set! v.mod-slot 1)))")
             .expect("open modulation editing for macro-owned rack sampler parameter");
         editor.refresh_runtime_side_effects();
         let mods_layout = editor
@@ -14146,7 +14184,7 @@ mod solo_binding_tests;
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (set! v.mods-open false))")
             .expect("return to rack sampler base controls");
         editor.refresh_runtime_side_effects();
 
@@ -14524,6 +14562,7 @@ mod solo_binding_tests;
             "instrument-panel",
             build_instrument_panel_value(&app, 0, &selected),
         );
+        seed_panel_kinds(&mut editor);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-plocks",
@@ -14550,7 +14589,7 @@ mod solo_binding_tests;
             ("row".into(), value_cell(Value::Number(4.0))),
         ].into_iter().collect())]).expect("open rack macro lock menu");
         assert_eq!(editor.runtime_mut().eval_str(
-            "(get eseq.effects.param-controls/param-plock-menu :target)"),
+            "(let ((m eseq.effects.param-controls/plock-menu)) (get m.target :target))"),
             Ok(Some(Value::String("rack-macro".into()))));
         editor.runtime_mut().eval_str("(eseq.effects.param-controls/close-param-plock-menu)")
             .expect("close macro menu");
@@ -14878,7 +14917,7 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str(
                 r#"(eseq.effects.param-controls/fx-set-effect-value
-                    (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
+                    (dict :name "OTT" :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
                     (dict :idx 2)
                     0.75)"#,
             )
@@ -22813,17 +22852,15 @@ mod solo_binding_tests;
                 ]),
             ]),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-variants",
-            test_list(vec![map_value([
-                ("kind", Value::String("variant".to_string())),
-                ("current", Value::Bool(true)),
-                ("color-r", Value::Number(0.2)),
-                ("color-g", Value::Number(0.7)),
-                ("color-b", Value::Number(0.9)),
-            ])]),
-        );
+        // The selected step plays the current track's variant A: the
+        // p-lock accent is its color (eseq.kinds variant.current).
+        let rt = editor.runtime_mut();
+        let track = project_list(rt, "tracks")[0];
+        let variant = rt.register_keyed_instance("eseq.kinds:variant", &[track, 0]).unwrap();
+        set_field(rt, variant, "track", Value::Instance(track));
+        set_field(rt, variant, "current", Value::Bool(true));
+        set_field(rt, variant, "color", test_rgb([0.2, 0.7, 0.9]));
+        set_field(rt, track, "variants", instance_list([variant]));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -39347,6 +39384,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(0.0));
@@ -39792,6 +39830,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let filter_ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -39902,6 +39941,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx_id = editor
             .buffers
@@ -39941,12 +39981,8 @@ mod solo_binding_tests;
 
         // What `set-effect-param-batch` -> `sync_effect_param_batch_display`
         // does per drag event: rewrite only the per-param value fields.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", cutoff_field, Value::Number(4200.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", resonance_field, Value::Number(3.5));
+        set_seeded_field(&mut editor, cutoff_field, Value::Number(4200.0));
+        set_seeded_field(&mut editor, resonance_field, Value::Number(3.5));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -40010,6 +40046,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let eq8_ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -40130,6 +40167,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("fx lisp status after refresh: {status}");
@@ -40323,6 +40361,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx_id = editor
             .buffers
@@ -40818,6 +40857,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("sampler fx lisp status after refresh: {status}");
@@ -40993,6 +41033,7 @@ mod solo_binding_tests;
             .expect("install selected-step sampler fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("sampler fx lisp status after refresh: {status}");
@@ -41173,14 +41214,15 @@ mod solo_binding_tests;
                 });
         }
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
                 r#"
                 (do
-                  (set! eseq.effects.param-controls/process-map-track 0)
-                  (set! eseq.effects.param-controls/process-map-instance-id 42)
-                  (set! eseq.effects.param-controls/process-map-port "speed"))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.track 0))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.instance-id 42))
+                  (let ((v eseq.effects.param-controls/process-map)) (set! v.port "speed")))
                 "#,
             )
             .expect("arm process map state");
@@ -41308,6 +41350,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -41408,6 +41451,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -41467,7 +41511,7 @@ mod solo_binding_tests;
         let selector = find_layout_node_by_debug_name(panel, "es-compressor-mode").unwrap();
         assert_eq!(selector.props.get("value"), Some(&Value::String("Punch".into())));
         for mode in 1..=2 {
-            editor.runtime_mut().set_reactive("SEQ", "test-es-mode", Value::Number(mode as f64));
+            set_seeded_field(&mut editor, "test-es-mode", Value::Number(mode as f64));
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("updated ES Compressor layout");
@@ -41545,6 +41589,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -41769,6 +41814,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -41921,6 +41967,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -42102,6 +42149,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -42261,6 +42309,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -42557,6 +42606,7 @@ mod solo_binding_tests;
         ).expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("Filter Table fx lisp status after refresh: {status}");
@@ -42589,15 +42639,9 @@ mod solo_binding_tests;
             matches!(spectrum_viewer.props.get("response-cutoff"), Some(Value::ReactiveRef { .. })),
             "response visualization must bind to the live cutoff field",
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "filter-table-live-0",
-            Value::Number(0.5),
+        set_seeded_field(&mut editor, "filter-table-live-0", Value::Number(0.5),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "filter-table-live-1",
-            Value::Number(4000.0),
+        set_seeded_field(&mut editor, "filter-table-live-1", Value::Number(4000.0),
         );
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(&table_viewer.props, "wave", -1.0),
@@ -42631,20 +42675,16 @@ mod solo_binding_tests;
             ),
             "a modulated destination's knob binds its live dot to the offset field",
         );
+        // Every knob binds param.mod-offset; an unmodulated param's reads 0,
+        // which draws no dot.
         let frame_knob = find_knob_by_label(&layout, "frame").expect("frame knob-number");
-        assert!(
-            !matches!(
-                frame_knob.props.get("mod-offset"),
-                Some(Value::ReactiveRef { .. })
-            ),
-            "a param with no published modulation must draw no live dot",
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&frame_knob.props, "mod-offset", -1.0),
+            0.0,
+            "an unmodulated param draws no live dot",
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "fx-mod-value-77-2", Value::Number(0.8));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "fx-mod-offset-77-2", Value::Number(0.8));
+        set_seeded_field(&mut editor, "fx-mod-value-77-2", Value::Number(0.8));
+        set_seeded_field(&mut editor, "fx-mod-offset-77-2", Value::Number(0.8));
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(
                 &spectrum_viewer.props,
@@ -42781,13 +42821,7 @@ mod solo_binding_tests;
 
         editor.runtime_mut().eval_str(
             r#"(do
-              (set! eseq.effects.state/effect-mods-open true)
-              (set! eseq.effects.state/effect-mods-chain "audio")
-              (set! eseq.effects.state/effect-mods-track 0)
-              (set! eseq.effects.state/effect-mods-slot 0)
-              (set! eseq.effects.state/effect-mods-rack-slot -1)
-              (set! eseq.effects.state/effect-mods-bus -1)
-              (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
+              (let ((v eseq.effects.state/effect-mods)) (do (set! v.open true) (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.mod-slot 1))))"#,
         ).expect("open Filter Table effect mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -42957,6 +42991,7 @@ mod solo_binding_tests;
         ).expect("install rack Filter Table test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter()
             .find(|buffer| buffer.name == "*fx*")
@@ -42989,8 +43024,8 @@ mod solo_binding_tests;
         assert!(matches!(curve.props.get("response-cutoff"), Some(Value::ReactiveRef { .. })));
         assert!(matches!(cutoff.props.get("mod-offset"), Some(Value::ReactiveRef { .. })));
         for value in [2400.0, 750.0, 1000.0] {
-            editor.runtime_mut().set_reactive("SEQ", &effect_mod_value_field(43, 1), Value::Number(value));
-            editor.runtime_mut().set_reactive("SEQ", &effect_mod_offset_field(43, 1), Value::Number(value - 1000.0));
+            set_seeded_field(&mut editor, &effect_mod_value_field(43, 1), Value::Number(value));
+            set_seeded_field(&mut editor, &effect_mod_offset_field(43, 1), Value::Number(value - 1000.0));
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&curve.props, "response-cutoff", -1.0), value as f32);
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "mod-offset", -1.0), (value - 1000.0) as f32);
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "value", -1.0), 1000.0);
@@ -43131,6 +43166,7 @@ mod solo_binding_tests;
         ).expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("Filter Table editor lisp status after refresh: {status}");
@@ -43246,14 +43282,10 @@ mod solo_binding_tests;
             sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
         }
         editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+        seed_panel_kinds(&mut editor);
         editor.runtime_mut().eval_str(r#"
             (set-layout (list :buf "*fx*" :hide-status true))
-            (set! eseq.effects.state/effect-mods-chain "audio")
-            (set! eseq.effects.state/effect-mods-track 0)
-            (set! eseq.effects.state/effect-mods-slot 0)
-            (set! eseq.effects.state/effect-mods-rack-slot -1)
-            (set! eseq.effects.state/effect-mods-bus -1)
-            (set! eseq.effects.state/effect-mods-open true)
+            (let ((v eseq.effects.state/effect-mods)) (do (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.open true)))
         "#).expect("open Filterbank modulation controls");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -43262,7 +43294,7 @@ mod solo_binding_tests;
         editor.set_layout_viewport(220, 30);
         for slot in 1..=4 {
             editor.runtime_mut().eval_str(&format!(
-                "(set! eseq.effects.state/effect-selected-mod-slot {slot})",
+                "(let ((v eseq.effects.state/effect-mods)) (set! v.mod-slot {slot}))",
             )).unwrap();
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -43351,6 +43383,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -43440,6 +43473,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -43657,6 +43691,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let delay_ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -43791,6 +43826,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
     }
 
@@ -44005,6 +44041,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         let reverb_ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -45228,6 +45265,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -45331,6 +45369,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -45469,6 +45508,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -45599,6 +45639,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -45752,6 +45793,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -45916,6 +45958,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load initial custom instrument UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -46064,6 +46107,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -46227,6 +46271,7 @@ mod solo_binding_tests;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -46363,6 +46408,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("custom instrument fx lisp status after refresh: {status}");
@@ -46772,9 +46818,10 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open false) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open false) (set! v.mod-slot 1)))")
             .expect("show custom synth panel");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -46812,9 +46859,7 @@ mod solo_binding_tests;
             "custom instrument knob should bind its live dot: {:?}",
             synth_knob.props.get("mod-offset")
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "fx-instrument-mod-offset-0", Value::Number(0.3));
+        set_seeded_field(&mut editor, "fx-instrument-mod-offset-0", Value::Number(0.3));
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "mod-offset", -1.0),
             0.3,
@@ -46845,9 +46890,12 @@ mod solo_binding_tests;
             "(def seq-show-fx-lower-panel",
             "(bind-key \"Tab\"",
         );
+        // The slice reads eseq.effects.state's instrument-view singleton.
         editor
             .runtime_mut()
-            .eval_str(toggle_action_src)
+            .eval_str(&format!(
+                "(import eseq.effects.state :refer (instrument-view))\n{toggle_action_src}"
+            ))
             .expect("load real instrument mods toggle action");
         editor
             .runtime_mut()
@@ -46874,7 +46922,7 @@ mod solo_binding_tests;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(Value::Bool(true))
         );
@@ -46967,7 +47015,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-selected-mod-slot 2)")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (set! v.mod-slot 2))")
             .expect("select second modulator");
         editor
             .runtime_mut()
@@ -47023,12 +47071,8 @@ mod solo_binding_tests;
         assert_set_instrument_param(&commands[2], 22.0, 0.42);
         assert_set_instrument_param(&commands[3], 23.0, 330.0);
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "test-mod-source-12", Value::Number(2.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "test-mod-depth-13", Value::Number(0.75));
+        set_seeded_field(&mut editor, "test-mod-source-12", Value::Number(2.0));
+        set_seeded_field(&mut editor, "test-mod-depth-13", Value::Number(0.75));
         editor
             .runtime_mut()
             .invoke(callback, vec![Value::Number(0.9)])
@@ -47385,9 +47429,10 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 2))")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open true) (set! v.mod-slot 2)))")
             .expect("open sampler inline mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -47509,9 +47554,7 @@ mod solo_binding_tests;
             "sampler speed knob should bind its live dot: {:?}",
             speed_knob.props.get("mod-offset")
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "fx-instrument-mod-offset-11", Value::Number(0.4));
+        set_seeded_field(&mut editor, "fx-instrument-mod-offset-11", Value::Number(0.4));
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(&speed_knob.props, "mod-offset", -1.0),
             0.4,
@@ -47547,7 +47590,7 @@ mod solo_binding_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.effects.state/instrument-selected-mod-slot 1)")
+            .eval_str("(let ((v eseq.effects.state/instrument-view)) (set! v.mod-slot 1))")
             .expect("select sampler LFO source editor");
         editor
             .runtime_mut()
@@ -47645,6 +47688,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load agent stub custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("agent stub fx lisp status after refresh: {status}");
@@ -47774,6 +47818,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load drift custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("drift fx lisp status after refresh: {status}");
@@ -47831,8 +47876,8 @@ mod solo_binding_tests;
             assert_visible(panel, panel);
             let env = find_layout_node_by_debug_name(&current, &format!("{prefix}-envelope")).unwrap();
             for stage in ["attack", "decay", "sustain", "release"] {
-                let Value::ReactiveRef { field, .. } = &env.props[stage] else { panic!("bound {stage}"); };
-                assert_eq!(field, &format!("drift-test-env{}_{stage}", section + 1));
+                let field = bound_field(env.props.get(stage)).unwrap_or_else(|| panic!("bound {stage}"));
+                assert_eq!(field, format!("drift-test-env{}_{stage}", section + 1));
             }
             editor.drain_host_commands();
             let values = [("attack", 12.0), ("decay", 230.0), ("sustain", 0.45), ("release", 340.0)];
@@ -47885,7 +47930,7 @@ mod solo_binding_tests;
         if prefix == "syn" {
             for (mode, rate) in ["rate_hz", "time_ms", "ratio", "beats"].iter().enumerate() {
                 for prefix in ["lfo", "cyc"] {
-                    editor.runtime_mut().set_reactive("SEQ", &format!("drift-test-{prefix}_mode"), Value::Number(mode as f64));
+                    set_seeded_field(&mut editor, &format!("drift-test-{prefix}_mode"), Value::Number(mode as f64));
                 }
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
@@ -48140,6 +48185,7 @@ mod solo_binding_tests;
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&custom_ui).expect("load Heat UI");
         editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
         editor.set_active_buffer(fx_id);
@@ -48197,7 +48243,7 @@ mod solo_binding_tests;
                 (4, "notch", 1, 1.0), (5, "notch", 2, 1.0),
                 (6, "highpass", 1, 1.0), (7, "highpass", 2, 0.5),
             ] {
-                editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{prefix}_mode"), Value::Number(mode as f64));
+                set_seeded_field(&mut editor, &format!("heat-test-{prefix}_mode"), Value::Number(mode as f64));
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 let current = editor.widget_layout().unwrap();
@@ -48211,9 +48257,9 @@ mod solo_binding_tests;
                     assert_eq!(*band["q-curve-power"].borrow(), Value::Number(q_power));
                     assert_eq!(*band["q-taper"].borrow(), Value::Keyword("log".into()));
                     for (prop, param) in [("freq", "cutoff_hz"), ("q", "q")] {
-                        let binding = band[prop].borrow();
-                        let Value::ReactiveRef { field, .. } = &*binding else { panic!("bound {prop}"); };
-                        assert_eq!(field, &format!("heat-test-{prefix}_{param}"));
+                        let binding = band[prop].borrow().clone();
+                        let field = bound_field(Some(&binding)).unwrap_or_else(|| panic!("bound {prop}"));
+                        assert_eq!(field, format!("heat-test-{prefix}_{param}"));
                     }
                 }
             }
@@ -48247,7 +48293,7 @@ mod solo_binding_tests;
         // independent Filter 2 cutoff. Changes to Filter 1 redraw this graph.
         for (param, value) in [("filter2_follow", 1.0), ("filter1_cutoff_hz", 1000.0),
             ("filter2_offset_octaves", 1.0)] {
-            editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{param}"), Value::Number(value));
+            set_seeded_field(&mut editor, &format!("heat-test-{param}"), Value::Number(value));
         }
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -48275,7 +48321,7 @@ mod solo_binding_tests;
         assert_eq!(*offset["param-idx"].borrow(), Value::Number(param_index("filter2_offset_octaves")));
         let Value::Number(value) = *offset["value"].borrow() else { panic!("offset value"); };
         assert!((value - 2.0).abs() < 0.0001);
-        editor.runtime_mut().set_reactive("SEQ", "heat-test-filter2_follow", Value::Number(0.0));
+        set_seeded_field(&mut editor, "heat-test-filter2_follow", Value::Number(0.0));
         for (mode, expected) in [
             [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             [0.5, 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -48304,7 +48350,7 @@ mod solo_binding_tests;
                 assert_eq!(*update["value"].borrow(), Value::Number(*value));
             }
             for (param, value) in route_names.iter().zip(expected) {
-                editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{param}"), Value::Number(*value));
+                set_seeded_field(&mut editor, &format!("heat-test-{param}"), Value::Number(*value));
             }
             editor.refresh_runtime_side_effects();
             editor.runtime_mut().run_reactive_cycle();
@@ -48436,7 +48482,7 @@ mod solo_binding_tests;
                     assert_eq!(*update["value"].borrow(), Value::Number(value));
                 }
 
-                editor.runtime_mut().set_reactive(&namespace, &field, Value::Number(0.37));
+                set_binding_source(&mut editor, &namespace, &field, Value::Number(0.37));
                 assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.37,
                     "parameter changes must reach the editor without rebuilding the panel");
             }
@@ -48565,6 +48611,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load digiwave custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("digiwave fx lisp status after refresh: {status}");
@@ -48686,7 +48733,7 @@ mod solo_binding_tests;
         fn control<'a>(node: &'a eseqlisp::layout::LayoutNode, field: &str) -> Option<&'a eseqlisp::layout::LayoutNode> {
             if matches!(node.widget_type.as_str(), "knob-number" | "number-picker" | "dropdown")
                 && ["value", "value-index"].iter().any(|key| matches!(node.props.get(*key),
-                    Some(Value::ReactiveRef { field: bound, .. }) if bound == field)) {
+                    Some(bound) if bound_field(Some(bound)).as_deref() == Some(field))) {
                 return Some(node);
             }
             node.children.iter().find_map(|child| control(child, field))
@@ -48733,6 +48780,7 @@ mod solo_binding_tests;
         )));
         editor.runtime_mut().eval_str(&custom).unwrap();
         editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
         editor.set_active_buffer(fx);
@@ -48963,17 +49011,12 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
                 r#"(do
-                  (set! eseq.effects.state/effect-mods-open true)
-                  (set! eseq.effects.state/effect-mods-chain "audio")
-                  (set! eseq.effects.state/effect-mods-track 0)
-                  (set! eseq.effects.state/effect-mods-slot 0)
-                  (set! eseq.effects.state/effect-mods-rack-slot -1)
-                  (set! eseq.effects.state/effect-mods-bus -1)
-                  (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
+                  (let ((v eseq.effects.state/effect-mods)) (do (set! v.open true) (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.mod-slot 1))))"#,
             )
             .expect("open effect mods");
         editor.refresh_runtime_side_effects();
@@ -49225,6 +49268,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
@@ -49246,13 +49290,7 @@ mod solo_binding_tests;
                             (eseq.effects.custom-ui-lego/ui-lego-num-s 1 "mix" "mix" 5.2 2 false (eseq.effects.custom-ui-lego/ui-accent-orange))))))))
 
                 (do
-                  (set! eseq.effects.state/effect-mods-open true)
-                  (set! eseq.effects.state/effect-mods-chain "audio")
-                  (set! eseq.effects.state/effect-mods-track 0)
-                  (set! eseq.effects.state/effect-mods-slot 0)
-                  (set! eseq.effects.state/effect-mods-rack-slot -1)
-                  (set! eseq.effects.state/effect-mods-bus -1)
-                  (set! eseq.effects.state/effect-selected-mod-slot 1))
+                  (let ((v eseq.effects.state/effect-mods)) (do (set! v.open true) (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.mod-slot 1))))
                 "#,
             )
             .expect("install custom audio effect UI and open mods");
@@ -49395,6 +49433,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
@@ -49416,11 +49455,7 @@ mod solo_binding_tests;
                             (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "damp" "dmp" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2)))))))
 
                 (do
-                  (set! eseq.effects.state/effect-mods-open true)
-                  (set! eseq.effects.state/effect-mods-chain "audio")
-                  (set! eseq.effects.state/effect-mods-slot 0)
-                  (set! eseq.effects.state/effect-mods-bus -1)
-                  (set! eseq.effects.state/effect-selected-mod-slot 1))
+                  (let ((v eseq.effects.state/effect-mods)) (do (set! v.open true) (set! v.chain "audio") (set! v.slot 0) (set! v.bus -1) (set! v.mod-slot 1))))
                 "#,
             )
             .expect("install custom spectral-style audio effect UI");
@@ -49737,17 +49772,12 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor
             .runtime_mut()
             .eval_str(
                 r#"(do
-                  (set! eseq.effects.state/effect-mods-open true)
-                  (set! eseq.effects.state/effect-mods-chain "audio")
-                  (set! eseq.effects.state/effect-mods-track 0)
-                  (set! eseq.effects.state/effect-mods-slot 0)
-                  (set! eseq.effects.state/effect-mods-rack-slot -1)
-                  (set! eseq.effects.state/effect-mods-bus -1)
-                  (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
+                  (let ((v eseq.effects.state/effect-mods)) (do (set! v.open true) (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.mod-slot 1))))"#,
             )
             .expect("open DJ Mixer effect mods");
         editor.refresh_runtime_side_effects();
@@ -49821,21 +49851,13 @@ mod solo_binding_tests;
         assert_set_effect_param(&commands[0], 40.0, 0.0);
 
         assert_reactive_float_prop(loop_button, "active", 0.0);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "dj-loop-depth", Value::Number(1.0));
+        set_seeded_field(&mut editor, "dj-loop-depth", Value::Number(1.0));
         assert_reactive_float_prop(loop_button, "active", 1.0);
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "dj-enabled-depth", Value::Number(0.0));
+        set_seeded_field(&mut editor, "dj-enabled-depth", Value::Number(0.0));
         assert_reactive_float_prop(enabled_button, "active", 0.0);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "dj-loop-depth", Value::Number(0.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "dj-enabled-depth", Value::Number(1.0));
+        set_seeded_field(&mut editor, "dj-loop-depth", Value::Number(0.0));
+        set_seeded_field(&mut editor, "dj-enabled-depth", Value::Number(1.0));
 
         click_node(&mut editor, loop_button);
         let commands = editor.drain_host_commands();
@@ -49937,7 +49959,7 @@ mod solo_binding_tests;
             assert_eq!(
                 editor
                     .runtime_mut()
-                    .eval_str("eseq.effects.state/effect-mods-open")
+                    .eval_str("(let ((v eseq.effects.state/effect-mods)) v.open)")
                     .expect("read effect mods open"),
                 Some(Value::Bool(expected)),
                 "{context}"
@@ -50119,6 +50141,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("custom effect mods toggle status after refresh: {status}");
@@ -50178,6 +50201,7 @@ mod solo_binding_tests;
             sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
         }
         editor.runtime_mut().set_reactive("SEQ", "effects", effects.clone());
+        seed_panel_kinds(&mut editor);
         editor.runtime_mut().eval_str(
             r#"(set-layout (list :buf "*fx*" :hide-status true))"#,
         ).expect("isolate effect panel");
@@ -50213,8 +50237,9 @@ mod solo_binding_tests;
             let knob = find_layout_node_by_widget_type(row, "knob-number").unwrap();
             assert_eq!(knob.props.get("unit"), Some(&Value::String(unit.to_string())));
         }
+        // The mix is a % param, read in display units (0-100): no scale.
         for (idx, unit, scale) in [(1, "×", 1.0), (3, "ms", 1.0), (4, "beats", 1.0),
-                                   (5, "ms", 1.0), (6, "kHz", 0.001), (7, "%", 100.0)] {
+                                   (5, "ms", 1.0), (6, "kHz", 0.001), (7, "%", 1.0)] {
             let row = find_layout_node_by_debug_name(panel, &format!("slowdown-param-{idx}")).unwrap();
             let knob = find_layout_node_by_widget_type(row, "knob-number").unwrap();
             assert_eq!(knob.props.get("unit"), Some(&Value::String(unit.to_string())));
@@ -50234,15 +50259,10 @@ mod solo_binding_tests;
         assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", mode_idx, "value", Value::Number(1.0));
 
         editor.runtime_mut().eval_str(r#"
-            (set! eseq.effects.state/effect-mods-chain "audio")
-            (set! eseq.effects.state/effect-mods-track 0)
-            (set! eseq.effects.state/effect-mods-slot 0)
-            (set! eseq.effects.state/effect-mods-rack-slot -1)
-            (set! eseq.effects.state/effect-mods-bus -1)
-            (set! eseq.effects.state/effect-mods-open true)
+            (let ((v eseq.effects.state/effect-mods)) (do (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.open true)))
         "#).unwrap();
         for slot in 1..=4 {
-            editor.runtime_mut().eval_str(&format!("(set! eseq.effects.state/effect-selected-mod-slot {slot})")).unwrap();
+            editor.runtime_mut().eval_str(&format!("(let ((v eseq.effects.state/effect-mods)) (set! v.mod-slot {slot}))")).unwrap();
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
@@ -50265,6 +50285,7 @@ mod solo_binding_tests;
             sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
             let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
             editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+            seed_panel_kinds(&mut editor);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
@@ -50788,6 +50809,7 @@ mod solo_binding_tests;
         ).expect("install bus Filter Table test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter()
             .find(|buffer| buffer.name == "*fx*")
@@ -50947,6 +50969,7 @@ mod solo_binding_tests;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("modulator panel fx lisp status after refresh: {status}");
@@ -51088,6 +51111,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("lego text readout fx lisp status after refresh: {status}");
@@ -51209,6 +51233,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("ui-rack fx lisp status after refresh: {status}");
@@ -51356,6 +51381,7 @@ mod solo_binding_tests;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("ui-rack fx lisp status after refresh: {status}");
@@ -54339,6 +54365,10 @@ mod solo_binding_tests;
                 (def eseq.effects.param-grid/fx-param-row (p fx key)
                   (dict :param (get p :name) :key key))
                 (def eseq.effects.param-controls/fx-param-value-for (fx p) (get p :value))
+                ;; The param's own value (param.value): the tap count's.
+                (defstate shd-test-taps 3)
+                (def eseq.effects.param-controls/param-base-value (fx p)
+                  (if (= (get p :name) "taps") shd-test-taps (get p :value)))
                 (def eseq.effects.param-controls/param-control-min (fx p) (get p :min))
                 (def eseq.effects.param-controls/param-control-max (fx p) (get p :max))
                 (def eseq.effects.param-controls/param-base-value-prop (fx p) false)
@@ -54386,13 +54416,6 @@ mod solo_binding_tests;
             }
             other => panic!("expected spatial MIDI FX map, got {other:?}"),
         }
-        let taps_value_field = value_param_string(&spatial_fx, "taps", "value-field")
-            .expect("taps param should expose a reactive value field");
-        runtime.register_reactive(
-            "SEQ",
-            vec![(taps_value_field.as_str(), Value::Number(3.0))],
-            true,
-        );
         runtime.set_global_value("spatial-test-fx", spatial_fx);
         let direct_lookup = runtime
             .eval_str(r#"(eseq.effects.custom-effect-ui/midi-fx-ui-param spatial-test-fx "delay-1")"#)
@@ -54431,7 +54454,7 @@ mod solo_binding_tests;
             "tap rows should be generated from the selected tap count: {rendered:?}"
         );
 
-        runtime.set_reactive("SEQ", &taps_value_field, Value::Number(5.0));
+        runtime.eval_str("(set! shd-test-taps 5)").expect("change the tap count");
         let rendered = runtime
             .eval_str("(custom-midi-fx-ui spatial-test-fx)")
             .expect("re-render spatial harmonic delay after taps change")
@@ -54492,13 +54515,7 @@ mod solo_binding_tests;
         for mod_slot in 0..=4 {
             let depth_mode = mod_slot != 0;
             editor.runtime_mut().eval_str(&format!(r#"
-                (set! eseq.effects.state/effect-mods-chain "audio")
-                (set! eseq.effects.state/effect-mods-track 0)
-                (set! eseq.effects.state/effect-mods-slot 0)
-                (set! eseq.effects.state/effect-mods-rack-slot -1)
-                (set! eseq.effects.state/effect-mods-bus -1)
-                (set! eseq.effects.state/effect-selected-mod-slot {})
-                (set! eseq.effects.state/effect-mods-open {})
+                (let ((v eseq.effects.state/effect-mods)) (do (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.mod-slot {}) (set! v.open {})))
             "#, mod_slot.max(1), if depth_mode { "true" } else { "false" })).unwrap();
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -56271,6 +56288,7 @@ mod solo_binding_tests;
         register_test_delete_target_natives(&mut editor, 1);
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        seed_panel_kinds(&mut editor);
         editor.refresh_runtime_side_effects();
         editor
     }

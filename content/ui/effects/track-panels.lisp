@@ -2,6 +2,7 @@
 (module eseq.effects.track-panels)
 
 (import eseq.effects.state :as st)
+(import eseq.view-kit :refer (listed?))
 (import eseq.effects.param-controls :as pc)
 (import eseq.macro-state :as ms)
 (import eseq.drum-rack-v2)
@@ -10,6 +11,7 @@
 (import eseq.effects.scale-editor :as se)
 
 (export selected-plock-row
+        target-plock-any?
         plock-row-selected?
         delete-selected-plock-row
         plock-chip-click
@@ -91,10 +93,100 @@
       (seq-plock-timebase label)
       (seq-set-timebase label))))
 
-;; Track-level lock presence rides the SEQV p-lock projection
-;; (param-controls.lisp) instead of reading SEQ.track-plocks directly, so a
-;; selection change only reruns this panel when one of these locks actually
-;; changed.
+;; --- P-lock row projection (COMPAT: eseq-0l17.14 group D) -------------------
+;; Device param controls read their p-lock state from eseq.kinds params
+;; (param-controls.lisp). Track-level locks (timebase, swing: rows without a
+;; param index) and the drum rack panel's macro and slot-control targets have
+;; no kind field yet, so this panel and the rack panel keep the legacy fan-out
+;; of SEQ.track-plocks / SEQ.track-plock-any into per-row SEQV fields
+;; ("<key>-on" / "<key>-def" / "<key>-any"): each control subscribes only to
+;; its own field, so a selection change reruns only the controls whose lock
+;; state changed. Ported with this file.
+
+(def plock-projected-key (target slot rack-slot idx)
+  (str "plk-" target "-" slot "-" rack-slot "-" idx))
+
+(def plock-projected-row-key (row)
+  (if (= (get row :param-idx) nil)
+    (str "plk-t-" (get row :target))
+    (plock-projected-key
+      (get row :target)
+      (if (= (get row :target) "instrument") "any" (get row :slot-idx))
+      (if (= (get row :target) "rack-effect") (get row :rack-slot) "x")
+      (get row :param-idx))))
+
+;; The rows the projections publish: the track-level locks
+;; (track-param-plock-active?, -default) and the rack macro and slot-control
+;; locks (target-plock-any?); every device param reads its kinds param.
+(def track-level-row? (row)
+  (= (get row :param-idx) nil))
+
+(def rack-control-row? (row)
+  (listed? (get row :target) '("rack-macro" "rack-slot-param")))
+
+(defstate plock-published-keys '())
+
+;; Runs as a dedicated non-visual effect buffer: a plain (effect ...) treats
+;; its result as the source buffer's widget tree, which would clobber the
+;; buffer that loaded this file. The named target gives the projection its
+;; own inert scratch buffer and keeps it live in every layout.
+(effect-buffer "*plock-sync*"
+  (do
+    (let ((keys
+            (reverse
+              (reduce |acc row|
+                (let ((key (plock-projected-row-key row)))
+                  (do
+                    (reactive-set "SEQV" (str key "-on") 1)
+                    (reactive-set "SEQV" (str key "-def") (get row :default))
+                    (cons key acc)))
+                '()
+                (filter track-level-row? SEQ.track-plocks)))))
+      (do
+        (each plock-published-keys |key idx|
+          (if (listed? key keys)
+            false
+            (do
+              (reactive-set "SEQV" (str key "-on") 0)
+              (reactive-set "SEQV" (str key "-def") false))))
+        (if (= plock-published-keys keys)
+          false
+          (set! plock-published-keys keys))))
+    nil))
+
+(defstate plock-any-published-keys '())
+
+;; Same fan-out over SEQ.track-plock-any: the targets that carry a p-lock on
+;; ANY step of the pattern (bead eseq-yr6w), for the automation dot.
+(effect-buffer "*plock-any-sync*"
+  (do
+    (let ((keys
+            (reverse
+              (reduce |acc row|
+                (let ((key (plock-projected-row-key row)))
+                  (do
+                    (reactive-set "SEQV" (str key "-any") 1)
+                    (cons key acc)))
+                '()
+                (filter rack-control-row? SEQ.track-plock-any)))))
+      (do
+        (each plock-any-published-keys |key idx|
+          (if (listed? key keys)
+            false
+            (reactive-set "SEQV" (str key "-any") 0)))
+        (if (= plock-any-published-keys keys)
+          false
+          (set! plock-any-published-keys keys))))
+    nil))
+
+;; Whether a lock target (a dict as the clear-param-plocks command takes it:
+;; a rack macro, a rack slot control) is locked on any step.
+(def target-plock-any? (target)
+  (= (reactive-get "SEQV" (str (plock-projected-row-key target) "-any")) 1))
+
+;; Track-level lock presence rides the projection above instead of reading
+;; SEQ.track-plocks directly, so a selection change only reruns this panel
+;; when one of these locks actually changed.
 (def track-param-plock-active? (target)
   (= (reactive-get "SEQV" (str "plk-t-" target "-on")) 1))
 

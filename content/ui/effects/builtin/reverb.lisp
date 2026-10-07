@@ -99,7 +99,7 @@
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p)
-        :value-scale 100 :decimals 0
+        :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
         :mod-offset (eseq.effects.param-controls/param-mod-offset p)
         :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -152,10 +152,7 @@
 ;; Write several params at once. Rack/bus/midi chains go through the
 ;; per-param path; track chains use one batch host command so a drag lands
 ;; as a single undo step (`:commit` on release). `pairs` is a list of
-;; (param value) lists.
-(def update-dict (pair)
-  (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1)))
-
+;; (param value) lists, in display units.
 (def write-params (fx pairs commit?)
   (do
     (fx-clear-selected-effect)
@@ -166,9 +163,7 @@
         (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
         (dict :slot-idx (get fx :slot-idx)
               :target-node-id (get fx :target-node-id)
-              :updates (if (nth pairs 1)
-                         (list (update-dict (nth pairs 0)) (update-dict (nth pairs 1)))
-                         (list (update-dict (nth pairs 0))))
+              :updates (eseq.effects.param-controls/effect-param-updates fx pairs)
               :commit commit?)))))
 
 (def curve-drag? (event)

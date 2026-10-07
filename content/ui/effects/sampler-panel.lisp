@@ -1,7 +1,7 @@
 ;; Sampler instrument panel state and controls.
 (module eseq.effects.sampler-panel)
 
-(import eseq.effects.state :as st)
+(import eseq.effects.state :as st :refer (instrument-view key-lock-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.panel-frame :as pf)
@@ -66,7 +66,7 @@
               "set-instrument-plock-batch"
               "set-instrument-param-batch"))
           (dict :track (get inst :track)
-                :notes st/instrument-key-lock-selected-notes
+                :notes key-lock-view.notes
                 :updates updates
                 :gesture "sampler-range"
                 :label "Set sampler range"))))))
@@ -502,7 +502,7 @@
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
               (sampler-param-pickers (get inst :synth) inst)))))
           (sampler-param-knobs (get inst :synth) inst))))
-    (if st/instrument-mods-open
+    (if instrument-view.mods-open
       (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
         (im/mod-control-panel inst)
         body)

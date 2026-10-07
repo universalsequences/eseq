@@ -59,7 +59,16 @@ pub(super) fn register_mod_targets<S: KindStore>(
         let targets = indexed_children(store, param, MOD_TARGET, lanes.len(), |store, id, at| {
             let lane = lanes[at];
             let depth = &pdescs[lane.depth_param_idx];
-            let (min, max) = mod_target_depth_range(depth, lane, desc.sampler_depths);
+            // A % depth stored as a ratio reads (value, range) x 100 like
+            // every % param (`depth-min` doc: the depth's display units).
+            let (min, max) = if depth.is_percent() {
+                (
+                    depth.stored_to_user(lane.depth_min),
+                    depth.stored_to_user(lane.depth_max),
+                )
+            } else {
+                mod_target_depth_range(depth, lane, desc.sampler_depths)
+            };
             let source = lane.source_param_idx.and_then(param_at);
             let unit = lane.depth_unit.clone().unwrap_or_default();
             store.push(id, f::MOD_TARGET_PARAM, Value::Instance(param));
@@ -497,6 +506,14 @@ pub(super) fn param_panel_fields(
         }
         if mask & bits.mod_scale != 0 {
             emit(f::PARAM_MOD_SCALE, number(scale));
+        }
+        if mask & bits.mod_ratio != 0 {
+            let ratio = if pdesc.is_percent() {
+                value / 100.0
+            } else {
+                value
+            };
+            emit(f::PARAM_MOD_RATIO, number(ratio));
         }
     }
     if mask & bits.process() != 0 {

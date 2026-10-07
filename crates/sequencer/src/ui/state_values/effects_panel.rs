@@ -423,17 +423,25 @@ pub(crate) fn build_effects_value(
                         "idx".to_string(),
                         Rc::new(RefCell::new(Value::Number(param_idx as f64))),
                     );
+                    // Display units (a % param reads 0-100), as the eseq.kinds param the
+                    // panel binds; the effect commands still take stored values.
                     pmap.insert(
                         "value".to_string(),
-                        Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(current_val) as f64,
+                        ))),
                     );
                     pmap.insert(
                         "min".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.min) as f64
+                        ))),
                     );
                     pmap.insert(
                         "max".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.max) as f64
+                        ))),
                     );
                     match &pdesc.kind {
                         ParamKind::Boolean => {
@@ -1227,17 +1235,19 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                 "idx".to_string(),
                                 Rc::new(RefCell::new(Value::Number(param_idx as f64))),
                             );
+                            // Display units (a % param reads 0-100), as the eseq.kinds param the
+                            // panel binds; the effect commands still take stored values.
                             pmap.insert(
                                 "value".to_string(),
-                                Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                                Rc::new(RefCell::new(Value::Number(pdesc.stored_to_user(current_val) as f64))),
                             );
                             pmap.insert(
                                 "min".to_string(),
-                                Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                                Rc::new(RefCell::new(Value::Number(pdesc.stored_to_user(pdesc.min) as f64))),
                             );
                             pmap.insert(
                                 "max".to_string(),
-                                Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                                Rc::new(RefCell::new(Value::Number(pdesc.stored_to_user(pdesc.max) as f64))),
                             );
                             match &pdesc.kind {
                                 ParamKind::Boolean => {
@@ -1611,17 +1621,25 @@ pub(crate) fn build_midi_effects_value(
                         "idx".to_string(),
                         Rc::new(RefCell::new(Value::Number(param_idx as f64))),
                     );
+                    // Display units (a % param reads 0-100), as the eseq.kinds param the
+                    // panel binds; the effect commands still take stored values.
                     pmap.insert(
                         "value".to_string(),
-                        Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(current_val) as f64,
+                        ))),
                     );
                     pmap.insert(
                         "min".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.min) as f64
+                        ))),
                     );
                     pmap.insert(
                         "max".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.max) as f64
+                        ))),
                     );
                     match &pdesc.kind {
                         ParamKind::Boolean => {

@@ -51,8 +51,8 @@
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :taper (if (eseq.effects.param-controls/param-mods-open? fx) "linear" taper)
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -75,10 +75,10 @@
     (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -162,7 +162,7 @@
 ;; ── Mode selector ──
 
 (def mode-button (fx p index short-label)
-  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value-for fx p)) index))
         (reverb-mode (> index 5)))
     (button short-label
       :width 3.0 :height 1.30 :padding 0 :font-size 8.5
@@ -227,7 +227,7 @@
 
 ;; Spring type selector (which physical tank the model is tuned to).
 (def spring-button (fx p index short-label)
-  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value-for fx p)) index)))
     (button short-label
       :width 4.35 :height 0.92 :padding 0 :font-size 8.0
       :background-color (if selected :delay-reverb-mode-on-bg :mixer-control-bg)

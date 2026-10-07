@@ -4,8 +4,7 @@
 
 (module eseq.effects.process-panel)
 
-(import eseq.effects.state :as st
-  :refer (process-panel-selected-track process-panel-selected-instance-id))
+(import eseq.effects.state :as st :refer (process-panel-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.panel-frame :as pf)
@@ -40,33 +39,33 @@
 (def clear-selection ()
   (do
     (pc/process-map-clear)
-    (if (or (not (= eseq.effects.state/process-panel-selected-track -1))
-            (not (= eseq.effects.state/process-panel-selected-instance-id 0)))
+    (if (or (not (= process-panel-view.track -1))
+            (not (= process-panel-view.instance-id 0)))
       (do
-        (set! eseq.effects.state/process-panel-selected-track -1)
-        (set! eseq.effects.state/process-panel-selected-instance-id 0))
+        (set! process-panel-view.track -1)
+        (set! process-panel-view.instance-id 0))
       false)))
 
 (def slot-selected? (slot)
-  (and (= eseq.effects.state/process-panel-selected-track SEQ.current-track)
-       (= eseq.effects.state/process-panel-selected-instance-id (get slot :instance-id))))
+  (and (= process-panel-view.track SEQ.current-track)
+       (= process-panel-view.instance-id (get slot :instance-id))))
 
 (def select-slot (slot)
   (do
     (if (not (slot-selected? slot))
       (pc/process-map-clear)
       nil)
-    (set! eseq.effects.state/process-panel-selected-track SEQ.current-track)
-    (set! eseq.effects.state/process-panel-selected-instance-id (get slot :instance-id))
+    (set! process-panel-view.track SEQ.current-track)
+    (set! process-panel-view.instance-id (get slot :instance-id))
     (pf/fx-clear-delete-selection)))
 
 (def selected-slot ()
   (if (and (not (pw/has-selected-bus?))
-           (= eseq.effects.state/process-panel-selected-track SEQ.current-track))
+           (= process-panel-view.track SEQ.current-track))
     (let ((matches
             (filter
               (lambda (slot)
-                (= (get slot :instance-id) eseq.effects.state/process-panel-selected-instance-id))
+                (= (get slot :instance-id) process-panel-view.instance-id))
               SEQ.process-slots)))
       (if (> (len matches) 0) (nth matches 0) nil))
     nil))

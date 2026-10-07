@@ -1,14 +1,29 @@
 ;; Parameter value routing, modulation targeting, and wrappers.
+;;
+;; A control draws one param dict of a panel (an instrument's, or an effect's
+;; `fx` dict's): its layout comes from the dict, everything it shows from the
+;; eseq.kinds param the dict stands for (eseq.effects.devices/param-of; spec
+;; docs/kind-bindings-spec.md §13.1). A widget prop gets a `#'` binding
+;; (`#'prm.value`, the knob repaints), a decision a value (`prm.locked`, the
+;; control re-renders). Every value is in display units, so a % param reads
+;; 0-100; the legacy effect commands the controls send keep their stored
+;; units (eseq.effects.devices/param-stored-value converts).
+;;
+;; The p-lock menu, the process-map arm and the p-lock accent color are this
+;; module's view state: `:key ()` singletons below.
 (module eseq.effects.param-controls)
 
+(import eseq.kinds :refer (selection macros))
 (import eseq.macro-state :as ms)
-(import eseq.effects.state :as st)
+(import eseq.effects.state :refer (instrument-view key-lock-view effect-mods))
 (import eseq.effects.panel-frame :as pf)
+(import eseq.effects.devices :as dv)
+(import eseq.view-kit :refer (open-menu! rgb-part))
 
 (export instrument-rack-target?
-        process-map-track
-        process-map-instance-id
-        process-map-port
+        param-owner-fx
+        with-param-owners
+        process-map
         process-map-active?
         process-map-port-active?
         process-map-arm-port
@@ -21,23 +36,26 @@
         param-macro-structure-key
         instrument-key-lock-has-selection?
         instrument-key-lock-authoring-active?
-        instrument-param-key-lock-row
         instrument-param-base-value
+        param-base-value
         fx-set-instrument-value
         fx-set-instrument-option
         custom-ui-option-index
         fx-set-effect-value
+        fx-set-effect-stored-value
+        effect-param-updates
         fx-toggle-instrument-value
         fx-toggle-effect-value
         fx-param-value
         effect-mods-active?
+        effect-mods-track
         fx-has-modulators?
         param-mods-open?
         fx-param-value-for
+        fx-param-numeric-value-for
         fx-param-text-value-for
         param-plock-active?
         param-plock-context-menu
-        target-plock-any?
         open-target-plock-menu
         open-host-plock-menu
         param-plock-default
@@ -48,6 +66,7 @@
         param-control-min
         param-control-max
         param-control-unit
+        percent-scale
         param-set-option
         param-set-control-value
         param-mod-wrapper
@@ -55,18 +74,25 @@
         fx-param-on?
         fx-param-on-for?
         instrument-mod-selected-slot
-        instrument-param-mod-targets
-        instrument-mod-target-source-slot
-        instrument-mod-target-depth
+        param-mod-targets
+        mod-target-source-slot
+        mod-target-depth
+        mod-target-depth-idx
         param-knob-mod-slot-prop
         param-knob-mod-depth-prop
         param-base-value-prop
         param-mod-offset
+        param-mod-offset-for
         param-effective-value
+        param-effective-ratio
         param-mod-scale
+        param-mod-scale-for
         param-process-value
+        param-process-value-for
         param-process-clamped
+        param-process-clamped-for
         param-process-mapped?
+        param-process-mapped-for?
         param-process-text-color
         param-base-min-prop
         param-base-max-prop
@@ -85,7 +111,7 @@
         instrument-param-mod-wrapper)
 
 ;; Migration aliases (module spec §10). This is the most-depended-on file in
-;; effects/: ~28 still-unconverted effect panels (plus Rust test harnesses in
+;; effects/: the effect panels (plus Rust test harnesses in
 ;; src/ui/state_values/tests.rs) call these names by their flat spelling, and
 ;; bare callers cannot see qualified names. Every public name keeps its
 ;; spelling — like eseq.effects.state, this hub mixes several prefix families
@@ -96,21 +122,28 @@
 (def instrument-rack-target? (p)
   (not (= (get p :rack-track) nil)))
 
-(defstate process-map-track -1)
-(defstate process-map-instance-id 0)
-(defstate process-map-port "")
-(defstate process-map-target-kind "")
+;; ── Process map arm ──
+
+;; A process port armed to bind a param (step process lanes): its track
+;; position and process instance id, the port's name and the kind of target
+;; it takes ("" any). Track -1 while nothing is armed.
+(def-kind process-map
+  :key ()
+  :state ((track -1)
+          (instance-id 0)
+          (port "")
+          (target-kind "")))
 
 (def process-map-active? ()
-  (and (>= process-map-track 0)
-       (> process-map-instance-id 0)
-       (not (= process-map-port ""))))
+  (and (>= process-map.track 0)
+       (> process-map.instance-id 0)
+       (not (= process-map.port ""))))
 
 (def process-map-port-active? (track slot port)
   (and (process-map-active?)
-       (= process-map-track track)
-       (= process-map-instance-id (get slot :instance-id))
-       (= process-map-port (get port :name))))
+       (= process-map.track track)
+       (= process-map.instance-id (get slot :instance-id))
+       (= process-map.port (get port :name))))
 
 (def process-map-arm-port (track slot port)
   (if (process-map-port-active? track slot port)
@@ -118,24 +151,24 @@
     (do
       (ms/clear-mapping-arm)
       (ms/rack-clear-mapping-arm)
-      (set! st/instrument-mods-open false)
-      (set! st/effect-mods-open false)
-      (set! process-map-track track)
-      (set! process-map-instance-id (get slot :instance-id))
-      (set! process-map-port (get port :name))
-      (set! process-map-target-kind (if (get port :target-kind) (get port :target-kind) ""))
+      (set! instrument-view.mods-open false)
+      (set! effect-mods.open false)
+      (set! process-map.track track)
+      (set! process-map.instance-id (get slot :instance-id))
+      (set! process-map.port (get port :name))
+      (set! process-map.target-kind (if (get port :target-kind) (get port :target-kind) ""))
       (eseq.seq-panels/seq-show-fx-lower-panel))))
 
 (def process-map-clear ()
-  (if (or (not (= process-map-track -1))
-          (not (= process-map-instance-id 0))
-          (not (= process-map-port ""))
-          (not (= process-map-target-kind "")))
+  (if (or (not (= process-map.track -1))
+          (not (= process-map.instance-id 0))
+          (not (= process-map.port ""))
+          (not (= process-map.target-kind "")))
     (do
-      (set! process-map-track -1)
-      (set! process-map-instance-id 0)
-      (set! process-map-port "")
-      (set! process-map-target-kind ""))
+      (set! process-map.track -1)
+      (set! process-map.instance-id 0)
+      (set! process-map.port "")
+      (set! process-map.target-kind ""))
     false))
 
 (add-hook "macro-mapping-arm-enter-hook" "param-controls"
@@ -143,8 +176,8 @@
     (do
       (process-map-clear)
       (ms/rack-clear-mapping-arm)
-      (set! st/instrument-mods-open false)
-      (set! st/effect-mods-open false))))
+      (set! instrument-view.mods-open false)
+      (set! effect-mods.open false))))
 
 (def process-map-target-map (fx p)
   (if (not (fx-param-has-idx? p))
@@ -162,16 +195,17 @@
         (dict :kind "instrument" :param-idx (get p :idx) :param (get p :name))))))
 
 (def process-map-target-compatible? (target)
-  (let ((kind (get target :kind)))
-    (if (= process-map-target-kind "")
+  (let ((kind (get target :kind))
+        (wanted process-map.target-kind))
+    (if (= wanted "")
       true
-      (if (= process-map-target-kind "device-param")
+      (if (= wanted "device-param")
         (or (= kind "instrument") (= kind "effect") (= kind "midi-fx") (= kind "bus-send"))
-        (if (= process-map-target-kind "instrument-param")
+        (if (= wanted "instrument-param")
           (= kind "instrument")
-          (if (= process-map-target-kind "effect-param")
+          (if (= wanted "effect-param")
             (= kind "effect")
-            (if (= process-map-target-kind "midi-fx-param")
+            (if (= wanted "midi-fx-param")
               (= kind "midi-fx")
               false)))))))
 
@@ -185,7 +219,7 @@
   (let ((target (process-map-target-map fx p)))
     (if (and target (process-map-target-compatible? target))
       (do
-        (seq-bind-process-port process-map-track process-map-instance-id process-map-port target)
+        (seq-bind-process-port process-map.track process-map.instance-id process-map.port target)
         (process-map-clear))
       nil)))
 
@@ -205,13 +239,13 @@
 
 (def process-send-bindable? (track send)
   (and (process-map-active?)
-       (= track process-map-track)
+       (= track process-map.track)
        (process-map-target-compatible? (process-send-target-map send))))
 
 (def process-bind-send-target (track send)
   (if (process-send-bindable? track send)
     (do
-      (seq-bind-process-port process-map-track process-map-instance-id process-map-port
+      (seq-bind-process-port process-map.track process-map.instance-id process-map.port
         (process-send-target-map send))
       (process-map-clear))
     nil))
@@ -231,10 +265,14 @@
         body))
     body))
 
+;; ── Macro mapping ──
+
 (def param-macro-mapping-active? ()
   (or (and ms/mapping-open (>= ms/mapping-selected 0))
       (>= ms/rack-mapping-selected 0)))
 
+;; The map-rack-macro-param command's address of a drum rack slot's param
+;; (its instrument's or one of its effects'), false for any other param.
 (def rack-macro-target-map (fx p)
   (if fx
     (if (get fx :rack-fx)
@@ -247,119 +285,67 @@
         :param-idx (get p :idx) :param (get p :name) :min (get p :min) :max (get p :max))
       false)))
 
-(def rack-macro-selected-definition ()
-  (let ((panel (nth SEQ.instrument-panel 0)))
-    (if panel
-      (nth (filter |macro| (= (get macro :id) ms/rack-mapping-selected)
-        (get panel :macros)) 0)
-      false)))
+;; The current drum rack's macros (its instrument device's; empty for any
+;; other track).
+(def rack-macros ()
+  (let ((d (dv/instrument-of selection.track)))
+    (if d d.macros '())))
 
-(def rack-macro-target-equal? (left right)
-  (and (= (get left :kind) (get right :kind))
-       (= (get left :rack-slot) (get right :rack-slot))
-       (= (get left :param-idx) (get right :param-idx))
-       (= (get left :effect-slot) (get right :effect-slot))))
+(def rack-macro-selected ()
+  (first (filter (lambda (rm) (= rm.index ms/rack-mapping-selected)) (rack-macros))))
+
+;; The mapping of macro m (a project or rack macro) driving prm, or nil. A
+;; project mapping whose target is gone drives nothing.
+(def mapping-onto (m prm)
+  (if (and m prm)
+    (first (filter (lambda (mm) (and (not mm.suspended) (= mm.target prm))) m.mappings))
+    nil))
 
 (def rack-macro-mapping-for (fx p)
-  (let ((macro (rack-macro-selected-definition)) (target (rack-macro-target-map fx p)))
-    (if (and macro target)
-      (nth (filter |mapping| (rack-macro-target-equal? mapping target)
-        (get macro :mappings)) 0)
-      false)))
+  (mapping-onto (rack-macro-selected) (dv/param-of fx p)))
 
-(def rack-macro-owner-definition-for (fx p)
-  (let ((panel (nth SEQ.instrument-panel 0)) (target (rack-macro-target-map fx p)))
-    (if (and panel target)
-      (nth
-        (filter |macro|
-          (> (len (filter |mapping| (rack-macro-target-equal? mapping target)
-            (get macro :mappings))) 0)
-          (get panel :macros))
-        0)
-      false)))
+(def rack-macro-owner-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (when prm (first (filter (lambda (rm) (mapping-onto rm prm)) (rack-macros))))))
 
 (def param-macro-bindable? (fx p)
   (if (>= ms/rack-mapping-selected 0)
     (rack-macro-target-map fx p)
     (and (get p :modulatable) (process-map-target-map fx p))))
 
-(def param-macro-selected-definition ()
-  (nth (filter |macro| (= (get macro :id) ms/mapping-selected) SEQ.macros) 0))
+(def project-macro-selected ()
+  (first (filter (lambda (m) (= m.mid ms/mapping-selected)) (macros))))
 
-(def param-macro-target-structure-key (target)
-  (list (get target :kind)
-        (get target :slot-idx)
-        (get target :effect)
-        (get target :fx)
-        (get target :param)))
-
+;; Names the selected project macro's mappings, so the *fx* buffer's map
+;; mode rebuilds when they change.
 (def param-macro-structure-key ()
-  (let ((macro (param-macro-selected-definition)))
+  (let ((m (project-macro-selected)))
     (str "fx-macro-map-" ms/mapping-selected "-"
-         (if macro
-           (map |mapping|
-             (list (get mapping :mapping-idx)
-                   (get mapping :track)
-                   (param-macro-target-structure-key (get mapping :target))
-                   (get mapping :min)
-                   (get mapping :max))
-             (get macro :mappings))
+         (if m
+           (map (lambda (mm) (list mm.index mm.label mm.suspended mm.min mm.max)) m.mappings)
            '()))))
 
-(def param-macro-target-equal? (left right)
-  (let ((kind (get left :kind)))
-    (and (= kind (get right :kind))
-         (= (get left :param) (get right :param))
-         (if (= kind "instrument")
-           true
-           (and (= (get left :slot-idx) (get right :slot-idx))
-                (if (= kind "effect")
-                  (= (get left :effect) (get right :effect))
-                  (if (= kind "midi-fx")
-                    (= (get left :fx) (get right :fx))
-                    false)))))))
-
 (def param-macro-mapping-for (fx p)
-  (let ((macro (param-macro-selected-definition))
-        (target (process-map-target-map fx p)))
-    (if (and macro target)
-      (nth
-        (filter |mapping|
-          (and (not (get mapping :suspended))
-               (= (get mapping :track) SEQ.current-track)
-               (param-macro-target-equal? (get mapping :target) target))
-          (get macro :mappings))
-        0)
-      false)))
+  (mapping-onto (project-macro-selected) (dv/param-of fx p)))
 
-(def param-macro-owner-definition-for (fx p)
-  (let ((target (process-map-target-map fx p)))
-    (if target
-      (nth
-        (filter |macro|
-          (> (len
-            (filter |mapping|
-              (and (not (get mapping :suspended))
-                   (= (get mapping :track) SEQ.current-track)
-                   (param-macro-target-equal? (get mapping :target) target))
-              (get macro :mappings)))
-            0)
-          SEQ.macros)
-        0)
-      false)))
+(def param-macro-owner-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (when prm (first (filter (lambda (m) (mapping-onto m prm)) (macros))))))
 
 (def param-macro-owner-mapping-for (fx p)
-  (let ((macro (param-macro-owner-definition-for fx p))
-        (target (process-map-target-map fx p)))
-    (if (and macro target)
-      (nth
-        (filter |mapping|
-          (and (not (get mapping :suspended))
-               (= (get mapping :track) SEQ.current-track)
-               (param-macro-target-equal? (get mapping :target) target))
-          (get macro :mappings))
-        0)
-      false)))
+  (let ((prm (dv/param-of fx p)))
+    (when prm
+      (mapping-onto (first (filter (lambda (m) (some-mapping? m prm)) (macros))) prm))))
+
+;; Some rack or project macro drives p's param.
+(def param-macro-owned? (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (and prm
+         (not (empty? (filter (lambda (m) (some-mapping? m prm))
+                        (append (rack-macros) (macros))))))))
+
+(def some-mapping? (m prm)
+  (not (= (mapping-onto m prm) nil)))
 
 (def param-macro-bg (fx p)
   (if (and (param-macro-mapping-active?) (param-macro-bindable? fx p))
@@ -375,17 +361,19 @@
     (let ((target (rack-macro-target-map fx p)) (mapped (rack-macro-mapping-for fx p)))
       (if mapped
         (host-command "unmap-rack-macro-param"
-          (dict :track SEQ.current-track :id ms/rack-mapping-selected
-            :mapping-idx (get mapped :mapping-idx)))
+          (dict :track (dv/current-track-index) :id ms/rack-mapping-selected
+            :mapping-idx mapped.index))
         (if target (host-command "map-rack-macro-param"
-          (merge target :id ms/rack-mapping-selected :track SEQ.current-track)) false)))
+          (merge target :id ms/rack-mapping-selected :track (dv/current-track-index))) false)))
     (let ((target (process-map-target-map fx p)))
       (if (and target
-               (not (rack-macro-owner-definition-for fx p))
+               (not (rack-macro-owner-for fx p))
                (not (param-macro-owner-mapping-for fx p)))
         (host-command "macro-map-param"
-          (merge target :id ms/mapping-selected :track SEQ.current-track))
+          (merge target :id ms/mapping-selected :track (dv/current-track-index)))
         false))))
+
+;; ── Key locks (the instrument panel's keys tab) ──
 
 (def instrument-target-param-dict (source-p idx)
   (if (instrument-rack-target? source-p)
@@ -395,41 +383,74 @@
     (dict :idx idx :control "param")))
 
 (def instrument-keys-active? ()
-  (= st/instrument-panel-tab 1))
+  (= instrument-view.tab 1))
 
 (def instrument-key-lock-has-selection? ()
-  (> (len st/instrument-key-lock-selected-notes) 0))
+  (> (len key-lock-view.notes) 0))
 
 (def instrument-key-lock-authoring-active? ()
   (and (instrument-keys-active?) (instrument-key-lock-has-selection?)))
 
+;; The first selected key, or nil (note 0 is a key: compare with nil).
 (def instrument-selected-key-note ()
-  (nth st/instrument-key-lock-selected-notes 0))
+  (first key-lock-view.notes))
 
+;; p's key lock on `note`: its `(note value)` row, or nil.
 (def instrument-param-key-lock-row (p note)
-  (let ((inst (nth SEQ.instrument-panel 0))
-        (rows (if (and inst (fx-param-has-idx? p))
-                (nth (get inst :key-locks) (get p :idx))
-                '())))
-    (nth (filter |row| (= (get row :note) note) rows) 0)))
+  (let ((prm (dv/param-of false p)))
+    (if prm (first (filter (lambda (row) (= (first row) note)) prm.key-locks)) nil)))
 
 (def instrument-param-key-lock-active? (p)
   (let ((note (instrument-selected-key-note)))
-    (if note
-      (if (instrument-param-key-lock-row p note) true false)
-      false)))
+    (if (= note nil)
+      false
+      (if (instrument-param-key-lock-row p note) true false))))
+
+;; ── Values ──
+
+;; The effect a param dict belongs to, for the one-argument forms
+;; (fx-param-value, param-mod-offset, …): the owner a custom UI's scoped param
+;; (eseq.effects.custom-ui-runtime) or a built-in effect panel's param
+;; (with-param-owners) carries, else false (an instrument param). Effect
+;; panels may also pass their fx to the -for forms.
+(def param-owner-fx (p)
+  (let ((owner (get p :custom-ui-owner)))
+    (if owner (get owner :fx) false)))
+
+;; fx with each of its params resolved once (`:prm`, eseq.effects.devices'
+;; with-prm) and owned by it (param-owner-fx), for a panel that hands bare
+;; param dicts to the one-argument forms. The owner is fx's address only, so
+;; a param never carries its siblings.
+(def with-param-owners (fx)
+  (let ((owner (dict :fx (dict :name (get fx :name) :slot-idx (get fx :slot-idx)
+                               :track-idx (get fx :track-idx) :bus-idx (get fx :bus-idx)
+                               :rack-slot (get fx :rack-slot) :rack-fx (get fx :rack-fx)
+                               :bus-fx (get fx :bus-fx) :midi-fx (get fx :midi-fx)
+                               :target-node-id (get fx :target-node-id)))))
+    (merge fx :params
+      (map (lambda (p) (merge (dv/with-prm fx p) :custom-ui-owner owner)) (get fx :params)))))
+
+(def fx-param-has-idx? (p)
+  (not (= (get p :idx) nil)))
+
+;; The value param dict p shows, as a binding: its param's value (the base
+;; note control: the instrument's base note), else the dict's own value.
+(def param-base-value (fx p)
+  (if (dv/base-note-param? p)
+    (let ((d (dv/param-device fx p)))
+      (if d #'d.base-note-display (get p :value)))
+    (let ((prm (dv/param-of fx p)))
+      (if prm #'prm.value (get p :value)))))
 
 (def instrument-param-base-value (p)
-  (if (get p :value-field)
-    (bind-seq (get p :value-field))
-    (get p :value)))
+  (param-base-value (param-owner-fx p) p))
 
 (def instrument-param-key-lock-value (p)
   (let ((note (instrument-selected-key-note)))
-    (if note
+    (if (= note nil)
+      (param-base-value false p)
       (let ((row (instrument-param-key-lock-row p note)))
-        (if row (get row :value) (instrument-param-base-value p)))
-      (instrument-param-base-value p))))
+        (if row (nth row 1) (param-base-value false p))))))
 
 (def fx-set-instrument-value (p v)
   (do
@@ -437,19 +458,19 @@
     (let ((rack-track (get p :rack-track))
           (rack-slot (get p :rack-slot)))
       (if (instrument-rack-target? p)
-        (if (= (get p :control) "base-note")
+        (if (dv/base-note-param? p)
           (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" "set-rack-slot-base-note")
             (dict :track rack-track :slot rack-slot :param "base-note" :value v))
           (host-command
             (if (seq-has-selection?) "set-rack-slot-instrument-plock" "set-rack-slot-instrument-param")
             (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :value v)))
-        (if (= (get p :control) "base-note")
+        (if (dv/base-note-param? p)
           (host-command "set-instrument-base-note" (dict :value v))
           (host-command
             (if (instrument-key-lock-authoring-active?)
               "set-instrument-key-lock-multi"
               (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param"))
-            (dict :param-idx (get p :idx) :value v :notes st/instrument-key-lock-selected-notes)))))))
+            (dict :param-idx (get p :idx) :value v :notes key-lock-view.notes)))))))
 
 (def fx-set-instrument-option (p label)
   (do
@@ -464,12 +485,31 @@
           (if (instrument-key-lock-authoring-active?)
             "set-instrument-key-lock-option-multi"
             (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option"))
-          (dict :param-idx (get p :idx) :label label :notes st/instrument-key-lock-selected-notes))))))
+          (dict :param-idx (get p :idx) :label label :notes key-lock-view.notes))))))
 
 (def custom-ui-option-index (options label)
   (nth (filter |idx| (= (nth options idx) label) (range (len options))) 0))
 
+;; Set fx's param p to v (display units), or p-lock the selected steps to it.
+;; A param not published is left alone: its stored units are unknown.
 (def fx-set-effect-value (fx p v)
+  (let ((prm (dv/param-of fx p)))
+    (when prm (fx-set-effect-stored-value fx p (dv/param-stored-value fx prm v)))))
+
+;; fx's batch update setting p to v (display units), in the stored units the
+;; batch commands take; nil for a param not published.
+(def effect-param-update (fx p v)
+  (let ((prm (dv/param-of fx p)))
+    (when prm (dict :param-idx (get p :idx) :value (dv/param-stored-value fx prm v)))))
+
+;; The batch updates of `pairs` ((p v) lists), skipping unpublished params.
+(def effect-param-updates (fx pairs)
+  (filter (lambda (u) (not (= u nil)))
+    (map (lambda (pair) (effect-param-update fx (nth pair 0) (nth pair 1))) pairs)))
+
+;; Set fx's param p to `stored`, already in the effect commands' stored units
+;; (a preset table's), or p-lock the selected steps to it.
+(def fx-set-effect-stored-value (fx p stored)
   (do
     (pf/fx-clear-selected-effect)
     (if (get fx :rack-fx)
@@ -478,21 +518,21 @@
               :rack-slot (get fx :rack-slot)
               :effect-slot (get fx :slot-idx)
               :param (get p :idx)
-              :value v))
+              :value stored))
     (if (get fx :bus-fx)
       (host-command (if (seq-has-selection?) "set-bus-effect-plock" "set-bus-effect-param")
         (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
-              :param-idx (get p :idx) :value v))
+              :param-idx (get p :idx) :value stored))
     (if (get fx :midi-fx)
       (host-command
         (if (seq-has-selection?) "set-midi-fx-plock" "set-midi-fx-param")
-        (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))
+        (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value stored))
       (if (seq-has-selection?)
-        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v (get fx :target-node-id))
+        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) stored (get fx :target-node-id))
         (host-command "set-effect-param"
           (dict :slot-idx (get fx :slot-idx)
                 :target-node-id (get fx :target-node-id)
-                :param-idx (get p :idx) :value v))))))))
+                :param-idx (get p :idx) :value stored))))))))
 
 (def fx-toggle-instrument-value (p)
   (do
@@ -506,7 +546,7 @@
         (if (instrument-key-lock-authoring-active?)
           (host-command "set-instrument-key-lock-multi"
             (dict :param-idx (get p :idx)
-                  :notes st/instrument-key-lock-selected-notes
+                  :notes key-lock-view.notes
                   :value (if (fx-param-on? p) 0 1)))
           (host-command "toggle-instrument-param"
             (dict :param-idx (get p :idx))))))))
@@ -520,7 +560,7 @@
               :rack-slot (get fx :rack-slot)
               :effect-slot (get fx :slot-idx)
               :param (get p :idx)
-              :value (if (fx-param-on? p) 0 1)))
+              :value (if (fx-param-on-for? fx p) 0 1)))
       (host-command "toggle-effect-param"
         (dict :bus (get fx :bus-idx)
               :bus-fx (get fx :bus-fx)
@@ -528,90 +568,111 @@
               :slot-idx (get fx :slot-idx)
               :param-idx (get p :idx))))))
 
-(def fx-param-has-idx? (p)
-  (not (= (get p :idx) nil)))
-
+;; See fx-param-value-for (p's effect: param-owner-fx).
 (def fx-param-value (p)
-  (if (and (instrument-keys-active?) (fx-param-has-idx? p))
-    (instrument-param-key-lock-value p)
-    (if (and st/instrument-mods-open (get p :modulatable))
-    (let ((target (instrument-param-control-mod-target p)))
-      (if target (instrument-mod-target-depth target) 0))
-    (instrument-param-base-value p))))
+  (fx-param-value-for (param-owner-fx p) p))
+
+;; The effect-mods track of fx: its track position, -1 for a bus effect or a
+;; dict naming none (a MIDI effect's: the current track's).
+(def effect-mods-track (fx)
+  (let ((track (get fx :track-idx)))
+    (if (or (get fx :bus-fx) (= track nil)) -1 track)))
 
 (def effect-mods-active? (fx)
   (and fx
-       st/effect-mods-open
-       (= st/effect-mods-chain (pf/fx-effect-chain-kind fx))
-       (= st/effect-mods-track (if (get fx :bus-fx) -1 (get fx :track-idx)))
-       (= st/effect-mods-slot (get fx :slot-idx))
-       (= st/effect-mods-rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
-       (= st/effect-mods-bus (if (get fx :bus-fx) (get fx :bus-idx) -1))))
+       effect-mods.open
+       (= effect-mods.chain (pf/fx-effect-chain-kind fx))
+       (= effect-mods.track (effect-mods-track fx))
+       (= effect-mods.slot (get fx :slot-idx))
+       (= effect-mods.rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
+       (= effect-mods.bus (if (get fx :bus-fx) (get fx :bus-idx) -1))))
 
 (def fx-has-modulators? (fx)
   (and fx (> (len (get fx :sources)) 0)))
 
 (def param-mods-open? (fx)
-  (if fx (effect-mods-active? fx) st/instrument-mods-open))
+  (if fx (effect-mods-active? fx) instrument-view.mods-open))
+
+(def instrument-mod-selected-slot ()
+  (if (> instrument-view.mod-slot 0) instrument-view.mod-slot 1))
 
 (def param-mod-selected-slot (fx)
   (if fx
-    (if (> st/effect-selected-mod-slot 0) st/effect-selected-mod-slot 1)
+    (if (> effect-mods.mod-slot 0) effect-mods.mod-slot 1)
     (instrument-mod-selected-slot)))
 
-(def param-selected-mod-target (fx p)
-  (nth
-    (filter |target| (= (instrument-mod-target-source-slot target) (param-mod-selected-slot fx))
-      (instrument-param-mod-targets p))
-    0))
+;; ── Modulation lanes ──
 
-(def param-empty-mod-target (p)
-  (nth
-    (filter |target| (and (get target :source-idx)
-                          (= (instrument-mod-target-source-slot target) 0))
-      (instrument-param-mod-targets p))
-    0))
+;; The modulation lanes onto p's param (mod-target instances), or none.
+(def param-mod-targets (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm prm.mod-targets '())))
+
+;; The modulation source (1-4, 0 none) lane mt reads: its source param's
+;; value, else its fixed slot.
+(def mod-target-source-slot (mt)
+  (let ((source mt.source))
+    (if source source.value mt.slot)))
+
+;; Lane mt's depth, as a binding (the depth param's display units).
+(def mod-target-depth (mt)
+  (let ((depth mt.depth))
+    (if depth #'depth.value 0)))
+
+(def mod-target-depth-idx (mt)
+  (let ((depth mt.depth)) (if depth depth.index nil)))
+
+(def mod-target-source-idx (mt)
+  (let ((source mt.source)) (if source source.index nil)))
+
+(def param-selected-mod-target (fx p)
+  (first
+    (filter (lambda (mt) (= (mod-target-source-slot mt) (param-mod-selected-slot fx)))
+      (param-mod-targets fx p))))
+
+(def param-empty-mod-target (fx p)
+  (first
+    (filter (lambda (mt) (and mt.source (= (mod-target-source-slot mt) 0)))
+      (param-mod-targets fx p))))
 
 (def param-control-mod-target (fx p)
   (let ((selected-target (param-selected-mod-target fx p)))
     (if selected-target
       selected-target
-      (let ((empty-target (param-empty-mod-target p)))
+      (let ((empty-target (param-empty-mod-target fx p)))
         (if empty-target
           empty-target
-          (nth (instrument-param-mod-targets p) 0))))))
+          (first (param-mod-targets fx p)))))))
 
+;; The value p's control shows: on the keys tab the selected key's lock;
+;; while modulation is open (and p modulatable) the depth of the lane its
+;; knob edits; else the param's value. A binding where the value is live.
 (def fx-param-value-for (fx p)
   (if (and (not fx) (instrument-keys-active?) (fx-param-has-idx? p))
     (instrument-param-key-lock-value p)
     (if (and (param-mods-open? fx) (get p :modulatable))
-    (let ((target (param-control-mod-target fx p)))
-      (if target (instrument-mod-target-depth target) 0))
-    (if (get p :value-field)
-      (bind-seq (get p :value-field))
-      (get p :value)))))
+      (let ((mt (param-control-mod-target fx p)))
+        (if mt (mod-target-depth mt) 0))
+      (param-base-value fx p))))
 
-;; Options are indexed by the param's stored value, which is not guaranteed to
-;; be in range: a synced Delay time, for instance, stores milliseconds while its
-;; sync options list holds a dozen divisions. `nth` past the end returns nil and
-;; the dropdown then renders "nil", so clamp the index the way the old Rust
-;; builder did.
+;; Options are indexed by the param's value, which is not guaranteed to be in
+;; range: a synced Delay time, for instance, stores milliseconds while its
+;; sync options list holds a dozen divisions. `nth` past the end returns nil
+;; and the dropdown then renders "nil", so clamp the index the way the old
+;; Rust builder did.
 (def fx-param-option-at (options value)
   (nth options (clamp (round value) 0 (- (len options) 1))))
 
-;; `fx-param-value-for` returns a reactive binding for bound params, and `nth`
-;; treats a binding index as nil — deref with `reactive-value` before indexing.
-;; The mods-open depth branch must not leak into the label, so bound params
-;; read their field directly.
+;; The option label p's dropdown shows. The mods-open depth branch must not
+;; leak into the label, so it reads the param's own value.
 (def fx-param-text-value-for (fx p)
   (if (get p :options)
     (if (and (not fx) (instrument-keys-active?))
-      (fx-param-option-at (get p :options) (reactive-value (fx-param-value-for fx p)))
-      (if (get p :value-field)
-        (fx-param-option-at
-          (get p :options)
-          (reactive-value (bind-seq (get p :value-field))))
-        (get p :text-value)))
+      (fx-param-option-at (get p :options) (fx-param-value-for fx p))
+      (let ((prm (dv/param-of fx p)))
+        (if prm
+          (fx-param-option-at (get p :options) prm.value)
+          (get p :text-value))))
     (get p :text-value)))
 
 (def param-plock-row-target (fx)
@@ -620,99 +681,55 @@
       (if (get fx :midi-fx) "midi-fx" "effect"))
     "instrument"))
 
-(def param-plock-row (fx p)
-  (if (get p :idx)
-    (let ((target (param-plock-row-target fx))
-          (slot (if fx (get fx :slot-idx) -1))
-          (idx (get p :idx)))
-      (nth (filter |row|
-        (and (= (get row :target) target)
-             (= (get row :param-idx) idx)
-             (if fx (= (get row :slot-idx) slot) true)
-             (if (and fx (get fx :rack-fx))
-               (= (get row :rack-slot) (get fx :rack-slot))
-               true))
-        SEQ.track-plocks) 0))
-    false))
+;; ── P-locks ──
 
-(def param-current-variant-chip ()
-  (nth (filter |chip| (and (get chip :current)
-                           (= (get chip :kind) "variant"))
-        SEQ.track-plock-variants) 0))
-
-;; --- P-lock presence projection ------------------------------------------
-;; Param controls must not read SEQ.track-plocks / SEQ.track-plock-variants
-;; directly: every control in every visible panel would rerun whenever the
-;; p-lock list changes (i.e. on every selection change). A single projection
-;; effect (bottom of this file) fans the list out into per-param SEQV fields;
-;; each control subscribes only to its own field, so a p-lock change reruns
-;; exactly the controls whose lock state actually changed.
-
-(def param-plock-projected-key (target slot rack-slot idx)
-  (str "plk-" target "-" slot "-" rack-slot "-" idx))
-
-;; Key a control reads. Mirrors param-plock-row's match exactly: instrument
-;; controls match any slot; only rack effects discriminate on the rack slot.
-(def param-plock-control-key (fx p)
-  (param-plock-projected-key
-    (param-plock-row-target fx)
-    (if fx (get fx :slot-idx) "any")
-    (if (and fx (get fx :rack-fx)) (get fx :rack-slot) "x")
-    (get p :idx)))
-
-(def param-plock-field-on? (fx p)
-  ;; Explicit nil check: param index 0 is a valid lockable param, but bare
-  ;; truthiness would treat it as "no idx" (0 is falsey).
-  (if (= (get p :idx) nil)
-    false
-    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-on")) 1)))
+;; A p-lock supplies the value p's param shows at the displayed step.
+(def param-locked? (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm prm.locked false)))
 
 (def param-plock-active? (fx p)
   (if (and (not fx) (instrument-keys-active?))
     (instrument-param-key-lock-active? p)
     (and (not (param-mods-open? fx))
-         (param-plock-field-on? fx p))))
+         (param-locked? fx p))))
 
 ;; Automation presence (bead eseq-yr6w): this param carries a p-lock on SOME
 ;; step of the pattern, not necessarily the selected one. Drives the corner dot,
 ;; never the value readout.
 (def param-plock-any? (fx p)
-  (if (= (get p :idx) nil)
-    false
-    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-any")) 1)))
+  (let ((prm (dv/param-of fx p)))
+    (if prm prm.has-locks false)))
 
 ;; --- Right-click "clear p-locks" menu (bead eseq-1gy6) ---------------------
-;; One menu state shared by every param control: nil, or the key tuple of the
-;; param whose knob was right-clicked plus the anchor the menu opens at. The
-;; menu itself (param-plock-context-menu) is rendered by each buffer that
-;; hosts knobs — an overlay has to live in the active tile. More than one
-;; buffer hosts it (*fx* and *mixer*), and the anchor is tile-relative, so
-;; the state also records which host opened it: without that, every visible
-;; host draws a copy at the same offset in its own tile, and the stray copy
-;; steals the clicks meant for the real one.
+;; One menu shared by every param control: open at the right-click's grid
+;; point, on the key tuple of the param whose knob was right-clicked (the
+;; clear-param-plocks command's address). The menu itself
+;; (param-plock-context-menu) is rendered by each buffer that hosts knobs — an
+;; overlay has to live in the active tile. More than one buffer hosts it
+;; (*fx* and *mixer*), and the anchor is tile-relative, so the state also
+;; records which host opened it: without that, every visible host draws a
+;; copy at the same offset in its own tile, and the stray copy steals the
+;; clicks meant for the real one.
 ;;
 ;; A param with no p-locks has nothing to offer, so its right-click is a no-op
 ;; and no empty menu opens. The wrappers only bind :on-right-click on the
 ;; branches that already draw a box, which is every branch that can carry the
 ;; presence dot; the bare-body fast path stays free of a wrapper.
+(def-kind plock-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (host "fx")
+          (target :any :default nil)))
 
-(defstate param-plock-menu nil)
-(defstate param-plock-menu-col 0)
-(defstate param-plock-menu-row 0)
-(defstate param-plock-menu-host "fx")
-
-;; Key tuple the host command clears by. Mirrors param-plock-control-key's
-;; families, but spells out the real slot indices: the projection key can say
-;; "any"/"x" because it only has to match rows, while the clear has to name
-;; storage.
+;; Key tuple the host command clears by: the real slot indices of the
+;; param's storage.
 (def param-plock-menu-target (fx p)
-  (dict :track SEQ.current-track :target (param-plock-row-target fx)
+  (dict :track (dv/current-track-index) :target (param-plock-row-target fx)
         :slot-idx (if fx (get fx :slot-idx) 0)
         :rack-slot (if (and fx (get fx :rack-fx)) (get fx :rack-slot) 0)
         :param-idx (get p :idx)))
-
-(def target-plock-any? (target)
-  (= (reactive-get "SEQV" (str (param-plock-projected-row-key target) "-any")) 1))
 
 (def open-param-plock-menu (event fx p)
   (open-target-plock-menu event (param-plock-menu-target fx p) (param-plock-any? fx p)))
@@ -723,29 +740,25 @@
 (def open-host-plock-menu (event host target has-locks)
   (if has-locks
     (do
-      (set! param-plock-menu-host host)
-      (set! param-plock-menu target)
-      (set! param-plock-menu-col (get event :col))
-      (set! param-plock-menu-row (get event :row))
+      (set! plock-menu.host host)
+      (set! plock-menu.target target)
+      (open-menu! plock-menu event)
       true)
     false))
 
 (def close-param-plock-menu ()
-  (set! param-plock-menu nil))
-
-;; Live count of selected steps. Read only while the menu is open, so the
-;; hosting buffer does not subscribe to the selection the rest of the time.
-(def param-plock-selected-step-count ()
-  (len (filter |selected| selected SEQ.selected-steps)))
+  (set! plock-menu.open false))
 
 (def param-plock-selection-label (count)
   (if (= count 1)
     "Clear p-locks on 1 selected step"
     (str "Clear p-locks on " count " selected steps")))
 
+;; The selection is read only while the menu is open, so the hosting buffer
+;; does not follow it the rest of the time.
 (def param-plock-menu-actions ()
-  (if param-plock-menu
-    (let ((count (param-plock-selected-step-count)))
+  (if plock-menu.open
+    (let ((count (len selection.steps)))
       (if (> count 0)
         (list (dict :id "all" :label "Clear p-locks")
               (dict :id "selected" :label (param-plock-selection-label count)))
@@ -753,7 +766,7 @@
     (list)))
 
 (def clear-param-plocks (scope)
-  (let ((target param-plock-menu))
+  (let ((target plock-menu.target))
     (do
       (close-param-plock-menu)
       (if target
@@ -767,12 +780,11 @@
         false))))
 
 (def param-plock-menu-open-in? (host)
-  (if (and param-plock-menu (= param-plock-menu-host host)) true false))
+  (and plock-menu.open (= plock-menu.host host)))
 
 (def param-plock-context-menu (host)
   (context-menu :is-open (param-plock-menu-open-in? host)
-    :anchor-col param-plock-menu-col
-    :anchor-row param-plock-menu-row
+    :anchor plock-menu.at
     :on-close (lambda () (close-param-plock-menu))
     (each (param-plock-menu-actions) |action|
       (menu-item (get action :label)
@@ -780,46 +792,62 @@
         :on-select (lambda (event) (clear-param-plocks (get action :id)))))))
 
 ;; Live print latch (bead eseq-4seq): this param is the one being held while
-;; play+record writes its value onto passing steps. The *plock-print-sync*
-;; projection only publishes these while the transport gate holds, so a control
-;; never has to subscribe to SEQ.playing / SEQ.recording itself.
+;; play+record writes its value onto passing steps (param.printing is false
+;; unless the transport plays and records).
 (def param-print-latched? (fx p)
-  (if (= (get p :idx) nil)
-    false
-    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-print")) 1)))
+  (let ((prm (dv/param-of fx p)))
+    (if prm prm.printing false)))
 
+;; The value a locked control shows as its unlocked one: the param's own
+;; value.
 (def param-plock-default (fx p)
-  (if (param-plock-field-on? fx p)
-    (reactive-get "SEQV" (str (param-plock-control-key fx p) "-def"))
-    (fx-param-value-for fx p)))
+  (let ((prm (dv/param-of fx p)))
+    (if (and prm prm.locked) #'prm.base (fx-param-value-for fx p))))
 
-(def param-plock-color-r ()
-  (let ((v (reactive-get "SEQV" "plk-var-r")))
-    (if (= v nil) 0.27058825 v)))
+;; The p-lock accent: the color of the step variant the selected step plays,
+;; else the default lock color. One effect (below) follows the current
+;; track's variants; controls bind the components and only repaint.
+(def-kind plock-color
+  :key ()
+  :state ((r 0.27058825)
+          (g 0.78431374)
+          (b 0.8627451)))
 
-(def param-plock-color-g ()
-  (let ((v (reactive-get "SEQV" "plk-var-g")))
-    (if (= v nil) 0.78431374 v)))
+(def param-plock-color-r () #'plock-color.r)
+(def param-plock-color-g () #'plock-color.g)
+(def param-plock-color-b () #'plock-color.b)
 
-(def param-plock-color-b ()
-  (let ((v (reactive-get "SEQV" "plk-var-b")))
-    (if (= v nil) 0.8627451 v)))
+(def sync-plock-color! ()
+  (let ((t selection.track))
+    (let ((v (if t (first (filter (lambda (v) v.current) t.variants)) nil)))
+      (do
+        (set! plock-color.r (if v (rgb-part v.color 0) 0.27058825))
+        (set! plock-color.g (if v (rgb-part v.color 1) 0.78431374))
+        (set! plock-color.b (if v (rgb-part v.color 2) 0.8627451))))))
+
+;; Runs as a dedicated non-visual effect buffer: a plain (effect ...) treats
+;; its result as the source buffer's widget tree, which would clobber the
+;; buffer that loaded this file.
+(effect-buffer "*plock-color-sync*"
+  (do (sync-plock-color!) nil))
 
 (def param-plock-text-color (fx p)
   (if (param-plock-active? fx p)
-    (rgba (param-plock-color-r) (param-plock-color-g) (param-plock-color-b) 1.0)
+    (rgba plock-color.r plock-color.g plock-color.b 1.0)
     :dim))
+
+;; ── Control ranges and setters ──
 
 (def param-control-min (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (let ((target (param-control-mod-target fx p)))
-      (if target (get target :depth-min) -1))
+    (let ((mt (param-control-mod-target fx p)))
+      (if mt mt.depth-min -1))
     (get p :min)))
 
 (def param-control-max (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (let ((target (param-control-mod-target fx p)))
-      (if target (get target :depth-max) 1))
+    (let ((mt (param-control-mod-target fx p)))
+      (if mt mt.depth-max 1))
     (get p :max)))
 
 ;; Unit shown on a param's control. In the mods tab the knob edits a *depth*,
@@ -831,13 +859,23 @@
 ;; so the display is unchanged.
 (def param-control-unit (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (let ((target (param-control-mod-target fx p)))
-      (if target
-        (let ((unit (get target :depth-unit)))
-          (if unit unit false))
-        false))
+    (let ((mt (param-control-mod-target fx p)))
+      (if (and mt (not (= mt.unit ""))) mt.unit false))
     (let ((unit (get p :unit)))
       (if unit unit false))))
+
+;; The :value-scale a percent control shows p with. Its own value: a 0-1
+;; fraction (x 100) unless its unit is % (display units, x 1). A lane depth
+;; while modulation is open: x 100 only for a % lane whose depth param is a
+;; plain 0-1 fraction (no % of its own, so not already x 100).
+(def percent-scale (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((mt (param-control-mod-target fx p)))
+      (if (and mt (= mt.unit "%") (not (depth-percent? mt))) 100 1))
+    (if (= (get p :unit) "%") 1 100)))
+
+(def depth-percent? (mt)
+  (let ((depth mt.depth)) (and depth depth.percent)))
 
 (def param-set-option (fx p label)
   (if fx
@@ -862,47 +900,45 @@
                 :param-idx (get p :idx) :label label))))
     (fx-set-instrument-option p label)))
 
+;; Set param `idx` of p's device (a lane's source or depth) to v.
+(def set-device-param-at (fx p idx v)
+  (if fx
+    (fx-set-effect-value fx (dict :idx idx :control "param") v)
+    (fx-set-instrument-value (instrument-target-param-dict p idx) v)))
+
 (def param-set-control-value (fx p v)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (let ((target (param-control-mod-target fx p)))
-      (if target
-        (let ((source-slot (instrument-mod-target-source-slot target))
+    (let ((mt (param-control-mod-target fx p)))
+      (if mt
+        (let ((source-slot (mod-target-source-slot mt))
               (selected-slot (param-mod-selected-slot fx)))
           (if (= source-slot selected-slot)
-            (if fx
-              (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
-              (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) v))
+            (set-device-param-at fx p (mod-target-depth-idx mt) v)
             (if (= source-slot 0)
               (do
-                (if fx
-                  (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
-                  (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) selected-slot))
-                (if fx
-                  (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
-                  (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) v))))))))
+                (set-device-param-at fx p (mod-target-source-idx mt) selected-slot)
+                (set-device-param-at fx p (mod-target-depth-idx mt) v))
+              nil)))
+        nil))
     (if fx (fx-set-effect-value fx p v) (fx-set-instrument-value p v))))
 
 (def param-toggle-modulation (fx p)
   (if (get p :modulatable)
-    (let ((target (param-selected-mod-target fx p))
+    (let ((mt (param-selected-mod-target fx p))
           (selected-slot (param-mod-selected-slot fx)))
-      (if target
-        (if (get target :source-idx)
-          (if fx
-            (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") 0)
-            (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) 0))
-          (if fx
-            (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
-            (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) 0)))
-        (let ((target (param-empty-mod-target p)))
-          (if target
+      (if mt
+        (if mt.source
+          (set-device-param-at fx p (mod-target-source-idx mt) 0)
+          (set-device-param-at fx p (mod-target-depth-idx mt) 0))
+        (let ((empty (param-empty-mod-target fx p)))
+          (if empty
             (do
-              (if fx
-                (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
-                (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) selected-slot))
-              (if fx
-                (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
-                (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) 0)))))))))
+              (set-device-param-at fx p (mod-target-source-idx empty) selected-slot)
+              (set-device-param-at fx p (mod-target-depth-idx empty) 0))
+            nil))))
+    nil))
+
+;; ── Wrappers ──
 
 (def param-mod-bg (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
@@ -919,8 +955,7 @@
     (if (param-macro-bindable? fx p)
       (let ((mapped (if (>= ms/rack-mapping-selected 0)
               (rack-macro-mapping-for fx p) (param-macro-mapping-for fx p)))
-          (owner (or (rack-macro-owner-definition-for fx p)
-              (param-macro-owner-definition-for fx p))))
+          (owner (param-macro-owned? fx p)))
         (subtree :key (str key "-macro-map")
           (box :background-color (param-macro-bg fx p)
             :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
@@ -935,9 +970,7 @@
             :on-right-click (lambda (event) (open-param-plock-menu event fx p))
             body)))
       body)
-    (if (and (not (param-mods-open? fx))
-        (or (rack-macro-owner-definition-for fx p)
-            (param-macro-owner-definition-for fx p)))
+    (if (and (not (param-mods-open? fx)) (param-macro-owned? fx p))
       (subtree :key (str key "-macro-owned")
         (box :debug-name "macro-param-owned-wrapper"
           :background-color :transparent
@@ -1003,10 +1036,15 @@
               body)))))))
 
 (def fx-param-numeric-value (p)
-  (reactive-value (fx-param-value p)))
+  (fx-param-numeric-value-for (param-owner-fx p) p))
 
+;; The value as a number, read now (0 for none).
 (def fx-param-numeric-value-for (fx p)
-  (reactive-value (fx-param-value-for fx p)))
+  (number-now (fx-param-value-for fx p)))
+
+;; v read now (a binding reads its field, spec §8) as a number, 0 for nil.
+(def number-now (v)
+  (if (= v nil) 0 (+ v 0)))
 
 (def fx-param-on? (p)
   (> (fx-param-numeric-value p) 0.5))
@@ -1014,40 +1052,22 @@
 (def fx-param-on-for? (fx p)
   (> (fx-param-numeric-value-for fx p) 0.5))
 
-(def instrument-mod-selected-slot ()
-  (if (> st/instrument-selected-mod-slot 0) st/instrument-selected-mod-slot 1))
-
-(def instrument-param-mod-targets (p)
-  (if (get p :mod-targets) (get p :mod-targets) '()))
-
-(def instrument-mod-target-source-slot (target)
-  (let ((slot (if (get target :source-value-field)
-                (reactive-value (bind-seq (get target :source-value-field)))
-                (get target :source-slot))))
-    (if slot slot (get target :source-slot))))
-
-(def instrument-mod-target-depth (target)
-  (if (get target :depth-value-field)
-    (bind-seq (get target :depth-value-field))
-    (get target :depth)))
-
 (def param-knob-mod-target (fx p idx)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (nth (instrument-param-mod-targets p) idx)
+    (nth (param-mod-targets fx p) idx)
     false))
 
 (def param-knob-mod-slot-prop (fx p idx)
-  (let ((target (param-knob-mod-target fx p idx)))
-    (if target (instrument-mod-target-source-slot target) false)))
+  (let ((mt (param-knob-mod-target fx p idx)))
+    (if mt (mod-target-source-slot mt) false)))
 
 (def param-knob-mod-depth-prop (fx p idx)
-  (let ((target (param-knob-mod-target fx p idx)))
-    (if target (instrument-mod-target-depth target) false)))
+  (let ((mt (param-knob-mod-target fx p idx)))
+    (if mt (mod-target-depth mt) false)))
 
 ;; Live modulation offset for a param (eseq-hpc): how far modulation currently
 ;; pushes it from its base, in the base's own units. The host samples the
-;; modulator node at meter rate and publishes `sum(depth * mod)` for every
-;; declared modulation destination; knobs draw their live dot at that
+;; modulator node at meter rate; knobs draw their live dot at that
 ;; displacement from the base they are already showing.
 ;;
 ;; An offset rather than the absolute effective value on purpose. The base moves
@@ -1056,66 +1076,78 @@
 ;; modulating; an offset rides along with the base instead, and an unmodulated
 ;; param's offset is exactly 0. Read-only telemetry either way — nothing here
 ;; writes back into widget state, so dragging a modulated knob still edits the
-;; base value. `false` when the param is not a modulation destination (no field
-;; published), which is what makes the overlay cost nothing on unmodulatable
-;; params and on rack slots.
-(def param-mod-offset (p)
-  (let ((field (get p :mod-offset-field)))
-    (if field (bind-seq field) false)))
+;; base value. An unmodulated param's offset is 0, which draws no dot;
+;; `false` for a control with no param (nothing to show).
+(def param-mod-offset-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm #'prm.mod-offset false)))
 
-;; The absolute effective value, for curve visualizers. They bind one reactive
-;; field straight into a widget prop — a computed `base + offset` expression
-;; would not be re-evaluated when only the bound value field changes, so the
-;; curve would freeze until the panel rebuilt — which is why the host publishes
-;; the sum alongside the offset. Falls back to the base value for params with no
-;; published field (rack slots, non-destinations).
-(def param-effective-value (p)
-  (let ((field (get p :mod-value-field)))
-    (if field (bind-seq field) (instrument-param-base-value p))))
+;; The absolute effective value, for curve visualizers: one binding straight
+;; into a widget prop (a computed `base + offset` would not follow the bound
+;; value). The param's value when it is not modulated.
+(def param-effective-value-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm #'prm.mod-value (get p :value))))
+
+;; The effective value as a 0-1 fraction where p is a fraction % param
+;; (param.mod-ratio: its display value / 100), for visualizers drawn on the
+;; stored scale; else as param-effective-value-for. A binding.
+(def param-effective-ratio-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm #'prm.mod-ratio (get p :value))))
 
 ;; The multiplicative form of the same displacement, for destinations whose
 ;; modulation mode is exponential (the built-in Filter's cutoff, whose depth is
 ;; in octaves). `base + offset` only composes with a *moving* base when the mode
-;; is additive: a +2-octave lane sampled at 1 kHz publishes a 3 kHz offset, and
-;; a knob dragged to 8 kHz before the next 50 ms tick would draw its dot at
-;; 11 kHz instead of 32 kHz. The host publishes `2^octaves` here — exactly 1.0
-;; for additive destinations — and the knob prefers `base * scale` whenever it
-;; is not 1.0. `false` when the param is not a modulation destination.
-(def param-mod-scale (p)
-  (let ((field (get p :mod-scale-field)))
-    (if field (bind-seq field) false)))
+;; is additive: a +2-octave lane sampled at 1 kHz reads a 3 kHz offset, and a
+;; knob dragged to 8 kHz before the next 50 ms tick would draw its dot at
+;; 11 kHz instead of 32 kHz. The scale is `2^octaves` — exactly 1.0 for
+;; additive destinations — and the knob prefers `base * scale` whenever it is
+;; not 1.0. `false` for a control with no param.
+(def param-mod-scale-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm #'prm.mod-scale false)))
 
 ;; Process effective value (eseq-p1kg). When an enabled step process writes
-;; to this param through a bound OUT port, the host tags the param map
-;; `:process-mapped` and publishes the value the instrument actually received
-;; (base, or the step's p-lock, plus the port value, clamped to the range) in
-;; the param's display units. The knob draws it as a second dot in the process
-;; accent; the number picker as a strip anchored at the base. Read-only: the
-;; control keeps editing the base. `false` when the param is not mapped, so
-;; a stale feed entry never draws on an unmapped control.
-(def param-process-mapped? (p)
-  (if (get p :process-mapped) true false))
+;; to this instrument param through a bound OUT port, the value the instrument
+;; actually received (base, or the step's p-lock, plus the port value, clamped
+;; to the range) in the param's display units. The knob draws it as a second
+;; dot in the process accent; the number picker as a strip anchored at the
+;; base. Read-only: the control keeps editing the base. `false` while not
+;; mapped, so a stale write never draws on an unmapped control.
+(def param-process-mapped-for? (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm prm.process-mapped false)))
 
-(def param-process-value (p)
-  (let ((field (get p :process-value-field)))
-    (if (and (get p :process-mapped) field) (bind-seq field) false)))
+(def param-process-value-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if (and prm prm.process-mapped) #'prm.process-value false)))
 
-;; 1 when the last process write hit the range end and was clamped.
-(def param-process-clamped (p)
-  (let ((field (get p :process-clamped-field)))
-    (if (and (get p :process-mapped) field) (bind-seq field) 0)))
+;; True when the last process write hit the range end and was clamped.
+(def param-process-clamped-for (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if (and prm prm.process-mapped) #'prm.process-clamped 0)))
+
+;; The one-argument forms resolve p through its owner (param-owner-fx).
+(def param-mod-offset (p) (param-mod-offset-for (param-owner-fx p) p))
+(def param-mod-scale (p) (param-mod-scale-for (param-owner-fx p) p))
+(def param-effective-value (p) (param-effective-value-for (param-owner-fx p) p))
+(def param-effective-ratio (p) (param-effective-ratio-for (param-owner-fx p) p))
+(def param-process-value (p) (param-process-value-for (param-owner-fx p) p))
+(def param-process-clamped (p) (param-process-clamped-for (param-owner-fx p) p))
+(def param-process-mapped? (p) (param-process-mapped-for? (param-owner-fx p) p))
 
 ;; P-lock colour wins (the step override is the more specific state); a
 ;; process-mapped param otherwise reads in the process accent so the user can
 ;; tell it is being generatively driven even while the offset is zero.
 (def param-process-text-color (fx p)
   (if (param-plock-active? fx p)
-    (rgba (param-plock-color-r) (param-plock-color-g) (param-plock-color-b) 1.0)
-    (if (param-process-mapped? p) :process-lane-accent :dim)))
+    (rgba plock-color.r plock-color.g plock-color.b 1.0)
+    (if (param-process-mapped-for? fx p) :process-lane-accent :dim)))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
-    (instrument-param-base-value p)
+    (param-base-value fx p)
     false))
 
 (def param-base-min-prop (fx p)
@@ -1138,20 +1170,6 @@
     "-mod-depth"
     "-base"))
 
-(def instrument-param-base-value (p)
-  (if (get p :value-field)
-    (bind-seq (get p :value-field))
-    (get p :value)))
-
-(def instrument-param-active-mod-targets (p)
-  (if (and st/instrument-mods-open (get p :modulatable))
-    (filter |target| (> (instrument-mod-target-source-slot target) 0)
-      (instrument-param-mod-targets p))
-    '()))
-
-(def instrument-param-knob-mod-target (p idx)
-  (param-knob-mod-target false p idx))
-
 (def instrument-param-knob-mod-slot-prop (p idx)
   (param-knob-mod-slot-prop false p idx))
 
@@ -1173,103 +1191,28 @@
 (def instrument-param-control-key-mode (p)
   (param-control-key-mode false p))
 
-(def instrument-param-selected-mod-target (p)
-  (nth
-    (filter |target| (= (instrument-mod-target-source-slot target) (instrument-mod-selected-slot))
-      (instrument-param-mod-targets p))
-    0))
-
-(def instrument-param-empty-mod-target (p)
-  (nth
-    (filter |target| (and (get target :source-idx)
-                          (= (instrument-mod-target-source-slot target) 0))
-      (instrument-param-mod-targets p))
-    0))
-
-(def instrument-param-control-mod-target (p)
-  (let ((selected-target (instrument-param-selected-mod-target p)))
-    (if selected-target
-      selected-target
-      (let ((empty-target (instrument-param-empty-mod-target p)))
-        (if empty-target
-          empty-target
-          (nth (instrument-param-mod-targets p) 0))))))
-
-(def instrument-param-connected-to-selected-mod? (p)
-  (if (instrument-param-selected-mod-target p) true false))
-
-(def instrument-param-connected-to-other-mod? (p)
-  (> (len
-      (filter |target|
-        (and (> (instrument-mod-target-source-slot target) 0)
-             (not (= (instrument-mod-target-source-slot target) (instrument-mod-selected-slot))))
-        (instrument-param-mod-targets p)))
-     0))
-
 (def instrument-param-control-min (p)
-  (if (and st/instrument-mods-open (get p :modulatable))
-    (let ((target (instrument-param-control-mod-target p)))
-      (if target (get target :depth-min) -1))
-    (get p :min)))
+  (param-control-min false p))
 
 (def instrument-param-control-max (p)
-  (if (and st/instrument-mods-open (get p :modulatable))
-    (let ((target (instrument-param-control-mod-target p)))
-      (if target (get target :depth-max) 1))
-    (get p :max)))
+  (param-control-max false p))
 
 (def instrument-set-param-control-value (p v)
-  (if (and st/instrument-mods-open (get p :modulatable))
-    (let ((target (instrument-param-control-mod-target p)))
-      (if target
-        (let ((source-slot (instrument-mod-target-source-slot target)))
-          (if (= source-slot (instrument-mod-selected-slot))
-            (fx-set-instrument-value
-              (instrument-target-param-dict p (get target :depth-idx))
-              v)
-            (if (= source-slot 0)
-              (do
-                (fx-set-instrument-value
-                  (instrument-target-param-dict p (get target :source-idx))
-                  (instrument-mod-selected-slot))
-                (fx-set-instrument-value
-                  (instrument-target-param-dict p (get target :depth-idx))
-                  v)))))))
-    (fx-set-instrument-value p v)))
-
-(def instrument-toggle-param-modulation (p)
-  (if (get p :modulatable)
-    (let ((target (instrument-param-selected-mod-target p)))
-      (if target
-        (if (get target :source-idx)
-          (fx-set-instrument-value
-            (instrument-target-param-dict p (get target :source-idx))
-            0)
-          (fx-set-instrument-value
-            (instrument-target-param-dict p (get target :depth-idx))
-            0))
-        (let ((target (instrument-param-empty-mod-target p)))
-          (if target
-            (do
-              (fx-set-instrument-value
-                (instrument-target-param-dict p (get target :source-idx))
-                (instrument-mod-selected-slot))
-              (fx-set-instrument-value
-                (instrument-target-param-dict p (get target :depth-idx))
-                0))))))))
+  (param-set-control-value false p v))
 
 (def instrument-param-mod-bg (p)
-  (if (and st/instrument-mods-open (get p :modulatable))
+  (if (and instrument-view.mods-open (get p :modulatable))
     (rgba 0.18 0.48 0.95 0.24)
     :transparent))
 
+;; The instrument panel's own wrapper look (fainter macro borders, an
+;; unbordered mods box) over the same states as param-mod-wrapper.
 (def instrument-param-mod-wrapper (p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? false p)
       (let ((mapped (if (>= ms/rack-mapping-selected 0)
                       (rack-macro-mapping-for false p) (param-macro-mapping-for false p)))
-            (owner (or (rack-macro-owner-definition-for false p)
-                       (param-macro-owner-definition-for false p))))
+            (owner (param-macro-owned? false p)))
         (subtree :key (str key "-macro-map")
           (box :background-color (param-macro-bg false p)
                :debug-name (if owner "macro-param-owned-wrapper" "macro-param-map-wrapper")
@@ -1284,9 +1227,7 @@
                :on-right-click (lambda (event) (open-param-plock-menu event false p))
             body)))
       body)
-  (if (and (not st/instrument-mods-open)
-          (or (rack-macro-owner-definition-for false p)
-              (param-macro-owner-definition-for false p)))
+  (if (and (not instrument-view.mods-open) (param-macro-owned? false p))
     (subtree :key (str key "-macro-owned")
       (box :debug-name "macro-param-owned-wrapper"
            :background-color :transparent
@@ -1323,14 +1264,14 @@
              :padding 0
              :on-right-click (lambda (event) (open-param-plock-menu event false p))
           body))
-      (if (and st/instrument-mods-open (get p :modulatable))
+      (if (and instrument-view.mods-open (get p :modulatable))
         (subtree :key key
           (box :background-color (instrument-param-mod-bg p)
                :corner-radius 8
                :border-width 1
                :plock-any (if (param-plock-any? false p) 1 0)
                :padding 0.08
-               :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
+               :on-double-click (lambda (info) (param-toggle-modulation false p))
                :on-right-click (lambda (event) (open-param-plock-menu event false p))
             body))
         (if (param-plock-any? false p)
@@ -1343,132 +1284,3 @@
                  :on-right-click (lambda (event) (open-param-plock-menu event false p))
               body))
           body)))))))
-
-;; --- P-lock presence projection effect ------------------------------------
-;; The single reader of SEQ.track-plocks / SEQ.track-plock-variants on behalf
-;; of all param controls. Projects each displayed p-lock row into per-param
-;; SEQV float fields ("<key>-on" / "<key>-def") and the current variant chip
-;; color into three scalars; reactive value-compare suppresses no-op writes,
-;; so only the controls whose lock state actually changed rerun.
-
-(def param-plock-projected-row-key (row)
-  (param-plock-projected-key
-    (get row :target)
-    (if (= (get row :target) "instrument") "any" (get row :slot-idx))
-    (if (= (get row :target) "rack-effect") (get row :rack-slot) "x")
-    (get row :param-idx)))
-
-(def param-plock-key-member? (items value)
-  (> (len (filter |item| (= item value) items)) 0))
-
-(defstate param-plock-published-keys '())
-
-;; Runs as a dedicated non-visual effect buffer: a plain (effect ...) treats
-;; its result as the source buffer's widget tree, which would clobber the
-;; buffer that loaded this file. The named target gives the projection its
-;; own inert scratch buffer and keeps it live in every layout.
-(effect-buffer "*plock-sync*"
-  (do
-    (let ((keys
-            (reverse
-              (reduce |acc row|
-                ;; nil check, not truthiness: param index 0 must project too.
-                ;; Rows without a param index (timebase/swing/swing-resolution
-                ;; track locks) project under a target-only key read by the
-                ;; *track* parameters panel.
-                (let ((key (if (= (get row :param-idx) nil)
-                             (str "plk-t-" (get row :target))
-                             (param-plock-projected-row-key row))))
-                  (do
-                    (reactive-set "SEQV" (str key "-on") 1)
-                    (reactive-set "SEQV" (str key "-def") (get row :default))
-                    (cons key acc)))
-                '()
-                SEQ.track-plocks)))
-          (chip (param-current-variant-chip)))
-      (do
-        ;; Lock colors are only visible while some lock is shown, so leave
-        ;; the scalars untouched when no locks exist: publishing defaults on
-        ;; every deselect would flip the value back and forth and rerun every
-        ;; control for a color nothing displays.
-        (if (> (len keys) 0)
-          (do
-            (reactive-set "SEQV" "plk-var-r" (if chip (get chip :color-r) 0.27058825))
-            (reactive-set "SEQV" "plk-var-g" (if chip (get chip :color-g) 0.78431374))
-            (reactive-set "SEQV" "plk-var-b" (if chip (get chip :color-b) 0.8627451)))
-          false)
-        (each param-plock-published-keys |key idx|
-          (if (param-plock-key-member? keys key)
-            false
-            (do
-              (reactive-set "SEQV" (str key "-on") 0)
-              (reactive-set "SEQV" (str key "-def") false))))
-        (if (= param-plock-published-keys keys)
-          false
-          (set! param-plock-published-keys keys))))
-    nil))
-
-;; --- P-lock automation-presence projection ---------------------------------
-;; Same fan-out as *plock-sync*, one namespace over: SEQ.track-plock-any lists
-;; the params that carry a p-lock on ANY step of the pattern (bead eseq-yr6w),
-;; so a knob can show an automation dot without every control subscribing to
-;; the whole row list. Republished by the Rust side alongside
-;; SEQ.step-has-plocks — i.e. wherever a p-lock is written, cleared, or the
-;; pattern under the panel changes.
-
-(defstate param-plock-any-published-keys '())
-
-(effect-buffer "*plock-any-sync*"
-  (do
-    (let ((keys
-            (reverse
-              (reduce |acc row|
-                (let ((key (if (= (get row :param-idx) nil)
-                             (str "plk-t-" (get row :target))
-                             (param-plock-projected-row-key row))))
-                  (do
-                    (reactive-set "SEQV" (str key "-any") 1)
-                    (cons key acc)))
-                '()
-                SEQ.track-plock-any))))
-      (do
-        (each param-plock-any-published-keys |key idx|
-          (if (param-plock-key-member? keys key)
-            false
-            (reactive-set "SEQV" (str key "-any") 0)))
-        (if (= param-plock-any-published-keys keys)
-          false
-          (set! param-plock-any-published-keys keys))))
-    nil))
-
-;; --- Live print-latch projection -------------------------------------------
-;; SEQ.track-plock-printing carries the device params currently held under a
-;; print latch (bead eseq-4seq). The transport gate lives HERE rather than in
-;; each control: one effect subscribes to SEQ.playing / SEQ.recording, and a
-;; stale row list can never light an overlay because a failing gate projects
-;; the empty set and clears every published flag.
-
-(defstate param-plock-print-published-keys '())
-
-(effect-buffer "*plock-print-sync*"
-  (do
-    (let ((rows (if (and SEQ.playing SEQ.recording) SEQ.track-plock-printing '()))
-          (published param-plock-print-published-keys))
-      (let ((keys
-              (reverse
-                (reduce |acc row|
-                  (let ((key (param-plock-projected-row-key row)))
-                    (do
-                      (reactive-set "SEQV" (str key "-print") 1)
-                      (cons key acc)))
-                  '()
-                  rows))))
-        (do
-          (each published |key idx|
-            (if (param-plock-key-member? keys key)
-              false
-              (reactive-set "SEQV" (str key "-print") 0)))
-          (if (= param-plock-print-published-keys keys)
-            false
-            (set! param-plock-print-published-keys keys)))))
-    nil))

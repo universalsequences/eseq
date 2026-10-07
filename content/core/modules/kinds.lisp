@@ -420,6 +420,7 @@
          (type    :string :doc "continuous, enum or boolean (value 0 or 1)")
          (options (list-of :string) :doc "Labels of an enum param, by value; empty otherwise")
          (unit    :string :doc "Display unit of a continuous param (Hz, ms, %); may be empty")
+         (percent :bool   :doc "A % param its device stores as a ratio (0-1; its value, range and setters read 100 x the stored value)")
          (value   :number :doc "The value shown: a selected neural neuron's output override (overridden), else on the current track the p-lock at the selected (or playing) step, else the base under any engaged macro")
          (base    :number :set set-param-base
                   :doc "The device's own value (setting it never p-locks; see lock-param!). Set values are clamped; enum and boolean ones rounded (true/false work)")
@@ -444,6 +445,7 @@
          (mod-offset :number :doc "How far modulation moves value now (display units); 0 while unmodulated or not sampled")
          (mod-value  :number :doc "Where modulation moves value now; value while unmodulated")
          (mod-scale  :number :doc "An exponential destination's modulation ratio (mod-value / value); 1 otherwise")
+         (mod-ratio  :number :doc "mod-value as a 0-1 fraction where the param is percent (mod-value / 100), else mod-value: for visualizers drawn on the stored scale")
          (process-mapped :bool :doc "An enabled process slot of the track writes this instrument param")
          (process-value :number :doc "The value a process last wrote here (display units); value when none has")
          (process-clamped :bool :doc "That write hit the end of the param's range")

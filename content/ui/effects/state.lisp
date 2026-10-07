@@ -1,100 +1,120 @@
-;; Shared state and sizing constants for the Metal Sequencer effect strip.
+;; Shared view state and sizing constants for the Metal Sequencer effect strip.
 ;; ui/effects.lisp — Effect chain UI for Metal Sequencer
 ;; Renders to *fx* buffer. Loaded by ui/main.lisp after shared macro state.
+;;
+;; The panels' own state is `:key ()` singletons (docs/kind-bindings-spec.md
+;; §13.1): one per concern, read by value (`instrument-view.tab`, re-renders
+;; the reader) and written with `set!`. Fixtures and Rust tests reach one
+;; through a local: `(let ((v eseq.effects.state/effect-mods)) (set! v.open
+;; true))`.
 
 (module eseq.effects.state)
 
-(export instrument-panel-tab
-        instrument-source-tab
-        instrument-mods-open
-        instrument-selected-mod-slot
-        instrument-key-lock-octave
-        instrument-key-lock-octave-count
-        instrument-key-lock-anchor
-        instrument-key-lock-selected-notes
-        instrument-key-lock-audition
+(export instrument-view
+        key-lock-view
+        effect-mods
+        process-panel-view
+        section-of
+        select-section!
         rack-panel-slot-list-open
         rack-panel-selected-chain-open
         rack-panel-macros-open
         rack-panel-set-view
-        effect-mods-open
-        effect-mods-chain
-        effect-mods-track
-        effect-mods-slot
-        effect-mods-rack-slot
-        effect-mods-bus
-        effect-selected-mod-slot
-        process-panel-selected-track
-        process-panel-selected-instance-id
+        reset-rack-panel-views!
         seq-timebase-options
         fx-fixed-panel-height
         fx-panel-header-height
         fx-panel-body-content-height)
 
-;; Migration aliases (module spec §10). Every name below keeps its spelling —
-;; this file is a shared state hub for six unrelated prefix families
-;; (`instrument-`, `rack-panel-`, `effect-mods-`, `process-panel-`, the
-;; `*-ui-current-*` render-context globals and the `fx-panel-` sizing
-;; constants), and stripping any of them to the module would collide
-;; (`instrument-mods-open` and `effect-mods-open` both want `mods-open`).
-;; The aliases exist for the bare-name reason from the recipe's step 2: a
-;; bare `instrument-mods-open` in an unconverted caller does not find
-;; `eseq.effects.state/instrument-mods-open`. They are deleted as each
-;; consumer family converts. Not aliased: the two private sizing helpers,
-;; which have no caller outside this file.
+;; The instrument panel: its tab (0 synth, 1 keys), the sampler's source tab,
+;; the mods view and the modulation source (1-4) its knobs edit.
+(def-kind instrument-view
+  :key ()
+  :state ((tab 0)
+          (source-tab 0)
+          (mods-open false)
+          (mod-slot 1)))
 
-(defstate instrument-panel-tab 0)
-(defstate instrument-source-tab 0)
-(defstate instrument-mods-open false)
-(defstate instrument-selected-mod-slot 1)
-(defstate instrument-key-lock-octave 3)
-(defstate instrument-key-lock-octave-count 3)
-;; Last plain/cmd-clicked key; shift-click selects the range from it. -1 = none
-;; (0 is a valid MIDI note but falsy in eseqlisp, so never test it bare).
-(defstate instrument-key-lock-anchor -1)
-(defstate instrument-key-lock-selected-notes '())
-(defstate instrument-key-lock-audition true)
-;; Presentation state belongs to stable track identities, never dense indices.
-;; A project replacement invalidates old entries; ordinary scene changes do not.
-(defstate rack-panel-views '())
+;; The keys tab: the octave the piano starts at and how many it shows, the
+;; keys selected for key locks, the last plain/cmd-clicked key (shift-click
+;; selects the range from it; -1 none: 0 is a valid MIDI note but falsy, so
+;; never test it bare) and whether a selected key auditions.
+(def-kind key-lock-view
+  :key ()
+  :state ((octave 3)
+          (octave-count 3)
+          (anchor -1)
+          (notes (list-of :number) :default '())
+          (audition true)))
 
-(def rack-panel-view-generation ()
-  (or SEQ.rack-panel-view-generation 0))
+;; The effect whose modulation view is open: its chain (audio, midi, bus,
+;; rack), track, slot, rack slot and bus (-1 where it has none), and the
+;; modulation source (1-4) its knobs edit.
+(def-kind effect-mods
+  :key ()
+  :state ((open false)
+          (chain "audio")
+          (track -1)
+          (slot -1)
+          (rack-slot -1)
+          (bus -1)
+          (mod-slot 1)))
 
-(def rack-panel-view (inst)
-  (let ((generation (rack-panel-view-generation))
-        (view (nth (filter
-          (lambda (view)
-            (and (= (get view :track-id) (get inst :track-id))
-                 (= (get view :generation) generation)))
-          rack-panel-views) 0)))
+;; The section selected in each panel scope (a custom UI's, a param grid's),
+;; as `(dict :scope :section)` entries, newest first.
+(def-kind section-choice
+  :key ()
+  :state ((sections (list-of :any) :default '())))
+
+;; The section selected in `scope`, else `default`.
+(def section-of (scope default)
+  (let ((entry (first (filter |item| (= (get item :scope) scope) section-choice.sections))))
+    (if entry (get entry :section) default)))
+
+;; Select `section` in `scope` (a no-op when it is selected already).
+(def select-section! (scope section)
+  (unless (= (section-of scope nil) section)
+    (set! section-choice.sections
+      (cons (dict :scope scope :section section)
+        (filter |item| (not (= (get item :scope) scope)) section-choice.sections)))))
+
+;; The process panel's selected process: its track and instance id.
+(def-kind process-panel-view
+  :key ()
+  :state ((track -1)
+          (instance-id 0)))
+
+;; Each drum rack track's panel layout (its slot list, the selected slot's
+;; chain, the macro bank), by the track's stable id (the host's track id, as
+;; the string the host passes). Presentation state belongs to stable track
+;; identities, never positions; a project replacement forgets every entry
+;; (the host calls reset-rack-panel-views!), ordinary scene changes do not.
+(def-kind rack-panel-view
+  :key ()
+  :state ((views (list-of :any) :default '())))
+
+(def rack-view-of (inst)
+  (let ((view (first (filter (lambda (view) (= (get view :track-id) (get inst :track-id)))
+                       rack-panel-view.views))))
     (or view (dict :slots true :macros false :device true))))
 
-(def rack-panel-slot-list-open (inst) (get (rack-panel-view inst) :slots))
-(def rack-panel-selected-chain-open (inst) (get (rack-panel-view inst) :device))
-(def rack-panel-macros-open (inst) (get (rack-panel-view inst) :macros))
+(def rack-panel-slot-list-open (inst) (get (rack-view-of inst) :slots))
+(def rack-panel-selected-chain-open (inst) (get (rack-view-of inst) :device))
+(def rack-panel-macros-open (inst) (get (rack-view-of inst) :macros))
 
 ;; Also called by the host after successfully loading a rack preset or Sound.
 (def rack-panel-set-view (track-id slots macros device)
-  (let ((generation (rack-panel-view-generation)))
-    (set! rack-panel-views
-      (append
-        (filter (lambda (view)
-          (and (= (get view :generation) generation)
-               (not (= (get view :track-id) track-id)))) rack-panel-views)
-        (list (dict :track-id track-id :generation generation
-                    :slots slots :macros macros :device device))))))
-(defstate effect-mods-open false)
-(defstate effect-mods-chain "audio")
-(defstate effect-mods-track -1)
-(defstate effect-mods-slot -1)
-(defstate effect-mods-rack-slot -1)
-(defstate effect-mods-bus -1)
-(defstate effect-selected-mod-slot 1)
-(defstate process-panel-selected-track -1)
-(defstate process-panel-selected-instance-id 0)
+  (set! rack-panel-view.views
+    (append
+      (filter (lambda (view) (not (= (get view :track-id) track-id))) rack-panel-view.views)
+      (list (dict :track-id track-id :slots slots :macros macros :device device)))))
+
+;; Called by the host when a project replaces the previous one.
+(def reset-rack-panel-views! ()
+  (set! rack-panel-view.views '()))
+
 ;; These are temporary render-context globals used by generated custom synth UI.
-;; They must NOT be defstate: custom UI functions set them while rendering, and
+;; They must NOT be view state: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
 ;;
 ;; They also stay in `eseq.vanilla` explicitly (module spec §3's cross-module
@@ -123,5 +143,5 @@
 (def fx-panel-header-height 1.0)
 (def fx-panel-body-padding 0.25)
 (def fx-panel-body-top-spacer-height 0.16)
-(def fx-panel-body-content-height 
+(def fx-panel-body-content-height
   (- fx-fixed-panel-height fx-panel-header-height (* 2 fx-panel-body-padding) fx-panel-body-top-spacer-height))

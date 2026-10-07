@@ -2,6 +2,7 @@
 (module eseq.effects.custom-ui-runtime)
 
 (import eseq.effects.param-controls :as pc)
+(import eseq.effects.devices :as dv)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-sections :as sec)
 ;; runtime <-> custom-effect-ui is a converted-module import cycle
@@ -132,13 +133,15 @@
 (def param-owner (p)
   (get p :custom-ui-owner))
 
+;; A param also carries its kinds param (`:prm`), resolved once for every
+;; control that reads it.
 (def custom-ui-param-in-scope (scope name)
-  (scoped-param scope
-    (if (= (get scope :kind) "audio-fx")
-      (fxui/audio-fx-ui-param (get scope :audio-fx) name)
-      (if (= (get scope :kind) "midi-fx")
-        (fxui/midi-fx-ui-param (get scope :midi-fx) name)
-        (inst-param (get scope :inst) name)))))
+  (let ((p (if (= (get scope :kind) "audio-fx")
+             (fxui/audio-fx-ui-param (get scope :audio-fx) name)
+             (if (= (get scope :kind) "midi-fx")
+               (fxui/midi-fx-ui-param (get scope :midi-fx) name)
+               (inst-param (get scope :inst) name)))))
+    (scoped-param scope (when p (dv/with-prm (fx-in-scope scope) p)))))
 
 (def effect-scope? (scope)
   (or (= (get scope :kind) "audio-fx") (= (get scope :kind) "midi-fx")))
@@ -175,21 +178,22 @@
           (map (lambda (binding)
             (list (custom-ui-param-in-scope scope (nth binding 1)) (get env (nth binding 0)))) bindings)))
         (fx (fx-in-scope scope)))
-    (let ((updates (map (lambda (pair)
-            (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1))) pairs)))
-      (if (= (len pairs) 0) false
-        (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
+    (if (empty? pairs) false
+      (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
+        (host-command
+          (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
+          (dict :slot-idx (get fx :slot-idx)
+                :target-node-id (get fx :target-node-id)
+                :updates (pc/effect-param-updates fx pairs)
+                :commit (not (get env :active))))
+        (if (and (not fx) (not (pc/instrument-rack-target? (nth (nth pairs 0) 0))))
           (host-command
-            (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
-            (dict :slot-idx (get fx :slot-idx)
-                  :target-node-id (get fx :target-node-id)
-                  :updates updates :commit (not (get env :active))))
-          (if (and (not fx) (not (pc/instrument-rack-target? (nth (nth pairs 0) 0))))
-            (host-command
-              (if (seq-has-selection?) "set-instrument-plock-batch" "set-instrument-param-batch")
-              (dict :updates updates :commit (not (get env :active))))
-            (map (lambda (pair)
-              (custom-ui-set-param-in-scope scope (nth pair 0) (nth pair 1))) pairs)))))))
+            (if (seq-has-selection?) "set-instrument-plock-batch" "set-instrument-param-batch")
+            (dict :updates (map (lambda (pair) (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1)))
+                             pairs)
+                  :commit (not (get env :active))))
+          (map (lambda (pair)
+            (custom-ui-set-param-in-scope scope (nth pair 0) (nth pair 1))) pairs))))))
 
 (def custom-ui-set-adsr-in-scope (scope attack decay sustain release env)
   (custom-ui-set-envelope-in-scope scope
@@ -225,13 +229,14 @@
 (def custom-ui-set-param (p value)
   (pc/param-set-control-value (param-fx p) p value))
 
+;; The value p's control shows, as a binding (eseq.kinds `#'prm.value`,
+;; the lane depth while modulation is open, …): for widget props.
 (def custom-ui-param-binding (p)
   (pc/fx-param-value-for (param-fx p) p))
 
-;; Public custom-UI calculations have historically consumed a number here.
-;; Keep that contract distinct from the binding passed directly to widgets.
+;; The same value as a number, for custom-UI calculations.
 (def custom-ui-param-value (p)
-  (reactive-value (custom-ui-param-binding p)))
+  (pc/fx-param-numeric-value-for (param-fx p) p))
 
 (def custom-ui-param-control-min (p)
   (pc/param-control-min (param-fx p) p))
@@ -251,16 +256,16 @@
 (def custom-ui-param-base-value-prop (p)
   (pc/param-base-value-prop (param-fx p) p))
 
-;; Live modulation offset for a custom instrument's param (eseq-6mva). The host
-;; samples the most recently triggered voice's modulator and publishes
-;; `sum(depth * mod)`; the knob draws its live dot that far from its base.
-;; `false` for params with no published field, which draws no dot.
+;; Live modulation offset for a custom instrument's param (eseq-6mva): the
+;; most recently triggered voice's `sum(depth * mod)` (param.mod-offset); the
+;; knob draws its live dot that far from its base. `false` for a param that
+;; is no modulation destination, which draws no dot.
 (def custom-ui-param-mod-offset (p)
-  (pc/param-mod-offset p))
+  (pc/param-mod-offset-for (param-fx p) p))
 
 ;; The exponential companion of the offset; see `pc/param-mod-scale`.
 (def custom-ui-param-mod-scale (p)
-  (pc/param-mod-scale p))
+  (pc/param-mod-scale-for (param-fx p) p))
 
 (def custom-ui-param-base-min-prop (p)
   (pc/param-base-min-prop (param-fx p) p))
@@ -282,13 +287,13 @@
 ;; Process effective value / clamp flag for the knob dot and picker bar
 ;; (eseq-p1kg); see `pc/param-process-value`.
 (def custom-ui-param-process-value (p)
-  (pc/param-process-value p))
+  (pc/param-process-value-for (param-fx p) p))
 
 (def custom-ui-param-process-clamped (p)
-  (pc/param-process-clamped p))
+  (pc/param-process-clamped-for (param-fx p) p))
 
 (def custom-ui-param-process-mapped? (p)
-  (pc/param-process-mapped? p))
+  (pc/param-process-mapped-for? (param-fx p) p))
 
 ;; True while the mods tab paints its dark highlight box behind this param,
 ;; so light-panel surfaces can swap their black ink for a legible color.
@@ -308,10 +313,14 @@
   (let ((p (custom-ui-current-param name)))
     (if p (custom-ui-set-param p value) false)))
 
+;; The cells a tensor dict's matrix shows (the tensor's values, row by row:
+;; the p-lock at the displayed step, else its own), zeros while the tensor is
+;; not published.
 (def custom-ui-tensor-bound-values (p)
-  (let ((field (get p :value-field))
-        (cells (* (get p :rows) (get p :cols))))
-    (map |idx| (bind-seq-nth field idx) (range cells))))
+  (let ((tz (dv/tensor-of p)))
+    (if tz
+      tz.values
+      (map (lambda (idx) 0) (range (* (get p :rows) (get p :cols)))))))
 
 (def custom-ui-tensor-cell-change-callback (p)
   (lambda (row col value)

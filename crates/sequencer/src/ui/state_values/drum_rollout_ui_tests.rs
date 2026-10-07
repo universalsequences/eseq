@@ -72,6 +72,7 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
         .eval_str(&custom_ui_source)
         .expect("load hat909 custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("hat909 fx lisp status after refresh: {status}");
@@ -87,12 +88,15 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
     editor.set_layout_viewport(180, 18);
 
     if instrument == "Membrane Snare" {
-        let index = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
-            .position(|line| line.split_whitespace().nth(1) == Some("head_couple")).unwrap();
-        let field = format!("plk-instrument-any-x-{index}-on");
+        // A p-lock supplies the value at the selected step: param.locked.
         for locked in [0.0, 1.0, 0.0] {
-            editor.runtime_mut().set_reactive("SEQV", &field, Value::Number(locked));
-            editor.runtime_mut().run_reactive_cycle();
+            set_panel_param_field(
+                &mut editor,
+                &kinds,
+                "hat909-test-head_couple",
+                "locked",
+                Value::Bool(locked == 1.0),
+            );
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
             let picker = find_layout_node_by_debug_name(&layout, "drum-detail-head_couple")
@@ -136,7 +140,12 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
         }).unwrap_or(1);
     for engine in 1..=engines {
         if engines > 1 {
-            editor.runtime_mut().set_reactive("SEQ", "hat909-test-engine", Value::Number(engine as f64));
+            set_panel_param(
+                &mut editor,
+                &kinds,
+                "hat909-test-engine",
+                Value::Number(engine as f64),
+            );
             editor.runtime_mut().run_reactive_cycle();
         }
         for section in 0..page_count {
@@ -194,14 +203,11 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
             let mut nodes = Vec::new(); controls(panel, &mut nodes);
             assert!(nodes.len() >= 8);
             let knob_fields: Vec<_> = nodes.iter().filter(|node| node.widget_type == "knob-number")
-                .filter_map(|node| match node.props.get("value") {
-                    Some(Value::ReactiveRef { field, .. }) => Some(field),
-                    _ => None,
-                }).collect();
+                .filter_map(|node| bound_field(node.props.get("value"))).collect();
             assert_eq!(knob_fields.len(), 8);
             for node in &nodes {
                 if node.widget_type == "number-picker" {
-                    if let Some(Value::ReactiveRef { field, .. }) = node.props.get("value") {
+                    if let Some(field) = bound_field(node.props.get("value")) {
                         assert!(!knob_fields.contains(&field), "duplicate detail binding {field}");
                     }
                 }

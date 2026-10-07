@@ -5,11 +5,12 @@
     :audio-fx ("Filterbank")))
 
 (def capture-after-sync ()
-  (do
-    (set! eseq.effects.state/effect-mods-chain "audio")
-    (set! eseq.effects.state/effect-mods-track 0)
-    (set! eseq.effects.state/effect-mods-slot 0)
-    (set! eseq.effects.state/effect-mods-rack-slot -1)
-    (set! eseq.effects.state/effect-mods-bus -1)
-    (set! eseq.effects.state/effect-selected-mod-slot 1)
-    (set! eseq.effects.state/effect-mods-open true)))
+  (let ((em eseq.effects.state/effect-mods))
+    (do
+      (set! em.chain "audio")
+      (set! em.track 0)
+      (set! em.slot 0)
+      (set! em.rack-slot -1)
+      (set! em.bus -1)
+      (set! em.mod-slot 1)
+      (set! em.open true))))

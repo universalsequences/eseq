@@ -53,6 +53,7 @@ fn check_resonant_surface_at(root: &std::path::Path, dsp_file: &str, instrument:
     register_test_delete_target_natives(&mut editor, 1);
     editor.runtime_mut().eval_str(&ui).expect("load woodwind UI");
     editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
     editor.set_active_buffer(fx);
@@ -94,7 +95,7 @@ fn check_resonant_surface_at(root: &std::path::Path, dsp_file: &str, instrument:
         visit(panel, panel, &mut controls);
         assert_eq!(controls.iter().filter(|n| n.widget_type == "knob-number").count(), 8);
         for node in controls {
-            let Some(Value::ReactiveRef { field, .. }) = node.props.get("value") else { panic!("unbound control"); };
+            let field = bound_field(node.props.get("value")).expect("unbound control");
             let name = field.strip_prefix("pm-test-").expect("real parameter binding");
             assert!(expected.contains(name), "unknown parameter {name}");
             seen.insert(name.to_string());

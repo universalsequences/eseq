@@ -5142,13 +5142,14 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.effects.state/instrument-panel-tab 2)
-                (defstate eseq.effects.state/instrument-mods-open false)
+                (def-kind instrument-view :key () :state ((tab 2) (mods-open false)))
+                (def eseq.effects.state/instrument-view instrument-view)
                 (defstate eseq.seq-core-state/selected-bus 1)
                 (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
-                  (do
-                    (set! eseq.effects.state/instrument-panel-tab 0)
-                    (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
+                  (let ((v eseq.effects.state/instrument-view))
+                    (do
+                      (set! v.tab 0)
+                      (set! v.mods-open (not v.mods-open)))))
                 (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
                   (do
                     (set! eseq.seq-core-state/selected-bus -1)
@@ -5173,14 +5174,14 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-panel-tab")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.tab)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Number(0.0))
         );
@@ -5202,7 +5203,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(false))
         );
@@ -5217,9 +5218,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.effects.state/instrument-mods-open false)
+                (def-kind instrument-view :key () :state ((tab 0) (mods-open false)))
+                (def eseq.effects.state/instrument-view instrument-view)
                 (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
-                  (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open)))
+                  (let ((v eseq.effects.state/instrument-view))
+                    (set! v.mods-open (not v.mods-open))))
                 (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
                   (eseq.effects.effect-panels/instrument-toggle-mods-view))
                 "#,
@@ -5243,7 +5246,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );

@@ -9,6 +9,7 @@
   '(60 64 67))
 
 (def capture-after-sync ()
-  (do
-    (set! eseq.effects.state/instrument-panel-tab 1)
-    (set! eseq.effects.state/instrument-key-lock-selected-notes '(62 69))))
+  (let ((iv eseq.effects.state/instrument-view) (kv eseq.effects.state/key-lock-view))
+    (do
+      (set! iv.tab 1)
+      (set! kv.notes '(62 69)))))

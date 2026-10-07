@@ -68,6 +68,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         .eval_str(&custom_ui_source)
         .expect("load poseidon custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("poseidon fx lisp status after refresh: {status}");
@@ -108,7 +109,12 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         editor.runtime_mut().invoke(panel.props["on-click"].clone(), vec![Value::Bool(false)]).unwrap();
         editor.refresh_runtime_side_effects();
         for mode in [0, 1] {
-            editor.runtime_mut().set_reactive("SEQ", "poseidon-test-filter_mode", Value::Number(mode as f64));
+            set_panel_param(
+                &mut editor,
+                &kinds,
+                "poseidon-test-filter_mode",
+                Value::Number(mode as f64),
+            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let current = editor.widget_layout().unwrap();
@@ -139,8 +145,8 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
                 let env = find_layout_node_by_debug_name(display, "tri-envelope").unwrap();
                 let prefix = if section == 2 { "feg" } else { "aeg" };
                 for (prop, suffix) in [("attack", "attack_ms"), ("decay", "decay_ms"), ("sustain", "sustain"), ("release", "release_ms")] {
-                    let Value::ReactiveRef { field, .. } = &env.props[prop] else { panic!("bound envelope {prop}"); };
-                    assert_eq!(field, &format!("poseidon-test-{prefix}_{suffix}"));
+                    let field = bound_field(env.props.get(prop)).unwrap_or_else(|| panic!("bound envelope {prop}"));
+                    assert_eq!(field, format!("poseidon-test-{prefix}_{suffix}"));
                 }
                 editor.drain_host_commands();
                 let event = Value::Map([("attack", 12.0), ("decay", 230.0), ("sustain", 0.45), ("release", 340.0)]

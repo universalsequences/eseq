@@ -68,6 +68,7 @@ fn hat909_performance_controls_and_envelopes_are_bound_and_visible() {
         .eval_str(&custom_ui_source)
         .expect("load hat909 custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("hat909 fx lisp status after refresh: {status}");

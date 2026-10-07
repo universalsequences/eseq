@@ -68,6 +68,7 @@ fn clap_display_has_bound_waveform_and_visible_pages() {
         .eval_str(&custom_ui_source)
         .expect("load clap custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("clap fx lisp status after refresh: {status}");
@@ -133,7 +134,7 @@ fn clap_display_has_bound_waveform_and_visible_pages() {
             assert_eq!(*payload["value"].borrow(), Value::Number(16.0));
         }
         editor.runtime_mut().register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
-        editor.runtime_mut().set_reactive("SEQ", "clap-test-sp1", Value::Number(12.0));
+        set_panel_param(&mut editor, &kinds, "clap-test-sp1", Value::Number(12.0));
         editor.runtime_mut().run_reactive_cycle();
         let Value::ReactiveRef { slot, .. } = &wave.props["sp1"] else { panic!("binding"); };
         assert_eq!(eseqlisp::reactive::read_float_slot(slot), 12.0);

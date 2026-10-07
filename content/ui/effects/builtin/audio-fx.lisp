@@ -1,6 +1,7 @@
 ;; Dispatcher from built-in audio effect name to custom panel body.
 (module eseq.effects.builtin.audio-fx)
 
+(import eseq.effects.param-controls :refer (with-param-owners))
 (import eseq.effects.builtin.filter-panel :as flt)
 (import eseq.effects.builtin.eq8 :as eq8)
 (import eseq.effects.builtin.str8-delay :as sd)
@@ -30,7 +31,12 @@
 ;; them). The converted eseq.effects.panel-bodies imports this module instead.
 ;; Deleted when those tests move to the qualified spelling.
 
+;; The panels read their params' values through the one-argument
+;; param-controls forms, so every param carries fx (with-param-owners).
 (def builtin-audio-fx-ui (fx)
+  (builtin-panel (with-param-owners fx)))
+
+(def builtin-panel (fx)
   (if (= (get fx :name) "Chorus")
     (chorus/panel fx)
   (if (= (get fx :name) "Filter")

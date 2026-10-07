@@ -496,12 +496,7 @@ pub(super) fn handle(
             let was_latched = print.armed();
             let ended = print.unlatch(param);
             print.publish_engine_override(&state);
-            // A step-param release can end the whole latch, which must also
-            // drop any device-param print overlay it was holding.
-            let overlay_dirty =
-                crate::step_print::sync_print_latch_rows(editor.runtime_mut(), &print);
             drop(print);
-            flush_reactive_display_edit(editor, overlay_dirty);
             if was_latched && ended {
                 // The whole latch ended here (not in the tick's gate check),
                 // so restore all picker readouts to the cursor step now.

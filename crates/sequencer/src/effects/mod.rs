@@ -519,9 +519,13 @@ impl ParamDescriptor {
         matches!(self.kind, ParamKind::Enum { .. })
     }
 
-    /// Returns true if this param is displayed as percentage but stored 0.0-1.0.
+    /// Returns true if this param is displayed as a percentage of a stored
+    /// ratio (0.0-1.0, or the OTT time's 0.1-10): a `%` param whose range
+    /// stays within ±10. A `%` param stored as 0-100 (the Filterbank's) is
+    /// already in display units.
     pub fn is_percent(&self) -> bool {
         matches!(&self.kind, ParamKind::Continuous { unit: Some(u) } if u == "%")
+            && self.min.abs().max(self.max.abs()) <= 10.0
     }
 
     /// Convert user-entered value to stored value (handles % → /100).
@@ -636,6 +640,31 @@ mod tests {
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
+
+    #[test]
+    fn a_percent_param_is_a_fraction_shown_times_100() {
+        let param = |name: &str, effect: &str| {
+            EffectDescriptor::builtin_insert(effect)
+                .unwrap()
+                .params
+                .into_iter()
+                .find(|param| param.name == name)
+                .unwrap()
+        };
+        // The Chorus mix stores 0-1 and shows 0-100 %.
+        let mix = param("mix", "Chorus");
+        assert!(mix.is_percent());
+        assert_eq!(mix.stored_to_user(0.5), 50.0);
+        assert_eq!(mix.user_input_to_stored(50.0), 0.5);
+        // The OTT time is a ratio too: 1.0 shows 100 %.
+        let time = param("time", "OTT");
+        assert!(time.is_percent());
+        assert_eq!(time.stored_to_user(1.0), 100.0);
+        // The Filterbank stores its % params as 0-100 already.
+        let sense = param("sense", "Filterbank");
+        assert!(!sense.is_percent());
+        assert_eq!(sense.stored_to_user(30.0), 30.0);
+    }
 
     #[test]
     fn tensor_backed_options_bake_enum_labels_from_the_asset() {

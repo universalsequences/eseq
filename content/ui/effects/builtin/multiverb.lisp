@@ -13,8 +13,8 @@
   (fx-param-numeric-value
    fx-param-value-for
    fx-set-effect-value
-   instrument-mod-target-source-slot
-   instrument-param-mod-targets
+   mod-target-source-slot
+   param-mod-targets
    param-base-max-prop
    param-base-min-prop
    param-base-value-prop
@@ -104,7 +104,7 @@
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p)
-        :value-scale 100 :decimals 0
+        :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
         :mod-offset (eseq.effects.param-controls/param-mod-offset p)
         :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -141,10 +141,16 @@
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p index))))
 
+;; Preset values below are the effect's stored units (a % param's 0-1
+;; fraction), so the preset writes send them as they are.
+(def set-depth (fx mt depth)
+  (eseq.effects.param-controls/fx-set-effect-stored-value fx
+    (dict :idx (eseq.effects.param-controls/mod-target-depth-idx mt) :control "param") depth))
+
 (def clear-mod-depths (fx target-params)
   (each target-params |p|
-    (each (eseq.effects.param-controls/instrument-param-mod-targets p) |target|
-      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0))))
+    (each (eseq.effects.param-controls/param-mod-targets fx p) |mt|
+      (set-depth fx mt 0))))
 
 (def source-section (fx source-slot)
   (nth
@@ -163,14 +169,12 @@
       (if source-p (eseq.effects.param-controls/param-set-option fx source-p "off")))))
 
 (def set-mod-depth (fx p source-slot depth)
-  (let ((target
-          (nth
+  (let ((mt
+          (first
             (filter |candidate|
-              (= (eseq.effects.param-controls/instrument-mod-target-source-slot candidate) source-slot)
-              (eseq.effects.param-controls/instrument-param-mod-targets p))
-            0)))
-    (if target
-      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") depth))))
+              (= (eseq.effects.param-controls/mod-target-source-slot candidate) source-slot)
+              (eseq.effects.param-controls/param-mod-targets fx p)))))
+    (when mt (set-depth fx mt depth))))
 
 (def preset-values (name)
   (if (= name "Xtal Wash")
@@ -208,7 +212,7 @@
         (clear-mod-depths fx (list decay-p size-p depth-p mix-p))
         (each (preset-values name) |setting|
           (let ((p (eseq.effects.builtin.filter-core/builtin-fx-param params (nth setting 0))))
-            (if p (eseq.effects.param-controls/fx-set-effect-value fx p (nth setting 1)))))
+            (when p (eseq.effects.param-controls/fx-set-effect-stored-value fx p (nth setting 1)))))
         (if (= name "Xtal Wash")
           (do
             (set-mod-depth fx decay-p 1 0.08)

@@ -980,6 +980,7 @@ pub(crate) mod f {
     pub(crate) const PARAM_OPTIONS: FieldKey = (PARAM, "options");
     pub(crate) const PARAM_TYPE: FieldKey = (PARAM, "type");
     pub(crate) const PARAM_UNIT: FieldKey = (PARAM, "unit");
+    pub(crate) const PARAM_PERCENT: FieldKey = (PARAM, "percent");
     pub(crate) const PARAM_VALUE: FieldKey = (PARAM, "value");
     pub(crate) const PARAM_BASE: FieldKey = (PARAM, "base");
     pub(crate) const PARAM_LOCKED: FieldKey = (PARAM, "locked");
@@ -995,6 +996,7 @@ pub(crate) mod f {
     pub(crate) const PARAM_MOD_OFFSET: FieldKey = (PARAM, "mod-offset");
     pub(crate) const PARAM_MOD_VALUE: FieldKey = (PARAM, "mod-value");
     pub(crate) const PARAM_MOD_SCALE: FieldKey = (PARAM, "mod-scale");
+    pub(crate) const PARAM_MOD_RATIO: FieldKey = (PARAM, "mod-ratio");
     pub(crate) const PARAM_PROCESS_MAPPED: FieldKey = (PARAM, "process-mapped");
     pub(crate) const PARAM_PROCESS_VALUE: FieldKey = (PARAM, "process-value");
     pub(crate) const PARAM_PROCESS_CLAMPED: FieldKey = (PARAM, "process-clamped");
@@ -1461,6 +1463,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_OPTIONS, "(list-of :string)", Model),
     (f::PARAM_TYPE, ":string", Model),
     (f::PARAM_UNIT, ":string", Model),
+    (f::PARAM_PERCENT, ":bool", Model),
     (f::PARAM_VALUE, ":number", Live),
     (f::PARAM_BASE, ":number", Live),
     (f::PARAM_LOCKED, ":bool", Live),
@@ -1477,6 +1480,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_MOD_OFFSET, ":number", Live),
     (f::PARAM_MOD_VALUE, ":number", Live),
     (f::PARAM_MOD_SCALE, ":number", Live),
+    (f::PARAM_MOD_RATIO, ":number", Live),
     (f::PARAM_PROCESS_MAPPED, ":bool", Live),
     (f::PARAM_PROCESS_VALUE, ":number", Live),
     (f::PARAM_PROCESS_CLAMPED, ":bool", Live),
