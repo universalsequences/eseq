@@ -5,13 +5,11 @@
 
 (export slider-material
         slider-muted-material
-        slider-track-material
-        slider-track-muted-material
         color)
 
 ;; Migration compat aliases (spec §10 slice 3): every renamed macro with a
 ;; caller outside this file. `aqua-color` has ~10 call sites in
-;; sequencer.lisp / step-grid.lisp / legacy/mixer.lisp shader bodies, so it
+;; sequencer.lisp / legacy/mixer.lisp shader bodies, so it
 ;; stays public. `aqua-color-button` and `aqua-slider-material2` have none
 ;; and go `%`-private. The standalone eseqlisp demos (sdf-aqua-demo.lisp,
 ;; slider-material-demo.lisp) and the Rust test fixtures that define their
@@ -85,35 +83,6 @@
           (eseq.materials/color
             (rgba 0.10 0.10 0.22 0.85)
             (rgba 0.08 0.08 0.30 0.85)))))
-
-(defmacro slider-track-material ()
-  `(material
-     :lighting (lighting :edge-min -0.215 :edge-max 0.8413
-       :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
-     :color
-       (eseq.materials/color
-         (rgba (* eseq.step-grid/metal-track-r 0.55) (* eseq.step-grid/metal-track-g 0.55) (* eseq.step-grid/metal-track-b 0.55) 1.0)
-         (rgba eseq.step-grid/metal-track-r eseq.step-grid/metal-track-g eseq.step-grid/metal-track-b 1.0))))
-
-(defmacro slider-track-muted-material ()
-  `(material
-     :lighting (lighting :edge-min -0.215 :edge-max 0.8413
-       :light (vec3 -0.1 -0.61 2.4) :shininess 38.0)
-     :color
-       (* 0.42
-          (eseq.materials/color
-            (rgba
-              (+ (* eseq.step-grid/metal-track-r 0.36) 0.06)
-              (+ (* eseq.step-grid/metal-track-g 0.36) 0.06)
-              (+ (* eseq.step-grid/metal-track-b 0.36) 0.08)
-              0.85)
-            (rgba
-              (+ (* eseq.step-grid/metal-track-r 0.30) 0.04)
-              (+ (* eseq.step-grid/metal-track-g 0.30) 0.04)
-              (+ (* eseq.step-grid/metal-track-b 0.30) 0.08)
-              0.85)))))
-
-     
 
 ;; ── Aqua widgets ──
 

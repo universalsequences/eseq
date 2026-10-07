@@ -4,7 +4,7 @@
 ;; lane by its place in t.lanes. Tracks, steps and lanes are eseq.kinds
 ;; instances; the `seqv-current-…` / `seqv-param-…` forms read the current
 ;; track (selection.track), for the *step* panel (ui/effects/track-panels.lisp)
-;; and the *metal* grid mode (ui/seq-grid-mode.lisp).
+;; and the grid mode (ui/seq-grid-mode.lisp).
 ;;
 ;; The `seqv-` prefix stays: several names here wrap ui/step-grid-interactions'
 ;; unprefixed ones (`seqv-step-param-value` around `step-param-value`, …), and
@@ -103,8 +103,8 @@
     7 (set! s.retrig v)
     _ (set! s.retrig-rate v)))
 
-;; The current track's values of mode `mode`, by step (the *metal* grid
-;; mode's slider list).
+;; The current track's values of mode `mode`, by step (the grid mode's
+;; slider list).
 (def seqv-current-param-values (mode)
   (let ((t selection.track))
     (if (seqv-process-lane-mode? mode)

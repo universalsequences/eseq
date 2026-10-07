@@ -6,11 +6,12 @@
 ;; does not own. Three distinct rungs fire here, all pre-built infra:
 ;;
 ;;   1. `define-mode` qualifies the registry key to
-;;      `eseq.seq-grid-mode/seq-grid-mode`, so the two flat
-;;      `(set-buffer-mode-for … "eseq.seq-grid-mode/seq-grid-mode")` callers — ui/step-grid.lisp
-;;      and ui/sequencer.lisp (both converted modules as of S3b wave 8, whose
-;;      bare references qualify against *themselves*, miss, and fall to the
-;;      same base-name rung) — both reach it through the identity alias below.
+;;      `eseq.seq-grid-mode/seq-grid-mode`, so the flat
+;;      `(set-buffer-mode-for … "eseq.seq-grid-mode/seq-grid-mode")` caller,
+;;      ui/sequencer.lisp (a converted module whose bare references qualify
+;;      against *itself*, miss, and fall to the same base-name rung), reaches
+;;      it through the identity alias below. (ui/step-grid.lisp, the other
+;;      caller, was deleted with the legacy *metal* grid, eseq-0l17.77.)
 ;;   2. `mode-bind-key` qualifies its *handler* string against this module
 ;;      unconditionally, so the seven handlers bound below that are defined
 ;;      OUTSIDE this file (cursor-left/-right, select-all-steps,
@@ -68,8 +69,8 @@
 ;; The 14 `param-*` / `sync-current-label` aliases and `goto-page` that this
 ;; block carried in wave 7 were minted for exactly one caller, the then-
 ;; headerless ui/step-grid.lisp. That file became `eseq.step-grid` in wave 8
-;; and now reaches these names through `(import eseq.seq-grid-mode :as gm)`,
-;; so the aliases were retired — a whole-repo bounded grep confirms no other
+;; and reached these names through `(import eseq.seq-grid-mode :as gm)` (it
+;; is deleted since eseq-0l17.77), so the aliases were retired — a whole-repo bounded grep confirms no other
 ;; lisp or Rust caller spells any of them flat. (`param-color` had no caller
 ;; at all; the only `param-name` hit is the `"param-name"` *map field* string
 ;; in src/ui/natives.rs:272, not a global reference.)
@@ -106,7 +107,7 @@
     (seq-halve-track-pattern)
     (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 (core/cursor-num-steps)) 1)))))
 
-;; Cursor keys scoped to *metal* buffer via mode
+;; Cursor keys scoped to the *sequencer* buffer via mode
 ;; Inherits the shared sequencer keymap (arrows, RET, BS/Delete, UP/DOWN);
 ;; only the grid-specific keys are bound here.
 (define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :live-keys true :on-key "seq-grid-handle-key"

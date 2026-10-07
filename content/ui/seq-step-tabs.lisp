@@ -193,7 +193,7 @@
             (seq-main-step-tabs))) 0))
 
 (def seq-step-buffer? (buffer)
-  (or (= buffer "*metal*") (seq-main-step-tab-buffer? buffer)))
+  (seq-main-step-tab-buffer? buffer))
 
 (def seq-sanitized-step-buffer (buffer)
   (if (seq-step-buffer? buffer) buffer "*sequencer*"))

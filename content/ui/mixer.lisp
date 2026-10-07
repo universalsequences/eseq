@@ -1316,7 +1316,7 @@
     :width bus-strip-width :height (bus-strip-height)
     ;; Bound selection state (eseq-4jv): a raw `selected-bus` read here
     ;; re-rendered every bus strip on each selection.
-    :selected (eseq.seq-core-state/bus-selected-vis-binding b.index)
+    :selected (eseq.seq-core-state/bus-selected-ref b)
     :muted #'b.muted
     :background-color :mixer-strip-bg
     :selected-background-color :mixer-strip-selected-bg
@@ -1556,7 +1556,7 @@
       :padding 0.3
       ;; Selection is a bound state, not a computed color (eseq-4jv): the
       ;; selected look keeps a constant border width so it never relayouts.
-      :selected (eseq.seq-core-state/group-selected-vis-binding g.gid)
+      :selected (eseq.seq-core-state/group-selected-ref g)
       :background-color (color-rgba c 0.78)
       :selected-background-color (color-rgba c 1.0)
       :border-width 2

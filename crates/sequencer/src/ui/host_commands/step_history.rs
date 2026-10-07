@@ -2043,7 +2043,6 @@ mod tests {
                     cached_track_peak_levels: &peaks,
                     cached_bus_peak_levels: &bus_peaks,
                     record_armed: &self.record_armed,
-                    active_delete_target: &self.active_delete_target,
                     fx_visible: true,
                     sequencer_visible: true,
                     mixer_visible: true,
@@ -2122,7 +2121,7 @@ mod tests {
     /// `sync_step_param_lists` per drag update), so the targeted invalidations
     /// are now the ONLY writer for all of these:
     ///   - `SEQ.{transposes,velocities}` — read by the `*step*` panel's
-    ///     `fx-step-param-value`, `set-cursor-step-value`, and `*metal*`.
+    ///     `fx-step-param-value` and `set-cursor-step-value`.
     ///   - `SEQ.track-{transposes,velocities}` — the per-track lists
     ///     (the step editors read the `step` kind's fields instead).
     ///   - `fx-step-value-{param}` — the number-picker readout being dragged.

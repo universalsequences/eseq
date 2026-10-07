@@ -15,7 +15,7 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
-(import eseq.kinds :refer (buses groups selection transport))
+(import eseq.kinds :refer (buses selection transport))
 
 (export track-range-in-order
         selected-bus
@@ -38,10 +38,9 @@
         playhead-page
         page-offset
         cool-off-follow
-        sel-group-vis-field
-        sel-bus-vis-field
-        group-selected-vis-binding
-        bus-selected-vis-binding
+        bus-highlight
+        bus-selected-ref
+        group-selected-ref
         mixer-clip-area-height
         mixer-panel-height
         corner-radius-scale
@@ -165,21 +164,28 @@
 ;; mixer bus strips. A single group selection therefore re-rendered every one
 ;; of those subtrees before the *fx* panel had even started its (legitimate)
 ;; owner switch. This one effect is now the only selection-visibility reader
-;; of the defstate: it projects "does this bus / group draw selected?" into
-;; per-item SEQV float fields, and the strips and blocks bind those fields, so
-;; a selection change dirties only the affected retained widgets — no
-;; subtree re-renders. Track rows bind `track.in-selection` (eseq.kinds).
-;; The *fx* buffer root is the intended remaining reader (it must
-;; restructure); nothing else should read `selected-bus` in render.
-;; COMPAT(eseq-0l17): until the bus selection is a kind field.
-(def sel-group-vis-field (gid) (str "sel-group-vis-" gid))
-(def sel-bus-vis-field (i) (str "sel-bus-vis-" i))
+;; of the defstate: it projects "does this bus draw selected?" into a
+;; view-local `bus-highlight` per bus (eseq-0l17.77; it was a SEQV float
+;; field), and the bus strips and group blocks bind its `selected` (a group
+;; through its bus), so a selection change repaints only the affected
+;; retained widgets: no subtree re-renders. Track rows bind
+;; `track.in-selection` (eseq.kinds). The *fx* buffer root is the intended
+;; remaining reader (it must restructure); nothing else should read
+;; `selected-bus` in render.
+(def-kind bus-highlight
+  :key (bus)
+  :state ((selected false)))
 
-(def group-selected-vis-binding (gid)
-  (bind "SEQV" (sel-group-vis-field gid)))
+;; The highlight a bus strip binds: `:selected (bus-selected-ref b)`. A bus
+;; dropped under a render (its constructor answers nil) draws unselected.
+(def bus-selected-ref (b)
+  (let ((h (bus-highlight b)))
+    (if h #'h.selected false)))
 
-(def bus-selected-vis-binding (i)
-  (bind "SEQV" (sel-bus-vis-field i)))
+;; A group draws selected while its bus does; a group without a bus never.
+(def group-selected-ref (g)
+  (let ((b g.bus))
+    (if b (bus-selected-ref b) false)))
 
 ;; A named effect-buffer returning nil is inert (the *plock-sync* precedent):
 ;; it owns the churn-prone reads so no visible surface has to.
@@ -187,14 +193,12 @@
   (let ((bus-active (seq-has-selected-bus?)))
     (for-each
       (lambda (b)
-        (reactive-set "SEQV" (sel-bus-vis-field b.index)
-          (if (and bus-active (= selected-bus b.index)) 1 0)))
+        (let ((h (bus-highlight b))
+              (lit (and bus-active (= selected-bus b.index))))
+          ;; Reading h.selected makes the write rerun this effect once more;
+          ;; that rerun finds every field current and writes nothing.
+          (when (and h (not (= h.selected lit))) (set! h.selected lit))))
       (buses))
-    (for-each
-      (lambda (g)
-        (reactive-set "SEQV" (sel-group-vis-field g.gid)
-          (if (and bus-active g.bus (= selected-bus g.bus.index)) 1 0)))
-      (groups))
     nil))
 
 ;; Mixer sizing knob (content-tiers spec: customize tier). Every strip in

@@ -1,7 +1,7 @@
 //! The factory mixer, its legacy predecessor and the MIDImix map, ported to
 //! the kinds (kind-bindings spec §13 stage 8, eseq-0l17.13).
 
-use super::views::{assert_ported, distro, instance_bindings, legacy_forms};
+use super::views::{assert_ported, bound, distro, instance_bindings, legacy_forms, widgets_with_prop};
 use super::*;
 
 /// The ported files' sources.
@@ -158,6 +158,111 @@ fn the_selection_highlight_and_the_group_delete_target_are_kind_fields() {
     *h.shared.active_delete_target.lock().unwrap() = other.clone();
     h.eval_all("(set! g.delete-target false)");
     assert_eq!(target(&h), other);
+}
+
+/// The bus and group selection highlight (eseq-0l17.77): `*sel-sync*`
+/// projects `selected-bus` into a view-local `bus-highlight` per bus (it was
+/// a SEQV float field), the mixer's bus strips and group containers and the
+/// sequencer's group blocks bind its `selected`, and a selection lights only
+/// the selected bus's highlight, repainting both views without a re-render.
+#[test]
+fn selecting_a_bus_or_group_lights_only_its_highlight_and_only_repaints() {
+    let state = include_str!("../../../../../../content/ui/seq-core-state.lisp");
+    let legacy: Vec<_> = legacy_forms(state)
+        .into_iter()
+        .filter(|form| *form != "defstate")
+        .collect();
+    assert_eq!(legacy, Vec::<&str>::new(), "ui/seq-core-state.lisp");
+
+    let mut h = distro();
+    h.app.group_tracks_recorded(vec![0, 1]).expect("group");
+    h.share_buses_and_groups();
+    h.sync();
+    h.show_all();
+    h.eval_all(
+        "(def g77 (first (groups)))
+         (def other77 (first (filter (lambda (b) (not (= b g77.bus))) (buses))))
+         (def hg77 (eseq.seq-core-state/bus-highlight g77.bus))
+         (def ho77 (eseq.seq-core-state/bus-highlight other77))
+         (def lit-g77 #'hg77.selected) (def lit-o77 #'ho77.selected)",
+    );
+    let instance = |h: &mut Harness, name: &str| match h.eval_all(name) {
+        Value::Instance(id) => id,
+        other => panic!("{name}: {other:?}"),
+    };
+    let (group_lit, other_lit) = (instance(&mut h, "hg77"), instance(&mut h, "ho77"));
+    let (mixer, mixer_revision) = h.buffer_tree("*mixer*");
+    let (sequencer, sequencer_revision) = h.buffer_tree("*sequencer*");
+    for (view, tree, highlights) in [
+        ("*mixer*", &mixer, vec![group_lit, other_lit]),
+        ("*sequencer*", &sequencer, vec![group_lit]),
+    ] {
+        let mut bound = Vec::new();
+        let mut legacy = Vec::new();
+        instance_bindings(tree, &mut bound, &mut legacy);
+        for id in highlights {
+            assert!(
+                bound.contains(&(id, "selected".to_string())),
+                "{view} binds highlight {id}: {bound:?}"
+            );
+        }
+        assert!(
+            !legacy.iter().any(|field| field.starts_with("SEQV.")),
+            "{view} binds no SEQV field: {legacy:?}"
+        );
+    }
+    // The mixer's group container itself (the group drop target) binds the
+    // group's highlight, not only some other widget of the mixer.
+    let mut targets = Vec::new();
+    widgets_with_prop(&mixer, "drop-meta", &mut targets);
+    let group_containers: Vec<_> = targets
+        .iter()
+        .filter(|widget| match widget.get("drop-meta") {
+            Some(Value::Map(meta)) => meta
+                .get("kind")
+                .is_some_and(|kind| *kind.borrow() == Value::String("group".into())),
+            _ => false,
+        })
+        .collect();
+    assert!(
+        group_containers
+            .iter()
+            .any(|widget| bound(widget, "selected") == Some((group_lit, "selected".into()))),
+        "the mixer's group container binds the group highlight: {group_containers:?}"
+    );
+    assert_eq!((h.slot("lit-g77"), h.slot("lit-o77")), (0.0, 0.0));
+
+    let select = |h: &mut Harness, code: &str| {
+        h.eval_all(code);
+        h.sync();
+        h.show_all();
+        (h.slot("lit-g77"), h.slot("lit-o77"))
+    };
+    assert_eq!(
+        select(&mut h, "(eseq.sequencer/select-group g77)"),
+        (1.0, 0.0),
+        "a group selection lights its bus's highlight only"
+    );
+    assert_eq!(
+        select(&mut h, "(eseq.mixer/select-bus other77)"),
+        (0.0, 1.0),
+        "a bus selection moves the highlight"
+    );
+    assert_eq!(
+        select(&mut h, "(set! eseq.seq-core-state/selected-bus -1)"),
+        (0.0, 0.0),
+        "no selection lights none"
+    );
+    assert_eq!(
+        h.buffer_tree("*mixer*").1,
+        mixer_revision,
+        "the mixer only repaints for a selection"
+    );
+    assert_eq!(
+        h.buffer_tree("*sequencer*").1,
+        sequencer_revision,
+        "the sequencer only repaints for a selection"
+    );
 }
 
 #[test]

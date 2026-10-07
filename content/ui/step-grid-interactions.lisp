@@ -1,7 +1,7 @@
 ;; Step-grid pointer/cursor/selection interactions: paging, drag gestures, step param helpers.
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
 ;;
-;; This is the step-gesture hub: ui/step-grid.lisp,
+;; This is the step-gesture hub:
 ;; ui/sequencer.lisp, ui/seq-grid-mode.lisp, ui/seqv-track-params.lisp and several
 ;; Rust call sites reach its names by their flat spellings, so it converts with NO
 ;; renames and a full set of *identity* compat aliases (the seq-core-state /
@@ -454,7 +454,7 @@
       :arrangement
       (if (= buf "*piano-roll*")
         :piano-roll
-        (if (or (= buf "*sequencer*") (= buf "*metal*"))
+        (if (= buf "*sequencer*")
           :steps
           (if (buffer-visible? "*arrangement*")
             :arrangement

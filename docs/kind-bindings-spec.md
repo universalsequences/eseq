@@ -3079,7 +3079,8 @@ its instance and field.
      test, the piano roll step-locks parity check) moved to the Harness
      tests.
    - **Kept** (eseq-0l17.22): `eseq.bindings` (no content reader left; the
-     roots import it, its own test stands), `SEQ.track-num-steps` and
+     roots import it, its own test stands; deleted by eseq-0l17.77),
+     `SEQ.track-num-steps` and
      `track-ids` (sequencer), `track-process-lanes` and
      `track-process-lane-values` (seqv-track-params), `track-names`,
      `track-colors`, `current-track`, `playing` (many), the
@@ -3275,6 +3276,55 @@ its instance and field.
      groups only after a hook's host command; now its pads' hits) and the
      mixer's pattern-cell play glyphs (nondeterministic: two captures of
      one build differ the same way).
+   Built (stage 8, eseq-0l17.77, legacy removal B):
+   - **Bus / group selection.** The selection stays the Lisp `defstate`
+     `selected-bus` (the host reads and clears it by name, so no host
+     field holds it); its highlight is a view-local kind in
+     `eseq.seq-core-state`, `(def-kind bus-highlight :key (bus) :state
+     ((selected false)))`, keyed by the bus instance (dropped with it).
+     `*sel-sync*` stays the one reader of `selected-bus` and sets each
+     bus's `selected` (only when it changes); the mixer's bus strips bind
+     `(bus-selected-ref b)` and the mixer's group containers and the
+     grid's group blocks `(group-selected-ref g)` (its bus's highlight;
+     false without a bus, or for a bus dropped under a render). The SEQV
+     `sel-bus-vis-*` / `sel-group-vis-*` fields,
+     `bus-/group-selected-vis-binding`, `sel-*-vis-field` and the
+     grid's `group-selected-binding` are gone.
+   - **Deleted:** `ui/bindings.lisp` (`eseq.bindings`; its imports in
+     `ui/main.lisp` and `ui/noui.lisp` and its state_values test), the
+     unloaded `ui/step-grid.lisp` (its parse test and two ignored `*metal*`
+     tests, the parse-gate list entry, `eseq.materials`'
+     `slider-track-material` / `slider-track-muted-material`, which only it
+     used, and the alias rows `metal-track-r/g/b`,
+     `aqua-slider-track-material`, `aqua-slider-track-muted-material`), and
+     the dead `*metal*` branches: the read-only key check, the soft step
+     param and number picker arms and `current_metal_param_mode`
+     (`input.rs`), the scroll reset and the visible checks
+     (`reactive_tick.rs`), the step-selection list sync
+     (`reactive_sync.rs`: `sync_step_selection_bindings` keeps the cursor
+     fields; its `SEQ.selected-steps` writer, only `*metal*`'s, went with
+     `UiInvalidationApplyCtx::active_delete_target`), and the content
+     checks (`seq-step-tabs`, `step-grid-interactions`).
+   - **Kept:** the mixer's positional shims `track-color-r/g/b` and
+     `track-collapsed-label` (callers in `ui/effects/track-panels.lisp`,
+     .74's), `eseq.browser/list-contains?` (the alias table's
+     `sbrowser-list-contains?` target), the process map COMPAT(.14) shapes;
+     the `SEQV` registration (`natives.rs`) and `SEQ.selected-steps`
+     (registration and the redraw gate) for chunk A, and
+     `SEQ.step-has-plocks`, which has no content reader left (the step grid
+     read it): its publishers (`sync_shared_panel_state` and the fx sync)
+     are dead and go in chunk A. `eseq.scene-banks`'
+     `listed?` re-export had no referrer and is gone.
+   - **Tests.** `host_kinds::tests::mixer_view::selecting_a_bus_or_group_lights_only_its_highlight_and_only_repaints`
+     (Distro root, a group): `seq-core-state.lisp` uses no legacy form but
+     its `defstate`s; the mixer binds both highlights and the grid the
+     group's, neither binds SEQV; a group selection, a bus selection and
+     none light exactly the selected bus's highlight, and neither view
+     re-renders. The group block test and the drift probe read the
+     highlight.
+   - **Captures.** Scratch fixtures (a group and a rack, nothing, the main
+     bus, the group and the rack selected; mixer and grid) match before
+     and after.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -3473,7 +3523,8 @@ the other port beads follow it):
      track, so a press, shift-click or duration-edge drag on another track's
      row moves that track's cursor and page only; `set-track-cursor-step`
      and `step-select-drag-start` remain the current-track forms the keyboard
-     and the legacy `step-grid.lisp` use).
+     uses; the legacy `step-grid.lisp` used them too until eseq-0l17.77
+     deleted it).
    Learned by alez.neural (.67):
    - a Harness test's `drain` takes every queued host command, the
      editor's own (a `set-layout`, a buffer switch) included: run the
@@ -6487,8 +6538,8 @@ builds the field name.
 | `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local; ported (.15: arr-select, arr-lanes, arr-drag, with the timeline's lane ownership), removed | .15 |
 | `SEQV.<cursor-highlight-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local; ported (.11), removed | .11 |
 | `SEQV.<expanded-track-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (expanded tracks) | view-local; ported (.11), removed | .11 |
-| `SEQV.<sel-bus-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | bus selection (view singleton) | view-local | .11 |
-| `SEQV.<sel-group-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | group selection (view singleton) | view-local | .11 |
+| `SEQV.<sel-bus-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | bus-highlight.selected (view-local, keyed by bus; `*sel-sync*` writes it) | view-local; ported (.77: `bus-selected-ref`), removed | .11 .77 |
+| `SEQV.<sel-group-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | bus-highlight.selected of the group's bus | view-local; ported (.77: `group-selected-ref`), removed | .11 .77 |
 | `SEQV.alez.tracker/*` | 4 | packages/alez.tracker/src/ui | Lisp (eseq.bindings channels) | Lisp-owned | tracker view singleton (`tracker-cursor`, compared in the cells' shaders) | view-local; ported (.65), removed (eseq.bindings has no reader left; .22) | .65 |
 | `SEQV.arr-content-length` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
 | `SEQV.arr-view-duration` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
@@ -6502,7 +6553,7 @@ builds the field name.
 | `SEQV.plk-var-r` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton (:rgb) | view-local; ported (.14 A: plock-color singleton, three :number fields: a float prop reads one component) | .14 |
 | `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local; ported (.13), removed | .13 |
 | `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21); removed in ui/effects and ui/materials (.61) | .11 .12 .13 .14 .20 .21 .61 |
-| `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove; kept (.18): eseq.bindings' only reader is alez.tracker (.20); delete ui/bindings.lisp (and its imports in ui/main.lisp, ui/noui.lisp and the state_values test) once the tracker stops importing it | .18 |
+| `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove; kept (.18): eseq.bindings' only reader is alez.tracker (.20); removed (.77: ui/bindings.lisp, its imports in ui/main.lisp and ui/noui.lisp, and its state_values test) | .18 .77 |
 | `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value); gone from the panel plumbing (.14 A: custom-ui-param-value, fx-param-numeric-value-for); gone from .20's ported files (alez.jaki: generator marks); ported in ui/effects (.61: value twins custom-ui-param-value, comparisons read refs) | .11 .13 .14 .20 .21 .61 |
 | `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state; ported (.19), removed | .11 .13 .19 |
 | `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13, .17: the browser reads slot device.delete-target), kept: application-menus +; ported (.14 A: panel-bodies reads the effect device's delete-target); ported, legacy removed (.18: the last reader; its publishers in the tick, the invalidation apply and the registration) | .13 .14 .17 .18 |

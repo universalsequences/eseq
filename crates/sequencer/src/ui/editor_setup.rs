@@ -260,8 +260,6 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
         eprintln!("metal_seq: Lisp UI status during startup: {status}");
     }
 
-    // "*metal*" (the legacy step grid) is intentionally absent: ui/main.lisp
-    // no longer loads step-grid.lisp, so the buffer is never created.
     for name in [
         "*sequencer*",
         "*samples*",

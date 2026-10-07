@@ -4,8 +4,6 @@ agent-submit-current	eseq.agent/agent-submit-current	content/ui/agent.lisp
 aqua-color	eseq.materials/color	content/ui/materials.lisp
 aqua-slider-material	eseq.materials/slider-material	content/ui/materials.lisp
 aqua-slider-muted-material	eseq.materials/slider-muted-material	content/ui/materials.lisp
-aqua-slider-track-material	eseq.materials/slider-track-material	content/ui/materials.lisp
-aqua-slider-track-muted-material	eseq.materials/slider-track-muted-material	content/ui/materials.lisp
 arrangement-clip-color	eseq.arrangement/clip-color	content/ui/arrangement.lisp
 arrangement-clip-cycle	eseq.arrangement/clip-cycle	content/ui/arrangement.lisp
 arrangement-content-length	eseq.arrangement/content-length	content/ui/arrangement.lisp
@@ -230,9 +228,6 @@ macro-momentary	eseq.macros/macro-momentary	content/ui/macros.lisp
 macro-release-key	eseq.macros/macro-release-key	content/ui/macros.lisp
 macro-set-key-value	eseq.macros/macro-set-key-value	content/ui/macros.lisp
 macro-toggle-mapping-arm	eseq.macros/macro-toggle-mapping-arm	content/ui/macros.lisp
-metal-track-b	eseq.step-grid/metal-track-b	content/ui/step-grid.lisp
-metal-track-g	eseq.step-grid/metal-track-g	content/ui/step-grid.lisp
-metal-track-r	eseq.step-grid/metal-track-r	content/ui/step-grid.lisp
 midi-fx-panel	eseq.effects.effect-panels/midi-fx-panel	content/ui/effects/effect-panels.lisp
 midi-fx-ui-param	eseq.effects.custom-effect-ui/midi-fx-ui-param	content/ui/effects/custom-effect-ui.lisp
 midi-fx-ui-param-control	eseq.effects.custom-effect-ui/midi-fx-ui-param-control	content/ui/effects/custom-effect-ui.lisp

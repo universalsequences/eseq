@@ -836,37 +836,17 @@ pub(super) fn sync_step_selection_bindings(
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    current_track_idx: usize,
-    changed_steps: &[usize],
-    sync_legacy_list: bool,
-    multi_track_selection: Option<&[usize]>,
 ) -> bool {
     let selected = selected_steps.lock().unwrap();
-    let num_steps = state.pattern.track_params[track]
-        .get_num_steps()
-        .min(MAX_STEPS);
-    // The shared step set belongs to the current track; another track shows
-    // it only while a multi-track (rack-wide) selection names that track.
-    let track_selected = track == current_track_idx
-        || multi_track_selection.is_some_and(|tracks| tracks.contains(&track));
     let cursor_step = fx_step_cursor_from_runtime(rt);
-    let mut dirty = sync_fx_step_cursor_binding_fields(
+    sync_fx_step_cursor_binding_fields(
         rt,
         state,
         track,
         cursor_step,
         selected.iter().copied().min(),
         selected.len(),
-    );
-    if sync_legacy_list {
-        for &step in changed_steps.iter().filter(|&&step| step < MAX_STEPS) {
-            let is_selected = track_selected && step < num_steps && selected.contains(&step);
-            dirty |= rt
-                .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
-                .effects_dirty;
-        }
-    }
-    dirty
+    )
 }
 
 pub(super) fn sync_instrument_plock_presence_fields(
@@ -1241,7 +1221,6 @@ pub(super) struct UiInvalidationApplyCtx<'a> {
     pub(super) cached_track_peak_levels: &'a [f64],
     pub(super) cached_bus_peak_levels: &'a [f64],
     pub(super) record_armed: &'a Arc<Mutex<Vec<bool>>>,
-    pub(super) active_delete_target: &'a Arc<Mutex<Option<ActiveDeleteTarget>>>,
     pub(super) fx_visible: bool,
     pub(super) sequencer_visible: bool,
     pub(super) mixer_visible: bool,
@@ -1268,7 +1247,6 @@ pub(super) fn apply_ui_invalidations(
         cached_track_peak_levels,
         cached_bus_peak_levels,
         record_armed,
-        active_delete_target,
         fx_visible,
         sequencer_visible,
         mixer_visible,
@@ -1286,7 +1264,6 @@ pub(super) fn apply_ui_invalidations(
     let mut step_param_track_lists: Vec<(usize, StepParam)> = Vec::new();
     let mut duration_span_tracks: Vec<usize> = Vec::new();
     let active_track_count = state.active_track_count().min(app.tracks.len());
-    let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
 
     for invalidation in invalidations {
@@ -1475,24 +1452,9 @@ pub(super) fn apply_ui_invalidations(
                     needs_reactive_cycle |= sync_track_step_list_publishes(rt, state, track);
                 }
             }
-            UiInvalidation::StepSelection {
-                track,
-                changed_steps,
-            } => {
-                let multi_track_selection = match active_delete_target.lock().unwrap().as_ref() {
-                    Some(ActiveDeleteTarget::TrackSteps { tracks }) => Some(tracks.clone()),
-                    _ => None,
-                };
-                needs_reactive_cycle |= sync_step_selection_bindings(
-                    rt,
-                    state,
-                    track,
-                    selected_steps,
-                    current_track_idx,
-                    &changed_steps,
-                    legacy_step_grid_visible,
-                    multi_track_selection.as_deref(),
-                );
+            UiInvalidation::StepSelection { track, .. } => {
+                needs_reactive_cycle |=
+                    sync_step_selection_bindings(rt, state, track, selected_steps);
                 if track == current_track_idx {
                     if fx_visible {
                         let next_display =

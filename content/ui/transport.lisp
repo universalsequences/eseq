@@ -7,8 +7,8 @@
 ;; transport UI into every VM that loads the importer (the wave-2 lesson that
 ;; broke 60 tests). Callers reach the names below through the identity compat
 ;; aliases instead — which is also why `pattern-control-style`, used by the
-;; converted `eseq.step-grid` and `eseq.sequencer`, is aliased rather than
-;; requalified at those call sites.
+;; converted `eseq.sequencer`, is aliased rather than requalified at its call
+;; sites.
 ;;
 ;; Every other outbound reference evaluated at event time is left bare: a
 ;; Rust native (`host-command`), a function in ui/seq-panels.lisp (the panel
@@ -87,8 +87,8 @@
 ;;   write through a local (`(let ((p eseq.transport/scene-push)) (set!
 ;;   p.target 1))`: a qualified name takes no dotted field).
 ;;   pattern-control-style — a write-once style `def` read bare by
-;;   ui/step-grid.lisp (eseq.step-grid) and ui/sequencer.lisp (eseq.sequencer).
-;;   Neither may import a UI root, so the alias is the supported edge.
+;;   ui/sequencer.lisp (eseq.sequencer), which may not import a UI root, so
+;;   the alias is the supported edge.
 
 ;; ── Shared container backgrounds ──
 ;; `defwidget` names live in their own flat keyspace (hazard e) and are left

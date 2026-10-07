@@ -256,9 +256,9 @@ second. Bind the prop to a float reference instead:
 (slider :value (bind-nth "SEQV" "track-gain" i))
 ```
 
-Only props a widget lists as bindable accept references. The
-`eseq.bindings` module wraps this with `scope`, `bound`, `write!`, and
-`one-hot!` over the `SEQV` namespace.
+Only props a widget lists as bindable accept references. A view's own
+hot state (a cursor, a highlight) is a view-local kind's `:state` field,
+bound the same way (`#'h.selected`).
 
 ### `subtree`
 

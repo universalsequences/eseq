@@ -700,9 +700,10 @@
 ;; compiler, so "current module" there is `eseq.vanilla` and a bare call would
 ;; not find this macro.  Both call sites spell it `eseq.sequencer/…`.
 ;; Renamed off `seqv-aqua-slider-track-material` rather than mechanically
-;; stripped: bare `aqua-slider-track-material` is ui/materials.lisp's compat
-;; alias for `eseq.materials/slider-track-material`, and in that same
-;; implicit-module expansion the alias rung would have won.
+;; stripped: bare `aqua-slider-track-material` was ui/materials.lisp's compat
+;; alias for `eseq.materials/slider-track-material` (both gone with the
+;; legacy step grid, eseq-0l17.77), and in that same implicit-module
+;; expansion the alias rung would have won.
 (defmacro step-slider-track-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
@@ -3277,13 +3278,6 @@
   (select-group g)
   (eseq.seq-panels/seq-show-fx-lower-panel))
 
-;; Selection visibility rides the *sel-sync* SEQV field, never a raw
-;; `selected-bus` read: this block wraps every member row, so a render-time
-;; read here re-rendered the whole group on each selection (eseq-4jv).
-;; COMPAT(eseq-0l17): until the bus selection is a kind field.
-(def group-selected-binding (g)
-  (eseq.seq-core-state/group-selected-vis-binding g.gid))
-
 ;; Every group member gets the same indented prefix used by drum racks. It
 ;; visually connects the ordinary track row to the containing group header.
 (def group-member-row (g t)
@@ -3552,7 +3546,10 @@
   (let ((c g.color))
     (box :width :fill
       :key (group-element-key g "block")
-      :selected (group-selected-binding g)
+      ;; Selection visibility binds the *sel-sync* `bus-highlight`, never a
+      ;; raw `selected-bus` read: this block wraps every member row, so a
+      ;; render-time read re-rendered the whole group on each selection.
+      :selected (eseq.seq-core-state/group-selected-ref g)
       :background-color (group-container-bg c)
       :selected-background-color (group-container-bg c)
       :border-width 2

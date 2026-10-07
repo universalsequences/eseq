@@ -705,7 +705,7 @@ pub(crate) fn should_toggle_play_on_space(
     }
 
     let buffer = editor.active_buffer();
-    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly) || buffer.name == "*metal*"
+    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly)
 }
 
 pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent) -> bool {
@@ -717,13 +717,6 @@ pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent
 
 pub(crate) fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str("(eseq.seq-core-state/current-step)") {
-        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
-        _ => None,
-    }
-}
-
-pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
-    match editor.runtime_mut().eval_str("eseq.seq-core-state/param-mode") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
     }
@@ -943,10 +936,6 @@ fn current_soft_step_param_target(
     }
     let buffer_name = editor.active_buffer().name.clone();
     let (step, mode) = match buffer_name.as_str() {
-        "*metal*" => (
-            current_metal_cursor_step(editor)?,
-            current_metal_param_mode(editor)?,
-        ),
         "*sequencer*" => (
             current_sequencer_cursor_step(editor)?,
             current_sequencer_param_mode(editor)?,
@@ -978,11 +967,6 @@ fn current_soft_step_param_target(
 fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
     let buffer_name = editor.active_buffer().name.clone();
     match buffer_name.as_str() {
-        // ui/step-grid.lisp is `eseq.step-grid` since S3b wave 8, so its
-        // widget `:key` auto-qualifies (spec §10 hazard a/l). The *metal*
-        // buffer is not created by the live UI any more (editor_setup.rs),
-        // but the spelling has to track the lisp side regardless.
-        "*metal*" => Some("eseq.step-grid/step-param-number-picker".to_string()),
         "*sequencer*" => match editor
             .runtime_mut()
             .eval_str("(eseq.sequencer/current-number-picker-key)")

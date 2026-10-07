@@ -644,7 +644,6 @@ use panel_kinds_seed::*;
             "ui/midi.lisp",
             "ui/midi-midimix.lisp",
             "ui/agent.lisp",
-            "ui/step-grid.lisp",
             "ui/legacy/mixer.lisp",
             "ui/sequencer.lisp",
             "ui/arrangement.lisp",
@@ -5938,28 +5937,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn metal_seq_metal_lisp_parses() {
-        let src = read_ui_source("step-grid.lisp").expect("read metal lisp");
-        let tokens = Parser::new(src)
-            .parse()
-            .expect("tokenize ui/step-grid.lisp");
-        let mut pos = 0;
-        while pos < tokens.len() {
-            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
-                let start = pos.saturating_sub(8);
-                let end = (pos + 8).min(tokens.len());
-                panic!(
-                    "parse ui/step-grid.lisp at token {pos}: {err:?}\ncontext: {:?}",
-                    &tokens[start..end]
-                );
-            }
-        }
-        ASTParser::new(tokens)
-            .parse()
-            .expect("parse ui/step-grid.lisp");
-    }
-
-    #[test]
     fn metal_seq_sequencer_lisp_parses() {
         let src = read_ui_source("sequencer.lisp").expect("read sequencer lisp");
         let tokens = Parser::new(src)
@@ -9866,8 +9843,9 @@ use panel_kinds_seed::*;
     }
 
     /// Buffers other than `*fx*` read a slice of the fx panel publication:
-    /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`,
-    /// `*metal*` reads `SEQ.step-has-plocks`. The track-switch path publishes
+    /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel` (the
+    /// legacy `*metal*` grid read `SEQ.step-has-plocks`, unread since
+    /// eseq-0l17.77 and still published until chunk A). The track-switch path publishes
     /// that slice even while `*fx*` is hidden, so it must be exactly this
     /// helper — and the full fx sync must still cover the same two fields.
     #[test]
@@ -15516,40 +15494,6 @@ use panel_kinds_seed::*;
         assert!(
             find_layout_node_by_text(&factory_layout, "poly").is_some(),
             "remove-override must restore the rendered stock patch mixer"
-        );
-    }
-
-    #[test]
-    fn lisp_bindings_pad_list_channels_to_their_longest_write() {
-        use eseqlisp::vm::format_lisp_value;
-        let main_source = read_ui_source("main.lisp").expect("read main");
-        let mut editor = full_grid_editor_with_post_factory_source(&main_source, None, None, None);
-        let run = |editor: &mut eseqlisp::Editor, src: &str| -> String {
-            format_lisp_value(&editor.runtime_mut().eval_str(src).unwrap().unwrap())
-        };
-        run(&mut editor, "(def eseq.vanilla/bt-scope (eseq.bindings/scope \"t\"))");
-        run(&mut editor, "(def eseq.vanilla/bt-ch (eseq.bindings/channel eseq.vanilla/bt-scope \"rows\"))");
-        assert_eq!(run(&mut editor, "(eseq.bindings/field eseq.vanilla/bt-ch)"), "\"t/rows\"");
-        run(&mut editor, "(eseq.bindings/one-hot! eseq.vanilla/bt-ch 4 1)");
-        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "(0 1 0 0)");
-        run(&mut editor, "(eseq.bindings/one-hot! eseq.vanilla/bt-ch 2 0)");
-        assert_eq!(
-            run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"),
-            "(1 0 0 0)",
-            "a shorter write pads to the longest length so no slot keeps a stale 1"
-        );
-        run(&mut editor, "(eseq.bindings/clear! eseq.vanilla/bt-ch)");
-        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "(0 0 0 0)");
-        run(&mut editor, "(eseq.bindings/write! eseq.vanilla/bt-ch 7)");
-        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "7");
-        let bound = editor
-            .runtime_mut()
-            .eval_str("(eseq.bindings/bound-nth eseq.vanilla/bt-ch 2)")
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(&bound, Value::ReactiveRef { namespace, field, index: Some(2), .. } if namespace == "SEQV" && field == "t/rows"),
-            "{bound:?}"
         );
     }
 
@@ -22271,44 +22215,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    #[ignore = "eseq-4tl: the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
-    fn metal_seq_empty_metal_buffer_centers_prompt_without_overflow() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(0.0));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("empty metal refresh should not report status: {status}");
-        }
-
-        let metal_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*metal*")
-            .expect("metal buffer should exist")
-            .id;
-        editor.set_active_buffer(metal_id);
-        editor.set_layout_viewport(120, 36);
-        let layout = editor.widget_layout().expect("empty metal layout");
-        let prompt = find_layout_node_by_text(&layout, "Select a sound to create a track")
-            .expect("empty metal prompt should be present");
-        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
-
-        assert!(
-            (prompt_center - 18.0).abs() <= 2.0,
-            "empty metal prompt should be vertically centered, got rect {:?}",
-            prompt.rect
-        );
-        assert!(
-            layout_bottom(&layout) <= 36.01,
-            "empty metal fallback should fit viewport without scroll overflow; bottom={:.3}",
-            layout_bottom(&layout)
-        );
-    }
-
-    #[test]
     fn metal_seq_empty_fx_panel_centers_prompt_without_overflow() {
         let mut editor = full_grid_editor_for_scroll_tests();
         // No tracks (eseq.kinds project.tracks, what the panel reads).
@@ -28038,41 +27944,6 @@ use panel_kinds_seed::*;
                 .unwrap(),
             Some(Value::Bool(false)),
             "FX panel button should toggle lower-panel-visible"
-        );
-    }
-
-    #[test]
-    #[ignore = "eseq-4tl: the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
-    fn metal_seq_duration_mode_renders_all_steps_above_two() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "durations", test_number_list(&[8.0; 16]));
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.seq-core-state/param-mode 1)")
-            .expect("switch to duration mode");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("duration mode should render without status error: {status}");
-        }
-
-        let metal_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*metal*")
-            .expect("metal buffer should exist")
-            .id;
-        editor.set_active_buffer(metal_id);
-        editor.set_layout_viewport(120, 40);
-        let layout = editor
-            .widget_layout()
-            .expect("duration mode metal layout should build");
-
-        assert_eq!(
-            count_widget_type(&layout, "vslider"),
-            16,
-            "duration mode should keep rendering one slider per visible step"
         );
     }
 
@@ -48978,25 +48849,28 @@ use panel_kinds_seed::*;
             .expect("selected regular group sequencer layout should build");
         let selected_block = find_layout_node_by_stable_key_suffix(&selected, "sequencer-group-8")
             .expect("selected regular group block should render");
-        // Selection rides the *sel-sync* SEQV projection (eseq-4jv): the
-        // block binds `sel-group-vis-<id>` instead of reading `selected-bus`
-        // in render, so assert both the binding and the projected value.
+        // Selection rides the *sel-sync* projection (eseq-4jv): the block
+        // binds its bus's view-local `bus-highlight` (eseq-0l17.77) instead
+        // of reading `selected-bus` in render, so assert both the binding and
+        // the projected value.
+        const HIGHLIGHT: &str = "(let ((g (first (eseq.kinds/groups)))) \
+                                 (eseq.seq-core-state/bus-highlight g.bus))";
+        let Some(Value::Instance(id)) = editor.runtime_mut().eval_str(HIGHLIGHT).ok().flatten()
+        else {
+            panic!("the group's bus must have a highlight instance");
+        };
         assert!(
-            matches!(
-                selected_block.props.get("selected"),
-                Some(Value::ReactiveRef { namespace, field, .. })
-                    if namespace == "SEQV" && field == "sel-group-vis-8"
-            ),
-            "the group block's selected state must bind the sel-sync projection, got {:?}",
+            binds_kind_field(selected_block, "selected", id, "selected"),
+            "the group block's selected state must bind the bus highlight, got {:?}",
             selected_block.props.get("selected")
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(reactive-value (bind \"SEQV\" \"sel-group-vis-8\"))")
+                .eval_str(&format!("(let ((h {HIGHLIGHT})) h.selected)"))
                 .expect("read projected group selection"),
-            Some(Value::Number(1.0)),
-            "selecting group chrome should select its backing bus and light the projected field"
+            Some(Value::Bool(true)),
+            "selecting group chrome should select its backing bus and light its highlight"
         );
         assert_eq!(
             selected_block.props.get("selected-background-color"),

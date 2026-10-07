@@ -19,8 +19,7 @@
         scene-viewed-bank-index
         view-scene-bank!
         view-new-scene-bank!
-        clip-in-viewed-bank?
-        listed?)
+        clip-in-viewed-bank?)
 
 ;; The bank the strip shows (a bank instance), the index it last had, and
 ;; another bank listed beside it. A shown bank no longer listed falls back
@@ -38,10 +37,6 @@
           (index -1)
           (other bank :default nil)
           (pending -1)))
-
-;; COMPAT(eseq-0l17): eseq.view-kit/listed?, re-exported for callers
-;; that still refer it from here.
-(def listed? kit/listed?)
 
 (def view-scene-bank! (b)
   (let ((other (first (filter (lambda (x) (not (= x b))) (banks))))
@@ -61,7 +56,7 @@
 
 ;; Where a shown bank that is no longer listed falls back to.
 (def fallback-bank (all)
-  (if (and (>= scene-bank-view.index 0) (listed? scene-bank-view.other all))
+  (if (and (>= scene-bank-view.index 0) (kit/listed? scene-bank-view.other all))
     (nth all (min scene-bank-view.index (- (len all) 1)))
     (playing-bank all)))
 
@@ -75,11 +70,11 @@
         (view-scene-bank! (nth all pending))
         ;; The host has not published the appended bank yet: show the last.
         (nth all (- (len all) 1)))
-      (if (listed? b all)
+      (if (kit/listed? b all)
         (do
           ;; Keep the fallback current: b's index and a bank beside it.
           (unless (and (= scene-bank-view.index b.index)
-                       (or (= (len all) 1) (listed? scene-bank-view.other all)))
+                       (or (= (len all) 1) (kit/listed? scene-bank-view.other all)))
             (view-scene-bank! b))
           b)
         (view-scene-bank! (fallback-bank all))))))
@@ -96,4 +91,4 @@
 ;; the user cannot guess.
 (def clip-in-viewed-bank? (c viewed)
   (let ((in c.banks))
-    (or (= (len in) 0) (listed? viewed in))))
+    (or (= (len in) 0) (kit/listed? viewed in))))

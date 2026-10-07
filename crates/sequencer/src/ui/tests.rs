@@ -1212,7 +1212,7 @@
     }
 
     #[test]
-    fn step_selection_sync_updates_selected_steps_without_deadlocking() {
+    fn step_selection_sync_updates_the_step_fields_without_deadlocking() {
         let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
         state.pattern.track_params[0].set_num_steps(8);
         state
@@ -1265,29 +1265,8 @@
             .eval_str("(def cursor-step 3)")
             .expect("register cursor step");
 
-        super::sync_step_selection_bindings(
-            &mut runtime,
-            &state,
-            0,
-            &selected_steps,
-            0,
-            &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
-            true,
-            None,
-        );
+        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
 
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.selected-steps 1)")
-                .expect("read unselected step"),
-            Some(Value::Bool(false))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.selected-steps 3)")
-                .expect("read selected step"),
-            Some(Value::Bool(true))
-        );
         for (field, expected) in [
             ("fx-step-cursor-number", 4.0),
             ("fx-step-selection-count", 3.0),
@@ -1309,28 +1288,11 @@
         }
 
         selected_steps.lock().unwrap().remove(&3);
-        super::sync_step_selection_bindings(
-            &mut runtime,
-            &state,
-            0,
-            &selected_steps,
-            0,
-            &[3],
-            true,
-            None,
-        );
+        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
         assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.selected-steps 3)")
-                .expect("read cleared step"),
-            Some(Value::Bool(false))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.selected-steps 4)")
-                .expect("read unchanged selected step"),
-            Some(Value::Bool(true)),
-            "delta sync must preserve selection indexes outside changed_steps"
+            runtime.eval_str("SEQ.fx-step-selection-count").expect("read count"),
+            Some(Value::Number(2.0)),
+            "a deselect resyncs the selection count"
         );
     }
 
@@ -2268,7 +2230,6 @@
         let phase = Instant::now();
         let ct =
             current_track_for_app(&mut app, &current_track).expect("current track after click");
-        editor.reset_widget_scroll_for_buffer_named("*metal*");
         editor.reset_widget_scroll_for_buffer_named("*fx*");
         editor
             .runtime_mut()
@@ -3619,7 +3580,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -4311,7 +4271,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -5643,7 +5602,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -7602,7 +7560,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -8271,7 +8228,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -8993,12 +8949,10 @@
             // plus a `*sequencer*` layout refresh and took transpose/duration
             // to ~11ms and velocity to ~16ms.
             //
-            // Velocity's remaining budget is NOT this handler's doing: with
-            // the default param mode (0 = velocity), the legacy `*metal*` step
-            // grid's buffer root reads the whole `SEQ.velocities` list, so any
-            // write to it forces a full rerun of that buffer (~4.5ms) even
-            // though no tile shows it. Tracked separately; tighten this once
-            // that buffer stops depending on the whole list.
+            // Velocity's remaining budget was measured while the legacy
+            // `*metal*` step grid's buffer root (deleted since eseq-0l17.77)
+            // read the whole `SEQ.velocities` list and reran (~4.5ms) on each
+            // write; this ceiling can tighten.
             for result in &scenario_results {
                 let ceiling_ms = if result.label == "velocity" { 12.0 } else { 5.0 };
                 assert!(
@@ -9348,7 +9302,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -10235,9 +10188,10 @@
             // 2026-08-05 pass (clip 57.9ms, scene 87.2ms; baseline was 119 /
             // 89). What remains is honest single-cycle work: the *fx* panel
             // re-evaluation for genuinely changed device state (~22ms), the
-            // structural sequencer/mixer relayouts on scene change, and the
-            // hidden *metal* buffer's whole-list rerun (~5ms) — each tracked
-            // as follow-ups in the launch-perf memory.
+            // structural sequencer/mixer relayouts on scene change (the hidden
+            // *metal* buffer's whole-list rerun, ~5ms then, is gone since
+            // eseq-0l17.77) — each tracked as follow-ups in the launch-perf
+            // memory.
             for report in &scenario_reports {
                 let ceiling_ms = if report.label == "clip-launch" { 75.0 } else { 105.0 };
                 assert!(
@@ -10633,7 +10587,6 @@
                 let track_switch_fired =
                     ct != frame.prev_current_track && !app.tracks.is_empty();
                 if track_switch_fired {
-                    editor.reset_widget_scroll_for_buffer_named("*metal*");
                     editor.reset_widget_scroll_for_buffer_named("*fx*");
                     let cleared_step_selection = {
                         let mut selection = selected_steps.lock().unwrap();
@@ -10733,7 +10686,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -11338,19 +11290,22 @@
                     other => panic!("selected-bus must eval to a number, got {other:?}"),
                 }
             };
-            // The *sel-sync* projection (ui/seq-core-state.lisp) is what the
-            // row/group highlight widgets bind to; assert it tracks the
-            // selection so the fan-out fix can never silently break the
-            // visible highlight. ESEQ_PROBE_BASELINE=1 skips these (and the
+            // The *sel-sync* projection (ui/seq-core-state.lisp's
+            // `bus-highlight`) is what the group highlight widgets bind to;
+            // assert it tracks the selection so the fan-out fix can never
+            // silently break the visible highlight. ESEQ_PROBE_BASELINE=1 skips these (and the
             // ceilings) so the probe can measure a pre-projection tree.
             let baseline_mode = std::env::var_os("ESEQ_PROBE_BASELINE").is_some();
-            let sel_vis_value = |editor: &mut Editor, field: &str| -> f64 {
-                match editor
-                    .runtime_mut()
-                    .eval_str(&format!("(reactive-value (bind \"SEQV\" \"{field}\"))"))
-                {
-                    Ok(Some(Value::Number(value))) => value,
-                    other => panic!("SEQV.{field} must eval to a number, got {other:?}"),
+            let group_highlight = |editor: &mut Editor, gid: u64| -> bool {
+                match editor.runtime_mut().eval_str(&format!(
+                    "(let ((g (first (filter |g| (= g.gid {gid}) (eseq.kinds/groups)))) \
+                           (b (if g g.bus nil))) \
+                       (if b \
+                         (let ((h (eseq.seq-core-state/bus-highlight b))) (if h h.selected false)) \
+                         false))"
+                )) {
+                    Ok(Some(Value::Bool(lit))) => lit,
+                    other => panic!("group {gid}'s bus highlight must be a bool, got {other:?}"),
                 }
             };
 
@@ -11538,8 +11493,8 @@
                                     "{label}: the selected track's highlight field must be lit"
                                 );
                                 assert_eq!(
-                                    sel_vis_value(editor, &format!("sel-group-vis-{group_id}")),
-                                    0.0,
+                                    group_highlight(editor, group_id),
+                                    false,
                                     "{label}: the group highlight field must clear on track select"
                                 );
                             }
@@ -11552,8 +11507,8 @@
                             );
                             if !baseline_mode {
                                 assert_eq!(
-                                    sel_vis_value(editor, &format!("sel-group-vis-{group_id}")),
-                                    1.0,
+                                    group_highlight(editor, group_id),
+                                    true,
                                     "{label}: the group highlight field must light on group select"
                                 );
                             }
@@ -12212,7 +12167,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -12739,7 +12693,6 @@
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
-                            active_delete_target: &active_delete_target,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -13787,7 +13740,6 @@
                         cached_track_peak_levels: &cached_track_peak_levels,
                         cached_bus_peak_levels: &cached_bus_peak_levels,
                         record_armed: &record_armed,
-                        active_delete_target: &active_delete_target,
                         fx_visible: true,
                         sequencer_visible: true,
                         mixer_visible: true,
@@ -13888,7 +13840,6 @@
                         cached_track_peak_levels: &cached_track_peak_levels,
                         cached_bus_peak_levels: &cached_bus_peak_levels,
                         record_armed: &record_armed,
-                        active_delete_target: &active_delete_target,
                         fx_visible: true,
                         sequencer_visible: true,
                         mixer_visible: true,

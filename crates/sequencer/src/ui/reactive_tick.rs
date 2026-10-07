@@ -103,9 +103,10 @@ fn sync_fx_param_bindings_delta(
 
 /// The slice of fx panel publication that buffers other than `*fx*` read:
 /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`
-/// (content/ui/browser.lisp `rack-panel-open?`, content/ui/macros.lisp), and
-/// `*metal*` reads `SEQ.step-has-plocks` (content/ui/step-grid.lisp). These
+/// (content/ui/browser.lisp `rack-panel-open?`, content/ui/macros.lisp). It
 /// must stay current for the selected track even while `*fx*` is hidden.
+/// `SEQ.step-has-plocks` has no reader since the legacy step grid went
+/// (eseq-0l17.77); its publication goes with chunk A of eseq-0l17.22.
 pub(super) fn sync_shared_panel_state(
     rt: &mut Runtime,
     app: &app::App,
@@ -324,7 +325,6 @@ pub(crate) fn sync_reactive_tick(
         }
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
-        let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
         let mixer_visible = editor_has_visible_mixer_buffer(&editor);
         let sequencer_visible = editor_has_visible_sequencer_view(&mut editor);
         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
@@ -337,8 +337,7 @@ pub(crate) fn sync_reactive_tick(
             sequencer_visible,
             arrangement_visible,
         );
-        let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
-            || editor_has_visible_buffer(&editor, "*piano-roll*");
+        let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*piano-roll*");
         let previous_playhead = ctx.frame.prev_playhead;
         let current_track_playhead_changed = playhead != ctx.frame.prev_playhead;
         let meter_polled = ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL;
@@ -502,7 +501,6 @@ pub(crate) fn sync_reactive_tick(
         }
         // Track switch — rebuild everything
         if ct != ctx.frame.prev_current_track && !app.tracks.is_empty() {
-            editor.reset_widget_scroll_for_buffer_named("*metal*");
             editor.reset_widget_scroll_for_buffer_named("*fx*");
             ctx.gesture.preview_plock_variant = None;
             let cleared_step_selection = {
@@ -581,8 +579,7 @@ pub(crate) fn sync_reactive_tick(
                     // branch below are gated on *fx* visibility, so nothing
                     // else refreshes the panel state that non-*fx* buffers
                     // read (*samples* / *macro-mappings* read
-                    // SEQ.instrument-panel, *metal* reads
-                    // SEQ.step-has-plocks). Publish that slice for the new
+                    // SEQ.instrument-panel). Publish that slice for the new
                     // track now; the heavier *fx*-only lists still wait for
                     // *fx* to be shown.
                     sync_shared_panel_state(
@@ -913,7 +910,6 @@ pub(crate) fn sync_reactive_tick(
                 cached_track_peak_levels: &ctx.meters.cached_track_peak_levels,
                 cached_bus_peak_levels: &ctx.meters.cached_bus_peak_levels,
                 record_armed: &ctx.shared.record_armed,
-                active_delete_target: &ctx.shared.active_delete_target,
                 fx_visible,
                 sequencer_visible,
                 mixer_visible,
@@ -1168,10 +1164,9 @@ pub(crate) fn sync_reactive_tick(
         if ui_ep != ctx.frame.prev_ui_epoch {
             if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
                 eprintln!(
-                    "[ui-trace][metal_seq] ui_epoch {}->{} visible metal={} mixer={} sequencer={} fx={} ct={}",
+                    "[ui-trace][metal_seq] ui_epoch {}->{} visible mixer={} sequencer={} fx={} ct={}",
                     ctx.frame.prev_ui_epoch,
                     ui_ep,
-                    metal_visible,
                     mixer_visible,
                     sequencer_visible,
                     fx_visible,
@@ -1212,7 +1207,7 @@ pub(crate) fn sync_reactive_tick(
                 sync_track_name_state(rt, &mut *ctx.track_names, &app);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
                 sync_step_param_lists(rt, &ctx.shared.state, ct);
-                if metal_visible || sequencer_visible {
+                if sequencer_visible {
                     sync_all_track_sequencer_state(rt, &ctx.shared.state, &app);
                 }
                 sync_track_mixer_state(rt, &app, &ctx.shared.state);
