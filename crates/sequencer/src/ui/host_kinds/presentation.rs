@@ -445,6 +445,34 @@ fn push_sounds(pusher: &mut Pusher<'_>, palette: &Palette, track: InstanceId) ->
     ids.into_iter().flatten().collect()
 }
 
+/// Push the presented editor (and its macro sidebar), Patch Learn and
+/// settings into their kinds through the real syncs, as a host tick's first
+/// push of them would, then run the reactive cycle: tests on a host-less
+/// editor present a record with `present_*` and call this.
+#[cfg(test)]
+pub(crate) fn push_presented_views(rt: &mut Runtime) {
+    let handles = KindsHandles::detached();
+    let shared = RefCell::new(KindsShared::default());
+    let mut state = PresentedState::default();
+    let mut pusher = Pusher {
+        rt: &mut *rt,
+        sources: &handles,
+        shared: &shared,
+        changed: false,
+    };
+    if let Some(editor) = pusher.singleton(EDITOR) {
+        state.sync_editor(&mut pusher, editor);
+    }
+    if let Some(learn) = pusher.singleton(LEARN) {
+        state.sync_learn(&mut pusher, learn);
+    }
+    if let (Some(settings), Some(project)) = (pusher.singleton(SETTINGS), pusher.singleton(PROJECT))
+    {
+        state.sync_settings(&mut pusher, settings, project);
+    }
+    rt.run_reactive_cycle();
+}
+
 impl PresentedState {
     /// The editor's fields, and its macro sidebar's, each when its area
     /// moved.

@@ -625,10 +625,7 @@ pub(super) fn handle(
             let builtin = extract_bool_from_payload(&payload, "builtin");
             match (track, rack_slot, name) {
                 (Some(track), Some(rack_slot), Some(name)) => {
-                    let is_builtin = builtin
-                        || sequencer::effects::EffectDescriptor::builtin_insert(&name)
-                            .is_some()
-                        || sequencer::effects::dgen_builtin::contains(&name);
+                    let is_builtin = builtin || sequencer::effects::is_builtin_effect(&name);
                     let result = app.apply_recorded_rack_effect_chain_mutation(
                         track,
                         rack_slot,

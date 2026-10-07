@@ -1,7 +1,8 @@
 //! The capture fixtures' hook: `(present-fixture area fields)` seeds a
 //! presented area as a command or job would, by the kind's field names
-//! (`song-export`, `settings`, `retro`), so a fixture shows a modal's states
-//! without running an export, a MIDI service or a capture. The record moves
+//! (`song-export`, `settings`, `retro`, `learn`, `editor`), so a fixture
+//! shows a modal's or a pane's states without running an export, a MIDI
+//! service, a capture, a learn job or an edit session. The record moves
 //! like any typed edit and the legacy mirror follows (applied when the
 //! native returns).
 
@@ -52,12 +53,7 @@ pub(crate) fn present_fixture(
             for (name, value) in &fields {
                 settings_field(&mut view, name, value)?;
             }
-            present(
-                sink,
-                |p| &mut p.settings,
-                |s| *s = view,
-                legacy::mirror_settings,
-            );
+            present(sink, |p| &mut p.settings, |s| *s = view, legacy::unmirrored);
         }
         "retro" => {
             let mut view = presented(|p| p.retro.get().clone());
@@ -65,6 +61,32 @@ pub(crate) fn present_fixture(
                 retro_field(&mut view, name, value)?;
             }
             present(sink, |p| &mut p.retro, |r| *r = view, legacy::unmirrored);
+        }
+        "learn" => {
+            let mut view = presented(|p| p.learn.get().clone());
+            for (name, value) in &fields {
+                learn_field(&mut view, name, value)?;
+            }
+            present(sink, |p| &mut p.learn, |l| *l = view, legacy::unmirrored);
+        }
+        "editor" => {
+            let mut view = presented(|p| p.editor.get().clone());
+            let mut sidebar = presented(|p| p.editor_sidebar.get().clone());
+            for (name, value) in &fields {
+                editor_field(&mut view, &mut sidebar, name, value)?;
+            }
+            present(
+                sink,
+                |p| &mut p.editor,
+                |e| *e = view,
+                legacy::mirror_editor,
+            );
+            present(
+                sink,
+                |p| &mut p.editor_sidebar,
+                |s| *s = sidebar,
+                legacy::unmirrored,
+            );
         }
         _ => return Err(format!("no presented area {area}")),
     }
@@ -129,6 +151,133 @@ fn retro_field(view: &mut RetroView, name: &str, value: &Value) -> Result<(), St
         _ => return Err(format!("retro has no field {name}")),
     }
     Ok(())
+}
+
+fn learn_field(view: &mut LearnView, name: &str, value: &Value) -> Result<(), String> {
+    match name {
+        "target-path" => view.target_path = text(name, value)?,
+        "target-name" => view.target_name = text(name, value)?,
+        "phase" => view.phase = text(name, value)?,
+        "stage" => view.stage = text(name, value)?,
+        "current-epoch" => view.current_epoch = number(name, value)?,
+        "total-epochs" => view.total_epochs = number(name, value)?,
+        "loss" => view.loss = number(name, value)?,
+        "losses" => view.losses = rows(name, value, number)?,
+        "optimization-losses" => view.optimization_losses = rows(name, value, number)?,
+        "plan-params" => {
+            view.plan_params = rows(name, value, |name, row| {
+                Ok(LearnPlanParam {
+                    name: text(name, &entry(row, "name")?)?,
+                    status: text(name, &entry(row, "status")?)?,
+                    reason: text(name, &entry(row, "reason")?)?,
+                })
+            })?;
+        }
+        "epoch-params" => {
+            view.epoch_params = rows(name, value, |name, row| {
+                Ok(LearnEpochParam {
+                    name: text(name, &entry(row, "name")?)?,
+                    from: number(name, &entry(row, "from")?)?,
+                    value: number(name, &entry(row, "value")?)?,
+                    change: number(name, &entry(row, "change")?)?,
+                    step: number(name, &entry(row, "step")?)?,
+                })
+            })?;
+        }
+        "improvement-pct" => view.improvement_pct = number(name, value)?,
+        "abs-distance" => view.abs_distance = number(name, value)?,
+        "basin-check" => view.basin_check = text(name, value)?,
+        "result-deltas" => {
+            view.result_deltas = rows(name, value, |name, row| {
+                Ok(LearnDelta {
+                    name: text(name, &entry(row, "name")?)?,
+                    from: number(name, &entry(row, "from")?)?,
+                    to: number(name, &entry(row, "to")?)?,
+                    change: number(name, &entry(row, "change")?)?,
+                })
+            })?;
+        }
+        "seeded-wav" => view.seeded_wav = text(name, value)?,
+        "final-wav" => view.final_wav = text(name, value)?,
+        "applied" => view.applied = flag(name, value)?,
+        "error" => view.error = text(name, value)?,
+        // A training setting, typed like the record's.
+        _ => {
+            let value = match view.setting(name) {
+                Some(Value::String(_)) => Value::String(text(name, value)?),
+                Some(_) => Value::Number(number(name, value)?),
+                None => return Err(format!("learn has no field {name}")),
+            };
+            view.set_setting(name, value);
+        }
+    }
+    Ok(())
+}
+
+/// The `editor` kind's fields a fixture seeds: the open macro view and the
+/// macro sidebar (macros as dicts `:name :calls`, a library one's also
+/// `:used`; assets `:reference :tier`; the selected asset `:reference` and,
+/// each optional, `:tensor-kind :shape :sets :wave-names :waves-per-set
+/// :set-count :source`).
+fn editor_field(
+    view: &mut EditorView,
+    sidebar: &mut EditorSidebar,
+    name: &str,
+    value: &Value,
+) -> Result<(), String> {
+    let editor_macro = |name: &str, row: &Value| {
+        Ok(EditorMacro {
+            name: text(name, &entry(row, "name")?)?,
+            calls: rows(name, &entry(row, "calls")?, text)?,
+            used: optional(row, "used").map_or(Ok(false), |used| flag(name, &used))?,
+            ..EditorMacro::default()
+        })
+    };
+    match name {
+        "open-macro" => view.open_macro = text(name, value)?,
+        "patch-macros" => sidebar.patch_macros = rows(name, value, editor_macro)?,
+        "library-macros" => sidebar.library_macros = rows(name, value, editor_macro)?,
+        "assets" => {
+            sidebar.assets = rows(name, value, |name, row| {
+                Ok(EditorAsset {
+                    reference: text(name, &entry(row, "reference")?)?,
+                    tier: text(name, &entry(row, "tier")?)?,
+                    source_path: String::new(),
+                })
+            })?;
+        }
+        "selected-asset" => {
+            let field = |key: &str| optional(value, key);
+            let labels = |key: &str| field(key).map(|v| rows(name, &v, text)).transpose();
+            let shape = field("shape").map(|v| rows(name, &v, number)).transpose()?;
+            let count = |key: &str| field(key).map(|v| number(name, &v)).transpose();
+            let metadata = eseqlisp::editor::AssetMetadata {
+                shape: shape
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|d| d as u64)
+                    .collect(),
+                kind: field("tensor-kind").map(|v| text(name, &v)).transpose()?,
+                source: field("source").map(|v| text(name, &v)).transpose()?,
+                waves_per_set: count("waves-per-set")?.map(|n| n as usize),
+                set_count: count("set-count")?.unwrap_or(1.0) as usize,
+                sets: labels("sets")?,
+                wave_names: labels("wave-names")?,
+                ..Default::default()
+            };
+            sidebar.selected_asset = Some(AssetInfo {
+                reference: text(name, &entry(value, "reference")?)?,
+                metadata: Some(metadata),
+            });
+        }
+        _ => return Err(format!("editor has no field {name}")),
+    }
+    Ok(())
+}
+
+/// `map`'s `key`, when it has one.
+fn optional(map: &Value, key: &str) -> Option<Value> {
+    entry(map, key).ok()
 }
 
 fn text(name: &str, value: &Value) -> Result<String, String> {

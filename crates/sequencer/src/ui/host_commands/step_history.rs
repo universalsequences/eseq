@@ -2124,7 +2124,6 @@ mod tests {
                     cached_bus_peak_levels: &bus_peaks,
                     record_armed: &self.record_armed,
                     active_delete_target: &self.active_delete_target,
-                    active_delete_target_version: &self.active_delete_target_version,
                     expanded_step_projection: &self.expanded_step_projection,
                     fx_visible: true,
                     sequencer_visible: true,

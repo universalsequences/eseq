@@ -3,7 +3,6 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "open-learn-patch",
     "set-learn-target",
-    "configure-learn",
     "start-learn-job",
     "stop-learn-job",
     "replan-learn-job",
@@ -12,10 +11,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-learn",
 ];
 
-/// The integer training settings: (field, min, max), the field both the
-/// `configure-learn` payload key and the `learn` kind's name.
-/// `configure-learn` clamps into the range; `set-learn` (the `learn` kind's
-/// setters) takes only a value in it.
+/// The integer training settings: (field, min, max), the field the `learn`
+/// kind's name. `set-learn` (the `learn` kind's setters) takes only a value
+/// in the range.
 const LEARN_INT_SETTINGS: [(&str, usize, usize); 9] = [
     ("epochs", 1, 2000),
     ("cma-generations", 1, 1000),
@@ -140,44 +138,6 @@ pub(super) fn handle(
                 editor.handle_host_event(HostEvent::Status(format!("set-learn: {error}")));
             }
         },
-        "configure-learn" => {
-            // Clamped into range (unlike `set-learn`), then the value rule.
-            let mut settings = Vec::new();
-            for field in ["method", "cma-refine-mode"] {
-                if let Some(label) = extract_string_from_payload(&payload, field) {
-                    settings.push((field, Value::String(label)));
-                }
-            }
-            for (field, min, max) in LEARN_INT_SETTINGS {
-                if let Some(value) = extract_usize_from_payload(&payload, field) {
-                    let value = match value.clamp(min, max) {
-                        1..=3 if field == "cma-population" => 4,
-                        value => value,
-                    };
-                    settings.push((field, Value::Number(value as f64)));
-                }
-            }
-            if let Some(sigma) = extract_number_from_payload(&payload, "cma-sigma") {
-                // NaN stays NaN (and is refused): `f64::min` would make it 10.
-                let sigma = if sigma > 10.0 { 10.0 } else { sigma };
-                settings.push(("cma-sigma", Value::Number(sigma)));
-            }
-            if let Some(pitch_hz) = extract_number_from_payload(&payload, "pitch-hz") {
-                settings.push(("pitch-hz", Value::Number(pitch_hz)));
-            }
-            if let Some(gate_frames) = extract_usize_from_payload(&payload, "gate-frames") {
-                let gate_frames = gate_frames.min(u32::MAX as usize);
-                settings.push(("gate-frames", Value::Number(gate_frames as f64)));
-            }
-            present_learn(editor.runtime_mut(), |l| {
-                for (field, value) in settings {
-                    if let Ok(value) = validate_learn_setting(field, &value) {
-                        l.set_setting(field, value);
-                    }
-                }
-            });
-            finish_reactive(editor);
-        }
         "start-learn-job" => {
             if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
                 editor.handle_host_event(HostEvent::Status(message.to_string()));
@@ -348,7 +308,7 @@ pub(crate) fn open_patch_learn_buffer(
 
 /// One training setting (`set-learn`: `:field`, `:value`), the `learn`
 /// kind's setter: the current value always works, anything else must pass
-/// [`validate_learn_setting`] (no clamping, unlike `configure-learn`).
+/// [`validate_learn_setting`] (no clamping).
 fn set_learn(rt: &mut Runtime, payload: &Value) -> Result<(), String> {
     let Value::Map(map) = payload else {
         return Err("needs a :field and a :value".to_string());
@@ -369,8 +329,7 @@ fn set_learn(rt: &mut Runtime, payload: &Value) -> Result<(), String> {
 /// stored: the method or refine mode one of its labels (case-insensitive),
 /// an integer setting an integer in its range (a population 0 or at least
 /// 4), the sigma a number above 0 up to 10, the pitch a positive number and
-/// the gate a positive integer. `set-learn` and `configure-learn` both
-/// store only what this accepts.
+/// the gate a positive integer. `set-learn` stores only what this accepts.
 fn validate_learn_setting(field: &str, value: &Value) -> Result<Value, String> {
     let value = super::track_settings::SetValue::new(field, value.clone());
     Ok(match field {

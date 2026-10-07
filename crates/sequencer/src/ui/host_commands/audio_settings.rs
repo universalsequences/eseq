@@ -7,12 +7,6 @@ use sequencer::audio::worker_prefs::{self, WorkerPrefs};
 
 pub(super) const COMMANDS: &[&str] = &["audio-set-workers"];
 
-pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
-    // Presentation only; capture fixtures seed a preview (`present-fixture`).
-    let (fields, _) = crate::presented::settings_registration();
-    runtime.register_reactive("AUDIO", fields, true);
-}
-
 pub(super) fn handle(
     name: &str,
     payload: Value,

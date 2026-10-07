@@ -2258,7 +2258,7 @@
 
         {
             let rt = editor.runtime_mut();
-            sync_project_state(rt, &app);
+            record_preset_listings();
             sync_track_topology_state(
                 rt,
                 &app,
@@ -2288,11 +2288,6 @@
                 app.tracks.len(),
                 &state,
                 active_delete_target.lock().unwrap().as_ref(),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "delete-target-version",
-                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
             );
             rt.run_reactive_cycle();
         }
@@ -2402,11 +2397,6 @@
                 app.tracks.len(),
                 &state,
                 active_delete_target.lock().unwrap().as_ref(),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "delete-target-version",
-                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
             );
             rt.run_reactive_cycle();
         }
@@ -3495,7 +3485,7 @@
 
         {
             let rt = editor.runtime_mut();
-            sync_project_state(rt, &app);
+            record_preset_listings();
             sync_track_topology_state(
                 rt,
                 &app,
@@ -3525,11 +3515,6 @@
                 app.tracks.len(),
                 &state,
                 active_delete_target.lock().unwrap().as_ref(),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "delete-target-version",
-                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
             );
             rt.run_reactive_cycle();
         }
@@ -3739,7 +3724,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -4436,7 +4420,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -4479,7 +4462,6 @@
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
                         let rt = editor.runtime_mut();
-                        sync_macro_state(rt, app);
                         sync_track_name_state(rt, &mut track_names, app);
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
                         sync_step_param_lists(rt, &state, TRACK);
@@ -5843,7 +5825,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -5880,7 +5861,6 @@
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
                         let rt = editor.runtime_mut();
-                        sync_macro_state(rt, app);
                         sync_track_name_state(rt, &mut track_names, app);
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, track));
                         sync_step_param_lists(rt, &state, track);
@@ -7871,7 +7851,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -8539,7 +8518,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -8594,7 +8572,6 @@
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
                         let rt = editor.runtime_mut();
-                        sync_macro_state(rt, app);
                         sync_track_name_state(rt, &mut track_names, app);
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
                         sync_step_param_lists(rt, &state, TRACK);
@@ -9662,7 +9639,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -9775,16 +9751,11 @@
                 }
                 let pattern_sync_done = Instant::now();
 
-                // --- reactive_tick.rs delete-target-version branch ---------
+                // --- reactive_tick.rs delete-target branch ----------------
                 let delete_version = active_delete_target_version.load(Ordering::Relaxed);
                 if delete_version != frame.prev_delete_target_version {
                     frame.prev_delete_target_version = delete_version;
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "delete-target-version",
-                        Value::Number(delete_version as f64),
-                    );
                     sync_mixer_delete_target_binding_fields(
                         rt,
                         app.tracks.len(),
@@ -9808,7 +9779,6 @@
                     let revision = build_revision(&state, app);
                     sync_shared_track_collapsed(&track_collapsed, app);
                     let rt = editor.runtime_mut();
-                    sync_macro_state(rt, app);
                     sync_track_name_state(rt, &mut track_names, app);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_step_param_lists(rt, &state, ct);
@@ -11132,7 +11102,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -11155,7 +11124,6 @@
                     let revision = build_revision(&state, app);
                     sync_shared_track_collapsed(&track_collapsed, app);
                     let rt = editor.runtime_mut();
-                    sync_macro_state(rt, app);
                     sync_track_name_state(rt, &mut track_names, app);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_step_param_lists(rt, &state, ct);
@@ -12637,7 +12605,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -13168,7 +13135,6 @@
                             cached_bus_peak_levels: &cached_bus_peak_levels,
                             record_armed: &record_armed,
                             active_delete_target: &active_delete_target,
-                            active_delete_target_version: &active_delete_target_version,
                             expanded_step_projection: &expanded_step_projection,
                             fx_visible,
                             sequencer_visible: true,
@@ -14221,7 +14187,6 @@
                         cached_bus_peak_levels: &cached_bus_peak_levels,
                         record_armed: &record_armed,
                         active_delete_target: &active_delete_target,
-                        active_delete_target_version: &active_delete_target_version,
                         expanded_step_projection: &expanded_step_projection,
                         fx_visible: true,
                         sequencer_visible: true,
@@ -14324,7 +14289,6 @@
                         cached_bus_peak_levels: &cached_bus_peak_levels,
                         record_armed: &record_armed,
                         active_delete_target: &active_delete_target,
-                        active_delete_target_version: &active_delete_target_version,
                         expanded_step_projection: &expanded_step_projection,
                         fx_visible: true,
                         sequencer_visible: true,
@@ -14971,7 +14935,7 @@
         let mut host_kinds = super::host_kinds::HostKinds::default();
         {
             let rt = editor.runtime_mut();
-            sync_project_state(rt, &app);
+            record_preset_listings();
             sync_track_topology_state(
                 rt,
                 &app,

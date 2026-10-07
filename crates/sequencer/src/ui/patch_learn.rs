@@ -774,21 +774,13 @@ mod tests {
     #[test]
     fn loss_trajectory_retains_every_epoch() {
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", crate::presented::seq_registration(), true);
         for epoch in 0..250 {
             crate::present_learn(&mut runtime, |l| l.losses.push(1.0 / (epoch + 1) as f64));
         }
         let losses = crate::presented::presented(|p| p.learn.get().losses.clone());
         assert_eq!(losses.len(), 250);
-        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
-            panic!("SEQ should be a map");
-        };
-        let Value::List(values) = seq["learn-losses"].borrow().clone() else {
-            panic!("loss trajectory should be a list");
-        };
-        assert_eq!(values.len(), 250);
-        assert_eq!(*values[0].borrow(), Value::Number(1.0));
-        assert_eq!(*values[249].borrow(), Value::Number(1.0 / 250.0));
+        assert_eq!(losses[0], 1.0);
+        assert_eq!(losses[249], 1.0 / 250.0);
     }
 
     #[test]

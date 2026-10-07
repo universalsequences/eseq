@@ -762,9 +762,7 @@ impl ProjectEffectSource {
         if let Some(name) = crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
             return Self::Builtin { name: name.to_string() };
         }
-        if crate::effects::EffectDescriptor::builtin_insert(name).is_some()
-            || crate::effects::dgen_builtin::contains(name)
-        {
+        if crate::effects::is_builtin_effect(name) {
             return Self::Builtin { name: name.to_string() };
         }
         Self::Saved { name: name.to_string() }

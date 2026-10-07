@@ -801,15 +801,22 @@ fn project_macros_read_set_and_keep_their_identity() {
         h.eval_panel("(list mm.macro mm.rack-macro mm.index m.target-scene)"),
         h.eval_panel("(list m nil 0 nil)")
     );
-    // Legacy parity (SEQ.macros).
-    let legacy = items(&build_macros_value(&h.app)).remove(0);
-    let mapping = items(&get(&legacy, "mappings")).remove(0);
-    assert_eq!(h.eval_panel("mm.label"), get(&mapping, "target-label"));
-    assert_eq!(h.eval_panel("mm.min"), get(&mapping, "display-min"));
-    assert_eq!(h.eval_panel("mm.max"), get(&mapping, "display-max"));
-    assert_eq!(h.eval_panel("mm.curve"), get(&mapping, "curve"));
-    assert_eq!(h.eval_panel("mm.suspended"), get(&mapping, "suspended"));
-    assert_eq!(h.eval_panel("m.value"), get(&legacy, "value"));
+    // The mapping table's columns, as the model shows them.
+    let model = h.app.macro_engine.macros()[0].clone();
+    let mapping = &model.mappings[0];
+    let (path, param, min, max, ..) = macro_mapping_display_metadata(&h.app, mapping);
+    let label = format!("{path} · {}", process_param_target_label(&mapping.target));
+    assert_eq!(h.eval_panel("mm.label"), s(&label));
+    assert_eq!(h.eval_panel("mm.path"), s(&path));
+    assert_eq!(h.eval_panel("mm.param-label"), s(&param));
+    assert_eq!(h.eval_panel("mm.min"), Value::Number(f64::from(min)));
+    assert_eq!(h.eval_panel("mm.max"), Value::Number(f64::from(max)));
+    assert_eq!(h.eval_panel("mm.curve"), s(mapping.curve.label()));
+    assert_eq!(h.eval_panel("mm.suspended"), Value::Bool(mapping.suspended));
+    assert_eq!(
+        h.eval_panel("m.value"),
+        Value::Number(f64::from(model.value))
+    );
     // The value: a performance control (no undo entry), compared per tick
     // with no structure sync.
     let syncs = h.frame.host_kinds.macros.syncs;

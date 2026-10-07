@@ -220,6 +220,24 @@ pub(super) fn seed_panel_device(
     device
 }
 
+/// Mapping `index` of macro `owner` (a `macro`, or with `rack` a
+/// `rack-macro`): its `macro-mapping`, keyed (owner, index), with its owner
+/// and index set.
+pub(super) fn seed_mapping_row(
+    rt: &mut Runtime,
+    owner: eseqlisp::vm::InstanceId,
+    rack: bool,
+    index: usize,
+) -> eseqlisp::vm::InstanceId {
+    let row = rt
+        .register_keyed_instance("eseq.kinds:macro-mapping", &[owner, index as u64])
+        .unwrap();
+    let owner_field = if rack { "rack-macro" } else { "macro" };
+    set_field(rt, row, owner_field, Value::Instance(owner));
+    set_field(rt, row, "index", Value::Number(index as f64));
+    row
+}
+
 /// A rack panel dict's macros (`:macros`, their `:mappings` onto the
 /// slots' instrument and effect params) as the rack device's
 /// rack-macros.
@@ -254,11 +272,7 @@ pub(super) fn seed_panel_rack_macros(
                 .iter()
                 .enumerate()
                 .map(|(position, mapping)| {
-                    let mapping_id = rt
-                        .register_keyed_instance("eseq.kinds:macro-mapping", &[id, position as u64])
-                        .unwrap();
-                    set_field(rt, mapping_id, "rack-macro", Value::Instance(id));
-                    set_field(rt, mapping_id, "index", Value::Number(position as f64));
+                    let mapping_id = seed_mapping_row(rt, id, true, position);
                     let slot = dict_number(mapping, "rack-slot")
                         .and_then(|slot| slots.get(slot as usize).copied());
                     let device = match dict_string(mapping, "kind").as_deref() {

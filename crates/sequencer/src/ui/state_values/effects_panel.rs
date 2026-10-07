@@ -261,8 +261,7 @@ pub(crate) fn build_effects_value(
             slot_map.insert(
                 "builtin".to_string(),
                 Rc::new(RefCell::new(Value::Bool(
-                    sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some()
-                        || sequencer::effects::dgen_builtin::contains(&desc.name),
+                    sequencer::effects::is_builtin_effect(&desc.name),
                 ))),
             );
 
@@ -1106,9 +1105,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                     slot_map.insert(
                         "builtin".to_string(),
                         Rc::new(RefCell::new(Value::Bool(
-                            sequencer::effects::EffectDescriptor::builtin_insert(&desc.name)
-                                .is_some()
-                                || sequencer::effects::dgen_builtin::contains(&desc.name),
+                            sequencer::effects::is_builtin_effect(&desc.name),
                         ))),
                     );
                     let node_id = bus

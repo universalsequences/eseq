@@ -10879,7 +10879,7 @@ fn idle_reactive_cycles_leave_hidden_deferred_effects_for_the_presentation_seam(
     // as no work at all rather than re-sorting the dirty set every frame.
     for _ in 0..3 {
         assert!(
-            !editor.runtime.has_resumable_hidden_effect_work(),
+            !editor.runtime.has_pending_visible_effect_work(),
             "a hidden deferred effect is not resumable work"
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -10910,7 +10910,7 @@ fn idle_reactive_cycles_leave_hidden_deferred_effects_for_the_presentation_seam(
         "presentation must resume the deferred effect: {visible_rendered}"
     );
     assert!(
-        !editor.runtime.has_resumable_hidden_effect_work(),
+        !editor.runtime.has_pending_visible_effect_work(),
         "resumed work should be drained"
     );
 }

@@ -118,11 +118,6 @@ fn browser_sidebar_and_track_instruments_follow_the_presented_sidebar() {
         );
         let slots = h.instances(h.single(BROWSER, "rack-slots"));
         assert_eq!(slots.len(), sidebar.slots.len());
-        // The legacy name unported views still read mirrors the instrument.
-        assert_eq!(
-            h.legacy_in("SEQ", "sidebar-instrument-name"),
-            s(&sidebar.instrument)
-        );
     };
     check(&h);
     // The sidebar follows the shown track: the publisher records it, the
@@ -351,9 +346,8 @@ fn editor_fields_follow_the_published_editor_state() {
     ] {
         assert_eq!(h.single(EDITOR, field), value, "{field}");
     }
-    // The names unported views still read are mirrored.
+    // The name unported views still read is mirrored.
     assert_eq!(h.legacy_in("SEQ", "editor-mode"), s("new-instrument"));
-    assert_eq!(h.legacy_in("SEQ", "editor-open-macro"), s("lfo"));
     // The macro sidebar: the patch's macros, then the library's, kept by
     // name.
     let patch = patch_macro_sidebar(vec![
@@ -428,13 +422,11 @@ fn editor_fields_follow_the_published_editor_state() {
 }
 
 #[test]
-fn learn_settings_go_through_the_legacy_field_under_the_value_rule() {
+fn learn_settings_set_through_the_record_under_the_value_rule() {
     let mut h = Harness::new();
     h.sync();
-    assert_eq!(
-        h.single(LEARN, "epochs"),
-        h.legacy_in("SEQ", "learn-epochs")
-    );
+    let record = || presented(|p| p.learn.get().clone());
+    assert_eq!(h.single(LEARN, "epochs"), Value::Number(record().epochs));
     assert_eq!(h.single(LEARN, "method"), s(LEARN_METHODS[0]));
     // The option constants are the host's.
     let methods = strings_of(h.eval_7f("learn-method-options"));
@@ -455,11 +447,7 @@ fn learn_settings_go_through_the_legacy_field_under_the_value_rule() {
         ("pitch-hz", Value::Number(220.0)),
     ] {
         assert_eq!(h.single(LEARN, field), value, "{field}");
-        assert_eq!(
-            h.legacy_in("SEQ", &format!("learn-{field}")),
-            value,
-            "SEQ.learn-{field}"
-        );
+        assert_eq!(record().setting(field), Some(value), "the record's {field}");
     }
     // Out of range, of the wrong shape or unknown: an error, no change.
     for (code, message) in [
@@ -513,7 +501,7 @@ fn learn_settings_go_through_the_legacy_field_under_the_value_rule() {
     assert_eq!(h.single(LEARN, "phase"), s("training"));
     assert_eq!(
         h.single(LEARN, "losses"),
-        h.legacy_in("SEQ", "learn-losses")
+        list_value(record().losses.iter().map(|loss| Value::Number(*loss)))
     );
 }
 
@@ -621,21 +609,23 @@ fn settings_follow_the_audio_and_midi_state() {
     let mut h = Harness::new();
     crate::host_commands::audio_settings::publish(&mut h.editor, None);
     h.sync();
+    let record = presented(|p| p.settings.get().clone());
     assert_eq!(
         h.single(SETTINGS, "audio-workers-choice"),
-        h.legacy_in("AUDIO", "workers-choice")
+        s(&record.workers_choice)
     );
     assert_eq!(
         h.single(SETTINGS, "audio-workers-note"),
-        h.legacy_in("AUDIO", "workers-note")
+        s(&record.workers_note)
     );
+    let options = record.workers_options.iter().map(|option| s(option));
     assert_eq!(
         h.single(PROJECT, "audio-workers-options"),
-        h.legacy_in("AUDIO", "workers-options")
+        list_value(options)
     );
     // An unknown choice is an error that changes nothing (the note stays):
     // a label not among the options, even one a lenient parse would take.
-    let note = h.legacy_in("AUDIO", "workers-note");
+    let note = h.single(SETTINGS, "audio-workers-note");
     for choice in ["lots", "0", "9999", "auto"] {
         h.editor.minibuffer = None;
         h.eval_7f(&format!(
@@ -647,7 +637,8 @@ fn settings_follow_the_audio_and_midi_state() {
             "{choice}: {}",
             h.status_7f()
         );
-        assert_eq!(h.legacy_in("AUDIO", "workers-note"), note);
+        h.sync();
+        assert_eq!(h.single(SETTINGS, "audio-workers-note"), note);
     }
     // MIDI inputs are kept by device id.
     let device = |id: &str, enabled| Device {

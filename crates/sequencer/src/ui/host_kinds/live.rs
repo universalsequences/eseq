@@ -296,6 +296,34 @@ impl KindsHandles {
         }
     }
 
+    /// Handles to an empty one-track sequencer, for tests that run a sync
+    /// with no host (the presented views read none of them).
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            state: Arc::new(SequencerState::new(1, Vec::new())),
+            current_track: Default::default(),
+            selected_steps: Default::default(),
+            active_delete_target: Default::default(),
+            active_delete_target_version: Default::default(),
+            record_armed: Default::default(),
+            recording: Default::default(),
+            master_recording: Default::default(),
+            selected_tracks: Default::default(),
+            track_collapsed: Default::default(),
+            ui_epoch: Default::default(),
+            fx_epoch: Default::default(),
+            fx_value_epoch: Default::default(),
+            ui_invalidations: Arc::new(UiInvalidationQueue::new()),
+            step_print: Default::default(),
+            auto_follow_override_until: Default::default(),
+            armed_rack: Default::default(),
+            bus_state: Default::default(),
+            selected_neural_neurons: Default::default(),
+            piano_roll_selection: Default::default(),
+        }
+    }
+
     pub(super) fn track_exists(&self, track: usize) -> bool {
         track < self.state.active_track_count()
     }

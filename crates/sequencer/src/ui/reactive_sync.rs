@@ -1921,7 +1921,6 @@ pub(super) struct UiInvalidationApplyCtx<'a> {
     pub(super) cached_bus_peak_levels: &'a [f64],
     pub(super) record_armed: &'a Arc<Mutex<Vec<bool>>>,
     pub(super) active_delete_target: &'a Arc<Mutex<Option<ActiveDeleteTarget>>>,
-    pub(super) active_delete_target_version: &'a Arc<AtomicUsize>,
     pub(super) expanded_step_projection: &'a Arc<ExpandedStepProjectionRegistry>,
     pub(super) fx_visible: bool,
     pub(super) sequencer_visible: bool,
@@ -1950,7 +1949,6 @@ pub(super) fn apply_ui_invalidations(
         cached_bus_peak_levels,
         record_armed,
         active_delete_target,
-        active_delete_target_version,
         expanded_step_projection,
         fx_visible,
         sequencer_visible,
@@ -2715,13 +2713,6 @@ pub(super) fn apply_ui_invalidations(
                 }
             },
             UiInvalidation::DeleteTarget => {
-                needs_reactive_cycle |= rt
-                    .set_reactive(
-                        "SEQ",
-                        "delete-target-version",
-                        Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
-                    )
-                    .effects_dirty;
                 sync_mixer_delete_target_binding_fields(
                     rt,
                     app.tracks.len(),

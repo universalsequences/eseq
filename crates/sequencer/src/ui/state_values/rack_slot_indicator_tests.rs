@@ -25,7 +25,6 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
             ("midi-effects", test_list(vec![])),
             ("instrument-panel", build_instrument_panel_value(&app, 0, &selected)),
             ("bus-effects", test_list(vec![])),
-            ("delete-target-version", Value::Number(0.0)),
             ("track-plock-any", test_list(vec![])),
         ],
         true,

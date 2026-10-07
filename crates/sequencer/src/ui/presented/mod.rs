@@ -10,8 +10,8 @@
 //! generation only when its value changed, and the host kinds push an area's
 //! fields only when that generation moved (`host_kinds::presentation`).
 //!
-//! The legacy reactive names (`SEQ.editor-*`, `SEQ.learn-*`, `EXPORT`,
-//! `AUDIO`, `MIDI`, `AGENT`) are a mirror: after each typed edit the
+//! The legacy reactive names unported views still read (`SEQ.editor-active`
+//! / `editor-mode`, `EXPORT`, `AGENT`) are a mirror: after each typed edit the
 //! mutator writes the legacy fields that changed, derived from the record by
 //! [`legacy`], which holds every legacy name. Their registrations derive
 //! their defaults from the record too. Removing the legacy names
@@ -25,9 +25,7 @@ mod fixture;
 mod legacy;
 
 pub(crate) use fixture::register as register_fixture_native;
-pub(crate) use legacy::{
-    agent_registration, export_registration, seq_registration, settings_registration,
-};
+pub(crate) use legacy::{agent_registration, export_registration, seq_registration};
 
 use crate::app::sound_palette::{PaletteEntry, PaletteTarget};
 use crate::*;
@@ -121,17 +119,12 @@ pub(crate) fn present_editor_sidebar(
     rt: &mut Runtime,
     edit: impl FnOnce(&mut EditorSidebar),
 ) -> bool {
-    present(
-        rt,
-        |p| &mut p.editor_sidebar,
-        edit,
-        legacy::mirror_editor_sidebar,
-    )
+    present(rt, |p| &mut p.editor_sidebar, edit, legacy::unmirrored)
 }
 
 /// Edit Patch Learn.
 pub(crate) fn present_learn(rt: &mut Runtime, edit: impl FnOnce(&mut LearnView)) -> bool {
-    present(rt, |p| &mut p.learn, edit, legacy::mirror_learn)
+    present(rt, |p| &mut p.learn, edit, legacy::unmirrored)
 }
 
 /// Edit the MIDI capture.
@@ -146,7 +139,7 @@ pub(crate) fn present_export(rt: &mut Runtime, edit: impl FnOnce(&mut ExportView
 
 /// Edit the settings.
 pub(crate) fn present_settings(rt: &mut Runtime, edit: impl FnOnce(&mut SettingsView)) -> bool {
-    present(rt, |p| &mut p.settings, edit, legacy::mirror_settings)
+    present(rt, |p| &mut p.settings, edit, legacy::unmirrored)
 }
 
 /// Record the agent's generation.
@@ -643,8 +636,8 @@ pub(crate) struct SettingsView {
     pub(crate) midi_persistent: bool,
 }
 
-/// Seed whether MIDI device choices are saved, before the `MIDI`
-/// namespace registers (its registration reads the record).
+/// Seed whether MIDI device choices are saved, before the first host-kinds
+/// sync pushes `settings.midi-persistent` from the record.
 pub(crate) fn seed_midi_persistent(persistent: bool) {
     seed(|p| p.settings.value.midi_persistent = persistent);
 }

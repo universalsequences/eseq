@@ -424,7 +424,10 @@ path in `src/ui/state_values.rs`, as used for effect params and the
 process panels). Expose:
 
 - `macros` → list of `{id, key, name, kind, value, mappings: [{target-label, min, max, curve, current}]}`
-- `macro-mapping-open` reflection is UI-local (Lisp `defstate`), not engine state.
+- The mapping arm is UI-local (the `eseq.macro-state/macro-arm` singleton:
+  `open`, `mid`, `rack-index`), not engine state. Since eseq-0l17.18 the views
+  read the macros through the host kinds (`(macros)`, `macro`, `rack-macro`,
+  `macro-mapping`; kind-bindings spec §14.2g), not a `macros` list.
 
 ### 4.4 Precedence: base vs macro vs p-lock vs process write (must specify)
 
@@ -466,11 +469,14 @@ adds to the macro-effective value rather than the persisted scene base.
 
 ## 5. Phase 3 — Mapping-mode UI (highlight fork)
 
-### 5.1 New UI state (`ui/effects/state.lisp`)
+### 5.1 New UI state (`ui/macro-state.lisp`)
 
 ```lisp
-(defstate macro-mapping-open false)   ;; arm flag — global, like effect-mods-open
-(defstate macro-mapping-selected -1)  ;; MacroId currently being mapped, -1 none
+(def-kind macro-arm
+  :key ()
+  :state ((open false)        ;; a project macro is armed (like effect-mods.open)
+          (mid -1)            ;; the armed project macro's MacroId, -1 none
+          (rack-index -1)))   ;; the armed drum rack macro's index, -1 none
 ```
 
 ### 5.2 Wrapper fork (`ui/effects/param-controls.lisp`)
@@ -480,7 +486,7 @@ with a macro branch alongside the existing mods-open branch:
 
 ```lisp
 (def param-macro-mapping-active? ()
-  (and macro-mapping-open (>= macro-mapping-selected 0)))
+  (and macro-arm.open (>= macro-arm.mid 0)))
 
 (def param-macro-bg (p)
   (if (and (param-macro-mapping-active?) (get p :modulatable))
@@ -488,7 +494,7 @@ with a macro branch alongside the existing mods-open branch:
     :transparent))
 ```
 
-When `macro-mapping-open`:
+When `macro-arm.open`:
 - highlight every `:modulatable` param green (across *all* open device panels —
   this is what enables cross-device mapping in one gesture),
 - `on-click` → `host-command "macro-map-param" {...target...}` using the same
@@ -509,7 +515,7 @@ control only selects it. Once mapped, a control shows a small green ownership
 dot, reflects the macro's effective live value, and is read-only because the
 macro owns it. Unmapping is performed from the mapping table.
 
-While `macro-mapping-open`, the normal browser sidebar is temporarily replaced
+While `macro-arm.open`, the normal browser sidebar is temporarily replaced
 by a dense **Macro Mappings** table with `Macro`, `Path`, `Name`, `Min`, and
 `Max` columns. Min/max number pickers are the sole range-editing surface. The
 sidebar's previous visibility is restored when mapping closes. This keeps the
@@ -551,14 +557,15 @@ duplicate the macro or reset its mappings, ranges, display name, or live value.
 
 ### 6.2 Controls
 
-- **`macro-knob`**: continuous `0..1`, `on-change → macro-set-value {id, v}`.
+- **`macro-knob`**: continuous `0..1`, `on-change → (set! m.value v)` (the
+  `macro` kind's setter; binds `#'m.value`).
   Reuse `knob-number` as in `modulator-knob`.
-- **`macro-momentary`**: `on-press → macro-set-value {id, 1.0}` (or a configurable
+- **`macro-momentary`**: `on-press → (set! m.value 1.0)` (or a configurable
   engage target), `on-release → macro-release {id}`. Requires press/release
   events — confirm the button widget exposes both (mod source ON/OFF buttons use
   `on-click`; the momentary needs `on-press`/`on-release` — if absent, add to the
   widget, small).
-- **`macro-map-button`**: toggles `macro-mapping-open` + sets `macro-mapping-selected`
+- **`macro-map-button`**: toggles `macro-arm.open` + sets `macro-arm.mid`
   to this macro's id. Visually "armed" while active (Ableton-style).
 - **`macro-mapping-editor`**: the reusable row/table implementation mounted by
   mapping mode in the sidebar. It exposes Macro, Path, Name, min/max number
@@ -578,7 +585,7 @@ controls without coupling macro ownership to the FX buffer or any device rack.
 - Reusable `macro-knob`, `macro-momentary`, `macro-map-button`, and
   `macro-mapping-editor` EseqLisp components.
 - Idempotent script helper backed by `macro-ensure` and stable-key lookup through
-  `SEQ.macros`.
+  `(macros)` (`m.script-key`; `SEQ.macros` until eseq-0l17.18).
 - At least one durable experimental player-surface script/capture fixture.
 - `on-press`/`on-release` on the button widget if not already present.
 
@@ -853,7 +860,7 @@ Rust (engine, the high-risk surface):
 
 Lisp/UI (layout + interaction, use the existing layout-test harness):
 - script re-evaluation ensures the same keyed macro and preserves authored/user
-  mappings; reusable controls resolve keys through `SEQ.macros`;
+  mappings; reusable controls resolve keys through `(macros)`;
 - mapping-mode green highlight appears on `:modulatable` params only;
   click in armed mode emits `macro-map-param` with correct descriptor;
   an owned parameter rejects a second macro, displays its effective value, and

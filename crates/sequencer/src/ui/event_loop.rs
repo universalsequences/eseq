@@ -1615,7 +1615,7 @@ pub(crate) fn run_event_loop(
                         let rt = editor.runtime_mut();
 
                         sync_project_replacement(rt, &shared.state);
-                        sync_project_state(rt, &app);
+                        record_preset_listings();
                         // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
                         // loaded group headers can resolve their backing bus index.
                         sync_bus_mixer_state(rt, &app);

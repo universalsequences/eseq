@@ -148,6 +148,8 @@ use neural::*;
 use panel::*;
 use params::*;
 use pending::PendingState;
+#[cfg(test)]
+pub(crate) use presentation::push_presented_views;
 use presentation::PresentedState;
 use racks::RackState;
 use registry::*;
@@ -962,6 +964,7 @@ pub(crate) mod f {
     pub(crate) const DEVICE_DID: FieldKey = (DEVICE, "did");
     pub(crate) const DEVICE_TYPE: FieldKey = (DEVICE, "type");
     pub(crate) const DEVICE_NAME: FieldKey = (DEVICE, "name");
+    pub(crate) const DEVICE_BUILTIN: FieldKey = (DEVICE, "builtin");
     pub(crate) const DEVICE_ENABLED: FieldKey = (DEVICE, "enabled");
     pub(crate) const DEVICE_PARAMS: FieldKey = (DEVICE, "params");
     pub(crate) const DEVICE_PLAYHEAD: FieldKey = (DEVICE, "playhead");
@@ -1132,6 +1135,8 @@ pub(crate) mod f {
     pub(crate) const MAPPING_INDEX: FieldKey = (MACRO_MAPPING, "index");
     pub(crate) const MAPPING_TARGET: FieldKey = (MACRO_MAPPING, "target");
     pub(crate) const MAPPING_LABEL: FieldKey = (MACRO_MAPPING, "label");
+    pub(crate) const MAPPING_PATH: FieldKey = (MACRO_MAPPING, "path");
+    pub(crate) const MAPPING_PARAM_LABEL: FieldKey = (MACRO_MAPPING, "param-label");
     pub(crate) const MAPPING_MIN: FieldKey = (MACRO_MAPPING, "min");
     pub(crate) const MAPPING_MAX: FieldKey = (MACRO_MAPPING, "max");
     pub(crate) const MAPPING_CURVE: FieldKey = (MACRO_MAPPING, "curve");
@@ -1437,6 +1442,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_ROLE, ":string", Model),
     (f::DEVICE_TYPE, ":string", Model),
     (f::DEVICE_NAME, ":string", Model),
+    (f::DEVICE_BUILTIN, ":bool", Model),
     (f::DEVICE_ENABLED, ":bool", Model),
     (f::DEVICE_DEVICES, "(list-of device)", Model),
     (f::DEVICE_CONTAINER, "device", Model),
@@ -1626,6 +1632,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::MAPPING_INDEX, ":int", Model),
     (f::MAPPING_TARGET, "param", Model),
     (f::MAPPING_LABEL, ":string", Model),
+    (f::MAPPING_PATH, ":string", Model),
+    (f::MAPPING_PARAM_LABEL, ":string", Model),
     (f::MAPPING_MIN, ":number", Model),
     (f::MAPPING_MAX, ":number", Model),
     (f::MAPPING_CURVE, ":string", Model),

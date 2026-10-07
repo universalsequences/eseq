@@ -95,15 +95,15 @@ fn the_mirror_writes_only_the_fields_that_changed() {
         },
         legacy::mirror_editor,
     );
-    assert_eq!(writes.names(), vec!["editor-mode", "editor-open-macro"]);
+    assert_eq!(writes.names(), vec!["editor-mode"]);
     let mut writes = Writes::default();
     present(
         &mut writes,
         |p| &mut p.editor,
         |e| {
-            e.open_macro = "lfo".to_string();
-            // No legacy name mirrors the error any more (the browser reads
-            // `editor.error`).
+            // No legacy name mirrors the open macro or the error any more
+            // (the patch macros sidebar and the browser read the kind).
+            e.open_macro = "seq".to_string();
             e.error = "bad".to_string();
         },
         legacy::mirror_editor,
@@ -146,130 +146,62 @@ fn editor_mirror_matches_the_legacy_publishers() {
     assert_eq!(editor.run_mode, "instrument");
     // The surface is kept for the next open.
     assert_eq!(editor.surface, "patch");
-    // The macro sidebar's rows, as `build_*_sidebar_value` built them.
+    // The macro sidebar mirrors nothing (the patch macros sidebar reads
+    // `editor.*`): the record alone holds it.
     present_editor_sidebar(&mut rt, |sidebar| {
         sidebar.patch_macros = vec![EditorMacro {
             name: "lfo".to_string(),
-            params: vec!["rate".to_string()],
             ..Default::default()
         }];
-        sidebar.library_macros = vec![EditorMacro {
-            name: "env".to_string(),
-            outputs: vec!["out".to_string()],
-            summary: "An envelope".to_string(),
-            used: true,
-            ..Default::default()
-        }];
-        sidebar.assets = vec![EditorAsset {
-            reference: "tables/saw".to_string(),
-            tier: "factory".to_string(),
-            source_path: "/f/saw.json".to_string(),
-        }];
-        sidebar.selected_asset = Some(AssetInfo {
-            reference: "tables/missing".to_string(),
-            metadata: None,
-        });
     });
-    let patch = rows(legacy(&rt, "SEQ", "editor-patch-macros"));
-    assert_eq!(get(&patch[0], "name"), s("lfo"));
-    assert_eq!(rows(get(&patch[0], "params")), vec![s("rate")]);
-    let Value::Map(row) = &patch[0] else { panic!() };
-    assert_eq!(row.len(), 3, "a patch macro is name, params and calls");
-    let library = rows(legacy(&rt, "SEQ", "editor-library-macros"));
-    assert_eq!(get(&library[0], "summary"), s("An envelope"));
-    assert_eq!(get(&library[0], "used"), Value::Bool(true));
-    assert_eq!(rows(get(&library[0], "outputs")), vec![s("out")]);
-    let assets = rows(legacy(&rt, "SEQ", "editor-assets"));
-    for (key, value) in [
-        ("label", s("tables/saw")),
-        ("name", s("tables/saw")),
-        ("kind", s("patcher-asset")),
-        ("detail", s("factory")),
-        ("tier", s("factory")),
-        ("file", s("tables/saw")),
-        ("source-path", s("/f/saw.json")),
-        ("drag-type", s("dgen-asset")),
-        ("draggable", Value::Bool(true)),
-        ("drop-target", Value::Bool(false)),
-    ] {
-        assert_eq!(get(&assets[0], key), value, "{key}");
-    }
-    // An unresolvable asset: its reference alone.
-    let selected = legacy(&rt, "SEQ", "editor-selected-asset");
-    assert_eq!(get(&selected, "reference"), s("tables/missing"));
-    let Value::Map(selected) = selected else {
-        panic!()
+    let sidebar = presented(|p| p.editor_sidebar.get().clone());
+    assert_eq!(sidebar.patch_macros[0].name, "lfo");
+    let Some(Value::Map(seq)) = rt.global_value("SEQ") else {
+        panic!("SEQ should be a map");
     };
-    assert_eq!(selected.len(), 1);
-    present_editor_sidebar(&mut rt, |sidebar| sidebar.selected_asset = None);
-    assert_eq!(legacy(&rt, "SEQ", "editor-selected-asset"), Value::Nil);
+    assert!(!seq.contains_key("editor-patch-macros"));
 }
 
+/// Patch Learn mirrors no legacy name (the pane reads `learn.*`): an error,
+/// then a reset, keep the settings and the target in the record.
 #[test]
-fn learn_mirror_matches_the_legacy_publishers() {
-    let mut rt = runtime();
-    present_learn(&mut rt, |l| {
-        l.phase = "training".to_string();
-        l.plan_params = vec![LearnPlanParam {
-            name: "cutoff".to_string(),
-            status: "frozen".to_string(),
-            reason: "noise".to_string(),
-        }];
-        l.epoch_params = vec![LearnEpochParam {
-            name: "cutoff".to_string(),
-            from: 1.0,
-            value: 3.0,
-            change: 2.0,
-            step: 0.5,
-        }];
-        l.result_deltas = vec![LearnDelta {
-            name: "q".to_string(),
-            from: 0.5,
-            to: 0.75,
-            change: 0.25,
-        }];
-        l.losses = vec![0.5, 0.25];
-        l.checkpoint_wav = "/tmp/c.wav".to_string();
-    });
-    assert_eq!(legacy(&rt, "SEQ", "learn-phase"), s("training"));
-    let plan = rows(legacy(&rt, "SEQ", "learn-plan-params"));
-    assert_eq!(get(&plan[0], "status"), s("frozen"));
-    assert_eq!(get(&plan[0], "reason"), s("noise"));
-    let epoch = rows(legacy(&rt, "SEQ", "learn-epoch-params"));
-    for (key, value) in [
-        ("from", 1.0),
-        ("value", 3.0),
-        ("change", 2.0),
-        ("step", 0.5),
-    ] {
-        assert_eq!(get(&epoch[0], key), Value::Number(value), "{key}");
-    }
-    let deltas = rows(legacy(&rt, "SEQ", "learn-result-deltas"));
-    assert_eq!(get(&deltas[0], "to"), Value::Number(0.75));
-    assert_eq!(
-        rows(legacy(&rt, "SEQ", "learn-losses")),
-        vec![Value::Number(0.5), Value::Number(0.25)]
+fn learn_errors_and_resets_keep_the_settings_and_target() {
+    let mut writes = Writes::default();
+    present(
+        &mut writes,
+        |p| &mut p.learn,
+        |l| {
+            l.phase = "training".to_string();
+            l.plan_params = vec![LearnPlanParam {
+                name: "cutoff".to_string(),
+                status: "frozen".to_string(),
+                reason: "noise".to_string(),
+            }];
+            l.checkpoint_wav = "/tmp/c.wav".to_string();
+            l.epochs = 700.0;
+            l.target_name = "Kick".to_string();
+        },
+        legacy::unmirrored,
     );
-    assert_eq!(legacy(&rt, "SEQ", "learn-checkpoint-wav"), s("/tmp/c.wav"));
-    // An error, then a reset: the settings and target stay.
-    present_learn(&mut rt, |l| {
-        l.epochs = 700.0;
-        l.target_name = "Kick".to_string();
-    });
+    assert!(writes.0.is_empty(), "{:?}", writes.names());
+    let mut rt = Runtime::new();
     present_learn_error(&mut rt, "boom");
-    assert_eq!(legacy(&rt, "SEQ", "learn-phase"), s("error"));
-    assert_eq!(legacy(&rt, "SEQ", "learn-error"), s("boom"));
+    let learn = presented(|p| p.learn.get().clone());
+    assert_eq!(
+        (learn.phase.as_str(), learn.error.as_str()),
+        ("error", "boom")
+    );
     present_learn(&mut rt, LearnView::reset);
-    assert_eq!(legacy(&rt, "SEQ", "learn-phase"), s("pick"));
-    assert_eq!(legacy(&rt, "SEQ", "learn-error"), s(""));
-    assert_eq!(rows(legacy(&rt, "SEQ", "learn-plan-params")), vec![]);
-    assert_eq!(legacy(&rt, "SEQ", "learn-checkpoint-wav"), s(""));
-    assert_eq!(legacy(&rt, "SEQ", "learn-epochs"), Value::Number(700.0));
-    assert_eq!(legacy(&rt, "SEQ", "learn-target-name"), s("Kick"));
+    let learn = presented(|p| p.learn.get().clone());
+    assert_eq!((learn.phase.as_str(), learn.error.as_str()), ("pick", ""));
+    assert!(learn.plan_params.is_empty());
+    assert_eq!(learn.checkpoint_wav, "");
+    assert_eq!(learn.epochs, 700.0);
+    assert_eq!(learn.target_name, "Kick");
 }
 
 #[test]
-fn export_settings_and_agent_mirrors_match_the_legacy_publishers() {
+fn export_and_agent_mirrors_match_the_legacy_publishers() {
     let mut writes = Writes::default();
     present(
         &mut writes,
@@ -287,40 +219,6 @@ fn export_settings_and_agent_mirrors_match_the_legacy_publishers() {
     let mut writes = Writes::default();
     present(
         &mut writes,
-        |p| &mut p.settings,
-        |st| {
-            st.workers_choice = "Auto (6)".to_string();
-            st.workers_options = vec!["Auto (6)".to_string(), "1".to_string()];
-            st.midi_devices = vec![MidiDevice {
-                id: "a".to_string(),
-                name: "Keys".to_string(),
-                enabled: true,
-                connected: false,
-                status: "Disconnected".to_string(),
-            }];
-            st.midi_error = "boom".to_string();
-        },
-        legacy::mirror_settings,
-    );
-    assert_eq!(writes.get("AUDIO", "workers-choice"), s("Auto (6)"));
-    assert_eq!(
-        rows(writes.get("AUDIO", "workers-options")),
-        vec![s("Auto (6)"), s("1")]
-    );
-    let devices = rows(writes.get("MIDI", "devices"));
-    for (key, value) in [
-        ("id", s("a")),
-        ("name", s("Keys")),
-        ("enabled", Value::Bool(true)),
-        ("connected", Value::Bool(false)),
-        ("status", s("Disconnected")),
-    ] {
-        assert_eq!(get(&devices[0], key), value, "{key}");
-    }
-    assert_eq!(writes.get("MIDI", "error"), s("boom"));
-    let mut writes = Writes::default();
-    present(
-        &mut writes,
         |p| &mut p.agent,
         |a| *a = 9,
         legacy::mirror_agent,
@@ -334,22 +232,15 @@ fn registrations_derive_from_the_record() {
     for (field, value) in [
         ("editor-active", Value::Bool(false)),
         ("editor-mode", s("")),
-        ("editor-selected-asset", Value::Nil),
-        ("learn-phase", s("pick")),
-        ("learn-method", s(LEARN_METHODS[0])),
-        ("learn-epochs", Value::Number(300.0)),
-        ("learn-cma-sigma", Value::Number(0.2)),
-        ("learn-cma-refine-mode", s("Batched")),
-        ("learn-checkpoint-wav", s("")),
     ] {
         assert_eq!(seq.get(field), Some(&value), "{field}");
     }
+    assert_eq!(seq.len(), 2, "the editor's mode and session flag alone");
     let export: HashMap<&str, Value> = export_registration().into_iter().collect();
     assert_eq!(export.get("export-percent"), Some(&Value::Number(-1.0)));
-    // A seeded value registers as seeded.
+    // A seeded value is the record's.
     seed_midi_persistent(true);
-    let (_, midi) = settings_registration();
-    assert!(midi.contains(&("persistent", Value::Bool(true))));
+    assert!(presented(|p| p.settings.get().midi_persistent));
 }
 
 #[test]
@@ -377,6 +268,47 @@ fn a_fixture_seeds_the_record_and_its_mirror() {
     assert_eq!(
         presented(|p| p.settings.get().midi_devices[0].id.clone()),
         "keys"
+    );
+    let plan = list_value([map_value([
+        ("name", s("cutoff")),
+        ("status", s("learnable")),
+        ("reason", s("")),
+    ])]);
+    let fields = map_value([("phase", s("configure")), ("plan-params", plan)]);
+    fixture::present_fixture(&mut writes, "learn", &fields).unwrap();
+    let learn = presented(|p| p.learn.get().clone());
+    assert_eq!(learn.phase, "configure");
+    assert_eq!(learn.plan_params[0].status, "learnable");
+    let macros = list_value([map_value([("name", s("osc")), ("calls", list_value([]))])]);
+    let asset = map_value([
+        ("reference", s("waves/basic")),
+        (
+            "shape",
+            list_value([Value::Number(4.0), Value::Number(2048.0)]),
+        ),
+        ("waves-per-set", Value::Number(2.0)),
+    ]);
+    let fields = map_value([
+        ("open-macro", s("osc")),
+        ("patch-macros", macros),
+        ("selected-asset", asset),
+    ]);
+    fixture::present_fixture(&mut writes, "editor", &fields).unwrap();
+    assert_eq!(presented(|p| p.editor.get().open_macro.clone()), "osc");
+    let sidebar = presented(|p| p.editor_sidebar.get().clone());
+    assert_eq!(sidebar.patch_macros[0].name, "osc");
+    let metadata = sidebar
+        .selected_asset
+        .and_then(|asset| asset.metadata)
+        .unwrap();
+    assert_eq!(
+        (metadata.shape, metadata.waves_per_set),
+        (vec![4, 2048], Some(2))
+    );
+    assert!(
+        writes.0.iter().all(|(ns, ..)| *ns == "EXPORT"),
+        "{:?}",
+        writes.names()
     );
     let error = fixture::present_fixture(&mut writes, "song-export", &map_value([("nope", s(""))]));
     assert!(error.unwrap_err().contains("no field nope"));

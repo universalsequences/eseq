@@ -11,7 +11,6 @@ pub(crate) fn sync_track_topology_state(
     record_armed: &Arc<Mutex<Vec<bool>>>,
     track_peak_levels: &[f64],
 ) {
-    sync_macro_state(rt, app);
     sync_track_name_state(rt, track_names, app);
     sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
@@ -189,11 +188,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "SEQ",
         "current-pattern",
         Value::Number(state.current_scene_index() as f64),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "num-patterns",
-        Value::Number(state.scene_count() as f64),
     );
     sync_rack_clip_state(rt, state);
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));

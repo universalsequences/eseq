@@ -487,7 +487,7 @@ fn mini_daw_example_renders_through_kinds_and_only_repaints_on_playback() {
 }
 
 /// Whether any map in `tree` has a string `prop` containing `needle`.
-fn tree_has_string_prop(tree: &Value, prop: &str, needle: &str) -> bool {
+pub(super) fn tree_has_string_prop(tree: &Value, prop: &str, needle: &str) -> bool {
     let mut found = Vec::new();
     widgets_with_prop(tree, prop, &mut found);
     found

@@ -770,9 +770,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 })?;
         }
         for effect in &spec.audio_fx {
-            let result = if sequencer::effects::EffectDescriptor::builtin_insert(effect).is_some()
-                || sequencer::effects::dgen_builtin::contains(effect)
-            {
+            let result = if sequencer::effects::is_builtin_effect(effect) {
                 app.add_builtin_effect_sync(track, effect)
             } else {
                 app.add_saved_effect_sync(track, effect)
@@ -1390,11 +1388,10 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     {
         let runtime = editor.runtime_mut();
-        sync_project_state(runtime, &app);
+        record_preset_listings();
         // This also publishes group topology, which hook gestures need to
         // calculate the same visible track order as the rendered UI.
         sync_track_color_state(runtime, &app, &state);
-        sync_macro_state(runtime, &app);
         sync_track_topology_state(
             runtime,
             &app,
@@ -1436,7 +1433,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     // rows carry the theme's variant tint baked into their RGB.
     editor.refresh_runtime_side_effects();
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
-        sync_macro_state(editor.runtime_mut(), &app);
         sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
         sync_song_state(editor.runtime_mut(), &app, &mut SongFrameState::default());
     }

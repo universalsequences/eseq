@@ -11019,99 +11019,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn macro_readback_exposes_definition_mapping_range_curve_and_current_value() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        let mut app = test_app_with_instrument_descriptor(desc.clone());
-        app.state.pattern.instrument_slots[0].defaults.set(0, 17.5);
-        let id = app
-            .macro_engine
-            .ensure_macro("player/push", "Push")
-            .expect("macro id");
-        app.macro_engine
-            .add_mapping(
-                id,
-                sequencer::macro_engine::MacroMapping::new_resolved(
-                    0,
-                    sequencer::process::ParamTarget::InstrumentParam {
-                        param: desc.params[0].name.clone(),
-                        param_id: None,
-                    },
-                    Some(0),
-                    desc.params[0].min,
-                    desc.params[0].max,
-                    sequencer::macro_engine::MacroCurve::Log,
-                )
-                .expect("mapping"),
-            )
-            .expect("known macro");
-
-        let macros = value_list_maps(&build_macros_value(&app));
-        assert_eq!(macros.len(), 1);
-        assert!(matches!(
-            &*macros[0]["id"].borrow(),
-            Value::Number(value) if *value == id as f64
-        ));
-        assert!(matches!(
-            &*macros[0]["name"].borrow(),
-            Value::String(value) if value == "Push"
-        ));
-        assert!(matches!(
-            &*macros[0]["key"].borrow(),
-            Value::String(value) if value == "player/push"
-        ));
-        let mappings = value_list_maps(&macros[0]["mappings"].borrow());
-        assert_eq!(mappings.len(), 1);
-        assert!(matches!(
-            &*mappings[0]["curve"].borrow(),
-            Value::String(value) if value == "log"
-        ));
-        assert!(matches!(
-            &*mappings[0]["current"].borrow(),
-            Value::Number(value) if (*value - desc.params[0].min as f64).abs() < 1.0e-6
-        ));
-        assert!(matches!(
-            &*mappings[0]["min"].borrow(),
-            Value::Number(value) if *value == desc.params[0].min as f64
-        ));
-        assert!(matches!(
-            &*mappings[0]["max"].borrow(),
-            Value::Number(value) if *value == desc.params[0].max as f64
-        ));
-        assert!(matches!(
-            &*mappings[0]["mapping-idx"].borrow(),
-            Value::Number(value) if *value == 0.0
-        ));
-        assert!(matches!(
-            &*mappings[0]["track"].borrow(),
-            Value::Number(value) if *value == 0.0
-        ));
-        let target_cell = mappings[0]["target"].borrow();
-        let Value::Map(target) = &*target_cell else {
-            panic!("macro mapping target should be a map");
-        };
-        assert!(matches!(
-            &*target["kind"].borrow(),
-            Value::String(value) if value == "instrument"
-        ));
-        assert!(matches!(
-            &*target["param"].borrow(),
-            Value::String(value) if value == &desc.params[0].name
-        ));
-        assert!(matches!(
-            &*mappings[0]["path-label"].borrow(),
-            Value::String(value) if value.contains("Sampler")
-        ));
-        assert!(matches!(
-            &*mappings[0]["param-label"].borrow(),
-            Value::String(value) if value == &desc.params[0].name
-        ));
-        assert!(matches!(
-            &*mappings[0]["domain-min"].borrow(),
-            Value::Number(value) if *value == desc.params[0].stored_to_user(desc.params[0].min) as f64
-        ));
-    }
-
-    #[test]
     fn macro_effective_values_are_published_to_instrument_and_effect_controls() {
         let instrument_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
         let mut instrument_app = test_app_with_instrument_descriptor(instrument_desc.clone());
@@ -11220,362 +11127,27 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn macro_mapping_sidebar_renders_editable_range_curve_and_state_rows() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        let mut app = test_app_with_instrument_descriptor(desc.clone());
-        let id = app
-            .macro_engine
-            .ensure_macro("delay-push", "Delay Push")
-            .expect("macro");
-        app.macro_engine
-            .add_mapping(
-                id,
-                sequencer::macro_engine::MacroMapping::new_resolved(
-                    0,
-                    sequencer::process::ParamTarget::InstrumentParam {
-                        param: desc.params[0].name.clone(),
-                        param_id: None,
-                    },
-                    Some(0),
-                    10.0,
-                    30.0,
-                    sequencer::macro_engine::MacroCurve::Linear,
-                )
-                .expect("mapping"),
-            )
-            .expect("unique owner");
-
-        let mut editor = full_grid_editor_for_scroll_tests();
-        sync_macro_state(editor.runtime_mut(), &app);
-        editor
-            .runtime_mut()
-            .eval_str(&format!(
-                "(do (set! eseq.macro-state/mapping-open true) (set! eseq.macro-state/mapping-selected {id}))"
-            ))
-            .expect("arm mapping");
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(set-layout (list :buf "*macro-mappings*" :hide-status true :min-width 46))"#,
-            )
-            .expect("isolate mapping sidebar");
-        editor.refresh_runtime_side_effects();
-        let buffer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*macro-mappings*")
-            .expect("mapping sidebar buffer")
-            .id;
-        editor.set_active_buffer(buffer_id);
-        editor.set_layout_viewport(64, 24);
-        let layout = editor.widget_layout().expect("mapping sidebar layout");
-        assert_finite_layout_tree(&layout);
-        let row = find_layout_node_by_debug_name(&layout, "macro-mapping-table-row")
-            .unwrap_or_else(|| panic!("mapping table row; layout={layout:#?}"));
-        let min = find_layout_node_by_debug_name(&layout, "macro-mapping-min")
-            .expect("mapping min picker");
-        let max = find_layout_node_by_debug_name(&layout, "macro-mapping-max")
-            .expect("mapping max picker");
-        let curve = find_layout_node_by_debug_name(&layout, "macro-mapping-curve")
-            .expect("mapping curve dropdown");
-        let state = find_layout_node_by_debug_name(&layout, "macro-mapping-state")
-            .expect("mapping state label");
-        let unmap = find_layout_node_by_debug_name(&layout, "macro-mapping-unmap")
-            .expect("mapping unmap button");
-        for (node, label) in [
-            (row, "row"),
-            (min, "min"),
-            (max, "max"),
-            (curve, "curve"),
-            (state, "state"),
-            (unmap, "unmap"),
-        ] {
-            assert_finite_nonzero_rect(node, label);
-        }
-        assert_eq!(layout_prop_number(min, "value"), Some(10.0));
-        assert_eq!(layout_prop_number(max, "value"), Some(30.0));
-        assert!(matches!(
-            curve.props.get("value"),
-            Some(Value::String(value)) if value == "linear"
-        ));
-        assert!(matches!(
-            state.props.get("text"),
-            Some(Value::String(value)) if value == "live"
-        ));
-        editor.drain_host_commands();
-        editor
-            .runtime_mut()
-            .invoke(
-                min.props.get("on-change").cloned().expect("min callback"),
-                vec![Value::Number(12.5)],
-            )
-            .expect("edit mapping min");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
-                if name == "macro-set-range"
-                    && matches!(payload.get("min").map(|value| value.borrow().clone()), Some(Value::Number(value)) if (value - 12.5).abs() < 1.0e-6)
-        ));
-        editor
-            .runtime_mut()
-            .invoke(
-                curve
-                    .props
-                    .get("on-change")
-                    .cloned()
-                    .expect("curve callback"),
-                vec![Value::String("log".to_string())],
-            )
-            .expect("edit mapping curve");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
-                if name == "macro-set-curve"
-                    && matches!(payload.get("curve").map(|value| value.borrow().clone()), Some(Value::String(value)) if value == "log")
-        ));
-    }
-
-    #[test]
-    fn rack_macro_mapping_sidebar_shows_selected_rack_mapping_and_routes_edits() {
-        let mut app = test_app_with_rack_panel_and_slot_fx();
-        app.map_rack_macro(
-            0,
-            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
-            sequencer::sequencer::RackMacroMapping {
-                target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
-                    slot: 0,
-                    param: "attack".to_string(),
-                    param_index: 0,
-                },
-                range_min: 10.0,
-                range_max: 30.0,
-                curve: sequencer::sequencer::RackMacroCurve::Linear,
-            },
-        )
-        .expect("rack macro mapping");
-        {
-            use sequencer::sequencer::{RackMacroCurve, RackMacroField, RackMacroTarget};
-            let target = RackMacroTarget::SlotInstrumentParam {
-                slot: 0,
-                param: "attack".to_string(),
-                param_index: 0,
-            };
-            let id = sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1");
-            for field in [
-                RackMacroField::Range {
-                    target: target.clone(),
-                    min: 12.0,
-                    max: 30.0,
-                },
-                RackMacroField::Curve {
-                    target: target.clone(),
-                    curve: RackMacroCurve::Log,
-                },
-                RackMacroField::Range {
-                    target: target.clone(),
-                    min: 10.0,
-                    max: 30.0,
-                },
-                RackMacroField::Curve {
-                    target,
-                    curve: RackMacroCurve::Linear,
-                },
-            ] {
-                let outcome = app.apply_rack_macro_edit(0, id, field).expect("edit the mapping");
-                assert!(outcome.changed());
-            }
-        }
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(&app, 0, &selected),
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(do (set! eseq.macro-state/mapping-open false) (set! eseq.macro-state/rack-mapping-selected 0))")
-            .expect("arm rack macro mapping");
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(set-layout (list :buf "*macro-mappings*" :hide-status true :min-width 46))"#,
-            )
-            .expect("isolate rack mapping sidebar");
-        editor.refresh_runtime_side_effects();
-        let buffer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*macro-mappings*")
-            .expect("rack mapping sidebar buffer")
-            .id;
-        editor.set_active_buffer(buffer_id);
-        editor.set_layout_viewport(64, 24);
-        let layout = editor.widget_layout().expect("rack mapping sidebar layout");
-        assert_finite_layout_tree(&layout);
-        assert!(layout_node_contains_text_fragment(
-            &layout,
-            "RACK MACRO MAPPINGS"
-        ));
-        assert!(layout_node_contains_text_fragment(&layout, "Layer 1"));
-        assert!(layout_node_contains_text_fragment(&layout, "attack"));
-        let min = find_layout_node_by_debug_name(&layout, "macro-mapping-min")
-            .expect("rack mapping min picker");
-        let curve = find_layout_node_by_debug_name(&layout, "macro-mapping-curve")
-            .expect("rack mapping curve dropdown");
-        let unmap = find_layout_node_by_debug_name(&layout, "macro-mapping-unmap")
-            .expect("rack mapping unmap button");
-        for (node, label) in [
-            (min, "rack mapping min"),
-            (curve, "rack mapping curve"),
-            (unmap, "rack mapping unmap"),
-        ] {
-            assert_finite_nonzero_rect(node, label);
-        }
-        editor.drain_host_commands();
-        editor
-            .runtime_mut()
-            .invoke(
-                min.props
-                    .get("on-change")
-                    .cloned()
-                    .expect("rack min callback"),
-                vec![Value::Number(12.5)],
-            )
-            .expect("edit rack mapping min");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, .. }]
-                if name == "set-rack-macro-range"
-        ));
-        editor
-            .runtime_mut()
-            .invoke(
-                curve
-                    .props
-                    .get("on-change")
-                    .cloned()
-                    .expect("rack curve callback"),
-                vec![Value::String("log".to_string())],
-            )
-            .expect("edit rack mapping curve");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, .. }]
-                if name == "set-rack-macro-curve"
-        ));
-    }
-
-    #[test]
-    fn scene_macro_controls_have_visible_nonzero_layout() {
-        let mut app = test_app_with_instrument_descriptor(
-            sequencer::effects::EffectDescriptor::builtin_sampler(),
-        );
-        let id = app
-            .macro_engine
-            .create_macro(
-                "Scene Push",
-                sequencer::macro_engine::MacroKind::Scene(
-                    sequencer::macro_engine::SceneMacroConfig {
-                        target_scene: 0,
-                        morph_params: true,
-                        steal_patterns: false,
-                        quantize: sequencer::macro_engine::StealQuantize::Bar,
-                        track_mask: None,
-                    },
-                ),
-            )
-            .expect("scene macro");
-        let mut editor = full_grid_editor_for_scroll_tests();
-        sync_macro_state(editor.runtime_mut(), &app);
-        editor
-            .runtime_mut()
-            .eval_str(&format!(
-                "(effect-buffer \"*scene-macro-test*\" (eseq.macros/scene-macro-controls :macro {id}))"
-            ))
-            .expect("create scene macro controls");
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(set-layout (list :buf "*scene-macro-test*" :hide-status true :min-width 32))"#,
-            )
-            .expect("isolate scene macro controls");
-        editor.refresh_runtime_side_effects();
-        let buffer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*scene-macro-test*")
-            .expect("scene macro buffer")
-            .id;
-        editor.set_active_buffer(buffer_id);
-        editor.set_layout_viewport(80, 24);
-        let layout = editor.widget_layout().expect("scene macro layout");
-        assert_finite_layout_tree(&layout);
-        for (name, label) in [
-            ("scene-macro-controls", "controls"),
-            ("scene-macro-title", "title"),
-            ("scene-macro-target", "target"),
-            ("scene-macro-knob", "knob"),
-            ("scene-macro-momentary", "momentary"),
-            ("scene-macro-morph-params", "params toggle"),
-            ("scene-macro-steal-patterns", "patterns toggle"),
-            ("scene-macro-quantize", "quantize"),
-            ("scene-macro-track-mask", "track mask"),
-            ("scene-macro-diff", "diff readout"),
-        ] {
-            let node = find_layout_node_by_debug_name(&layout, name)
-                .unwrap_or_else(|| panic!("missing scene macro {label}"));
-            assert_finite_nonzero_rect(node, label);
-        }
-    }
-
-    #[test]
     fn reusable_macro_mapping_editor_scopes_rows_and_marks_suspended_targets() {
         let mut editor = macro_controls_editor(0.25);
         editor.set_layout_viewport(64, 20);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![
-                test_named_macro_value_with_mappings(
-                    7,
+        seed_project_macros(
+            &mut editor,
+            vec![
+                (
+                    7.0,
                     "player/delay-push",
                     "Delay Push",
-                    vec![test_macro_mapping_value(
-                        0,
-                        0,
-                        "instrument",
-                        None,
-                        None,
-                        "cutoff",
-                        0.2,
-                        0.8,
-                        true,
-                    )],
+                    0.25,
+                    vec![("T1 · Test", "cutoff", 0.2, 0.8, true)],
                 ),
-                test_named_macro_value_with_mappings(
-                    8,
+                (
+                    8.0,
                     "player/other",
                     "Other",
-                    vec![test_macro_mapping_value(
-                        0,
-                        0,
-                        "instrument",
-                        None,
-                        None,
-                        "resonance",
-                        0.0,
-                        1.0,
-                        false,
-                    )],
+                    0.25,
+                    vec![("T1 · Test", "resonance", 0.0, 1.0, false)],
                 ),
-            ]),
+            ],
         );
         editor
             .runtime_mut()
@@ -11625,147 +11197,80 @@ use panel_kinds_seed::*;
         );
     }
 
-    #[test]
-    fn macro_epoch_sync_makes_newly_ensured_macro_resolvable_by_player_key() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        let mut app = test_app_with_instrument_descriptor(desc);
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        let runtime = editor.runtime_mut();
-        runtime.register_reactive("SEQ", vec![("macros", Value::List(Vec::new()))], false);
-        let macro_state = read_ui_source("macro-state.lisp").expect("read macro state");
-        runtime
-            .eval_str(&macro_state)
-            .expect("load shared macro state");
-        let macro_controls =
-            read_ui_source("macros.lisp").expect("read macro controls");
-        runtime
-            .eval_str(&macro_controls)
-            .expect("load macro controls");
+    /// A project macro as the host kinds publish it: (mid, script key,
+    /// name, value) and its mappings, each (path, param label, min, max,
+    /// suspended), driving no device param.
+    type SeedMacro<'a> = (f64, &'a str, &'a str, f64, Vec<(&'a str, &'a str, f64, f64, bool)>);
 
-        assert_eq!(
-            runtime.eval_str("(eseq.macros/macro-id-for-key :delay-push)"),
-            Ok(Some(Value::Number(-1.0)))
-        );
-
-        app::apply_command(
-            &mut app,
-            app::AppCommand::MacroEnsure {
-                key: "delay-push".to_string(),
-                name: "Delay Push".to_string(),
-            },
-        );
-        let id = app.macro_engine.macros()[0].id;
-        sync_macro_state(runtime, &app);
-        runtime.run_reactive_cycle();
-
-        assert_eq!(
-            runtime.eval_str("(eseq.macros/macro-id-for-key :delay-push)"),
-            Ok(Some(Value::Number(id as f64))),
-            "the UI epoch refresh must publish engine macros before map controls can arm"
-        );
-    }
-
-    fn test_macro_value(id: u32, key: &str, name: &str, value: f64) -> Value {
-        map_value([
-            ("id", Value::Number(id as f64)),
-            ("key", Value::String(key.to_string())),
-            ("name", Value::String(name.to_string())),
-            ("kind", Value::String("mapped".to_string())),
-            ("value", Value::Number(value)),
-            ("mappings", test_list(vec![])),
-        ])
-    }
-
-    fn test_macro_mapping_value(
-        mapping_idx: usize,
-        track: usize,
-        kind: &str,
-        slot_idx: Option<usize>,
-        device: Option<(&'static str, &str)>,
-        param: &str,
-        min: f64,
-        max: f64,
-        suspended: bool,
-    ) -> Value {
-        let mut target = vec![
-            ("kind", Value::String(kind.to_string())),
-            ("param", Value::String(param.to_string())),
-        ];
-        if let Some(slot_idx) = slot_idx {
-            target.push(("slot-idx", Value::Number(slot_idx as f64)));
+    /// Publish `macros` as `project.macros` (registered by position), with
+    /// their mappings, as the host-kinds tick does.
+    fn seed_project_macros(
+        editor: &mut Editor,
+        macros: Vec<SeedMacro<'_>>,
+    ) -> Vec<eseqlisp::vm::InstanceId> {
+        let rt = editor.runtime_mut();
+        let ids = register_kind_range(rt, "eseq.kinds:macro", macros.len());
+        for (index, ((mid, key, name, value, mappings), &id)) in
+            macros.into_iter().zip(&ids).enumerate()
+        {
+            for (field, value) in [
+                ("index", Value::Number(index as f64)),
+                ("mid", Value::Number(mid)),
+                ("script-key", Value::String(key.to_string())),
+                ("name", Value::String(name.to_string())),
+                ("type", Value::String("mapped".to_string())),
+                ("value", Value::Number(value)),
+            ] {
+                set_field(rt, id, field, value);
+            }
+            let rows: Vec<_> = (mappings.into_iter().enumerate())
+                .map(|(at, (path, param, min, max, suspended))| {
+                    let row = seed_mapping_row(rt, id, false, at);
+                    for (field, value) in [
+                        ("label", Value::String(format!("{path} · {param}"))),
+                        ("path", Value::String(path.to_string())),
+                        ("param-label", Value::String(param.to_string())),
+                        ("min", Value::Number(min)),
+                        ("max", Value::Number(max)),
+                        ("curve", Value::String("linear".to_string())),
+                        ("suspended", Value::Bool(suspended)),
+                    ] {
+                        set_field(rt, row, field, value);
+                    }
+                    row
+                })
+                .collect();
+            set_field(rt, id, "mappings", instance_list(rows));
         }
-        if let Some((field, value)) = device {
-            target.push((field, Value::String(value.to_string())));
-        }
-        map_value([
-            ("mapping-idx", Value::Number(mapping_idx as f64)),
-            ("track", Value::Number(track as f64)),
-            ("target", map_value(target)),
-            ("target-label", Value::String(param.to_string())),
-            ("min", Value::Number(min)),
-            ("max", Value::Number(max)),
-            ("path-label", Value::String("T1 · Test".to_string())),
-            ("param-label", Value::String(param.to_string())),
-            ("display-min", Value::Number(min)),
-            ("display-max", Value::Number(max)),
-            ("domain-min", Value::Number(min.min(0.0))),
-            ("domain-max", Value::Number(max.max(1.0))),
-            ("display-scale", Value::Number(1.0)),
-            ("display-decimals", Value::Number(2.0)),
-            ("display-unit", Value::String(String::new())),
-            ("curve", Value::String("linear".to_string())),
-            ("current", Value::Number(min)),
-            ("suspended", Value::Bool(suspended)),
-        ])
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "macros", instance_list(ids.iter().copied()));
+        rt.run_reactive_cycle();
+        ids
     }
 
-    fn test_named_macro_value_with_mappings(
-        id: u32,
-        key: &str,
-        name: &str,
-        mappings: Vec<Value>,
-    ) -> Value {
-        map_value([
-            ("id", Value::Number(id as f64)),
-            ("key", Value::String(key.to_string())),
-            ("name", Value::String(name.to_string())),
-            ("kind", Value::String("mapped".to_string())),
-            ("value", Value::Number(0.25)),
-            ("mappings", test_list(mappings)),
-        ])
-    }
-
-    fn test_macro_value_with_mappings(mappings: Vec<Value>) -> Value {
-        test_named_macro_value_with_mappings(7, "player/delay-push", "Delay Push", mappings)
-    }
-
+    /// A bare editor with the shared macro state and the reusable macro
+    /// controls loaded (eseq.kinds with them) and project macro 7
+    /// (`player/delay-push`, "Delay Push", at `value`) published.
     fn macro_controls_editor(value: f64) -> eseqlisp::Editor {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(40, 16);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![(
-                "macros",
-                test_list(vec![test_macro_value(
-                    7,
-                    "player/delay-push",
-                    "Delay Push",
-                    value,
-                )]),
-            )],
-            false,
+        // The panel tests built on this editor publish their dicts here.
+        editor.runtime_mut().register_reactive("SEQ", vec![], false);
+        for path in ["ui/macro-state.lisp", "ui/macros.lisp"] {
+            let source = read_factory_source(path).expect("read macro UI source");
+            let overlays = editor.snapshot_file_backed_sources();
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(std::path::PathBuf::from(path)),
+                &source,
+                overlays,
+            );
+            assert!(report.success, "load {path}: {}", report.failure_message());
+            editor.process_lisp_reload_report(report);
+        }
+        seed_project_macros(
+            &mut editor,
+            vec![(7.0, "player/delay-push", "Delay Push", value, vec![])],
         );
-        let macro_state =
-            read_ui_source("macro-state.lisp").expect("read shared macro state");
-        editor
-            .runtime_mut()
-            .eval_str(&macro_state)
-            .expect("load shared macro state");
-        let src = read_ui_source("macros.lisp").expect("read reusable macro controls");
-        editor
-            .runtime_mut()
-            .eval_str(&src)
-            .expect("load reusable macro controls");
         editor
     }
 
@@ -11801,155 +11306,6 @@ use panel_kinds_seed::*;
             payload.get("name").map(|value| value.borrow().clone()),
             Some(Value::String(name)) if name == "Ignored Rename"
         ));
-    }
-
-    #[test]
-    fn macro_knob_momentary_and_map_button_render_and_emit_by_resolved_id() {
-        let mut editor = macro_controls_editor(0.25);
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (effect-buffer "*macro-controls-test*"
-                  (h-stack :gap 1
-                    (eseq.macros/macro-knob :macro :player/delay-push)
-                    (eseq.macros/macro-momentary :macro :player/delay-push)
-                    (eseq.macros/macro-map-button :macro :player/delay-push)))
-                "#,
-            )
-            .expect("create macro controls test buffer");
-        editor.refresh_runtime_side_effects();
-        let buffer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*macro-controls-test*")
-            .expect("macro controls buffer")
-            .id;
-        editor.set_active_buffer(buffer_id);
-
-        let layout = editor.widget_layout().expect("macro controls layout");
-        assert_finite_layout_tree(&layout);
-        let knob = find_layout_node_by_widget_type(&layout, "knob-number")
-            .expect("macro knob layout node");
-        let momentary = find_layout_node_by_debug_name(&layout, "macro-momentary")
-            .expect("macro momentary layout node");
-        let map_button = find_layout_node_by_debug_name(&layout, "macro-map-button")
-            .expect("macro map button layout node");
-        assert_finite_nonzero_rect(knob, "macro knob");
-        assert_finite_nonzero_rect(momentary, "macro momentary");
-        assert_finite_nonzero_rect(map_button, "macro map button");
-        assert_eq!(layout_prop_number(knob, "value"), Some(0.25));
-
-        editor
-            .runtime_mut()
-            .invoke(
-                knob.props
-                    .get("on-change")
-                    .cloned()
-                    .expect("macro knob on-change"),
-                vec![Value::Number(0.75)],
-            )
-            .expect("change macro knob");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1, "commands={commands:?}");
-        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
-            panic!("expected macro-set-value host command: {:?}", commands[0]);
-        };
-        assert_eq!(name, "macro-set-value");
-        let Value::Map(payload) = payload else {
-            panic!("macro-set-value payload should be a dict: {payload:?}");
-        };
-        assert!(matches!(
-            payload.get("id").map(|value| value.borrow().clone()),
-            Some(Value::Number(id)) if id == 7.0
-        ));
-        assert!(matches!(
-            payload.get("value").map(|value| value.borrow().clone()),
-            Some(Value::Number(value)) if value == 0.75
-        ));
-
-        editor
-            .runtime_mut()
-            .invoke(
-                momentary
-                    .props
-                    .get("on-press")
-                    .cloned()
-                    .expect("macro momentary on-press"),
-                vec![Value::Nil],
-            )
-            .expect("press momentary macro");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
-                if name == "macro-set-value"
-                    && matches!(payload.get("id").map(|value| value.borrow().clone()), Some(Value::Number(id)) if id == 7.0)
-                    && matches!(payload.get("value").map(|value| value.borrow().clone()), Some(Value::Number(value)) if value == 1.0)
-        ));
-        editor
-            .runtime_mut()
-            .invoke(
-                momentary
-                    .props
-                    .get("on-release")
-                    .cloned()
-                    .expect("macro momentary on-release"),
-                vec![Value::Nil],
-            )
-            .expect("release momentary macro");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
-                if name == "macro-release"
-                    && matches!(payload.get("id").map(|value| value.borrow().clone()), Some(Value::Number(id)) if id == 7.0)
-        ));
-
-        editor
-            .runtime_mut()
-            .invoke(
-                map_button
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("macro map button on-click"),
-                vec![Value::Nil],
-            )
-            .expect("arm macro mapping");
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.macro-state/mapping-open"),
-            Ok(Some(Value::Bool(true)))
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.macro-state/mapping-selected"),
-            Ok(Some(Value::Number(7.0)))
-        );
-
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![test_macro_value(
-                7,
-                "player/delay-push",
-                "Delay Push",
-                0.6,
-            )]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let updated_layout = editor
-            .widget_layout()
-            .expect("updated macro controls layout");
-        let updated_knob = find_layout_node_by_widget_type(&updated_layout, "knob-number")
-            .expect("updated macro knob layout node");
-        assert_eq!(layout_prop_number(updated_knob, "value"), Some(0.6));
-        let updated_map_button =
-            find_layout_node_by_debug_name(&updated_layout, "macro-map-button")
-                .expect("updated macro map button layout node");
-        assert_layout_rgba_prop(
-            updated_map_button,
-            "background-color",
-            [0.27, 0.78, 0.43, 1.0],
-        );
     }
 
     // Beads eseq-4seq / eseq-yr6w. Deliberately asserts structure only —
@@ -12330,11 +11686,6 @@ use panel_kinds_seed::*;
             "instrument-panel",
             test_list(vec![Value::Map(instrument)]),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![test_macro_value_with_mappings(vec![])]),
-        );
         for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
             let source = read_factory_source(path).expect("read macro mapping UI source");
             let overlays = editor.snapshot_file_backed_sources();
@@ -12357,7 +11708,7 @@ use panel_kinds_seed::*;
         rt.run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.macro-state/mapping-open true) (set! eseq.macro-state/mapping-selected 7))")
+            .eval_str("(eseq.macro-state/arm-macro! 7)")
             .expect("arm macro mapping");
         editor
             .runtime_mut()
@@ -12447,10 +11798,7 @@ use panel_kinds_seed::*;
 
         // Macro 7 now drives the instrument's cutoff.
         let rt = editor.runtime_mut();
-        let mapping = rt
-            .register_keyed_instance("eseq.kinds:macro-mapping", &[project_macro, 0])
-            .unwrap();
-        set_field(rt, mapping, "macro", Value::Instance(project_macro));
+        let mapping = seed_mapping_row(rt, project_macro, false, 0);
         set_field(rt, mapping, "target", Value::Instance(cutoff));
         set_field(rt, project_macro, "mappings", instance_list([mapping]));
         rt.run_reactive_cycle();
@@ -12497,10 +11845,9 @@ use panel_kinds_seed::*;
     #[test]
     fn macro_modulation_and_process_mapping_arm_modes_are_mutually_exclusive() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "macros",
-            test_list(vec![test_macro_value_with_mappings(vec![])]),
+        seed_project_macros(
+            &mut editor,
+            vec![(7.0, "player/delay-push", "Delay Push", 0.25, vec![])],
         );
         editor
             .runtime_mut()
@@ -12518,7 +11865,7 @@ use panel_kinds_seed::*;
             .expect("enter macro mapping mode");
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(list eseq.macro-state/mapping-open (let ((v eseq.effects.state/instrument-view)) v.mods-open) (let ((v eseq.effects.state/effect-mods)) v.open) (eseq.effects.param-controls/process-map-active?))"
+                "(list (let ((a eseq.macro-state/macro-arm)) a.open) (let ((v eseq.effects.state/instrument-view)) v.mods-open) (let ((v eseq.effects.state/effect-mods)) v.open) (eseq.effects.param-controls/process-map-active?))"
             ),
             Ok(Some(test_list(vec![
                 Value::Bool(true),
@@ -12541,7 +11888,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list eseq.macro-state/mapping-open (eseq.effects.param-controls/process-map-active?))"),
+                .eval_str("(list (let ((a eseq.macro-state/macro-arm)) a.open) (eseq.effects.param-controls/process-map-active?))"),
             Ok(Some(test_list(vec![Value::Bool(false), Value::Bool(true)])))
         );
 
@@ -12552,7 +11899,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list eseq.macro-state/mapping-open (let ((v eseq.effects.state/instrument-view)) v.mods-open) (eseq.effects.param-controls/process-map-active?))"),
+                .eval_str("(list (let ((a eseq.macro-state/macro-arm)) a.open) (let ((v eseq.effects.state/instrument-view)) v.mods-open) (eseq.effects.param-controls/process-map-active?))"),
             Ok(Some(test_list(vec![
                 Value::Bool(false),
                 Value::Bool(true),
@@ -13200,7 +12547,6 @@ use panel_kinds_seed::*;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", rack_panel),
                 ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -13318,7 +12664,6 @@ use panel_kinds_seed::*;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", rack_panel),
                 ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -13466,7 +12811,6 @@ use panel_kinds_seed::*;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", rack_panel),
                 ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -13842,7 +13186,6 @@ use panel_kinds_seed::*;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", rack_panel),
                 ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -14641,9 +13984,6 @@ use panel_kinds_seed::*;
                 .expect("active delete target kind"),
             Some(Value::String("rack-slot".to_string()))
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
         editor.runtime_mut().set_reactive(
             "SEQ",
             &rack_slot_delete_target_field(0, 0),
@@ -16336,6 +15676,35 @@ use panel_kinds_seed::*;
         devices
     }
 
+    /// The settings the MIDI service and the audio worker prefs recorded
+    /// (`presented`), pushed into the `settings` kind and its `midi-device`
+    /// rows by the host kinds' own sync.
+    fn push_presented_settings(editor: &mut Editor) {
+        crate::host_kinds::push_presented_views(editor.runtime_mut());
+    }
+
+    /// Edit Patch Learn's record as a learn job's events do, then push it into
+    /// the `learn` kind and its rows by the host kinds' own sync.
+    fn present_learn_kinds(
+        editor: &mut Editor,
+        edit: impl FnOnce(&mut crate::presented::LearnView),
+    ) {
+        crate::present_learn(editor.runtime_mut(), edit);
+        crate::host_kinds::push_presented_views(editor.runtime_mut());
+    }
+
+    /// Edit the patch editor's macro sidebar record as the edit session does,
+    /// then push it into the `editor` kind (its `editor-macro` and
+    /// `editor-asset` rows and the selected asset) by the host kinds' own
+    /// sync.
+    fn present_editor_sidebar_kinds(
+        editor: &mut Editor,
+        edit: impl FnOnce(&mut crate::presented::EditorSidebar),
+    ) {
+        crate::presented::present_editor_sidebar(editor.runtime_mut(), edit);
+        crate::host_kinds::push_presented_views(editor.runtime_mut());
+    }
+
     /// The instrument types of the kind tracks registered so far
     /// (`track.instrument-type`), mirroring a test's
     /// `SEQ.track-instrument-types` for the views that read the kinds.
@@ -17043,7 +16412,6 @@ use panel_kinds_seed::*;
                 ("track-colors", test_track_colors()),
                 ("track-collapsed", test_bool_list(&[false])),
                 ("current-track", Value::Number(0.0)),
-                ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
                 ("track-solos", test_bool_list(&[false])),
@@ -17166,43 +16534,8 @@ use panel_kinds_seed::*;
                     "instrument-panel",
                     test_list(vec![Value::Map(test_instrument_map())]),
                 ),
-                ("sidebar-instrument-name", Value::String(String::new())),
-                ("current-project-name", Value::String("test".to_string())),
                 ("current-pattern", Value::Number(0.0)),
-                ("num-patterns", Value::Number(1.0)),
                 ("editor-mode", Value::String(String::new())),
-                ("learn-target-path", Value::String(String::new())),
-                ("learn-target-name", Value::String(String::new())),
-                ("learn-phase", Value::String("pick".to_string())),
-                ("learn-plan-params", Value::List(vec![])),
-                ("learn-method", Value::String("Local fit + basin check".to_string())),
-                ("learn-epochs", Value::Number(300.0)),
-                ("learn-cma-generations", Value::Number(12.0)),
-                ("learn-cma-population", Value::Number(0.0)),
-                ("learn-cma-sigma", Value::Number(0.2)),
-                ("learn-cma-seed", Value::Number(1.0)),
-                ("learn-cma-forward-batch", Value::Number(0.0)),
-                ("learn-local-epochs", Value::Number(0.0)),
-                ("learn-cma-continue", Value::Number(8.0)),
-                ("learn-cma-refine-epochs", Value::Number(5.0)),
-                ("learn-cma-refine-mode", Value::String("Batched".to_string())),
-                ("learn-cma-final-epochs", Value::Number(300.0)),
-                ("learn-pitch-hz", Value::Number(0.0)),
-                ("learn-gate-frames", Value::Number(0.0)),
-                ("learn-stage", Value::String(String::new())),
-                ("learn-current-epoch", Value::Number(0.0)),
-                ("learn-total-epochs", Value::Number(0.0)),
-                ("learn-loss", Value::Number(0.0)),
-                ("learn-losses", Value::List(vec![])),
-                ("learn-optimization-losses", Value::List(vec![])),
-                ("learn-epoch-params", Value::List(vec![])),
-                ("learn-checkpoint-wav", Value::String(String::new())),
-                ("learn-improvement-pct", Value::Number(0.0)),
-                ("learn-abs-distance", Value::Number(0.0)),
-                ("learn-basin-check", Value::String(String::new())),
-                ("learn-result-deltas", Value::List(vec![])),
-                ("learn-final-wav", Value::String(String::new())),
-                ("learn-error", Value::String(String::new())),
                 ("recording", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
@@ -18741,9 +18074,6 @@ use panel_kinds_seed::*;
             "current-pattern",
             Value::Number((generation % cell_count) as f64),
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-patterns", Value::Number(cell_count as f64));
         apply_mixer_v2_perf_pattern(editor, track_count, cell_count, generation);
     }
 
@@ -18777,7 +18107,6 @@ use panel_kinds_seed::*;
                 ),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
-                ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, track_count)),
                 ("track-mutes", test_repeated_bool_list(false, track_count)),
                 ("track-solos", test_repeated_bool_list(false, track_count)),
@@ -19569,36 +18898,18 @@ use panel_kinds_seed::*;
 
     fn metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer_impl() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "learn-target-path",
-            Value::String("samples/drums/kick.wav".to_string()),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "learn-target-name",
-            Value::String(
-                "Tim Maia – Est Dificil (Original Studio Recording 1971)".to_string(),
-            ),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "learn-plan-params",
-            test_list(vec![map_value([
-                ("name", Value::String("cutoff".to_string())),
-                ("status", Value::String("learnable".to_string())),
-                ("reason", Value::String(String::new())),
-            ])]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "learn-pitch-hz", Value::Number(49.2));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "learn-gate-frames", Value::Number(8820.0));
+        present_learn_kinds(&mut editor, |l| {
+            l.phase = "configure".to_string();
+            l.target_path = "samples/drums/kick.wav".to_string();
+            l.target_name = "Tim Maia – Est Dificil (Original Studio Recording 1971)".to_string();
+            l.plan_params = vec![crate::presented::LearnPlanParam {
+                name: "cutoff".to_string(),
+                status: "learnable".to_string(),
+                reason: String::new(),
+            }];
+            l.pitch_hz = 49.2;
+            l.gate_frames = 8820.0;
+        });
         editor
             .runtime_mut()
             .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
@@ -19737,14 +19048,15 @@ use panel_kinds_seed::*;
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
         let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
-            panic!("expected configure-learn command, got {:?}", commands[0]);
+            panic!("expected set-learn command, got {:?}", commands[0]);
         };
-        assert_eq!(name, "configure-learn");
+        assert_eq!(name, "set-learn", "learn.epochs' setter");
         let Value::Map(payload) = payload else {
-            panic!("configure-learn payload should be a dict: {payload:?}");
+            panic!("set-learn payload should be a dict: {payload:?}");
         };
+        assert_eq!(map_string(payload, "field").as_deref(), Some("epochs"));
         assert_eq!(
-            payload.get("epochs").map(|value| value.borrow().clone()),
+            payload.get("value").map(|value| value.borrow().clone()),
             Some(Value::Number(750.0))
         );
 
@@ -19755,12 +19067,9 @@ use panel_kinds_seed::*;
             .expect("Patch Learn buffer")
             .id;
         editor.set_active_buffer(learn_buffer_id);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "learn-method",
-            Value::String("Evolutionary search + training".to_string()),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        present_learn_kinds(&mut editor, |l| {
+            l.method = "Evolutionary search + training".to_string();
+        });
         editor.refresh_runtime_side_effects();
         editor.set_layout_viewport(58, 48);
         let cma_layout = editor.widget_layout().expect("evolutionary Patch Learn layout");
@@ -19797,40 +19106,16 @@ use panel_kinds_seed::*;
             .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 let mut editor = full_grid_editor_for_scroll_tests();
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-phase",
-                    Value::String("training".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-stage",
-                    Value::String("training".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-target-path",
-                    Value::String("samples/drums/kick.wav".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-target-name",
-                    Value::String("Studio Kick".to_string()),
-                );
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-current-epoch", Value::Number(3.0));
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(300.0));
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-loss", Value::Number(0.0625));
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-losses",
-                    test_number_list(&[1.0, 0.25, 0.0625]),
-                );
+                present_learn_kinds(&mut editor, |l| {
+                    l.phase = "training".to_string();
+                    l.stage = "training".to_string();
+                    l.target_path = "samples/drums/kick.wav".to_string();
+                    l.target_name = "Studio Kick".to_string();
+                    l.current_epoch = 3.0;
+                    l.total_epochs = 300.0;
+                    l.loss = 0.0625;
+                    l.losses = vec![1.0, 0.25, 0.0625];
+                });
                 editor
                     .runtime_mut()
                     .eval_str(
@@ -19867,12 +19152,7 @@ use panel_kinds_seed::*;
                 assert_eq!(graph.props.get("y-axis"), Some(&Value::Bool(true)));
                 assert!(!graph.props.contains_key("scale"));
 
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-losses",
-                    test_number_list(&[1.0, 0.25, 0.0625, 0.015625]),
-                );
-                editor.runtime_mut().run_reactive_cycle();
+                present_learn_kinds(&mut editor, |l| l.losses.push(0.015625));
                 let updated_layout = editor
                     .widget_layout()
                     .expect("updated Patch Learn training layout");
@@ -19883,20 +19163,11 @@ use panel_kinds_seed::*;
                 };
                 assert_eq!(updated_losses.len(), 4);
 
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-stage",
-                    Value::String("cma-es".to_string()),
-                );
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(12.0));
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-optimization-losses",
-                    test_number_list(&[0.031, 0.044, 0.052]),
-                );
-                editor.runtime_mut().run_reactive_cycle();
+                present_learn_kinds(&mut editor, |l| {
+                    l.stage = "cma-es".to_string();
+                    l.total_epochs = 12.0;
+                    l.optimization_losses = vec![0.031, 0.044, 0.052];
+                });
                 let cma_layout = editor.widget_layout().expect("CMA search stage layout");
                 assert_finite_layout_tree(&cma_layout);
                 assert!(
@@ -19909,23 +19180,12 @@ use panel_kinds_seed::*;
                     assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{text}: {:?}", node.rect);
                 }
 
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-stage",
-                    Value::String("cma-refine-batched".to_string()),
-                );
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-current-epoch", Value::Number(2.0));
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(5.0));
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-optimization-losses",
-                    test_number_list(&[0.021]),
-                );
-                editor.runtime_mut().run_reactive_cycle();
+                present_learn_kinds(&mut editor, |l| {
+                    l.stage = "cma-refine-batched".to_string();
+                    l.current_epoch = 2.0;
+                    l.total_epochs = 5.0;
+                    l.optimization_losses = vec![0.021];
+                });
                 let batched_layout = editor.widget_layout().expect("batched Adam stage layout");
                 assert_finite_layout_tree(&batched_layout);
                 for text in ["BATCHED SHORTLIST POLISH", "Epoch 2 / 5", "Mean batch loss"] {
@@ -19949,41 +19209,19 @@ use panel_kinds_seed::*;
             .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 let mut editor = full_grid_editor_for_scroll_tests();
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-phase",
-                    Value::String("result".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-target-path",
-                    Value::String("samples/drums/kick.wav".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-target-name",
-                    Value::String("Studio Kick".to_string()),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-improvement-pct",
-                    Value::Number(27.3),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-abs-distance",
-                    Value::Number(3.688_417),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "learn-result-deltas",
-                    test_list(vec![map_value([
-                        ("name", Value::String("cutoff".to_string())),
-                        ("from", Value::Number(520.0)),
-                        ("to", Value::Number(1125.7611)),
-                        ("change", Value::Number(605.7611)),
-                    ])]),
-                );
+                present_learn_kinds(&mut editor, |l| {
+                    l.phase = "result".to_string();
+                    l.target_path = "samples/drums/kick.wav".to_string();
+                    l.target_name = "Studio Kick".to_string();
+                    l.improvement_pct = 27.3;
+                    l.abs_distance = 3.688_417;
+                    l.result_deltas = vec![crate::presented::LearnDelta {
+                        name: "cutoff".to_string(),
+                        from: 520.0,
+                        to: 1125.7611,
+                        change: 605.7611,
+                    }];
+                });
                 editor
                     .runtime_mut()
                     .eval_str(
@@ -22274,8 +21512,14 @@ use panel_kinds_seed::*;
             };
             app::apply_command(&mut app, app::AppCommand::MacroEnsure { key, name });
         }
-        sync_macro_state(editor.runtime_mut(), &app);
-        editor.runtime_mut().run_reactive_cycle();
+        // The ensured macros, as the host kinds publish them.
+        let macros = (app.macro_engine.macros().iter())
+            .map(|m| {
+                let key = m.key.as_deref().unwrap_or_default();
+                (f64::from(m.id), key, m.name.as_str(), f64::from(m.value), vec![])
+            })
+            .collect();
+        seed_project_macros(&mut editor, macros);
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -22367,7 +21611,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (eseq.macros/macro-by-key :delay-push) :name)"),
+                .eval_str("(let ((m (eseq.macros/macro-by-key :delay-push))) m.name)"),
             Ok(Some(Value::String("Delay Push".to_string()))),
             "engine readback should replace the fallback key label"
         );
@@ -24556,21 +23800,19 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_patch_macros_sidebar_nests_call_structure() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(reactive-set "SEQ" "editor-patch-macros"
-                     (list (dict :name "reverb" :params (list "in") :calls (list "comb"))
-                           (dict :name "comb" :params (list "x") :calls (list "dcblock"))))"#,
-            )
-            .expect("set patch macros");
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(reactive-set "SEQ" "editor-library-macros"
-                     (list (dict :name "dcblock" :params (list "x") :calls (list) :used true)))"#,
-            )
-            .expect("set library macros");
+        let named = |name: &str, calls: &[&str], used| crate::presented::EditorMacro {
+            name: name.to_string(),
+            calls: calls.iter().map(|call| call.to_string()).collect(),
+            used,
+            ..Default::default()
+        };
+        present_editor_sidebar_kinds(&mut editor, |sidebar| {
+            sidebar.patch_macros = vec![
+                named("reverb", &["comb"], false),
+                named("comb", &["dcblock"], false),
+            ];
+            sidebar.library_macros = vec![named("dcblock", &[], true)];
+        });
 
         // In Patch shows only the root (reverb); comb is nested beneath it,
         // and the library macro dcblock nests beneath comb.
@@ -24612,21 +23854,14 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_patch_macros_sidebar_items_and_filtering() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(reactive-set "SEQ" "editor-patch-macros"
-                     (list (dict :name "wobble" :params (list "x"))))"#,
-            )
-            .expect("set patch macros");
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(reactive-set "SEQ" "editor-library-macros"
-                     (list (dict :name "gain2" :params (list "in" "amount"))
-                           (dict :name "simposc" :params (list "freq"))))"#,
-            )
-            .expect("set library macros");
+        let named = |name: &str| crate::presented::EditorMacro {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        present_editor_sidebar_kinds(&mut editor, |sidebar| {
+            sidebar.patch_macros = vec![named("wobble")];
+            sidebar.library_macros = vec![named("gain2"), named("simposc")];
+        });
 
         assert_eq!(
             editor
@@ -24639,7 +23874,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str(r#"(set! eseq.patch-macros/patch-macros-filter "GAIN")"#)
+            .eval_str(r#"(let ((s eseq.patch-macros/macro-sidebar)) (set! s.filter "GAIN"))"#)
             .expect("set filter");
         assert_eq!(
             editor
@@ -24669,25 +23904,13 @@ use panel_kinds_seed::*;
             .expect("patch macros buffer")
             .id;
         editor.set_active_buffer(buffer_id);
-        let assets = editor
-            .runtime_mut()
-            .eval_str(
-                r#"(list (dict :label "wavetables/basic-shapes.json"
-                               :name "wavetables/basic-shapes.json"
-                               :kind "patcher-asset"
-                               :detail "Factory"
-                               :file "wavetables/basic-shapes.json"
-                               :source-path "/factory/wavetables/basic-shapes.json"
-                               :drag-type "dgen-asset"
-                               :draggable true
-                               :drop-target false))"#,
-            )
-            .expect("build editor assets")
-            .expect("editor assets value");
-        let update = editor
-            .runtime_mut()
-            .set_reactive("SEQ", "editor-assets", assets);
-        assert!(update.effects_dirty, "asset publication must dirty the sidebar effect");
+        present_editor_sidebar_kinds(&mut editor, |sidebar| {
+            sidebar.assets = vec![crate::presented::EditorAsset {
+                reference: "wavetables/basic-shapes.json".to_string(),
+                tier: "Factory".to_string(),
+                source_path: "/factory/wavetables/basic-shapes.json".to_string(),
+            }];
+        });
 
         assert_eq!(
             editor
@@ -32436,7 +31659,6 @@ use panel_kinds_seed::*;
                     test_bool_list(&[false, false, false, true]),
                 ),
                 ("current-track", Value::Number(0.0)),
-                ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, 4)),
                 ("track-mutes", test_repeated_bool_list(false, 4)),
                 ("track-solos", test_repeated_bool_list(false, 4)),
@@ -38304,7 +37526,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("limiter".to_string())]),
@@ -41970,7 +41191,6 @@ use panel_kinds_seed::*;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", panel),
                 ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
                 (effect_mod_value_field(43, 1).as_str(), Value::Number(1000.0)),
                 (effect_mod_offset_field(43, 1).as_str(), Value::Number(0.0)),
@@ -44218,7 +43438,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("MODUM_DELAY".to_string())]),
@@ -44313,7 +43532,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(2.0)),
                 ("compiling", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("sidechain".to_string())]),
@@ -44461,7 +43679,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("dimension-d-chorus".to_string())]),
@@ -44586,7 +43803,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![
@@ -54850,7 +54066,6 @@ use panel_kinds_seed::*;
             ("instrument-panel", test_list(vec![])),
             ("process-slots", test_list(vec![])),
             ("bus-effects", test_list(vec![test_list(vec![]); 3])),
-            ("delete-target-version", Value::Number(0.0)),
         ] {
             rt.set_reactive("SEQ", key, value);
         }
@@ -55717,6 +54932,7 @@ use panel_kinds_seed::*;
                 "(set-layout (list :buf \"{buffer}\" :hide-status true))")).unwrap();
             editor.refresh_runtime_side_effects();
             super::super::midi_dispatch::sync_midi_devices(&mut editor, Snapshot::default());
+            push_presented_settings(&mut editor);
             editor.runtime_mut().eval_str("(eseq.settings/open-settings)").unwrap();
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -55732,7 +54948,7 @@ use panel_kinds_seed::*;
                         connected: false, status: "Disabled".into() },
                 ], error: "Device connection error".into(),
             });
-            editor.runtime_mut().run_reactive_cycle();
+            push_presented_settings(&mut editor);
             editor.refresh_runtime_side_effects();
             let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
             let layout = editor.widget_layout().unwrap();

@@ -1,5 +1,5 @@
 //! Macros (spec §14.2g, stage 7b-3): the project's macros (`macro`,
-//! `project.macros`, legacy `SEQ.macros`), a drum rack's macros
+//! `project.macros`), a drum rack's macros
 //! (`rack-macro`, the rack instrument device's `macros`, legacy
 //! `SEQ.instrument-panel :macros`), and what each drives (`macro-mapping`).
 //!
@@ -171,6 +171,9 @@ struct MappingModel {
     /// (owner instance, device did, param index) of the target param.
     target: Option<(InstanceId, u64, usize)>,
     label: String,
+    /// The mapping table's Path and Name columns.
+    path: String,
+    param_label: String,
     min: f32,
     max: f32,
     curve: &'static str,
@@ -212,6 +215,12 @@ fn sync_mappings(
         });
         pusher.push(*id, f::MAPPING_TARGET, instance_or_nil(target));
         pusher.push(*id, f::MAPPING_LABEL, Value::String(model.label));
+        pusher.push(*id, f::MAPPING_PATH, Value::String(model.path));
+        pusher.push(
+            *id,
+            f::MAPPING_PARAM_LABEL,
+            Value::String(model.param_label),
+        );
         pusher.push(*id, f::MAPPING_MIN, number(model.min));
         pusher.push(*id, f::MAPPING_MAX, number(model.max));
         pusher.push(*id, f::MAPPING_CURVE, text(model.curve));
@@ -248,7 +257,7 @@ impl HostKinds {
     }
 
     /// Each observed scene macro's `diff-count`
-    /// (`App::scene_macro_diff_count`, the legacy `SEQ.macros`' own): a walk
+    /// (`App::scene_macro_diff_count`): a walk
     /// of every track's scene target, so only when the UI epoch (the legacy
     /// publisher's gate), the history or the scenes moved, the macros were
     /// re-synced or it starts being observed. An unobserved one costs a
@@ -343,7 +352,8 @@ impl HostKinds {
                 .mappings
                 .iter()
                 .map(|mapping| {
-                    let (path, _, min, max, ..) = macro_mapping_display_metadata(app, mapping);
+                    let (path, param_label, min, max, ..) =
+                        macro_mapping_display_metadata(app, mapping);
                     let target =
                         macro_mapping_location(app, mapping).and_then(|(owner, device, index)| {
                             let parent = match device {
@@ -356,6 +366,8 @@ impl HostKinds {
                     MappingModel {
                         target,
                         label,
+                        path,
+                        param_label,
                         min,
                         max,
                         curve: mapping.curve.label(),
@@ -465,6 +477,8 @@ impl HostKinds {
                             target: device
                                 .map(|(device, index)| (track_id, device.did(app, track), index)),
                             label: format!("{path} · {param}"),
+                            path,
+                            param_label: param,
                             min,
                             max,
                             curve: mapping.curve.label(),

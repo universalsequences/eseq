@@ -291,7 +291,7 @@ fn macro_edit(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Resul
     let script = ScriptEdit::begin(app, ctx);
     let changed = script.apply(app, command);
     if changed {
-        // As the macro commands: the legacy `SEQ.macros` resync.
+        // As the macro commands do: a UI epoch resync.
         ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
     script.end(app, ctx, false, changed);

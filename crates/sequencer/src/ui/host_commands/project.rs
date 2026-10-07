@@ -289,7 +289,7 @@ pub(super) fn handle(
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let rt = editor.runtime_mut();
             sync_project_replacement(rt, &state);
-            sync_project_state(rt, &app);
+            record_preset_listings();
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
             sync_bus_mixer_state(rt, &app);
@@ -356,7 +356,7 @@ pub(super) fn handle(
             match app.save_project_with_name(requested_name.as_deref()) {
                 Ok(save_name) => {
                     let rt = editor.runtime_mut();
-                    sync_project_state(rt, &app);
+                    record_preset_listings();
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -387,7 +387,7 @@ pub(super) fn handle(
                     match app.promote_preset_to_sound(track, &name) {
                         Ok(_) => {
                             let rt = editor.runtime_mut();
-                            sync_project_state(rt, &app);
+                            record_preset_listings();
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.handle_host_event(HostEvent::Status(format!(

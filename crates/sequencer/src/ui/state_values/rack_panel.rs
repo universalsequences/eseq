@@ -949,10 +949,9 @@ pub(super) fn build_rack_slot_effect_value(
     );
     effect.insert(
         "builtin".to_string(),
-        value_cell(Value::Bool(
-            sequencer::effects::EffectDescriptor::builtin_insert(&descriptor.name).is_some()
-                || sequencer::effects::dgen_builtin::contains(&descriptor.name),
-        )),
+        value_cell(Value::Bool(sequencer::effects::is_builtin_effect(
+            &descriptor.name,
+        ))),
     );
     // A rack effect's panel carries a Filter Table's fields (no IR name).
     if descriptor.name == sequencer::effects::filter_table::NAME {

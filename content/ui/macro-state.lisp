@@ -2,10 +2,10 @@
 ;; device wrappers and the reusable macro controls.
 (module eseq.macro-state)
 
-(export mapping-open
+(export macro-arm
+        rack-armed?
+        arm-macro!
         macro-name
-        mapping-selected
-        rack-mapping-selected
         macro-mapping-sidebar-open-hook
         macro-mapping-sidebar-close-hook
         macro-mapping-sidebar-refresh-hook
@@ -13,19 +13,27 @@
         rack-clear-mapping-arm
         macro-mapping-arm-enter-hook)
 
-;; Compat aliases (module-system spec §10 slice 3): every renamed def that has
-;; callers outside this file. Unconverted callers keep using the flat names;
-;; the table is deleted when the migration finishes. Aliases must be evaluated
-;; before a caller *compiles*, which is why the FX manifest loads this file
-;; first (ui/effects.lisp:6).
+;; The macro a click on a green parameter maps: a project macro while `open`
+;; (by its id, `mid`: the map command's address) or a drum rack macro of the
+;; current track's rack (by its index, `rack-index`); -1 for none.
+(def-kind macro-arm
+  :key ()
+  :state ((open false)
+          (mid -1)
+          (rack-index -1)))
 
-(defstate mapping-open false)
-(defstate mapping-selected -1)
-(defstate rack-mapping-selected -1)
+;; Whether a drum rack macro is armed (the map commands address it).
+(def rack-armed? () (>= macro-arm.rack-index 0))
 
-;; Rack names have their own field so live typing need not replace the
-;; instrument panel (or its mapping/parameter-lock metadata). Empty text is
-;; an edit in progress, so fall back only when the field is absent.
+;; Arm project macro `mid` for mapping (no hooks: the controls run those).
+(def arm-macro! (mid)
+  (set! macro-arm.open true)
+  (set! macro-arm.mid mid))
+
+;; COMPAT (eseq-0l17.61): the rack panel's macro dicts name a legacy field
+;; for live typing (`:name-field`); the effects port reads the rack macro's
+;; own `rm.name` and deletes this. Empty text is an edit in progress, so fall
+;; back only when the field is absent.
 (def macro-name (macro)
   (let ((name (if (get macro :name-field) (reactive-get "SEQ" (get macro :name-field)) nil)))
     (if (= name nil) (get macro :name) name)))
@@ -45,18 +53,17 @@
 ;; call would intern a dead `eseq.macro-state/…` slot. Inside a module, reach
 ;; hooks through `run-hook` (the flat keyspace, addressed as data).
 (def clear-mapping-arm ()
-  (do
-    (set! mapping-open false)
-    (set! mapping-selected -1)
-    (run-hook "macro-mapping-sidebar-close-hook")
-    true))
+  (set! macro-arm.open false)
+  (set! macro-arm.mid -1)
+  (run-hook "macro-mapping-sidebar-close-hook")
+  true)
 
 (def rack-clear-mapping-arm ()
-  (if (>= rack-mapping-selected 0)
+  (if (rack-armed?)
     (do
       ;; Clear the arm before rebuilding the layout so the sidebar switches
       ;; back to its previous content instead of rendering one stale frame.
-      (set! rack-mapping-selected -1)
+      (set! macro-arm.rack-index -1)
       (run-hook "macro-mapping-sidebar-close-hook")
       true)
     false))

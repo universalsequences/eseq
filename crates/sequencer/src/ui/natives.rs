@@ -2212,8 +2212,8 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
 }
 
 /// Arming/clearing a delete target only moves the delete-target read
-/// surfaces (`SEQ.delete-target-version` + the mixer/rack binding fields),
-/// which the reactive tick republishes off the version counter alone — a
+/// surfaces (the host kinds' delete-target fields and the mixer/rack binding
+/// fields), which the ticks republish off the version counter alone — a
 /// `ui_epoch` bump here would buy nothing but a whole-project resync per
 /// clip-launch click (~7ms at 20-clip pool scale).
 /// What making a track the current one touches (`seq-set-track`, the host
@@ -3169,7 +3169,6 @@ pub(crate) fn init_runtime(
         "SEQ",
         {
             let mut fields = vec![
-                ("macros", build_macros_value(app)),
                 ("playing", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
@@ -3196,12 +3195,10 @@ pub(crate) fn init_runtime(
                 ("group-collapsed", Value::List(vec![])),
                 // Group id of the pad-armed drum rack; -1 = none.
                 ("armed-rack-id", Value::Number(-1.0)),
-                ("delete-target-version", Value::Number(0.0)),
                 (
                     "current-pattern",
                     Value::Number(state.current_scene_index() as f64),
                 ),
-                ("num-patterns", Value::Number(state.scene_count() as f64)),
                 ("neural-networks", build_neural_networks_value(&state)),
                 (
                     "selected-neural-neurons",
@@ -3673,9 +3670,7 @@ pub(crate) fn init_runtime(
                     build_record_armed_value(&record_armed.lock().unwrap()),
                 ),
                 ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
-                ("sidebar-instrument-name", Value::String(String::new())),
                 ("rack-clips", Value::List(vec![])),
-                ("current-project-name", Value::String(String::new())),
                 ("tuning-root-options", build_tuning_root_options()),
             ];
             // The editor's and Patch Learn's legacy fields, as the record
@@ -3759,7 +3754,6 @@ pub(crate) fn init_runtime(
     );
     runtime.register_reactive("SEQV", vec![], true);
     crate::midi_dispatch::register_device_state(&mut runtime);
-    crate::host_commands::audio_settings::register_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
     crate::host_commands::factory_promote::register_state(&mut runtime);

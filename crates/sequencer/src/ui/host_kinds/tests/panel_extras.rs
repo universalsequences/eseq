@@ -21,8 +21,16 @@ impl Harness {
 
 // ── scene macro config ─────────────────────────────────────────────────
 
+/// The first macro's scene config and its diff count, from the model.
+fn scene_config(h: &Harness) -> (sequencer::macro_engine::SceneMacroConfig, Value) {
+    let id = h.app.macro_engine.macros()[0].id;
+    let config = h.app.macro_engine.scene_config(id).unwrap().clone();
+    let diffs = h.app.scene_macro_diff_count(&config) as f64;
+    (config, Value::Number(diffs))
+}
+
 #[test]
-fn scene_macro_config_reads_like_the_legacy_macros_and_sets_through_history() {
+fn scene_macro_config_reads_like_the_model_and_sets_through_history() {
     let (mut h, slot) = Harness::with_devices();
     // A second scene whose Filter cutoff differs from the first's.
     h.command("clone-pattern", Value::Nil);
@@ -49,24 +57,27 @@ fn scene_macro_config_reads_like_the_legacy_macros_and_sets_through_history() {
     h.eval_x(r#"(effect-buffer "*diffs*" (label (str m.diff-count plain.diff-count)))"#);
     h.show_all();
     h.sync();
-    // Legacy parity (SEQ.macros).
-    let legacy = items(&build_macros_value(&h.app)).remove(0);
+    // As the model holds the config.
+    let (config, diffs) = scene_config(&h);
     assert_eq!(h.eval_x("m.type"), s("scene"));
     assert_eq!(
         h.eval_x("m.target-scene"),
         h.eval_x("(nth (scenes) 1)"),
         "the scene instance"
     );
-    assert_eq!(get(&legacy, "target-scene"), Value::Number(1.0));
-    assert_eq!(h.eval_x("m.morph-params"), get(&legacy, "morph-params"));
-    assert_eq!(h.eval_x("m.steal-patterns"), get(&legacy, "steal-patterns"));
-    assert_eq!(h.eval_x("m.quantize"), get(&legacy, "quantize"));
-    assert_eq!(h.eval_x("m.diff-count"), get(&legacy, "diff-count"));
+    assert_eq!(config.target_scene, 1);
+    assert_eq!(h.eval_x("m.morph-params"), Value::Bool(config.morph_params));
+    assert_eq!(
+        h.eval_x("m.steal-patterns"),
+        Value::Bool(config.steal_patterns)
+    );
+    assert_eq!(h.eval_x("m.quantize"), s(config.quantize.label()));
+    assert_eq!(h.eval_x("m.diff-count"), diffs);
     assert!(
         matches!(h.eval_x("m.diff-count"), Value::Number(n) if n >= 1.0),
         "the cutoff differs"
     );
-    assert_eq!(get(&legacy, "track-mask"), Value::Nil);
+    assert_eq!(config.track_mask, None);
     assert_eq!(h.eval_x("m.tracks"), h.eval_x("(tracks)"), "every track");
     // A mapped macro reads empty and takes no config.
     assert_eq!(
@@ -95,12 +106,9 @@ fn scene_macro_config_reads_like_the_legacy_macros_and_sets_through_history() {
     h.eval_x("(set! m.tracks (list (track 1)))");
     h.drain_and_sync();
     assert_eq!(h.eval_x("m.tracks"), h.eval_x("(list (track 1))"));
-    let legacy = items(&build_macros_value(&h.app)).remove(0);
-    assert_eq!(
-        items(&get(&legacy, "track-mask")),
-        vec![Value::Bool(false), Value::Bool(true), Value::Bool(false)]
-    );
-    assert_eq!(h.eval_x("m.diff-count"), get(&legacy, "diff-count"));
+    let (config, diffs) = scene_config(&h);
+    assert_eq!(config.track_mask, Some(vec![false, true, false]));
+    assert_eq!(h.eval_x("m.diff-count"), diffs);
     assert_eq!(
         h.eval_x("m.diff-count"),
         Value::Number(0.0),
@@ -178,8 +186,7 @@ fn an_unobserved_diff_count_costs_no_walk_until_observed() {
     h.show_all();
     h.sync();
     assert_eq!(h.frame.host_kinds.macros.diff_syncs, 1);
-    let legacy = items(&build_macros_value(&h.app)).remove(0);
-    assert_eq!(h.eval_x("m.diff-count"), get(&legacy, "diff-count"));
+    assert_eq!(h.eval_x("m.diff-count"), scene_config(&h).1);
     assert!(matches!(h.eval_x("m.diff-count"), Value::Number(n) if n >= 1.0));
     h.sync();
     assert_eq!(h.frame.host_kinds.macros.diff_syncs, 1, "nothing moved");

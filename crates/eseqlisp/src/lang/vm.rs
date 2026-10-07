@@ -8165,8 +8165,11 @@ impl VM {
         self.process_dirty_reactive()
     }
 
-    /// True when a named effect deferred while its buffer was hidden now
-    /// targets a visible buffer, so a reactive cycle would resume real work.
+    /// True when a dirty effect on a visible target (any buffer effect whose
+    /// buffer is not hidden, or an observer) waits for a reactive cycle: a
+    /// named effect deferred while its buffer was hidden that is visible
+    /// again, or an effect a write outside the reactive registry dirtied (a
+    /// kind field's `set_instance_field`).
     pub(crate) fn has_visible_deferred_effects(&self) -> bool {
         // Mid-cycle the dirty set is live working state, not deferred work;
         // resuming from inside an effect run would reorder the cycle.
@@ -8179,11 +8182,8 @@ impl VM {
             }
             matches!(
                 self.dag.nodes.get(node_id),
-                Some(ReactiveNode::Effect {
-                    target: EffectTarget::BufferName(name),
-                    ..
-                }) if !self.hidden_effect_buffer_names.contains(name)
-            )
+                Some(ReactiveNode::Effect { .. })
+            ) && self.effect_target_is_visible(*node_id)
         })
     }
 
@@ -8301,6 +8301,9 @@ impl VM {
                             let _ = self.tracking_stack.pop();
                             self.finish_function_profile(profile_started, Some(root_id));
                             let rendered_tree = render_result.map_err(|error| {
+                                // As below: a failed render waits for an input
+                                // change rather than forcing every cycle.
+                                self.dag.clear_dirty(node_id);
                                 self.last_reactive_error_context =
                                     label.clone().or_else(|| Some(format!("node:{node_id}")));
                                 error
@@ -8427,6 +8430,10 @@ impl VM {
                         let _ = self.tracking_stack.pop();
                     }
                     execute_result.map_err(|error| {
+                        // A failed run never reaches its `EffectEnd`; clear the
+                        // dirty bit here so the node re-runs only once an input
+                        // changes again instead of forcing every later cycle.
+                        self.dag.clear_dirty(node_id);
                         self.last_reactive_error_context =
                             label.clone().or_else(|| Some(format!("node:{node_id}")));
                         error

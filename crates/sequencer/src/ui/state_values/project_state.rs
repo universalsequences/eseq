@@ -92,12 +92,9 @@ pub(crate) fn sync_project_replacement(rt: &mut Runtime, state: &Arc<SequencerSt
     }
 }
 
-pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {
-    rt.set_reactive(
-        "SEQ",
-        "current-project-name",
-        Value::String(app.current_project_name.clone().unwrap_or_default()),
-    );
+/// Re-list the saved Sounds and kits into the presented record (the
+/// `browser.sound-presets` / `kit-presets` source).
+pub(crate) fn record_preset_listings() {
     record_sound_presets();
     record_kit_presets();
 }
@@ -428,22 +425,13 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         "track-loaded-presets",
         build_string_list(&loaded_presets),
     );
-    let sidebar = sidebar_browser(app, track);
-    // Still read by unported views (application menus, the panel frame);
-    // the browser reads the `browser` host kind.
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-instrument-name",
-        Value::String(sidebar.instrument.clone()),
-    );
-    crate::presented::present_sidebar(sidebar);
+    crate::presented::present_sidebar(sidebar_browser(app, track));
 }
 
 /// What the browser sidebar shows for `track`: its instrument (a sampler's
 /// sample), the presets it can load, a drum rack's slots' presets, and the
 /// project's instrument engines. The `browser` host kind's source (through
-/// `presented`); the legacy `SEQ.sidebar-instrument-name` mirrors its
-/// instrument.
+/// `presented`).
 fn sidebar_browser(app: &app::App, track: usize) -> crate::presented::Sidebar {
     use crate::presented::{Sidebar, SlotPresets};
     // Each slot independently of the edit cursor: only the explicit

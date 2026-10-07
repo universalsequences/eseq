@@ -4659,9 +4659,7 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        if EffectDescriptor::builtin_insert(name).is_none()
-            && !crate::effects::dgen_builtin::contains(name)
-        {
+        if !crate::effects::is_builtin_effect(name) {
             return Err(format!("Unknown built-in effect '{name}'"));
         }
         let effect_slot =

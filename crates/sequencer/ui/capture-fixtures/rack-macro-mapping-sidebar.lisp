@@ -3,7 +3,7 @@
 (capture-project
   (track :layer-rack
     :name "Macro Rack"
-    :samples ("../../assets/ir/lexicon-300-rich-plate.wav")))
+    :samples ("../../../../content/impulses/lexicon-300-rich-plate.wav")))
 
 (def capture-after-sync ()
   (do

@@ -14,7 +14,7 @@
 (module eseq.effects.param-controls)
 
 (import eseq.kinds :refer (selection macros))
-(import eseq.macro-state :as ms)
+(import eseq.macro-state :as ms :refer (macro-arm rack-armed?))
 (import eseq.effects.state :refer (instrument-view key-lock-view effect-mods))
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.devices :as dv)
@@ -268,8 +268,8 @@
 ;; ── Macro mapping ──
 
 (def param-macro-mapping-active? ()
-  (or (and ms/mapping-open (>= ms/mapping-selected 0))
-      (>= ms/rack-mapping-selected 0)))
+  (or (and macro-arm.open (>= macro-arm.mid 0))
+      (rack-armed?)))
 
 ;; The map-rack-macro-param command's address of a drum rack slot's param
 ;; (its instrument's or one of its effects'), false for any other param.
@@ -292,7 +292,7 @@
     (if d d.macros '())))
 
 (def rack-macro-selected ()
-  (first (filter (lambda (rm) (= rm.index ms/rack-mapping-selected)) (rack-macros))))
+  (first (filter (lambda (rm) (= rm.index macro-arm.rack-index)) (rack-macros))))
 
 ;; The mapping of macro m (a project or rack macro) driving prm, or nil. A
 ;; project mapping whose target is gone drives nothing.
@@ -309,18 +309,18 @@
     (when prm (first (filter (lambda (rm) (mapping-onto rm prm)) (rack-macros))))))
 
 (def param-macro-bindable? (fx p)
-  (if (>= ms/rack-mapping-selected 0)
+  (if (rack-armed?)
     (rack-macro-target-map fx p)
     (and (get p :modulatable) (process-map-target-map fx p))))
 
 (def project-macro-selected ()
-  (first (filter (lambda (m) (= m.mid ms/mapping-selected)) (macros))))
+  (first (filter (lambda (m) (= m.mid macro-arm.mid)) (macros))))
 
 ;; Names the selected project macro's mappings, so the *fx* buffer's map
 ;; mode rebuilds when they change.
 (def param-macro-structure-key ()
   (let ((m (project-macro-selected)))
-    (str "fx-macro-map-" ms/mapping-selected "-"
+    (str "fx-macro-map-" macro-arm.mid "-"
          (if m
            (map (lambda (mm) (list mm.index mm.label mm.suspended mm.min mm.max)) m.mappings)
            '()))))
@@ -349,7 +349,7 @@
 
 (def param-macro-bg (fx p)
   (if (and (param-macro-mapping-active?) (param-macro-bindable? fx p))
-    (if (if (>= ms/rack-mapping-selected 0)
+    (if (if (rack-armed?)
           (rack-macro-mapping-for fx p)
           (param-macro-mapping-for fx p))
       (rgba 0.18 0.45 0.142 0.98)
@@ -357,20 +357,20 @@
     :transparent))
 
 (def param-macro-map (fx p)
-  (if (>= ms/rack-mapping-selected 0)
+  (if (rack-armed?)
     (let ((target (rack-macro-target-map fx p)) (mapped (rack-macro-mapping-for fx p)))
       (if mapped
         (host-command "unmap-rack-macro-param"
-          (dict :track (dv/current-track-index) :id ms/rack-mapping-selected
+          (dict :track (dv/current-track-index) :id macro-arm.rack-index
             :mapping-idx mapped.index))
         (if target (host-command "map-rack-macro-param"
-          (merge target :id ms/rack-mapping-selected :track (dv/current-track-index))) false)))
+          (merge target :id macro-arm.rack-index :track (dv/current-track-index))) false)))
     (let ((target (process-map-target-map fx p)))
       (if (and target
                (not (rack-macro-owner-for fx p))
                (not (param-macro-owner-mapping-for fx p)))
         (host-command "macro-map-param"
-          (merge target :id ms/mapping-selected :track (dv/current-track-index)))
+          (merge target :id macro-arm.mid :track (dv/current-track-index)))
         false))))
 
 ;; ── Key locks (the instrument panel's keys tab) ──
@@ -953,7 +953,7 @@
 (def param-mod-wrapper (fx p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? fx p)
-      (let ((mapped (if (>= ms/rack-mapping-selected 0)
+      (let ((mapped (if (rack-armed?)
               (rack-macro-mapping-for fx p) (param-macro-mapping-for fx p)))
           (owner (param-macro-owned? fx p)))
         (subtree :key (str key "-macro-map")
@@ -1210,7 +1210,7 @@
 (def instrument-param-mod-wrapper (p key body)
   (if (param-macro-mapping-active?)
     (if (param-macro-bindable? false p)
-      (let ((mapped (if (>= ms/rack-mapping-selected 0)
+      (let ((mapped (if (rack-armed?)
                       (rack-macro-mapping-for false p) (param-macro-mapping-for false p)))
             (owner (param-macro-owned? false p)))
         (subtree :key (str key "-macro-map")

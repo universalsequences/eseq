@@ -8081,8 +8081,7 @@ impl Editor {
     /// state. Depth-guarded; each pass either clears the deferred work or
     /// leaves it hidden again.
     fn resume_deferred_effects_for_presentation(&mut self) {
-        if self.deferred_effect_resume_depth >= 3
-            || !self.runtime.has_resumable_hidden_effect_work()
+        if self.deferred_effect_resume_depth >= 3 || !self.runtime.has_pending_visible_effect_work()
         {
             return;
         }

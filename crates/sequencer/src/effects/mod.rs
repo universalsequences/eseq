@@ -119,6 +119,13 @@ pub fn builtin_effect_name_from_project_name(name: &str) -> Option<&'static str>
         .or_else(|| dgen_builtin::find(bare).map(|builtin| builtin.name))
 }
 
+/// Whether `name` names an effect built into eseq: a built-in insert (its
+/// canonical name or a legacy alias) or a dgen built-in. Cheap: no
+/// descriptor is built.
+pub fn is_builtin_effect(name: &str) -> bool {
+    EffectDescriptor::canonical_builtin_insert_name(name).is_some() || dgen_builtin::contains(name)
+}
+
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
 

@@ -4,87 +4,68 @@
 ;; ("Library"; macros imported by the patch get the :sliders icon), and file-
 ;; backed tensor assets from the draft, user, and factory tiers. Macro rows drag
 ;; as "dgen-macro"; asset rows override that with "dgen-asset". The blue
-;; selected row always mirrors
-;; the macro view open in the patcher (SEQ.editor-open-macro); single-click an
-;; "In Patch" row to open that macro's view. Library rows only open on
-;; double-click, so click-dragging one into the patch does not navigate.
+;; selected row always mirrors the macro view open in the patcher
+;; (editor.open-macro); single-click an "In Patch" row to open that macro's
+;; view. Library rows only open on double-click, so click-dragging one into
+;; the patch does not navigate.
+;;
+;; The macros, assets and the selected asset are the host's `editor` kind
+;; (kind-bindings spec §14.2i): `editor-macro`, `editor-asset` and
+;; `asset-info` instances.
 ;;
 ;; MODULE NOTE (spec §10, S3b): this file is a RENDER ROOT — it registers the
 ;; *patch-macros* effect-buffer at top level. `import` EVALUATES its target, so
 ;; NEVER import this module from a library file; that would drag a UI root into
-;; every VM that loads the importer. Reach `patch-macros-items` bare through
-;; the identity compat alias below instead.
-;;
-;; It needs no imports of its own: everything it touches outside the file is a
-;; Rust native, a widget, or the SEQ reactive namespace (SEQ.editor-patch-macros
-;; / SEQ.editor-library-macros / SEQ.editor-assets /
-;; SEQ.editor-open-macro), none of which are
-;; module-scoped. Only `patch-macros-items` and `patch-macros-filter` are
-;; reachable from outside (Rust tests eval them by flat name); every other def
-;; is `%`-private with the now-redundant file prefix stripped.
+;; every VM that loads the importer. `patch-macros-items` and `macro-sidebar`
+;; are exported for the Rust tests, which reach them by qualified name.
 (module eseq.patch-macros)
+(import eseq.kinds :refer (editor))
+(import eseq.view-kit :refer (listed?))
 
-(export patch-macros-filter
+(export macro-sidebar
         patch-macros-items)
 
-;; The Rust sidebar tests call `(patch-macros-items)` by its flat spelling from
-;; a headerless eval; it is a function, so an identity alias covers it safely.
+;; The search box's text.
+(def-kind macro-sidebar
+  :key ()
+  :state ((filter "")))
 
-;; The search box is a named state definition — `(def x (state …))` compiles
-;; through the same path as `defstate`, so it lives in the `state_bindings`
-;; keyspace, not the mutable-plain-def hazard (m) trap, and needs no
-;; eseq.vanilla pin. A Rust test drives it with a headerless
-;; `(set! patch-macros-filter …)`; that flat write follows this alias into the
-;; qualified state binding and emits StoreState on the very same node.
-
-(def patch-macros-filter (state ""))
-
-(def match? (m)
-  (or (= patch-macros-filter "")
-      (str-contains? (get m :name) patch-macros-filter)))
+(def match? (name)
+  (or (= macro-sidebar.filter "")
+      (str-contains? name macro-sidebar.filter)))
 
 (def find-macro (name ms)
-  (nth (filter (lambda (m) (= (get m :name) name)) ms) 0))
+  (first (filter (lambda (m) (= m.name name)) ms)))
 
 (def lib-icon (m)
-  (if (get m :used) :sliders :dial))
+  (if m.used :sliders :dial))
 
 ;; :click-opens marks rows that jump to their macro view on a single click.
 ;; Only rows under "In Patch" set it — "Library" rows are primarily drag
 ;; sources, and opening a view mid-drag-start feels like a misfire.
-(def lib-leaf (m click-opens)
-  (dict :label (get m :name)
-        :name (get m :name)
-        :kind "library-macro"
-        :icon (lib-icon m)
-        :click-opens click-opens
-        :drop-target false))
+(def macro-row (m kind icon click-opens kids)
+  (let ((row (dict :label m.name
+                   :name m.name
+                   :kind kind
+                   :icon icon
+                   :click-opens click-opens
+                   :drop-target false)))
+    (if (empty? kids) row (merge row :children kids))))
 
 ;; Library macros can import other library macros; nest those too. Only
 ;; reachable from the "In Patch" call tree, so these rows open on click.
 (def lib-item (m depth)
-  (let ((kids (child-items (get m :calls) depth)))
-    (if (= (len kids) 0)
-      (lib-leaf m true)
-      (dict :label (get m :name)
-            :name (get m :name)
-            :kind "library-macro"
-            :icon (lib-icon m)
-            :click-opens true
-            :drop-target false
-            :children kids))))
+  (macro-row m "library-macro" (lib-icon m) true (child-items m.calls depth)))
 
 ;; ── Nested "In Patch" items: children = macros this macro's body calls. ──
 ;; Depth-capped so a (malformed) cyclic call graph cannot recurse forever.
 
 (def call-item (c depth)
-  (let ((local (find-macro c SEQ.editor-patch-macros)))
-    (if (not (= local nil))
+  (let ((local (find-macro c editor.patch-macros)))
+    (if local
       (local-item local depth)
-      (let ((lib (find-macro c SEQ.editor-library-macros)))
-        (if (not (= lib nil))
-          (lib-item lib depth)
-          nil)))))
+      (let ((lib (find-macro c editor.library-macros)))
+        (when lib (lib-item lib depth))))))
 
 (def child-items (calls depth)
   (if (> depth 4)
@@ -93,78 +74,61 @@
       (map (lambda (c) (call-item c (+ depth 1))) calls))))
 
 (def local-item (m depth)
-  (let ((kids (child-items (get m :calls) depth)))
-    (if (= (len kids) 0)
-      (dict :label (get m :name)
-            :name (get m :name)
-            :kind "patch-macro"
-            :icon :dial
-            :click-opens true
-            :drop-target false)
-      (dict :label (get m :name)
-            :name (get m :name)
-            :kind "patch-macro"
-            :icon :dial
-            :click-opens true
-            :drop-target false
-            :children kids))))
+  (macro-row m "patch-macro" :dial true (child-items m.calls depth)))
 
-;; Macros not called by another local macro are roots; called ones appear
-;; nested under each caller.
-(def called-by-some? (name)
-  (< 0 (len (filter
-              (lambda (m) (< 0 (len (filter (lambda (c) (= c name)) (get m :calls)))))
-              SEQ.editor-patch-macros))))
+;; Every name a local macro calls (built once per render).
+(def called-names ()
+  (reduce (lambda (all m) (append all m.calls)) (list) editor.patch-macros))
 
 (def header-row (label)
   (dict :label label :kind "header" :draggable false :drop-target false))
 
+;; A section: its header over its rows, or nothing without rows.
+(def section (title rows)
+  (if (empty? rows)
+    (list)
+    (append (list (header-row title)) rows)))
+
+;; Macros not called by another local macro are roots; called ones appear
+;; nested under each caller.
 (def nested-patch-section ()
-  (let ((roots (filter (lambda (m) (not (called-by-some? (get m :name))))
-                       SEQ.editor-patch-macros)))
-    (if (= (len roots) 0)
-      (list)
-      (append
-        (list (header-row "In Patch"))
-        (map (lambda (m) (local-item m 0)) roots)))))
+  (let ((called (called-names)))
+    (section "In Patch"
+      (map (lambda (m) (local-item m 0))
+           (filter (lambda (m) (not (listed? m.name called))) editor.patch-macros)))))
+
+;; Search active: flatten the patch's macros to the matching rows.
+(def flat-patch-section ()
+  (section "In Patch"
+    (map (lambda (m) (macro-row m "patch-macro" :dial true (list)))
+         (filter (lambda (m) (match? m.name)) editor.patch-macros))))
 
 (def lib-section ()
-  (let ((visible (filter (lambda (m) (match? m)) SEQ.editor-library-macros)))
-    (if (= (len visible) 0)
-      (list)
-      (append
-        (list (header-row "Library"))
-        (map (lambda (m) (lib-leaf m false)) visible)))))
+  (section "Library"
+    (map (lambda (m) (macro-row m "library-macro" (lib-icon m) false (list)))
+         (filter (lambda (m) (match? m.name)) editor.library-macros))))
 
-(def asset-section (assets)
-  (let ((visible (filter (lambda (asset) (match? asset)) assets)))
-    (if (= (len visible) 0)
-      (list)
-      (append (list (header-row "Assets")) visible))))
+(def asset-row (a)
+  (dict :label a.reference
+        :name a.reference
+        :kind "patcher-asset"
+        :detail a.tier
+        :tier a.tier
+        :file a.reference
+        :source-path a.source-path
+        :drag-type "dgen-asset"
+        :draggable true
+        :drop-target false))
 
-;; Search active: flatten both macro sections and assets to matching rows.
-(def flat-patch-section ()
-  (let ((visible (filter (lambda (m) (match? m)) SEQ.editor-patch-macros)))
-    (if (= (len visible) 0)
-      (list)
-      (append
-        (list (header-row "In Patch"))
-        (map (lambda (m)
-               (dict :label (get m :name)
-                     :name (get m :name)
-                     :kind "patch-macro"
-                     :icon :dial
-                     :click-opens true
-                     :drop-target false))
-             visible)))))
-
-(def items-for-assets (assets)
-  (if (= patch-macros-filter "")
-    (append (nested-patch-section) (lib-section) (asset-section assets))
-    (append (flat-patch-section) (lib-section) (asset-section assets))))
+(def asset-section ()
+  (section "Assets"
+    (map asset-row (filter (lambda (a) (match? a.reference)) editor.assets))))
 
 (def patch-macros-items ()
-  (items-for-assets SEQ.editor-assets))
+  (append
+    (if (= macro-sidebar.filter "") (nested-patch-section) (flat-patch-section))
+    (lib-section)
+    (asset-section)))
 
 (def activate (item)
   (if (or (= (get item :kind) "patch-macro")
@@ -187,9 +151,9 @@
     (text-input
       :key "search"
       :width :fill
-      :value patch-macros-filter
+      :value macro-sidebar.filter
       :placeholder "Search macros and assets..."
-      :on-change (lambda (v) (set! patch-macros-filter v))
+      :on-change (lambda (v) (set! macro-sidebar.filter v))
       :height 1.5
       :font-size 11)))
 
@@ -202,9 +166,10 @@
 
 ;; ── Asset inspector ─────────────────────────────────────────────────────
 ;; When exactly one file-backed tensor node is selected in the patcher, the
-;; host mirrors its reference + asset metadata into SEQ.editor-selected-asset
-;; (Nil otherwise); a compact panel below the tree shows the high-level shape
-;; so the index math (set * waves-per-set + wave) is patchable at a glance.
+;; host shows its reference + asset metadata as editor.selected-asset (nil
+;; otherwise); a compact panel below the tree shows the high-level shape so
+;; the index math (set * waves-per-set + wave) is patchable at a glance. An
+;; undeclared label reads empty (a count 0).
 
 (def join-names (names)
   (reduce |acc n| (if (= acc "") n (str acc ", " n)) "" names))
@@ -216,33 +181,27 @@
   (label text :font-size size :color color :bg :transparent :width :fill))
 
 (def asset-inspector (a)
-  (let ((shape (get a :shape))
-        (kind (get a :kind))
-        (sets (get a :sets))
-        (wave-names (get a :wave-names))
-        (waves-per-set (get a :waves-per-set))
-        (source (get a :source)))
-    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.45
-      (v-stack :width :fill :gap 0.18
-        (inspector-row (get a :reference) :white 9.5)
-        (if (not (= shape nil))
-          (inspector-row
-            (if (= kind nil)
-              (dims-text shape)
-              (str kind "  " (dims-text shape)))
-            :gray 9))
-        (if (not (= waves-per-set nil))
-          (inspector-row
-            (str (get a :set-count) " sets x " waves-per-set " waves/set")
-            :gray 9))
-        (if (not (= sets nil))
-          (inspector-row (join-names sets) :dim 8.5))
-        ;; Per-wave names matter most when there is no set structure to
-        ;; summarize (single-set assets like basic-shapes).
-        (if (and (not (= wave-names nil)) (= sets nil))
-          (inspector-row (join-names wave-names) :dim 8.5))
-        (if (not (= source nil))
-          (inspector-row source :dim 8))))))
+  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.45
+    (v-stack :width :fill :gap 0.18
+      (inspector-row a.reference :white 9.5)
+      (unless (empty? a.shape)
+        (inspector-row
+          (if (= a.tensor-kind "")
+            (dims-text a.shape)
+            (str a.tensor-kind "  " (dims-text a.shape)))
+          :gray 9))
+      (unless (= a.waves-per-set 0)
+        (inspector-row
+          (str a.set-count " sets x " a.waves-per-set " waves/set")
+          :gray 9))
+      (unless (empty? a.sets)
+        (inspector-row (join-names a.sets) :dim 8.5))
+      ;; Per-wave names matter most when there is no set structure to
+      ;; summarize (single-set assets like basic-shapes).
+      (when (and (not (empty? a.wave-names)) (empty? a.sets))
+        (inspector-row (join-names a.wave-names) :dim 8.5))
+      (unless (= a.source "")
+        (inspector-row a.source :dim 8)))))
 
 ;; The buffer root must stay keyless: a keyed root is annotated as an
 ;; explicit subtree root and EmitTree then routes the update as a subtree
@@ -250,14 +209,12 @@
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*patch-macros*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*patch-macros*"
-  ;; Pass the reactive fields at the render root so the effect subscribes even
-  ;; though most sidebar assembly lives in helper functions.
-  (let ((items (items-for-assets SEQ.editor-assets))
-        (selected-asset SEQ.editor-selected-asset))
+  (let ((items (patch-macros-items))
+        (selected-asset editor.selected-asset))
     (v-stack :width :fill :gap 0.4 :flex 1
       (search-row)
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-        (if (= (len items) 0)
+        (if (empty? items)
           (empty-message)
           (scroll :key "scroll" :width :fill :flex 1
             (tree
@@ -268,7 +225,7 @@
               :expand-all true
               :focusable true
               :drag-type "dgen-macro"
-              :selected-label (if (= SEQ.editor-open-macro "") nil SEQ.editor-open-macro)
+              :selected-label (if (= editor.open-macro "") nil editor.open-macro)
               :selection-follows-external true
               :activate-parents true
               ;; Single click opens the macro view for "In Patch" rows: leaf
@@ -279,5 +236,5 @@
               :on-toggle (lambda (item) (click item))
               :on-activate (lambda (item) (activate item))
               :on-modified-activate (lambda (item) (activate item))))))
-      (if (not (= selected-asset nil))
+      (when selected-asset
         (asset-inspector selected-asset)))))

@@ -1,7 +1,7 @@
 ;; Instrument panel composition for sampler, rack, modulator, and synth tracks.
 (module eseq.effects.instrument-panel)
 
-(import eseq.macro-state :as ms)
+(import eseq.macro-state :as ms :refer (macro-arm))
 (import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
@@ -178,7 +178,7 @@
     (get macro :value)))
 
 (def rack-macro-arm (macro)
-  (let ((next (if (= ms/rack-mapping-selected (get macro :id)) -1 (get macro :id))))
+  (let ((next (if (= macro-arm.rack-index (get macro :id)) -1 (get macro :id))))
     (if (< next 0)
       (ms/rack-clear-mapping-arm)
       (do
@@ -186,7 +186,7 @@
         (pc/process-map-clear)
         (set! instrument-view.mods-open false)
         (set! effect-mods.open false)
-        (set! ms/rack-mapping-selected next)
+        (set! macro-arm.rack-index next)
         ;; Hook natives register at runtime under flat names; inside a module,
         ;; reach hooks through the data-addressed flat keyspace (spec §10 e).
         (run-hook "macro-mapping-sidebar-open-hook")
@@ -198,7 +198,7 @@
     (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
-      (if (= ms/rack-mapping-selected (get macro :id)) :rack-mapping-border :mixer-strip-border)
+      (if (= macro-arm.rack-index (get macro :id)) :rack-mapping-border :mixer-strip-border)
       (v-stack :gap 0.08 :align :center
         (subtree :key (str "rack-macro-name-" (get macro :id))
           (text-input :debug-name (str "rack-macro-name-" (get macro :id))
@@ -218,7 +218,7 @@
             :plock-color-b (pc/param-plock-color-b)
             :on-change (lambda (value) (rack-macro-set track macro value))))
         (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
-          :active (if (= ms/rack-mapping-selected (get macro :id)) 1 0)
+          :active (if (= macro-arm.rack-index (get macro :id)) 1 0)
           :background-color :mixer-control-bg
           :active-background-color :rack-mapping-bg
           :border-color :transparent

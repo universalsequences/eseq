@@ -143,13 +143,13 @@ pub(crate) struct FrameDiffState {
     /// reruns when this changes.
     pub(crate) prev_editor_macro_action_fingerprint: u64,
     /// Hash of the active edit-session source; the macro sidebar values
-    /// (`editor-patch-macros` / `editor-library-macros`) republish on change.
+    /// (`editor.patch-macros` / `editor.library-macros`) republish on change.
     pub(crate) prev_editor_macro_sidebar_fingerprint: u64,
-    /// Macro view open in the patcher ("" = root), mirrored to
-    /// `SEQ.editor-open-macro` for the sidebar's selected row.
+    /// Macro view open in the patcher ("" = root), presented as
+    /// `editor.open-macro` for the sidebar's selected row.
     pub(crate) prev_editor_open_macro: String,
-    /// The selected file-backed tensor's `@file` reference, mirrored to
-    /// `SEQ.editor-selected-asset` for the sidebar's asset inspector.
+    /// The selected file-backed tensor's `@file` reference, presented as
+    /// `editor.selected-asset` for the sidebar's asset inspector.
     pub(crate) prev_editor_selected_asset: Option<String>,
     pub(crate) prev_playing: bool,
     pub(crate) prev_bpm: u32,

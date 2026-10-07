@@ -1196,7 +1196,6 @@ pub(crate) fn sync_reactive_tick(
                 cached_bus_peak_levels: &ctx.meters.cached_bus_peak_levels,
                 record_armed: &ctx.shared.record_armed,
                 active_delete_target: &ctx.shared.active_delete_target,
-                active_delete_target_version: &ctx.shared.active_delete_target_version,
                 expanded_step_projection: &ctx.shared.expanded_step_projection,
                 fx_visible,
                 sequencer_visible,
@@ -1460,11 +1459,6 @@ pub(crate) fn sync_reactive_tick(
         if delete_target_version != ctx.frame.prev_delete_target_version {
             ctx.frame.prev_delete_target_version = delete_target_version;
             let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "delete-target-version",
-                Value::Number(delete_target_version as f64),
-            );
             let multi_track_selection = {
                 let guard = ctx.shared.active_delete_target.lock().unwrap();
                 sync_mixer_delete_target_binding_fields(
@@ -1526,7 +1520,6 @@ pub(crate) fn sync_reactive_tick(
             let param_sync_revision = (!app.tracks.is_empty())
                 .then(|| capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot));
             let rt = editor.runtime_mut();
-            sync_macro_state(rt, &app);
             if app.tracks.is_empty() {
                 sync_track_topology_state(
                     rt,
@@ -1622,15 +1615,6 @@ pub(crate) fn sync_reactive_tick(
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);
             let master_rec_on = ctx.shared.master_recording.load(Ordering::Acquire);
             rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
-            rt.set_reactive(
-                "SEQ",
-                "delete-target-version",
-                Value::Number(
-                    ctx.shared
-                        .active_delete_target_version
-                        .load(Ordering::Relaxed) as f64,
-                ),
-            );
             sync_mixer_delete_target_binding_fields(
                 rt,
                 app.tracks.len(),

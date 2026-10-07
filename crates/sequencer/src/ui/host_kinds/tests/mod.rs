@@ -169,7 +169,20 @@ impl Harness {
         harness
     }
 
+    /// Apply one host command as the event loop does: the project macro
+    /// commands first, then the custom dispatch.
     fn command(&mut self, name: &str, payload: Value) {
+        use crate::host_commands::{handle_macro_host_command, MacroHostCommandOutcome};
+        let current = self.shared.current_track.load(Ordering::Relaxed);
+        let state = self.shared.state.clone();
+        match handle_macro_host_command(name, &payload, &mut self.app, &state, current) {
+            MacroHostCommandOutcome::Applied => {
+                self.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            MacroHostCommandOutcome::Ignored => return,
+            MacroHostCommandOutcome::NotMacro => {}
+        }
         let mut ctx = LoopCtx {
             sessions: &mut self.sessions,
             meters: &mut self.meters,
@@ -453,6 +466,7 @@ mod neural;
 mod panel;
 mod panel_extras;
 mod panels_view;
+mod patching_view;
 mod params;
 mod pending;
 mod piano_roll;

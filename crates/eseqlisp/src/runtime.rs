@@ -3606,9 +3606,12 @@ impl Runtime {
         self.vm.set_hidden_effect_buffer_names(names);
     }
 
-    /// True when an effect deferred while its target buffer was hidden is now
-    /// visible and waiting for a reactive cycle to resume it.
-    pub fn has_resumable_hidden_effect_work(&self) -> bool {
+    /// True when a dirty effect on a visible target waits for a reactive
+    /// cycle: one deferred while its buffer was hidden that is visible again,
+    /// or one dirtied outside the reactive registry (a kind field write).
+    /// Effects whose last run failed are not pending: they wait for an input
+    /// change.
+    pub fn has_pending_visible_effect_work(&self) -> bool {
         self.vm.has_visible_deferred_effects()
     }
 
@@ -3621,8 +3624,10 @@ impl Runtime {
         // Deferred effects for hidden buffers stay in the DAG's dirty set
         // indefinitely, so `process_dirty_reactive` would pay a full
         // `topo_sort_dirty` every idle cycle to produce no work. Skip that
-        // unless a deferred effect's target has become visible, which is the
-        // only other reason an empty-dirty cycle has anything to do.
+        // unless a dirty effect targets something visible: a deferred effect
+        // whose buffer became visible, or one a kind field write dirtied
+        // outside the registry. Those are the only other reasons an
+        // empty-dirty cycle has anything to do.
         if dirty.is_empty() && injected.is_empty() && !self.vm.has_visible_deferred_effects() {
             if trace_ui_enabled() {
                 eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
@@ -5342,6 +5347,97 @@ mod observer_tests {
             runtime.run_reactive_cycle();
             assert_eq!(*seen.borrow(), vec![Value::Number(1.0), Value::Number(2.0), Value::Number(1.0)], "{read}");
         }
+    }
+
+    /// A host kind field the host pushes (no reactive registry write) still
+    /// re-runs an observer that read it at the next reactive cycle.
+    #[test]
+    fn a_host_pushed_kind_field_reruns_its_observer_in_the_next_cycle() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-value", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            Ok(Value::Nil)
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (observe (record-value probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(2.0)]);
+    }
+
+    /// An observer whose run fails clears its dirty bit: it does not re-run
+    /// (or keep forcing reactive cycles) until an input it read changes.
+    #[test]
+    fn a_failing_observer_waits_for_an_input_change_before_rerunning() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-or-fail", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            if args[0] == Value::Number(1.0) {
+                Err("boom".to_string())
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (observe (record-or-fail probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(1.0))
+            .unwrap();
+        assert!(runtime.has_pending_visible_effect_work());
+        runtime.run_reactive_cycle();
+        assert!(
+            !runtime.has_pending_visible_effect_work(),
+            "a failed observer must not keep forcing cycles"
+        );
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(1.0)]);
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            *seen.borrow(),
+            vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)]
+        );
+    }
+
+    /// A buffer effect (not only observers and named buffers) dirtied by a
+    /// host-pushed kind field runs in the next reactive cycle.
+    #[test]
+    fn a_host_pushed_kind_field_reruns_a_buffer_effect_in_the_next_cycle() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-value", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            Ok(Value::Nil)
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (effect (record-value probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        assert!(runtime.has_pending_visible_effect_work());
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(2.0)]);
     }
 
     #[test]

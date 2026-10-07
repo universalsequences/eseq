@@ -299,8 +299,15 @@ fn push_device(
         DeviceSlot::RackSlot(_) => instrument_display_name(&model.name),
         _ => model.name.clone(),
     };
+    let builtin = match model.device {
+        DeviceSlot::Effect(_) | DeviceSlot::RackEffect { .. } | DeviceSlot::BusEffect(_) => {
+            sequencer::effects::is_builtin_effect(&model.name)
+        }
+        _ => false,
+    };
     pusher.push(id, f::DEVICE_TYPE, Value::String(model.kind));
     pusher.push(id, f::DEVICE_NAME, Value::String(model.name));
+    pusher.push(id, f::DEVICE_BUILTIN, Value::Bool(builtin));
     pusher.push(id, f::DEVICE_ENABLED, Value::Bool(model.enabled));
     pusher.push(id, f::DEVICE_CONTAINER, instance_or_nil(model.container));
     pusher.push(id, f::DEVICE_VOICES, number(model.voices as f64));

@@ -20,19 +20,14 @@ pub(crate) fn reset_midi_port(editor: &mut Editor, state: &SequencerState, port:
 }
 
 pub(crate) fn register_device_state(runtime: &mut eseqlisp::Runtime) {
-    // Presentation state only. Device changes always go through host commands;
-    // writable fields also let authoring/capture scripts preview device states.
+    // The device list, its error and whether choices are saved are the
+    // `settings` kind's (from the presented record, seeded here); `MIDI.ports`
+    // keeps each input port's device identity for `dispatch_midi_to_lisp`.
     crate::presented::seed_midi_persistent(sequencer::midi_input::service::persistent_device_ids());
-    let (_, mut fields) = crate::presented::settings_registration();
-    fields.push((
-        "ports",
-        Value::List(
-            (0..sequencer::midi_input::MAX_INPUT_PORTS)
-                .map(|_| cell(Value::Nil))
-                .collect(),
-        ),
-    ));
-    runtime.register_reactive("MIDI", fields, true);
+    let ports = (0..sequencer::midi_input::MAX_INPUT_PORTS)
+        .map(|_| cell(Value::Nil))
+        .collect();
+    runtime.register_reactive("MIDI", vec![("ports", Value::List(ports))], true);
 }
 
 fn cell(value: Value) -> Rc<RefCell<Value>> {
