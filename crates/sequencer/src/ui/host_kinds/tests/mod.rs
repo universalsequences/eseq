@@ -225,7 +225,12 @@ impl Harness {
     /// Evaluate `code` as a view would: with eseq.kinds referred (an
     /// import's `:refer` covers the source it heads).
     fn eval(&mut self, code: &str) -> Value {
-        let source = format!("{REFER}\n{code}");
+        self.eval_with(REFER, code)
+    }
+
+    /// Evaluate `code` after the `refer` prelude; panics on an error.
+    pub(super) fn eval_with(&mut self, refer: &str, code: &str) -> Value {
+        let source = format!("{refer}\n{code}");
         self.editor
             .runtime_mut()
             .eval_str(&source)
@@ -450,6 +455,7 @@ mod panels_view;
 mod params;
 mod pending;
 mod piano_roll;
+mod piano_roll_view;
 mod racks;
 mod scenes;
 mod schema;

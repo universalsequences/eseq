@@ -1396,6 +1396,43 @@ fn rack_macro_locks_set_and_clear_the_steps_that_differ_through_history() {
     assert_eq!(locks(&h), [Some(0.25), Some(0.25), None]);
 }
 
+/// A script drag of `lock-rack-macro!` on one step is one undo entry until
+/// the release; another step starts the next (eseq-0l17.58).
+#[test]
+fn a_script_drag_of_rack_macro_locks_joins_one_entry_per_step() {
+    let mut h = Harness::new();
+    h.mapped_rack_macro();
+    h.eval_panel("(def s2 (nth t2.steps 2)) (def s5 (nth t2.steps 5))");
+    let locks = |h: &Harness| {
+        let rack = h.shared.state.live_rack_track_snapshot(2).unwrap();
+        [2, 5].map(|step| rack.macros[1].plocks[step])
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in [0.25, 0.5, 0.75] {
+        h.eval_panel(&format!("(lock-rack-macro! rm (list s2) {value})"));
+        h.drain();
+    }
+    h.eval_panel("(lock-rack-macro! rm (list s5) 0.5)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1, "step 2's entry");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    h.gesture.script_param_gesture = None;
+    assert_eq!(h.app.history.undo_len(), before + 2, "one entry per step");
+    assert_eq!(locks(&h), [Some(0.75), Some(0.5)]);
+    h.undo();
+    assert_eq!(locks(&h), [Some(0.75), None]);
+    h.undo();
+    assert_eq!(locks(&h), [None, None]);
+    // No pointer: an entry per call.
+    h.eval_panel("(lock-rack-macro! rm (list s2) 0.25)");
+    h.drain();
+    h.eval_panel("(lock-rack-macro! rm (list s2) 0.5)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 2);
+}
+
 #[test]
 fn a_selected_neurons_override_shows_in_the_param_value() {
     let (mut h, slot) = Harness::with_devices();

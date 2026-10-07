@@ -9,7 +9,7 @@ use sequencer::sequencer::{
     PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS, NUM_PARAMS,
 };
 
-use super::state_values::{held_plock_value, rack_macro_name_field, rack_macro_short_name_field};
+use super::state_values::{rack_macro_name_field, rack_macro_short_name_field};
 use super::values::{list_value, map_value};
 
 pub(crate) const PIANO_ROLL_ID_STRIDE: usize = 16;
@@ -54,7 +54,7 @@ impl PianoRollFocusSpec {
     }
 
     /// Where its edits land, by name: `live`, `pattern` or `take`
-    /// (`SEQ.focus-kind`, `piano-roll.focus-kind`).
+    /// (`piano-roll.focus-kind`).
     pub(crate) fn kind_name(self) -> &'static str {
         match self {
             PianoRollFocusSpec::Live => "live",
@@ -594,7 +594,6 @@ struct PianoRollMoveItem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PianoRollDragKind {
-    Automation,
     Move,
     Resize,
 }
@@ -665,37 +664,6 @@ pub(crate) fn piano_roll_item_id(step: usize, voice_idx: usize) -> u64 {
     (step * PIANO_ROLL_ID_STRIDE + voice_idx.min(PIANO_ROLL_ID_STRIDE - 1)) as u64
 }
 
-pub(crate) fn build_piano_roll_lanes_value() -> Value {
-    list_value(
-        (PIANO_ROLL_MIN_TRANSPOSE..=PIANO_ROLL_MAX_TRANSPOSE)
-            .rev()
-            .map(|transpose| {
-                let pitch_class = (transpose + 60).rem_euclid(12);
-                let is_black_key = matches!(pitch_class, 1 | 3 | 6 | 8 | 10);
-                let label = if pitch_class == 0 {
-                    format!("C{}", 4 + transpose.div_euclid(12))
-                } else {
-                    String::new()
-                };
-                map_value([
-                    (
-                        "id",
-                        Value::Number((PIANO_ROLL_MAX_TRANSPOSE - transpose) as f64),
-                    ),
-                    ("label", Value::String(label)),
-                    (
-                        "sidebar-bg",
-                        Value::Keyword(if is_black_key { "black" } else { "white" }.to_string()),
-                    ),
-                    (
-                        "label-fg",
-                        Value::Keyword(if is_black_key { "white" } else { "black" }.to_string()),
-                    ),
-                ])
-            }),
-    )
-}
-
 fn piano_roll_find_note_index(
     lanes: &PianoRollLanes,
     step: usize,
@@ -718,53 +686,13 @@ fn piano_roll_find_note_index(
         })
 }
 
-pub(crate) fn build_piano_roll_items_value(
-    lanes: &PianoRollLanes,
-    selected: &Arc<Mutex<HashSet<u64>>>,
-) -> Value {
-    let num_steps = lanes.num_steps();
-    let selected = selected.lock().unwrap();
-    let mut items = Vec::new();
-    for (step, notes) in lanes.note_entries_batch(num_steps).into_iter().enumerate() {
-        for (voice_idx, note) in notes.into_iter().enumerate() {
-            let id = piano_roll_item_id(step, voice_idx);
-            items.push(map_value([
-                ("id", Value::Number(id as f64)),
-                (
-                    "lane",
-                    Value::Number(piano_roll_transpose_to_lane(note.transpose) as f64),
-                ),
-                ("start", Value::Number((step as f32 + note.delay) as f64)),
-                (
-                    "end",
-                    Value::Number((step as f32 + note.delay + note.duration) as f64),
-                ),
-                ("selected", Value::Bool(selected.contains(&id))),
-                ("label", Value::String(piano_roll_note_label(&note))),
-            ]));
-        }
-    }
-    list_value(items)
-}
-
-pub(crate) fn build_piano_roll_selection_value(selected: &Arc<Mutex<HashSet<u64>>>) -> Value {
-    let mut ids: Vec<u64> = selected.lock().unwrap().iter().copied().collect();
-    ids.sort_unstable();
-    list_value(ids.into_iter().map(|id| Value::Number(id as f64)))
-}
-
-// ── Automation lane (bead eseq-2k9p.21) ────────────────────────────────────
+// ── Tracker automation columns ────────────────────────────────────────────
 //
-// The lane under the piano roll shows ONE parameter across the focus axis:
-// every triggered step contributes a point (its lock, or the gray base value
-// in force without one) spanning the note's duration; an off-step device
-// lock contributes a bare point, since it holds until the next lock or
-// trigger. Lisp owns the selection as the pinned
-// `eseq.vanilla/piano-roll-automation-param` key and asks for a republish
-// through `piano-roll-automation-refresh`; every other publish site already
-// funnels through `sync_piano_roll_state`.
-
-pub(crate) const PIANO_ROLL_AUTOMATION_DEFAULT_KEY: &str = "step-param:1";
+// The tracker package draws one column per parameter that carries a lock
+// (`SEQ.track-automation`, `SEQ.tracker-rows`, `SEQ.track-lock-targets`),
+// addressed the way `set-track-plock-entry` expects. The piano roll's
+// automation lane is a view over the kinds (`piano-roll.steps`, the device
+// params' and rack macros' step locks; eseq-0l17.16).
 
 /// A lane-selectable parameter, addressed the way `set-track-plock-entry`
 /// expects (`target` + `slot-idx` / `param-idx`).
@@ -792,27 +720,6 @@ impl PianoRollAutomationTarget {
                 param_idx,
             } => format!("midi-fx:{slot_idx}:{param_idx}"),
         }
-    }
-
-    pub(crate) fn parse(key: &str) -> Option<Self> {
-        let mut parts = key.split(':');
-        let target = parts.next()?;
-        let mut next = || parts.next()?.parse::<usize>().ok();
-        let parsed = match target {
-            "step-param" => Self::StepParam(*StepParam::ALL.get(next()?)?),
-            "instrument" => Self::Instrument { param_idx: next()? },
-            "effect" => Self::Effect {
-                slot_idx: next()?,
-                param_idx: next()?,
-            },
-            "rack-macro" => Self::RackMacro { macro_idx: next()? },
-            "midi-fx" => Self::MidiFx {
-                slot_idx: next()?,
-                param_idx: next()?,
-            },
-            _ => return None,
-        };
-        parts.next().is_none().then_some(parsed)
     }
 
     fn target_name(self) -> &'static str {
@@ -1020,52 +927,6 @@ fn automation_name_fields(
         entries.push(("label-field", Value::String(rack_macro_name_field(track, macro_idx))));
         entries.push(("short-field", Value::String(rack_macro_short_name_field(track, macro_idx))));
     }
-}
-
-fn automation_param_row(
-    track: usize,
-    target: PianoRollAutomationTarget,
-    scale: &AutomationScale,
-    locked_anywhere: bool,
-) -> Value {
-    let mut entries = vec![
-        ("key", Value::String(target.key())),
-        ("label", Value::String(scale.label.clone())),
-        ("group", Value::String(scale.group.clone())),
-        ("target", Value::String(target.target_name().to_string())),
-        ("locked", Value::Bool(locked_anywhere)),
-    ];
-    automation_name_fields(&mut entries, track, target);
-    if let Some(slot_idx) = target.slot_idx() {
-        entries.push(("slot-idx", Value::Number(slot_idx as f64)));
-    }
-    if let Some(param_idx) = target.param_idx() {
-        entries.push(("param-idx", Value::Number(param_idx as f64)));
-    }
-    map_value(entries)
-}
-
-/// The lane's selectable parameters: the visible step params always, plus
-/// every device param that carries a lock somewhere in the live pattern (the
-/// Ableton "automated controls" list — never the whole parameter space).
-pub(crate) fn build_piano_roll_automation_params_value(
-    app: &sequencer::app::App,
-    state: &SequencerState,
-    track: usize,
-) -> Value {
-    let mut rows = Vec::new();
-    for param in StepParam::VISIBLE {
-        let target = PianoRollAutomationTarget::StepParam(param);
-        if let Some(scale) = automation_scale(app, state, track, target) {
-            rows.push(automation_param_row(track, target, &scale, true));
-        }
-    }
-    for target in automation_device_targets(app, state, track) {
-        if let Some(scale) = automation_scale(app, state, track, target) {
-            rows.push(automation_param_row(track, target, &scale, true));
-        }
-    }
-    list_value(rows)
 }
 
 /// Every device parameter on `track` that carries at least one p-lock in the
@@ -1497,8 +1358,8 @@ fn automation_column_row(
 
 /// Where `step`'s notes sound on the focus axis (the automation lane's
 /// point): from its earliest note's onset to where its last note ends;
-/// `(step, step)` when it holds none. Shared by the legacy lane and the
-/// host kinds' `focus-step.start` / `end`.
+/// `(step, step)` when it holds none: the host kinds' `focus-step.start` /
+/// `end`.
 pub(crate) fn piano_roll_step_span(step: usize, notes: &[PianoRollNote]) -> (f32, f32) {
     let at = step as f32;
     let Some(delay) = notes.iter().map(|note| note.delay).reduce(f32::min) else {
@@ -1509,134 +1370,6 @@ pub(crate) fn piano_roll_step_span(step: usize, notes: &[PianoRollNote]) -> (f32
         .map(|note| at + note.delay + note.duration)
         .fold(start, f32::max);
     (start, end)
-}
-
-/// The lane body for `key`: scale, edit permission and one point per
-/// contributing step. Falls back to velocity when the key no longer resolves
-/// (the lock that put a device param in the list was cleared, or the track's
-/// device changed), so the lane never goes blank under a stale selection.
-pub(crate) fn build_piano_roll_automation_value(
-    app: &sequencer::app::App,
-    state: &SequencerState,
-    lanes: &PianoRollLanes,
-    key: &str,
-) -> Value {
-    let track = lanes.track();
-    let default_target = PianoRollAutomationTarget::StepParam(StepParam::Velocity);
-    let (target, scale) = PianoRollAutomationTarget::parse(key)
-        .and_then(|target| Some((target, automation_scale(app, state, track, target)?)))
-        .or_else(|| {
-            Some((
-                default_target,
-                automation_scale(app, state, track, default_target)?,
-            ))
-        })
-        .unwrap_or((
-            default_target,
-            AutomationScale {
-                label: StepParam::Velocity.label().to_string(),
-                group: "step".to_string(),
-                min: StepParam::Velocity.min(),
-                max: StepParam::Velocity.max(),
-                default: StepParam::Velocity.default_value(),
-                increment: StepParam::Velocity.increment(),
-            },
-        ));
-    // Device locks remain live-pattern-only; step parameters use the
-    // focus-aware piano-roll mutation path for every source kind.
-    let live = matches!(lanes.focus(), PianoRollFocusSpec::Live);
-    let is_step_param = matches!(target, PianoRollAutomationTarget::StepParam(_));
-    let num_steps = lanes.num_steps();
-    let mut points = Vec::new();
-    if is_step_param || live {
-        let has_any_lock = !is_step_param
-            && (0..num_steps.min(MAX_STEPS))
-                .any(|step| automation_device_lock(app, state, track, target, step).is_some());
-        for (step, notes) in lanes.note_entries_batch(num_steps).into_iter().enumerate() {
-            let active = !notes.is_empty();
-            let (value, locked) = match target {
-                PianoRollAutomationTarget::StepParam(param) => {
-                    if !active {
-                        continue;
-                    }
-                    // Step params are dense (every note has one), so they
-                    // always draw as locked; gray is reserved for a DEVICE
-                    // base value.
-                    (lanes.step_param(step, param), true)
-                }
-                _ => {
-                    let own = automation_device_lock(app, state, track, target, step);
-                    match own {
-                        Some(value) => (value, true),
-                        None if active => {
-                            let held = held_plock_value(state, track, step, has_any_lock, |s| {
-                                automation_device_lock(app, state, track, target, s)
-                            });
-                            (held.unwrap_or(scale.default), false)
-                        }
-                        None => continue,
-                    }
-                }
-            };
-            let (start, end) = piano_roll_step_span(step, &notes);
-            points.push(map_value([
-                ("step", Value::Number(step as f64)),
-                ("start", Value::Number(start as f64)),
-                ("end", Value::Number(end as f64)),
-                ("value", Value::Number(value as f64)),
-                ("locked", Value::Bool(locked)),
-                ("active", Value::Bool(active)),
-            ]));
-        }
-    }
-    let mut entries = vec![
-        ("key", Value::String(target.key())),
-        ("label", Value::String(scale.label)),
-        ("group", Value::String(scale.group)),
-        ("target", Value::String(target.target_name().to_string())),
-        ("min", Value::Number(scale.min as f64)),
-        ("max", Value::Number(scale.max as f64)),
-        ("default", Value::Number(scale.default as f64)),
-        ("increment", Value::Number(scale.increment as f64)),
-        ("editable", Value::Bool(is_step_param || live)),
-        ("points", list_value(points)),
-    ];
-    automation_name_fields(&mut entries, track, target);
-    if let Some(slot_idx) = target.slot_idx() {
-        entries.push(("slot-idx", Value::Number(slot_idx as f64)));
-    }
-    if let Some(param_idx) = target.param_idx() {
-        entries.push(("param-idx", Value::Number(param_idx as f64)));
-    }
-    map_value(entries)
-}
-
-/// The lane's selected-parameter key as Lisp holds it (flat spelling of the
-/// pinned `eseq.vanilla/piano-roll-automation-param`), velocity by default.
-fn piano_roll_automation_key(rt: &Runtime) -> String {
-    match rt.global_value("piano-roll-automation-param") {
-        Some(Value::String(key)) if !key.is_empty() => key,
-        _ => PIANO_ROLL_AUTOMATION_DEFAULT_KEY.to_string(),
-    }
-}
-
-pub(crate) fn sync_piano_roll_automation_state(
-    rt: &mut Runtime,
-    app: &sequencer::app::App,
-    state: &SequencerState,
-    lanes: &PianoRollLanes,
-) {
-    let key = piano_roll_automation_key(rt);
-    rt.set_reactive(
-        "SEQ",
-        "piano-roll-automation-params",
-        build_piano_roll_automation_params_value(app, state, lanes.track()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "piano-roll-automation",
-        build_piano_roll_automation_value(app, state, lanes, &key),
-    );
 }
 
 /// `SEQ.track-grid-playhead-<t>`: one 0/1 per tracker grid row (the grid is
@@ -1741,147 +1474,21 @@ pub(crate) fn sync_track_automation_state(
     dirty
 }
 
-/// Refresh the piano roll's reactive surfaces from the resolved focus
-/// (spec 3.5): items and selection, plus `SEQ.focus-num-steps` (the focus
-/// axis length — `SEQ.tp-num-steps` keeps meaning the live value until the
-/// step grid is ported) and `SEQ.focus-label` for the header.
-pub(crate) fn sync_piano_roll_state(
-    rt: &mut Runtime,
-    app: &sequencer::app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<u64>>>,
-) {
-    let focus = PianoRollFocusSpec::from_focus(app.track_edit_focus(track));
-    let lanes = PianoRollLanes::new(state, track, focus);
-    rt.set_reactive(
-        "SEQ",
-        "focus-num-steps",
-        Value::Number(app.focus_num_steps(track) as f64),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "focus-label",
-        Value::String(app.focus_label(track).unwrap_or_default()),
-    );
-    // Whether the focus is the live mirror. The loop bar's length write is
-    // still live-track-shaped (`seq-set-track-param :num-steps`), so a
-    // pinned focus must keep it read-only until slice C lands the
-    // pattern-addressed write — otherwise the band would DISPLAY the pinned
-    // length while EDITING the live pattern.
-    rt.set_reactive(
-        "SEQ",
-        "focus-live",
-        Value::Bool(matches!(focus, PianoRollFocusSpec::Live)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "focus-kind",
-        Value::Keyword(focus.kind_name().to_string()),
-    );
-    // The pinned CLIP's source kind (:none/:pattern/:take), independent of
-    // the resolved write focus: a pinned clip whose pattern is the effective
-    // one still shows clip-shaped surfaces (overlay, band slide, panel).
-    rt.set_reactive(
-        "SEQ",
-        "focus-clip-kind",
-        Value::Keyword(
-            app.focus_clip_source_kind(track)
-                .unwrap_or("none")
-                .to_string(),
-        ),
-    );
-    // Loop-window overlay (spec 5): start marker at the clip's offset, the
-    // played window when the span is under one source pass, repeat badge
-    // when it covers several. All sentinel-shaped for the float channels.
-    let (marker, span, repeat) = piano_roll_window(app, track);
-    rt.set_reactive("SEQ", "focus-window-marker", Value::Number(marker));
-    rt.set_reactive(
-        "SEQ",
-        "focus-window-span",
-        match span {
-            Some((start, end)) => list_value([Value::Number(start), Value::Number(end)]),
-            None => Value::Nil,
-        },
-    );
-    rt.set_reactive("SEQ", "focus-window-repeat", Value::Number(repeat));
-    // Clip-panel fields (spec 6): Start/End/Offset for the pinned clip,
-    // Nil-shaped when hidden (follow mode).
-    let clip_fields = app.focus_clip_fields(track);
-    rt.set_reactive(
-        "SEQ",
-        "focus-clip-start",
-        clip_fields
-            .map(|(start, _, _)| Value::Number(start))
-            .unwrap_or(Value::Nil),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "focus-clip-end",
-        clip_fields
-            .map(|(_, end, _)| Value::Number(end))
-            .unwrap_or(Value::Nil),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "focus-clip-offset",
-        clip_fields
-            .map(|(_, _, offset)| Value::Number(offset))
-            .unwrap_or(Value::Nil),
-    );
-    sync_piano_roll_note_state(rt, &lanes, selected);
-    sync_piano_roll_automation_state(rt, app, state, &lanes);
-    sync_track_automation_state(rt, app, state);
-}
-
-/// The lanes-level half of `sync_piano_roll_state`: items, selection, and the
-/// pending view fit. Split out so tests can drive it without an `App`.
-pub(crate) fn sync_piano_roll_note_state(
-    rt: &mut Runtime,
-    lanes: &PianoRollLanes,
-    selected: &Arc<Mutex<HashSet<u64>>>,
-) {
-    rt.set_reactive(
-        "SEQ",
-        "piano-roll-items",
-        build_piano_roll_items_value(lanes, selected),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "piano-roll-selection",
-        build_piano_roll_selection_value(selected),
-    );
-    apply_pending_piano_roll_fit(rt);
-}
-
-/// Publish the piano roll's own playhead channel (spec 3.3.4): the live
-/// playhead in follow mode, a clip-relative position while the song sounds a
-/// pinned focus, `-1` (hidden) otherwise.
-pub(crate) fn sync_piano_roll_playhead(
-    rt: &mut Runtime,
-    app: &sequencer::app::App,
-    track: usize,
-    live_playhead: usize,
-) -> bool {
-    let value = app
-        .focus_playhead_step(track, live_playhead)
-        .unwrap_or(-1.0);
-    rt.set_reactive("SEQ", "piano-roll-playhead", Value::Number(value))
-        .effects_dirty
-}
-
-fn apply_pending_piano_roll_fit(rt: &mut Runtime) {
-    if !matches!(
-        rt.global_value("piano-roll-fit-pending"),
-        Some(Value::Bool(true))
-    ) {
-        return;
-    }
+/// Let the piano roll view fit the notes of a track it waits for
+/// (`eseq.piano-roll/piano-roll-apply-pending-fit`, a no-op unless a fit is
+/// pending for the track the piano roll now shows). The host kinds call it
+/// after each note sync, as the notes of a newly shown track arrive.
+/// Returns whether it fitted (the view's state moved).
+pub(crate) fn apply_pending_piano_roll_fit(rt: &mut Runtime) -> bool {
     let Some(callback) = rt.global_value("eseq.piano-roll/piano-roll-apply-pending-fit") else {
-        return;
+        return false;
     };
-    if let Err(error) = rt.invoke(callback, vec![]) {
-        eprintln!("piano-roll pending fit failed: {error:?}");
+    match rt.invoke(callback, vec![]) {
+        Ok(fitted) => fitted == Some(Value::Bool(true)),
+        Err(error) => {
+            eprintln!("piano-roll pending fit failed: {error:?}");
+            false
+        }
     }
 }
 
@@ -1958,8 +1565,6 @@ pub(crate) enum PianoRollGestureCommand {
 pub(crate) fn piano_roll_gesture_command(action: &Value) -> Option<PianoRollGestureCommand> {
     let map = cloned_map(action).ok()?;
     match value_as_keyword_or_string(map.get("type"))?.as_str() {
-        "update-automation-step-param" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Automation)),
-        "finish-automation-step-param" => Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Automation)),
         "move-items-absolute" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Move)),
         "resize-item-absolute" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Resize)),
         "finish-move-items" => Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Move)),
@@ -1976,9 +1581,6 @@ pub(crate) fn piano_roll_gesture_touched_steps(
     let map = cloned_map(action)?;
     let action_type = value_as_keyword_or_string(map.get("type"))
         .ok_or_else(|| "piano roll action missing :type".to_string())?;
-    if action_type == "update-automation-step-param" {
-        return automation_step_edit(lanes, &map).map(|(step, _, _)| vec![step]);
-    }
     let mut ids = parse_piano_roll_ids(map.get("ids"));
     if ids.is_empty() {
         if let Some(id) = value_as_u64(map.get("id")) {
@@ -2233,7 +1835,7 @@ pub(crate) fn apply_piano_roll_action_with_clipboard(
     let num_steps = lanes.num_steps();
 
     match action_type.as_str() {
-        "set-automation-step-param" | "update-automation-step-param" => {
+        "set-automation-step-param" => {
             let (step, param, value) = automation_step_edit(lanes, &action)?;
             lanes.set_step_param(step, param, value);
             Ok("Edited piano-roll automation".to_string())

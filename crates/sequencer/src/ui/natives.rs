@@ -3302,36 +3302,6 @@ pub(crate) fn init_runtime(
                         build_steps_value(&state, 0)
                     },
                 ),
-                ("piano-roll-lanes", build_piano_roll_lanes_value()),
-                ("piano-roll-automation-params", Value::List(vec![])),
-                ("piano-roll-automation", Value::Nil),
-                (
-                    "piano-roll-items",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_piano_roll_items_value(
-                            &PianoRollLanes::live(&state, 0),
-                            &piano_roll_selection,
-                        )
-                    },
-                ),
-                (
-                    "piano-roll-selection",
-                    build_piano_roll_selection_value(&piano_roll_selection),
-                ),
-                ("focus-num-steps", Value::Number(16.0)),
-                ("focus-label", Value::String(String::new())),
-                ("focus-live", Value::Bool(true)),
-                ("focus-kind", Value::Keyword("live".to_string())),
-                ("focus-clip-kind", Value::Keyword("none".to_string())),
-                ("focus-window-marker", Value::Number(-1.0)),
-                ("focus-window-span", Value::Nil),
-                ("focus-window-repeat", Value::Number(0.0)),
-                ("focus-clip-start", Value::Nil),
-                ("focus-clip-end", Value::Nil),
-                ("focus-clip-offset", Value::Nil),
-                ("piano-roll-playhead", Value::Number(-1.0)),
                 (
                     "velocities",
                     if track_count == 0 {

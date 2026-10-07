@@ -10,7 +10,7 @@
 //! and changes nothing; anything else, an index past the source's length or
 //! a field a focus step does not set, is an error that changes nothing. The
 //! setter goes through the piano roll's focus-aware history
-//! (`app::edit::apply_recorded_focus_step_mutation`, as the legacy lane's
+//! (`app::edit::apply_recorded_focus_step_mutation`, as the tracker's
 //! `set-automation-step-param`: one undo entry, undo restores; a transpose
 //! or duration moves the step's chord notes with it) and lands like the
 //! piano roll's edits ([`piano_roll_edit_landed`]). A transpose or delay
@@ -20,8 +20,8 @@
 //!
 //! Script drags ([`super::ScriptEdit`]): while the pointer is down every
 //! focus step `set!` of one focus (any field, any step) joins ONE undo entry
-//! (`app::edit::focus_step_param_drag`, the shape of the legacy lane's
-//! `update-automation-step-param` gesture); Esc rolls it back (the notes it
+//! (`app::edit::focus_step_param_drag`, the shape of the piano roll's note
+//! drag gestures); Esc rolls it back (the notes it
 //! moved then get fresh handles, as after an undo). With the pointer up
 //! each `set!` is its own entry.
 

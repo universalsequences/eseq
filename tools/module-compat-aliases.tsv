@@ -319,14 +319,9 @@ piano-roll-action	eseq.piano-roll/piano-roll-action	content/ui/piano-roll.lisp
 piano-roll-apply-pending-fit	eseq.piano-roll/piano-roll-apply-pending-fit	content/ui/piano-roll.lisp
 piano-roll-arrangement-mode?	eseq.piano-roll/piano-roll-arrangement-mode?	content/ui/piano-roll.lisp
 piano-roll-default-pane-height	eseq.seq-step-tabs/piano-roll-default-pane-height	content/ui/seq-step-tabs.lisp
-piano-roll-lane-height	eseq.piano-roll/piano-roll-lane-height	content/ui/piano-roll.lisp
-piano-roll-lane-scroll	eseq.piano-roll/piano-roll-lane-scroll	content/ui/piano-roll.lisp
-piano-roll-max-lane-scroll	eseq.piano-roll/piano-roll-max-lane-scroll	content/ui/piano-roll.lisp
 piano-roll-placement	eseq.seq-step-tabs/piano-roll-placement	content/ui/seq-step-tabs.lisp
 piano-roll-request-fit	eseq.piano-roll/piano-roll-request-fit	content/ui/piano-roll.lisp
 piano-roll-request-fit-for-track	eseq.piano-roll/piano-roll-request-fit-for-track	content/ui/piano-roll.lisp
-piano-roll-view-duration	eseq.piano-roll/piano-roll-view-duration	content/ui/piano-roll.lisp
-piano-roll-view-start	eseq.piano-roll/piano-roll-view-start	content/ui/piano-roll.lisp
 playhead-page	eseq.seq-core-state/playhead-page	content/ui/seq-core-state.lisp
 process-map-active?	eseq.effects.param-controls/process-map-active?	content/ui/effects/param-controls.lisp
 process-map-arm-port	eseq.effects.param-controls/process-map-arm-port	content/ui/effects/param-controls.lisp

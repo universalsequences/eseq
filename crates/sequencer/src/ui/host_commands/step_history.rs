@@ -336,9 +336,8 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
         }
-        // The lane changed its selected parameter (a Lisp-side pinned def):
-        // republish through the ordinary piano-roll sync so the lane body
-        // follows the new key.
+        // The tracker package opened: publish `SEQ.track-automation` (its
+        // p-lock columns) now rather than on the next edit.
         "piano-roll-automation-refresh" => {
             ui_invalidations.push(UiInvalidation::PianoRoll {
                 track: current_track.load(Ordering::Relaxed),
@@ -2120,7 +2119,6 @@ mod tests {
                     current_track_idx: TRACK,
                     selected_steps: &self.selected_steps,
                     selected_neural_neurons: &neural,
-                    piano_roll_selection: &self.piano_roll_selection,
                     accumulator_names: &self.accumulator_names,
                     cached_track_peak_levels: &peaks,
                     cached_bus_peak_levels: &bus_peaks,
@@ -2171,24 +2169,14 @@ mod tests {
             }
         }
 
+        /// The lanes of the edited step's notes (lane 0 is the highest
+        /// pitch), as the host kinds read them for `piano-roll.notes`.
         fn piano_roll_lanes(&self) -> Vec<f64> {
-            match self
-                .editor
-                .runtime()
-                .reactive_field_value("SEQ", "piano-roll-items")
-            {
-                Some(Value::List(items)) => items
-                    .iter()
-                    .filter_map(|item| match &*item.borrow() {
-                        Value::Map(map) => map.get("lane").and_then(|cell| match &*cell.borrow() {
-                            Value::Number(lane) => Some(*lane),
-                            _ => None,
-                        }),
-                        _ => None,
-                    })
-                    .collect(),
-                other => panic!("SEQ.piano-roll-items should be a list, got {other:?}"),
-            }
+            (PianoRollLanes::live(&self.state, TRACK)
+                .note_entries(STEP)
+                .iter())
+            .map(|note| f64::from(PIANO_ROLL_MAX_TRANSPOSE) - f64::from(note.transpose))
+            .collect()
         }
 
         fn nested_list_bool(&self, field: &str, outer: usize, inner: usize) -> bool {
@@ -2228,7 +2216,7 @@ mod tests {
     ///     `seqv-track-param-values` for every non-current expanded lane.
     ///   - `seq-track-step-param-{slider,haptic}-{track}-{mode}-{step}`.
     ///   - `fx-step-value-{param}` — the number-picker readout being dragged.
-    ///   - `SEQ.piano-roll-items` — note pitch comes from the step transpose.
+    ///   - the piano roll's notes — note pitch comes from the step transpose.
     #[test]
     fn set_step_param_publishes_every_step_panel_surface_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();

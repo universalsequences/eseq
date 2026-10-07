@@ -68,8 +68,8 @@ impl App {
 
     /// The focused source's step-axis length (spec 3.5): pattern targets use
     /// their `num_steps`, takes their playable `total_len_steps`. Published as
-    /// `SEQ.focus-num-steps` — a sibling of `SEQ.tp-num-steps`, which keeps
-    /// meaning the live value until the step grid is ported.
+    /// `piano-roll.focus-num-steps` (the track's own length is
+    /// `track.num-steps`).
     pub fn focus_num_steps(&self, track: usize) -> usize {
         match self.track_edit_focus(track) {
             EditFocus::Live { track } => self

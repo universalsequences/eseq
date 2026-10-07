@@ -15,6 +15,9 @@ merge-key coalesced), `arr_clip_slide_offset` band slide, window overlay
 (`:window-marker`/`:window-span`/`:window-repeat`). Slice D: clip panel
 column inside the `*piano-roll*` buffer (`focus_clip_fields`,
 `arr_clip_set_offset`, `focus-clip-resize`/`focus-set-offset`).
+Since the kind-bindings port of the piano roll (eseq-0l17.16) the
+`SEQ.focus-*` and `SEQ.piano-roll-*` fields named below are the `piano-roll`
+and `note` kinds' fields (`docs/kind-bindings-spec.md` §14.2j).
 
 Rev 3 adds the arrangement authoring follow-up: double-clicking empty space
 in a track lane mints a silent take-backed clip over the widget's default

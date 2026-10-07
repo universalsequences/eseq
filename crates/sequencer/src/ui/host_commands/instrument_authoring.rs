@@ -37,7 +37,6 @@ pub(super) fn handle(
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -3065,7 +3064,6 @@ pub(super) fn handle(
                                     &mut *ctx.track_names,
                                     restored_track,
                                     &selected_steps,
-                                    &piano_roll_selection,
                                     &accumulator_names,
                                     &record_armed,
                                     &ctx.meters.cached_track_peak_levels,

@@ -115,7 +115,6 @@ fn sync_after_track_topology_delete(
         ctx.track_names,
         new_idx,
         &ctx.shared.selected_steps,
-        &ctx.shared.piano_roll_selection,
         &ctx.shared.accumulator_names,
         &ctx.shared.record_armed,
         &ctx.meters.cached_track_peak_levels,

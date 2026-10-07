@@ -15536,61 +15536,6 @@ use panel_kinds_seed::*;
         );
     }
 
-    // Bead eseq-2k9p.21: the piano-roll automation lane publishes one point
-    // per triggered step for the selected parameter — its lock, or the gray
-    // base value in force without one — plus the picker rows (step params
-    // always, device params only once they carry a lock somewhere).
-    #[test]
-    fn piano_roll_take_automation_edits_chunk_with_undo() {
-        use super::super::piano_roll::{
-            build_piano_roll_automation_value, PianoRollFocusSpec, PianoRollLanes,
-        };
-        use sequencer::sequencer::{ProjectArrangement, MAX_STEPS};
-        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        let mut app = test_app_for_track_visual_state(state.clone());
-        app.arr_replace(ProjectArrangement::new(1, 128.0)).unwrap();
-        app.set_arrangement_view_visible(true);
-        let (take, _) = app.arr_empty_take_clip_create(0, 0.0, 128.0).unwrap();
-        let before = StepParam::Velocity.default_value();
-        let chunks = state.track_take(0, take).unwrap().chunks;
-        let lanes = PianoRollLanes::new(&state, 0, PianoRollFocusSpec::Take(take));
-        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "step-param:1");
-        let Value::Map(lane) = lane else { panic!("lane map") };
-        assert_eq!(value_map_bool(&lane, "editable"), Some(true));
-        let payload = |kind: &str, value| map_value([
-            ("track", Value::Number(0.0)),
-            ("action", map_value([
-                ("type", Value::Keyword(kind.into())),
-                ("step", Value::Number(MAX_STEPS as f64)),
-                ("param-idx", Value::Number(StepParam::Velocity.index() as f64)),
-                ("value", Value::Number(value)),
-            ])),
-        ]);
-        let selection = Arc::new(Mutex::new(HashSet::new()));
-        let moving = Arc::new(Mutex::new(None));
-        let mut gesture = None;
-        for value in [0.5, 0.25] {
-            super::super::history_commands::apply_piano_roll_gesture_update(
-                &mut app, &selection, &moving, &mut gesture,
-                &payload("update-automation-step-param", value),
-            ).unwrap();
-        }
-        super::super::history_commands::finish_piano_roll_gesture(
-            &mut app, &moving, &mut gesture,
-            &payload("finish-automation-step-param", 0.25),
-        ).unwrap();
-        let velocity = |pattern| state.with_pool_pattern(0, pattern, |data| {
-            data.step_data[0][StepParam::Velocity.index()]
-        }).unwrap();
-        assert_eq!(velocity(chunks[0]), before);
-        assert_eq!(velocity(chunks[1]), 0.25);
-        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Velocity), before);
-        app::edit::undo(&mut app);
-        assert_eq!(velocity(chunks[1]), before);
-        app::edit::redo(&mut app);
-        assert_eq!(velocity(chunks[1]), 0.25);
-    }
-
     #[test]
     fn track_automation_columns_follow_locks_and_gate_on_the_lisp_flag() {
         use super::super::piano_roll::{
@@ -15797,145 +15742,6 @@ use panel_kinds_seed::*;
             ),
             "the picker list rides the same gate"
         );
-    }
-
-    #[test]
-    fn piano_roll_automation_publishes_step_params_and_device_locks() {
-        use super::super::piano_roll::{
-            build_piano_roll_automation_params_value, build_piano_roll_automation_value,
-            PianoRollLanes,
-        };
-        let instrument = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = instrument
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let effect = sequencer::effects::EffectDescriptor::builtin_filter();
-        let state = Arc::new(SequencerState::new(
-            1,
-            vec![vec![sequencer::effects::EffectSlotState::new(&effect, 0)]],
-        ));
-        state.pattern.track_params[0].set_num_steps(16);
-        state.pattern.instrument_slots[0].apply_descriptor(&instrument, 0);
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = app::App::new(
-            state.clone(),
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        app.tracks = vec!["Track 1".to_string()];
-        app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        app.graph.instrument_descriptors = vec![instrument.clone()];
-        app.graph.effect_descriptors = vec![vec![effect.clone()]];
-
-        state.pattern.patterns[0].set_step_active(0, true);
-        state.pattern.patterns[0].set_step_active(4, true);
-        state.pattern.step_data[0].set(4, StepParam::Velocity, 0.5);
-        state.pattern.step_data[0].set(4, StepParam::Duration, 2.0);
-
-        let lanes = PianoRollLanes::live(&state, 0);
-
-        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
-        assert!(
-            params
-                .iter()
-                .all(|row| value_map_string(row, "target").as_deref() == Some("step-param")),
-            "no device lock yet, so only step params are offered: {params:?}"
-        );
-        assert_eq!(
-            value_map_string(&params[1], "key").as_deref(),
-            Some("step-param:1"),
-            "velocity is the default lane key"
-        );
-
-        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "step-param:1");
-        let Value::Map(lane_map) = &lane else {
-            panic!("lane is a map")
-        };
-        assert_eq!(value_map_string(&lane_map, "label").as_deref(), Some("Velocity"));
-        assert_eq!(value_map_number(&lane_map, "max"), Some(1.0));
-        let points = value_list_maps(&lane_map["points"].borrow().clone());
-        assert_eq!(points.len(), 2, "one point per triggered step: {points:?}");
-        assert_eq!(value_map_number(&points[0], "step"), Some(0.0));
-        assert_eq!(
-            value_map_number(&points[0], "value"),
-            Some(StepParam::Velocity.default_value() as f64)
-        );
-        assert_eq!(
-            value_map_bool(&points[0], "locked"),
-            Some(true),
-            "step params always draw in the track color"
-        );
-        assert_eq!(value_map_number(&points[1], "value"), Some(0.5));
-        assert_eq!(value_map_number(&points[1], "start"), Some(4.0));
-        assert_eq!(
-            value_map_number(&points[1], "end"),
-            Some(6.0),
-            "the bar spans the note's duration"
-        );
-
-        // A device lock on step 4: step 0 shows the gray base value, step 4
-        // the lock, and an off-step lock on 9 holds as a bare point.
-        state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 900.0);
-        state.pattern.instrument_slots[0].set_plock(9, cutoff_idx, 300.0);
-        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
-        let cutoff_row = params
-            .iter()
-            .find(|row| value_map_string(row, "key").as_deref() == Some(&format!("instrument:{cutoff_idx}")))
-            .expect("locked cutoff joins the picker");
-        assert_eq!(value_map_string(cutoff_row, "label").as_deref(), Some("cutoff"));
-
-        let lane = build_piano_roll_automation_value(
-            &app,
-            &state,
-            &lanes,
-            &format!("instrument:{cutoff_idx}"),
-        );
-        let Value::Map(lane_map) = &lane else {
-            panic!("lane is a map")
-        };
-        assert_eq!(value_map_number(&lane_map, "param-idx"), Some(cutoff_idx as f64));
-        let points = value_list_maps(&lane_map["points"].borrow().clone());
-        assert_eq!(points.len(), 3, "{points:?}");
-        let cutoff = &instrument.params[cutoff_idx];
-        assert_eq!(
-            value_map_bool(&points[0], "locked"),
-            Some(false),
-            "step 0 carries no lock: base value drawn gray"
-        );
-        assert_eq!(
-            value_map_number(&points[0], "value"),
-            Some(cutoff.stored_to_user(state.pattern.instrument_slots[0].defaults.get(cutoff_idx)) as f64)
-        );
-        assert_eq!(value_map_bool(&points[1], "locked"), Some(true));
-        assert_eq!(
-            value_map_number(&points[1], "value"),
-            Some(cutoff.stored_to_user(900.0) as f64)
-        );
-        assert_eq!(value_map_number(&points[2], "step"), Some(9.0));
-        assert_eq!(value_map_bool(&points[2], "active"), Some(false));
-
-        // A stale key (lock cleared) falls back to velocity instead of a
-        // blank lane.
-        state.pattern.instrument_slots[0].plocks.clear_param(4, cutoff_idx);
-        state.pattern.instrument_slots[0].plocks.clear_param(9, cutoff_idx);
-        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "instrument:9999");
-        let Value::Map(lane_map) = &lane else {
-            panic!("lane is a map")
-        };
-        assert_eq!(value_map_string(&lane_map, "key").as_deref(), Some("step-param:1"));
     }
 
     #[test]
@@ -17214,11 +17020,6 @@ use panel_kinds_seed::*;
                     "instrument-panel",
                     test_list(vec![Value::Map(test_instrument_map())]),
                 ),
-                ("piano-roll-lanes", build_piano_roll_lanes_value()),
-                ("piano-roll-automation-params", Value::List(vec![])),
-                ("piano-roll-automation", Value::Nil),
-                ("piano-roll-items", Value::List(vec![])),
-                ("piano-roll-selection", Value::List(vec![])),
                 ("sidebar-instrument-name", Value::String(String::new())),
                 ("current-project-name", Value::String("test".to_string())),
                 ("current-pattern", Value::Number(0.0)),
@@ -19093,22 +18894,26 @@ use panel_kinds_seed::*;
 
         let mut editor = full_grid_editor_for_scroll_tests();
         let target = register_test_delete_target_natives(&mut editor, 3);
+        // One piano roll note, as the host kinds list it.
+        let track = kind_track(editor.runtime(), 0);
+        let note = editor
+            .runtime_mut()
+            .register_keyed_instance("eseq.kinds:note", &[track, 1])
+            .expect("note");
+        set_field(editor.runtime_mut(), note, "item", Value::Number(1.0));
         for surface in ["*piano-roll*", "*arrangement*"] {
             editor.runtime_mut().eval_str(&format!(
                 "(set-window-buffer \"{surface}\")"
             )).expect("open selection surface");
             editor.refresh_runtime_side_effects();
             for populated in [false, true] {
+                let notes = if populated { vec![note] } else { vec![] };
+                set_kind_field(&mut editor, "piano-roll", "notes", instance_list(notes));
                 editor.runtime_mut().eval_str(if populated {
-                    r#"(do
-                      (reactive-set "SEQ" "piano-roll-items"
-                        (list (dict :id 1 :time 0 :duration 1 :lane 60)))
-                      (reactive-set "SEQ" "song-lanes"
-                        (list (list (dict :clip-id 1 :start-beat 0 :end-beat 4)))))"#
+                    r#"(reactive-set "SEQ" "song-lanes"
+                         (list (list (dict :clip-id 1 :start-beat 0 :end-beat 4))))"#
                 } else {
-                    r#"(do
-                      (reactive-set "SEQ" "piano-roll-items" (list))
-                      (reactive-set "SEQ" "song-lanes" (list (list))))"#
+                    r#"(reactive-set "SEQ" "song-lanes" (list (list)))"#
                 }).expect("populate or empty surface");
                 // Repeating Cmd+A must cancel deletion even if selection
                 // is unchanged, or there is nothing on the surface to select.
@@ -30975,10 +30780,6 @@ use panel_kinds_seed::*;
             "empty space clears the clip without switching panel mode"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "focus-clip-start", Value::Nil);
-        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         assert!(
             editor.switch_active_tile_to_buffer_named("*piano-roll*"),
@@ -32637,7 +32438,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(reactive-set \"SEQV\" \"piano-roll-arrangement-mode\" 1)")
+            .eval_str("(eseq.piano-roll/set-arrangement-mode! true)")
             .expect("simulate a stale arrangement piano-roll mode");
         editor
             .runtime_mut()
@@ -53160,404 +52961,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn metal_seq_piano_roll_lisp_loads() {
-        let src = read_ui_source("piano-roll.lisp").expect("read piano roll lisp");
-        let tokens = Parser::new(src.clone())
-            .parse()
-            .expect("tokenize ui/piano-roll.lisp");
-        let mut pos = 0;
-        while pos < tokens.len() {
-            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
-                let start = pos.saturating_sub(8);
-                let end = (pos + 8).min(tokens.len());
-                panic!(
-                    "parse ui/piano-roll.lisp at token {pos}: {err:?}\ncontext: {:?}",
-                    &tokens[start..end]
-                );
-            }
-        }
-        ASTParser::new(tokens)
-            .parse()
-            .expect("parse ui/piano-roll.lisp");
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("playhead", Value::Number(0.0)),
-                ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("track-colors", test_track_colors()),
-                ("tp-num-steps", Value::Number(16.0)),
-                ("focus-num-steps", Value::Number(16.0)),
-                ("focus-label", Value::String(String::new())),
-                ("focus-live", Value::Bool(true)),
-                ("piano-roll-playhead", Value::Number(-1.0)),
-                ("piano-roll-lanes", build_piano_roll_lanes_value()),
-                ("piano-roll-automation-params", Value::List(vec![])),
-                ("piano-roll-automation", Value::Nil),
-                ("piano-roll-items", Value::List(vec![])),
-                ("piano-roll-selection", Value::List(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
-        editor
-            .runtime_mut()
-            .eval_str(&src)
-            .expect("load piano roll lisp");
-        editor.refresh_runtime_side_effects();
-        assert!(
-            editor
-                .buffers
-                .iter()
-                .any(|buffer| buffer.name == "*piano-roll*"),
-            "piano roll lisp should create the *piano-roll* buffer"
-        );
-        let piano_buffer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*piano-roll*")
-            .expect("piano roll buffer")
-            .id;
-        editor.set_active_buffer(piano_buffer_id);
-        editor.runtime_mut().set_reactive("SEQ", "piano-roll-automation", map_value([
-            ("editable", Value::Bool(true)),
-            ("target", Value::String("step-param".into())),
-            ("param-idx", Value::Number(1.0)),
-            ("min", Value::Number(0.0)),
-            ("max", Value::Number(1.0)),
-        ]));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.runtime_mut().eval_str(
-            "(eseq.piano-roll/automation-action :set 0 0.25)"
-        ).unwrap();
-        editor.refresh_runtime_side_effects();
-        let readout_layout = editor.widget_layout().unwrap();
-        fn find_readout(node: &eseqlisp::layout::LayoutNode) -> Option<&eseqlisp::layout::LayoutNode> {
-            if node.props.get("key") == Some(&Value::String("automation-axis-value".into())) {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_readout)
-        }
-        let readout = find_readout(&readout_layout).expect("automation value label");
-        assert_eq!(readout.props.get("text"), Some(&Value::String("0.25".into())));
-        assert!(readout.rect.width.is_finite() && readout.rect.width > 0.0);
-        assert!(readout.rect.height.is_finite() && readout.rect.height > 0.0);
-        editor.runtime_mut().eval_str(
-            "(eseq.piano-roll/automation-action :finish 0 0.25)"
-        ).unwrap();
-        editor.refresh_runtime_side_effects();
-        let released_layout = editor.widget_layout().unwrap();
-        let readout = find_readout(&released_layout).expect("automation value label");
-        assert_eq!(readout.props.get("text"), Some(&Value::String(String::new())));
-        let layout = editor
-            .widget_layout()
-            .expect("piano roll should have a widget layout");
-        // The buffer wraps a clip-panel + timeline row (clip-edit-target
-        // spec 4.4/6); the timeline itself keeps every prop below.
-        assert_eq!(layout.widget_type, "box");
-        fn find_timeline(
-            node: &eseqlisp::layout::LayoutNode,
-        ) -> Option<&eseqlisp::layout::LayoutNode> {
-            if node.widget_type == "timeline" {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_timeline)
-        }
-        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
-        let expected_track_color = test_number_list(&[0.96, 0.28, 0.52]);
-        assert_eq!(
-            layout.props.get("item-color"),
-            Some(&expected_track_color),
-            "piano roll notes should use the current track color"
-        );
-        assert_eq!(
-            layout.props.get("loop-color"),
-            Some(&expected_track_color),
-            "piano roll loop selector should use the current track color"
-        );
-        assert_eq!(
-            layout.props.get("snap"),
-            Some(&Value::Number(1.0)),
-            "piano roll move snapping should use step grid lines"
-        );
-        assert_eq!(
-            layout.props.get("move-snap-mode"),
-            Some(&Value::Keyword("alignment-helper".to_string())),
-            "piano roll should preserve sub-step drag offsets until the next grid line"
-        );
-        assert_eq!(
-            layout.props.get("resize-snap-mode"),
-            Some(&Value::Keyword("alignment-helper".to_string())),
-            "piano roll duration resize should use the same alignment helper as note moves"
-        );
-        assert_eq!(
-            layout.props.get("zoom-max-duration"),
-            Some(&Value::Number(256.0)),
-            "piano roll should be able to zoom out to the full supported pattern length"
-        );
-        assert_eq!(
-            layout.props.get("min-duration"),
-            Some(&Value::Number(0.03125)),
-            "piano roll duration resize should not be clamped to the visible grid"
-        );
-        assert_eq!(
-            layout.props.get("create-duration"),
-            Some(&Value::Number(1.0)),
-            "piano roll should default new notes to one step"
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 0)")
-            .expect("fit empty piano roll");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
-                .expect("read empty piano roll lane scroll"),
-            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
-            // note grid, so C4 centers over fewer visible lanes.
-            Some(Value::Number(42.5)),
-            "empty piano roll should center C4 at the default lower-pane height"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.piano-roll/piano-roll-max-lane-scroll)")
-                .expect("read default piano roll max lane scroll"),
-            // 7 more lanes are hidden behind the automation row (eseq-2k9p.21).
-            Some(Value::Number(85.0)),
-            "default lower-pane height should allow scrolling below C4"
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 85 :delta-lanes 0))",
-            )
-            .expect("scroll piano roll to low lanes");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
-                .expect("read low piano roll lane scroll"),
-            Some(Value::Number(85.0))
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :finish-create-item :start 2 :end 4.5))")
-            .expect("record created duration");
-        editor.refresh_runtime_side_effects();
-        let layout = editor
-            .widget_layout()
-            .expect("piano roll should still have a widget layout");
-        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
-        assert_eq!(
-            layout.props.get("create-duration"),
-            Some(&Value::Number(2.5)),
-            "piano roll should reuse the last created note duration"
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :resize-item-absolute :duration 3.25))")
-            .expect("record resized duration");
-        editor.refresh_runtime_side_effects();
-        let layout = editor
-            .widget_layout()
-            .expect("piano roll should still have a widget layout");
-        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
-        assert_eq!(
-            layout.props.get("create-duration"),
-            Some(&Value::Number(3.25)),
-            "piano roll should reuse the last edited note duration"
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :clear-selection :time 4.5))")
-            .expect("record cursor time");
-        editor.refresh_runtime_side_effects();
-        let layout = editor
-            .widget_layout()
-            .expect("piano roll should still have a widget layout");
-        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
-        assert_eq!(
-            layout.props.get("cursor-time"),
-            Some(&Value::Number(4.5)),
-            "piano roll should expose the last clicked cursor time to the timeline"
-        );
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "playhead", Value::Number(4.0));
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound piano-roll playhead updates must not enqueue timeline widget tree rebuilds"
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.piano-roll/piano-roll-view-duration 8)")
-            .expect("set piano roll duration");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.piano-roll/piano-roll-lane-height 1)")
-            .expect("set piano roll lane height");
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :zoom-view :anchor-time 4 :factor 2))")
-            .expect("zoom piano roll");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-lane-height")
-                .expect("read piano roll lane height after x zoom"),
-            Some(Value::Number(1.0))
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.piano-roll/piano-roll-view-duration 8)")
-            .expect("reset piano roll duration");
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :delta-time 100))")
-            .expect("scroll piano roll");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-view-start")
-                .expect("read piano roll view start"),
-            Some(Value::Number(12.0))
-        );
-
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "piano-roll-items",
-            test_list(vec![
-                map_value([
-                    ("id", Value::Number(1.0)),
-                    ("lane", Value::Number(20.0)),
-                    ("start", Value::Number(2.0)),
-                    ("end", Value::Number(4.0)),
-                ]),
-                map_value([
-                    ("id", Value::Number(2.0)),
-                    ("lane", Value::Number(60.0)),
-                    ("start", Value::Number(14.0)),
-                    ("end", Value::Number(16.0)),
-                ]),
-            ]),
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.piano-roll/piano-roll-lane-height 0.5)")
-            .expect("restore default piano roll lane height");
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 0)")
-            .expect("fit piano roll to notes");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-view-start")
-                .expect("read fitted piano roll view start"),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-view-duration")
-                .expect("read fitted piano roll view duration"),
-            Some(Value::Number(16.0))
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
-                .expect("read fitted piano roll lane scroll"),
-            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
-            // note grid, so the fit centers over fewer visible lanes.
-            Some(Value::Number(34.5))
-        );
-    }
-
-    #[test]
-    fn sync_piano_roll_state_applies_pending_track_fit_after_items_update() {
-        let src = read_ui_source("piano-roll.lisp").expect("read piano roll lisp");
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        let runtime = editor.runtime_mut();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("playhead", Value::Number(0.0)),
-                ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("track-colors", test_track_colors()),
-                ("tp-num-steps", Value::Number(16.0)),
-                ("piano-roll-lanes", build_piano_roll_lanes_value()),
-                ("piano-roll-automation-params", Value::List(vec![])),
-                ("piano-roll-automation", Value::Nil),
-                ("piano-roll-items", Value::List(vec![])),
-                ("piano-roll-selection", Value::List(vec![])),
-            ],
-            true,
-        );
-        runtime.register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
-        runtime.eval_str(&src).expect("load piano roll lisp");
-        runtime
-            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 1)")
-            .expect("request fit for future current track");
-        assert_eq!(
-            runtime
-                .eval_str("piano-roll-fit-pending")
-                .expect("read pending fit"),
-            Some(Value::Bool(true)),
-            "fit should stay pending until SEQ.current-track matches the requested track"
-        );
-
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        let selection = Arc::new(Mutex::new(HashSet::new()));
-        let track = 1;
-        let step = 12;
-        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
-        state.pattern.patterns[track].set_step_active(step, true);
-        runtime.set_reactive("SEQ", "current-track", Value::Number(track as f64));
-
-        sync_piano_roll_note_state(runtime, &PianoRollLanes::live(&state, track), &selection);
-
-        assert_eq!(
-            runtime
-                .eval_str("piano-roll-fit-pending")
-                .expect("read pending fit after sync"),
-            Some(Value::Bool(false))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("eseq.piano-roll/piano-roll-view-start")
-                .expect("read fitted view start after sync"),
-            Some(Value::Number(11.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("eseq.piano-roll/piano-roll-view-duration")
-                .expect("read fitted view duration after sync"),
-            Some(Value::Number(4.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
-                .expect("read fitted lane scroll after sync"),
-            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the note
-            // grid, so the fit centers over fewer visible lanes.
-            Some(Value::Number(42.5))
-        );
-    }
-
-    #[test]
     fn piano_roll_item_edit_syncs_sequencer_track_reactive_state() {
         let app = test_app_with_instrument_descriptor(
             sequencer::effects::EffectDescriptor::empty_custom_slot(),
@@ -53753,17 +53156,8 @@ use panel_kinds_seed::*;
         assert_eq!(state.pattern.chord_data[track].get_delay(2, 0), 0.5);
         assert_eq!(state.pattern.step_data[track].get(2, StepParam::Delay), 0.0);
 
-        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
-        let Value::List(items) = items else {
-            panic!("expected item list");
-        };
-        let Value::Map(item) = items[0].borrow().clone() else {
-            panic!("expected item map");
-        };
-        assert_eq!(
-            item.get("label").map(|value| value.borrow().clone()),
-            Some(Value::String("C4 +0.50".to_string()))
-        );
+        let note = PianoRollLanes::live(&state, track).note_entries(2)[0];
+        assert_eq!(piano_roll_note_label(&note), "C4 +0.50");
     }
 
     #[test]
@@ -54136,17 +53530,8 @@ use panel_kinds_seed::*;
         state.pattern.patterns[track].set_step_active(step, true);
         state.pattern.step_data[track].set(step, StepParam::Duration, 0.5);
 
-        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
-        let Value::List(items) = items else {
-            panic!("expected item list");
-        };
-        let Value::Map(item) = items[0].borrow().clone() else {
-            panic!("expected item map");
-        };
-        assert_eq!(
-            item.get("end").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.5))
-        );
+        let note = PianoRollLanes::live(&state, track).note_entries(step)[0];
+        assert_eq!(step as f32 + note.delay + note.duration, 2.5);
 
         let action = map_value([
             ("type", Value::Keyword("resize-item-absolute".to_string())),

@@ -1656,10 +1656,10 @@
 ;; A note of the piano roll's source: (nth piano-roll.notes 0). The host gives
 ;; each note an id while it exists; a set! that moves a note keeps its id (and
 ;; its handle), and one moved onto another replaces it (the other's handle goes
-;; stale). An edit made otherwise (the legacy piano roll, the step grid,
-;; recording) keeps a note's handle while the note stays where it was; an undo
-;; or redo that changes the notes makes every note handle stale. A set! or
-;; delete of a stale note is an error ("the note is gone").
+;; stale). An edit made otherwise (the piano roll's timeline gestures, the
+;; step grid, recording) keeps a note's handle while the note stays where it
+;; was; an undo or redo that changes the notes makes every note handle stale.
+;; A set! or delete of a stale note is an error ("the note is gone").
 (def-kind note
   :key (track nid)
   :host ((track    track  :doc "The track whose source holds the note (the piano roll's track)")
@@ -1673,7 +1673,8 @@
                    :doc "Its step's velocity: a chord's notes share it; a note keeps its own on a step it moves to alone")
          (selected :bool   :set (note-setter "selected") :doc "Selected in the piano roll (no undo entry)")
          (label    :string :doc "Its pitch name, with its offset when off the step: C4, D#3 +0.50")
-         (hidden   :bool   :doc "A script drag's note lies over it: unlisted until the drag ends (or moves on); its set! and delete are errors meanwhile")))
+         (hidden   :bool   :doc "A script drag's note lies over it: unlisted until the drag ends (or moves on); its set! and delete are errors meanwhile")
+         (item     :int    :doc "The piano roll timeline's id for it (its step and voice), what seq-piano-roll-action's gestures address; another when a chord's voices shift")))
 
 ;; A step of the piano roll's source on its axis: (nth piano-roll.steps 5),
 ;; a pinned pattern's or take's step too (step, the live pattern's, reaches

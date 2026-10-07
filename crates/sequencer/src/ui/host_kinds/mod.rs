@@ -611,6 +611,7 @@ pub(crate) mod f {
     pub(crate) const NOTE_SELECTED: FieldKey = (NOTE, "selected");
     pub(crate) const NOTE_LABEL: FieldKey = (NOTE, "label");
     pub(crate) const NOTE_HIDDEN: FieldKey = (NOTE, "hidden");
+    pub(crate) const NOTE_ITEM: FieldKey = (NOTE, "item");
 
     pub(crate) const PIANO_ROLL_TRACK: FieldKey = (PIANO_ROLL, "track");
     pub(crate) const PIANO_ROLL_FOCUS_KIND: FieldKey = (PIANO_ROLL, "focus-kind");
@@ -2047,6 +2048,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::NOTE_SELECTED, ":bool", Model),
     (f::NOTE_LABEL, ":string", Model),
     (f::NOTE_HIDDEN, ":bool", Model),
+    (f::NOTE_ITEM, ":int", Model),
     // The piano roll's focus steps (`focus_steps`): registered on the first
     // read of `steps` and re-read with the notes' triggers.
     (f::PIANO_ROLL_STEPS, "(list-of focus-step)", Model),
@@ -2802,6 +2804,7 @@ impl HostKinds {
         self.sync_song_pushed(&mut pusher, app);
         self.sync_song_pending(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
+        let note_syncs = self.shared.borrow().notes.syncs;
         self.sync_piano_roll(&mut pusher, app);
         self.sync_graph_model(&mut pusher, app);
         self.sync_network_model(&mut pusher, app);
@@ -2849,7 +2852,11 @@ impl HostKinds {
             .is_some_and(|id| pusher.push_live(id, &MASTER_LIVE) & master_peaks != 0);
         self.sync_selection(&mut pusher, selection_changed);
         self.shared.borrow_mut().tick = None;
-        let changed = pusher.changed;
+        let mut changed = pusher.changed;
+        if self.shared.borrow().notes.syncs != note_syncs {
+            // The notes of a track the piano roll view waits to fit arrive.
+            changed |= apply_pending_piano_roll_fit(rt);
+        }
         if changed {
             rt.run_reactive_cycle();
         }

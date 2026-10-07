@@ -198,12 +198,12 @@
 
 (def seq-open-piano-roll-bottom-for-track (track)
   (do
-    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
+    (eseq.piano-roll/set-arrangement-mode! false)
     (open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-arrangement-piano-roll-bottom-for-track (track)
   (do
-    (reactive-set "SEQV" "piano-roll-arrangement-mode" 1)
+    (eseq.piano-roll/set-arrangement-mode! true)
     (open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-piano-roll-bottom ()
@@ -234,7 +234,7 @@
 
 (def seq-show-sequencer-main ()
   (do
-    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
+    (eseq.piano-roll/set-arrangement-mode! false)
     (set! eseq.seq-step-tabs/remembered-step-panel-buffer "*sequencer*")
     (set! eseq.seq-step-tabs/step-panel-buffer "*sequencer*")
     ;; Leaving the arrangement restores whatever mixer state the session view
@@ -318,7 +318,7 @@
   (do
     ;; This is an explicit mode transition even when the FX buffer is already
     ;; visible; do not leave a stale arrangement-editor mode behind.
-    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
+    (eseq.piano-roll/set-arrangement-mode! false)
     (if (or (not eseq.seq-core-state/lower-panel-visible) (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*"))
       (do
         (set! eseq.seq-core-state/lower-panel-visible true)

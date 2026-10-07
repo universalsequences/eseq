@@ -87,8 +87,8 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
 
 #[test]
 fn rack_macro_cached_labels_follow_names_without_rebuilding_metadata() {
-    use crate::piano_roll::{build_piano_roll_automation_params_value, build_track_automation_value,
-        build_track_lock_targets_value, compact_param_label};
+    use crate::piano_roll::{build_track_automation_value, build_track_lock_targets_value,
+        compact_param_label};
     let mut app = test_app_with_rack_panel();
     let id = sequencer::sequencer::RackMacroId::from_index(0).unwrap();
     assert!(app.state.set_rack_macro_plocks_in_current_pattern(0, id, &[0], 0.5));
@@ -105,14 +105,12 @@ fn rack_macro_cached_labels_follow_names_without_rebuilding_metadata() {
     editor.runtime_mut().register_reactive("NAMES", vec![
         ("panel", build_instrument_panel_value(&app, 0, &selected)),
         ("plocks", build_track_plocks_value(&app, &app.state, 0, &selected)),
-        ("params", build_piano_roll_automation_params_value(&app, &app.state, 0)),
         ("columns", build_track_automation_value(&app, &app.state)),
         ("targets", build_track_lock_targets_value(&app, &app.state)),
     ], false);
     editor.runtime_mut().eval_str(r#"
         (def cached-macro (nth (get (nth NAMES.panel 0) :macros) 0))
         (def cached-plock (nth (filter |p| (= (get p :target) "rack-macro") NAMES.plocks) 0))
-        (def cached-param (nth (filter |p| (= (get p :key) "rack-macro:0") NAMES.params) 0))
         (def cached-column (nth (filter |p| (= (get p :key) "rack-macro:0") (nth NAMES.columns 0)) 0))
         (def cached-target (nth (get (nth (filter |g| (= (get g :group) "Macros") (nth NAMES.targets 0)) 0) :items) 0))
     "#).unwrap();
@@ -126,7 +124,6 @@ fn rack_macro_cached_labels_follow_names_without_rebuilding_metadata() {
         for expression in [
             "(eseq.macro-state/macro-name cached-macro)",
             "(eseq.effects.track-panels/plock-row-title cached-plock)",
-            "(eseq.piano-roll/automation-name cached-param)",
             "(alez.tracker.ui/column-label cached-column)",
             "(alez.tracker.ui/column-label cached-target)",
         ] {

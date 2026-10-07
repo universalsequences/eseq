@@ -1,6 +1,6 @@
 //! The piano roll (spec §14, stage 7e): the `piano-roll` singleton (the
-//! current track's edit focus: legacy `SEQ.focus-*`, `piano-roll-playhead`)
-//! and its `note`s (legacy `SEQ.piano-roll-items`, `piano-roll-selection`).
+//! current track's edit focus, its pinned clip, loop window and playhead)
+//! and its `note`s (the timeline's items and their selection).
 //!
 //! **Identity.** The model gives a note no id: a step holds its notes as
 //! (transpose, duration, offset) entries, at most one per (transpose,
@@ -23,8 +23,7 @@
 //! source, the pinned clip, the committed song and scenes revisions, the
 //! pattern epoch, the live length and the song structure generation),
 //! compared every tick without allocating; they derive through
-//! the `App`'s focus accessors, shared with the legacy publisher
-//! (`sync_piano_roll_state`). The notes are registered lazily, on the first
+//! the `App`'s focus accessors. The notes are registered lazily, on the first
 //! read of `piano-roll.notes` (the reader hook, or the tick once observed),
 //! like a device's params; then the tick re-reads them
 //! (`PianoRollLanes::step_rows_batch`, the legacy items' batch read with
@@ -318,7 +317,8 @@ pub(super) fn sync_notes<S: KindStore>(
             let Some(id) = *id else {
                 continue;
             };
-            let selected = selection.contains(&piano_roll_item_id(key.step, *voice));
+            let item = piano_roll_item_id(key.step, *voice);
+            let selected = selection.contains(&item);
             let fields = [
                 (f::NOTE_PITCH, number(note.transpose.round())),
                 (f::NOTE_START, number(key.step as f32 + note.delay)),
@@ -327,6 +327,7 @@ pub(super) fn sync_notes<S: KindStore>(
                 (f::NOTE_SELECTED, Value::Bool(selected)),
                 (f::NOTE_LABEL, Value::String(piano_roll_note_label(note))),
                 (f::NOTE_HIDDEN, Value::Bool(false)),
+                (f::NOTE_ITEM, number(item as f64)),
             ];
             for (field, value) in fields {
                 changed |= put(store, shared, id, field, value);
@@ -400,8 +401,8 @@ pub(super) fn cold_piano_roll_notes<S: KindStore>(
     Some(instance_list(listed))
 }
 
-/// `piano-roll.playhead`: a live focus's playhead step (the legacy
-/// `piano-roll-playhead`, which passes the raw track playhead), else the
+/// `piano-roll.playhead`: a live focus's playhead step (the raw track
+/// playhead, as `App::focus_playhead_step` passes it), else the
 /// pinned focus's as last computed by the tick; -1 without a track.
 pub(super) fn piano_roll_playhead(sources: &KindsHandles, shared: &RefCell<KindsShared>) -> f64 {
     let notes = &shared.borrow().notes;

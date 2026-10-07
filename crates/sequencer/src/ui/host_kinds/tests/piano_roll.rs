@@ -77,23 +77,6 @@ impl Harness {
         self.shared.state.pattern.step_data[track].get(step, StepParam::Velocity)
     }
 
-    /// Publish the legacy piano roll fields as the reactive tick does.
-    fn publish_legacy_piano_roll(&mut self) {
-        let state = self.shared.state.clone();
-        let selection = self.shared.piano_roll_selection.clone();
-        let track = self.shared.current_track.load(Ordering::Relaxed);
-        let rt = self.editor.runtime_mut();
-        sync_piano_roll_state(rt, &self.app, &state, track, &selection);
-        sync_piano_roll_playhead(rt, &self.app, track, 0);
-    }
-
-    fn seq_7e(&self, field: &str) -> Value {
-        self.rt()
-            .reactive_field_value("SEQ", field)
-            .unwrap_or_else(|| panic!("SEQ.{field}"))
-            .clone()
-    }
-
     fn note_syncs(&self) -> u64 {
         self.frame.host_kinds.shared.borrow().notes.syncs
     }
@@ -167,7 +150,7 @@ fn near(value: Value, expected: f64) -> bool {
 }
 
 #[test]
-fn piano_roll_fields_read_after_sync_and_match_the_legacy_fields() {
+fn piano_roll_fields_read_after_sync() {
     let mut h = Harness::new();
     h.write_notes(0, 0, &[(0.0, 1.0, 0.0), (7.0, 2.0, 0.0)]);
     h.write_notes(0, 3, &[(-5.0, 0.5, 0.25)]);
@@ -204,34 +187,27 @@ fn piano_roll_fields_read_after_sync_and_match_the_legacy_fields() {
     );
     assert_eq!(PIANO_ROLL_MIN_TRANSPOSE, -48);
     assert_eq!(PIANO_ROLL_MAX_TRANSPOSE, 48);
-    // Legacy parity: the items (id order = step, then voice), selection and
-    // the focus fields.
+    // The timeline's ids (step, then voice) and the selection, which is the
+    // editor's (item ids); the focus fields as the App resolves them.
+    assert_eq!(
+        h.eval_7e("(list a.item b.item c.item)"),
+        list_value(
+            [(0, 0), (0, 1), (3, 0)]
+                .map(|(step, voice)| number(piano_roll_item_id(step, voice) as f64))
+        )
+    );
     h.shared
         .piano_roll_selection
         .lock()
         .unwrap()
         .insert(piano_roll_item_id(0, 1));
     h.sync();
-    h.publish_legacy_piano_roll();
-    let items = list(h.seq_7e("piano-roll-items"));
-    assert_eq!(items.len(), 3);
-    for (index, item) in items.iter().enumerate() {
-        let mut field = |code: &str| h.eval_7e(&format!("(let ((n (note-at {index}))) {code})"));
-        assert_eq!(field("n.start"), entry(item, "start"));
-        let end = num(field("(+ n.start n.length)"));
-        assert!(near(entry(item, "end"), end), "{index}");
-        assert_eq!(field("(- pitch-max n.pitch)"), entry(item, "lane"));
-        assert_eq!(field("n.label"), entry(item, "label"));
-        assert_eq!(field("n.selected"), entry(item, "selected"));
-    }
-    assert_eq!(h.eval_7e("b.selected"), Value::Bool(true));
-    assert_eq!(h.eval_7e("piano-roll.focus-label"), h.seq_7e("focus-label"));
     assert_eq!(
-        h.eval_7e("piano-roll.focus-num-steps"),
-        h.seq_7e("focus-num-steps")
+        h.eval_7e("(list a.selected b.selected c.selected)"),
+        h.eval_7e("(list false true false)")
     );
-    assert_eq!(h.seq_7e("focus-kind"), Value::Keyword("live".to_string()));
-    assert_eq!(h.seq_7e("focus-clip-start"), Value::Nil);
+    let label = h.app.focus_label(0).unwrap_or_default();
+    assert_eq!(h.eval_7e("piano-roll.focus-label"), s(&label));
     // A pinned clip: its pattern is not the effective one (a cloned scene
     // plays a copy), so the piano roll edits the pool pattern.
     h.command("clone-pattern", Value::Nil);
@@ -251,29 +227,22 @@ fn piano_roll_fields_read_after_sync_and_match_the_legacy_fields() {
     let first_clip = "(first (let ((t (track 0))) t.clips))";
     assert_eq!(h.eval_7e("piano-roll.clip"), h.eval_7e(first_clip));
     assert_eq!(h.eval_7e("piano-roll.clip.offset"), Value::Number(2.0));
-    h.publish_legacy_piano_roll();
-    assert_eq!(h.eval_7e("piano-roll.focus-label"), h.seq_7e("focus-label"));
-    assert_eq!(
-        h.eval_7e("piano-roll.window-marker"),
-        h.seq_7e("focus-window-marker")
-    );
-    assert_eq!(
-        h.eval_7e("piano-roll.window-repeat"),
-        h.seq_7e("focus-window-repeat")
-    );
-    let span = h.seq_7e("focus-window-span");
-    assert_eq!(h.eval_7e("piano-roll.window-span"), span);
-    assert_eq!(
-        h.eval_7e("piano-roll.clip.start"),
-        h.seq_7e("focus-clip-start")
-    );
+    let label = h.app.focus_label(0).unwrap_or_default();
+    assert_eq!(h.eval_7e("piano-roll.focus-label"), s(&label));
+    let (marker, span, repeat) = piano_roll_window(&h.app, 0);
+    assert_eq!(h.eval_7e("piano-roll.window-marker"), number(marker));
+    assert_eq!(h.eval_7e("piano-roll.window-repeat"), number(repeat));
+    let span: Vec<Value> = span.map_or(vec![], |(start, end)| vec![number(start), number(end)]);
+    assert_eq!(h.eval_7e("piano-roll.window-span"), list_value(span));
+    let (start, _, _) = h.app.focus_clip_fields(0).expect("clip fields");
+    assert_eq!(h.eval_7e("piano-roll.clip.start"), number(start));
     assert_eq!(h.eval_7e("piano-roll.playhead"), Value::Number(-1.0));
-    // The pool pattern's notes, as the legacy items list them.
-    let items = list(h.seq_7e("piano-roll-items"));
-    assert_eq!(
-        h.eval_7e("(len (notes))"),
-        Value::Number(items.len() as f64)
-    );
+    // The pool pattern's notes.
+    let pool = PianoRollLanes::new(&h.shared.state, 0, PianoRollFocusSpec::Pool(PatternId(1)));
+    let count: usize = (0..pool.num_steps())
+        .map(|step| pool.note_entries(step).len())
+        .sum();
+    assert_eq!(h.eval_7e("(len (notes))"), number(count as f64));
     // Another source: the live pattern's handles went stale.
     let Value::Instance(a) = h.eval_7e("a") else {
         panic!("a")

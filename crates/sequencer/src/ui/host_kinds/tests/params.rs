@@ -391,6 +391,47 @@ fn param_setters_change_the_model_through_history() {
     }
 }
 
+/// A script drag (the pointer down) of `lock-param!` on one step is one
+/// undo entry until the release; a lock of another step starts the next
+/// (eseq-0l17.58). With the pointer up each call is its own entry.
+#[test]
+fn a_script_drag_of_param_locks_joins_one_entry_per_step() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_all(DEVICES);
+    h.eval_all("(def s3 (nth t0.steps 3)) (def s7 (nth t0.steps 7))");
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in [500, 600, 700] {
+        h.eval_all(&format!("(lock-param! cutoff (list s3) {value})"));
+        h.drain();
+    }
+    assert_eq!(h.filter_slot(slot).plocks.get(3, CUTOFF), Some(700.0));
+    assert!(h.app.history.active_gesture().is_some(), "open while held");
+    // Another step: the first step's entry is sealed, a new one opens.
+    for value in [900, 1000] {
+        h.eval_all(&format!("(lock-param! cutoff (list s7) {value})"));
+        h.drain();
+    }
+    assert_eq!(h.app.history.undo_len(), before + 1, "step 3's entry");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    h.gesture.script_param_gesture = None;
+    assert_eq!(h.app.history.undo_len(), before + 2, "one entry per step");
+    h.undo();
+    assert_eq!(h.filter_slot(slot).plocks.get(7, CUTOFF), None);
+    assert_eq!(h.filter_slot(slot).plocks.get(3, CUTOFF), Some(700.0));
+    h.undo();
+    assert_eq!(h.filter_slot(slot).plocks.get(3, CUTOFF), None);
+    // No pointer: an entry per call.
+    let before = h.app.history.undo_len();
+    h.eval_all("(lock-param! cutoff (list s3) 500)");
+    h.drain();
+    h.eval_all("(lock-param! cutoff (list s3) 600)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    assert!(h.app.history.active_gesture().is_none(), "entries ended");
+}
+
 #[test]
 fn param_setters_check_their_inputs() {
     let (mut h, slot) = Harness::with_devices();

@@ -1393,7 +1393,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             &mut track_names,
             args.track,
             &selected_steps,
-            &piano_roll_selection,
             &accumulator_names,
             &record_armed,
             &vec![0.0; app.tracks.len()],

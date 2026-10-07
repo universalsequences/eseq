@@ -43,7 +43,13 @@
 //! or voices edit, or a track instrument's base note edit while the
 //! pointer is down stays open and later script edits join it (a drag
 //! view's `set!` per frame is one undo entry, which the release ends); any
-//! other script edit ends its entry at once. An edit landing while another
+//! other script edit ends its entry at once. A lock (`lock-param!`,
+//! `lock-strip!`, `lock-rack-macro!`) while the pointer is down stays open
+//! too: the history's device p-lock coalescing joins the frames that lock
+//! the same param or macro on the same steps (its merge key names both), so
+//! dragging a lane point is one entry per step, and a lock of other steps
+//! seals it and starts another (eseq-0l17.58). A clear is an entry of its
+//! own (the history records it at once). An edit landing while another
 //! gesture is active (a user's knob drag) gets an entry of its own beside
 //! it.
 
@@ -238,7 +244,8 @@ fn param_edit(
             rack_param_applied(editor, app, ctx, track, target, rebuild, Some(rows));
         }
     }
-    script.end(app, ctx, false, changed);
+    // A drag's locks of the same steps join one entry (eseq-0l17.58).
+    script.end(app, ctx, true, changed);
     Ok(())
 }
 
@@ -286,8 +293,9 @@ pub(super) struct StepLocks {
 
 /// Apply a lock edit to the steps whose lock differs (or that hold one, to
 /// clear): the command `command` builds for them, as one script edit (one
-/// undo entry; nothing at all when no step differs), then the steps' p-lock
-/// presence and `refresh`, given how the shown step's p-lock rows moved.
+/// undo entry, which a drag's later locks of the same steps join; nothing
+/// at all when no step differs), then the steps' p-lock presence and
+/// `refresh`, given how the shown step's p-lock rows moved.
 pub(super) fn lock_steps(
     app: &mut app::App,
     editor: &mut Editor,
@@ -326,7 +334,8 @@ pub(super) fn lock_steps(
             });
         refresh(editor, app, ctx, rows);
     }
-    script.end(app, ctx, false, changed);
+    // A drag's locks of the same steps join one entry (eseq-0l17.58).
+    script.end(app, ctx, true, changed);
 }
 
 /// Set a device param's base (stored units) through its family's history

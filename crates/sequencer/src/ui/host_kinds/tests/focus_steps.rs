@@ -69,16 +69,8 @@ fn pool_lanes(h: &Harness) -> PianoRollLanes {
     PianoRollLanes::new(&h.shared.state, 0, PianoRollFocusSpec::Pool(PatternId(1)))
 }
 
-/// `(step start end value locked)` of each legacy lane point.
-fn legacy_points(lane: &Value) -> Vec<Value> {
-    let fields = ["step", "start", "end", "value", "locked"];
-    (items(&get(lane, "points")).iter())
-        .map(|point| list_value(fields.map(|field| get(point, field))))
-        .collect()
-}
-
 #[test]
-fn focus_steps_show_the_sources_steps_as_the_legacy_lane_did() {
+fn focus_steps_show_the_sources_steps_and_their_params() {
     let mut h = Harness::new();
     h.write_notes(0, 0, &[(0.0, 1.0, 0.0), (7.0, 2.0, 0.0)]);
     h.write_notes(0, 3, &[(-5.0, 0.5, 0.25)]);
@@ -105,33 +97,21 @@ fn focus_steps_show_the_sources_steps_as_the_legacy_lane_did() {
         h.eval_7e2("(let ((fs (fs-at 3))) (focus-step-value fs \"velocity\"))"),
         Value::Number(0.5)
     );
-    // Legacy parity: a step param's lane points are the active steps' span
+    // The automation lane's points for a step param: the active steps' span
     // and value.
-    let state = h.shared.state.clone();
-    let lanes = PianoRollLanes::live(&state, 0);
-    for (param, key) in [
-        (StepParam::Velocity, "velocity"),
-        (StepParam::Delay, "delay"),
-    ] {
-        let lane = build_piano_roll_automation_value(
-            &h.app,
-            &state,
-            &lanes,
-            &PianoRollAutomationTarget::StepParam(param).key(),
-        );
-        let points = h.eval_7e2(&format!(
-            "(map (lambda (fs) (list fs.index fs.start fs.end (focus-step-value fs \"{key}\") true))
+    assert_eq!(
+        h.eval_7e2(
+            "(map (lambda (fs) (list fs.index fs.start fs.end (focus-step-value fs \"velocity\")))
                   (filter (lambda (fs) fs.active) piano-roll.steps))"
-        ));
-        assert_eq!(list_value(legacy_points(&lane)), points, "{key}");
-    }
-    // The picker's step params: the host's, in the legacy picker's order,
+        ),
+        h.eval_7e2("(list (list 0 0 2 1) (list 3 3.25 3.75 0.5))")
+    );
+    // The picker's step params: the host's, in the lane picker's order,
     // each one a focus-step field focus-step-value reads.
     let params = items(&h.eval_7e2("(focus-step-params)"));
-    let legacy = items(&build_piano_roll_automation_params_value(&h.app, &state, 0));
     assert_eq!(params.len(), StepParam::VISIBLE.len());
-    for ((row, param), legacy) in params.iter().zip(StepParam::VISIBLE).zip(&legacy) {
-        assert_eq!(get(row, "label"), get(legacy, "label"));
+    for (row, param) in params.iter().zip(StepParam::VISIBLE) {
+        assert_eq!(get(row, "label"), s(param.label()));
         let Value::String(name) = get(row, "name") else {
             panic!("{row:?}");
         };
@@ -145,8 +125,8 @@ fn focus_steps_show_the_sources_steps_as_the_legacy_lane_did() {
 }
 
 #[test]
-fn a_device_params_lane_is_a_view_over_focus_steps_and_its_locks() {
-    let (mut h, slot) = Harness::with_devices();
+fn a_device_params_lane_reads_its_locks_and_the_focus_steps() {
+    let (mut h, _) = Harness::with_devices();
     h.write_notes(0, 0, &[(0.0, 1.0, 0.0)]);
     h.write_notes(0, 4, &[(0.0, 2.0, 0.5)]);
     h.write_notes(0, 9, &[(0.0, 1.0, 0.0)]);
@@ -154,32 +134,24 @@ fn a_device_params_lane_is_a_view_over_focus_steps_and_its_locks() {
     h.eval_7e2(
         r#"(def t0 (track 0)) (def flt (first t0.devices))
            (def cutoff (device-param flt "cutoff"))
-           (lock-param! cutoff (list (nth t0.steps 4) (nth t0.steps 6)) 800)
-           ;; The lane's points: a locked step's lock, else an active
-           ;; step's base (gray), as the legacy lane drew them.
-           (def lane-points (p)
-             (filter (lambda (x) x)
-               (map (lambda (fs)
-                      (let ((lock (first (filter (lambda (row) (= (first row) fs.index))
-                                                 p.step-locks))))
-                        (if lock
-                          (list fs.index fs.start fs.end (nth lock 1) true)
-                          (if fs.active (list fs.index fs.start fs.end p.base false) nil))))
-                    piano-roll.steps)))"#,
+           (lock-param! cutoff (list (nth t0.steps 4) (nth t0.steps 6)) 800)"#,
     );
     h.drain();
     h.sync();
+    // What the lane draws: the locks (an off-step one too) in display units,
+    // and the active steps' spans, which show the base where no lock is.
     assert_eq!(h.eval_7e2("cutoff.has-locks"), Value::Bool(true));
-    let state = h.shared.state.clone();
-    let lanes = PianoRollLanes::live(&state, 0);
-    let target = PianoRollAutomationTarget::Effect {
-        slot_idx: slot,
-        param_idx: 2,
-    };
-    let lane = build_piano_roll_automation_value(&h.app, &state, &lanes, &target.key());
-    let points = legacy_points(&lane);
-    assert_eq!(points.len(), 4, "three active steps and an off-step lock");
-    assert_eq!(list_value(points), h.eval_7e2("(lane-points cutoff)"));
+    assert_eq!(
+        h.eval_7e2("cutoff.step-locks"),
+        h.eval_7e2("(list (list 4 800) (list 6 800))")
+    );
+    assert_eq!(
+        h.eval_7e2(
+            "(map (lambda (fs) (list fs.index fs.start fs.end))
+                  (filter (lambda (fs) fs.active) piano-roll.steps))"
+        ),
+        h.eval_7e2("(list (list 0 0 1) (list 4 4.5 6.5) (list 9 9 10))")
+    );
 }
 
 #[test]

@@ -1916,7 +1916,6 @@ pub(super) struct UiInvalidationApplyCtx<'a> {
     pub(super) current_track_idx: usize,
     pub(super) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(super) selected_neural_neurons: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    pub(super) piano_roll_selection: &'a Arc<Mutex<HashSet<u64>>>,
     pub(super) accumulator_names: &'a Arc<Mutex<Vec<String>>>,
     pub(super) cached_track_peak_levels: &'a [f64],
     pub(super) cached_bus_peak_levels: &'a [f64],
@@ -1946,7 +1945,6 @@ pub(super) fn apply_ui_invalidations(
         current_track_idx,
         selected_steps,
         selected_neural_neurons,
-        piano_roll_selection,
         accumulator_names,
         cached_track_peak_levels,
         cached_bus_peak_levels,
@@ -2676,8 +2674,7 @@ pub(super) fn apply_ui_invalidations(
             },
             UiInvalidation::PianoRoll { track, change } => {
                 if track == current_track_idx {
-                    sync_piano_roll_state(rt, app, state, track, piano_roll_selection);
-                    needs_reactive_cycle = true;
+                    needs_reactive_cycle |= sync_track_automation_state(rt, app, state);
                 }
                 if matches!(change, PianoRollInvalidation::Items) {
                     needs_reactive_cycle |= sync_single_track_sequencer_state(
@@ -2768,8 +2765,7 @@ pub(super) fn apply_ui_invalidations(
         }
     }
     if piano_roll_step_params_dirty {
-        sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
-        needs_reactive_cycle = true;
+        needs_reactive_cycle |= sync_track_automation_state(rt, app, state);
     }
 
     if needs_reactive_cycle {

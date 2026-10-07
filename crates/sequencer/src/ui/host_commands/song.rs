@@ -1017,12 +1017,10 @@ pub(super) fn song_edit_landed(
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
             app.song_edit_error = None;
-            // Every command here can move what the piano roll's clip-shaped
-            // surfaces read (focus-num-steps, the window overlay, the clip
-            // panel's Start/End/Offset) without moving the FOCUS itself —
-            // a clip resize/move/region edit changes the pinned clip's span
-            // and offset. These are one-shot edits, so an unconditional
-            // resync is cheap and keeps the overlay from going stale.
+            // Every command here can move the pinned clip's span and offset
+            // without moving the FOCUS itself (a clip resize/move/region
+            // edit): resync the current track. These are one-shot edits, so
+            // an unconditional resync is cheap.
             ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
                 track: ctx.shared.current_track.load(Ordering::Relaxed),
                 change: PianoRollInvalidation::Items,

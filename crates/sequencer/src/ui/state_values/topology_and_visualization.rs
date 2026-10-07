@@ -7,7 +7,6 @@ pub(crate) fn sync_track_topology_state(
     track_names: &mut Vec<String>,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    piano_roll_selection: &Arc<Mutex<HashSet<u64>>>,
     accumulator_names: &Arc<Mutex<Vec<String>>>,
     record_armed: &Arc<Mutex<Vec<bool>>>,
     track_peak_levels: &[f64],
@@ -37,8 +36,6 @@ pub(crate) fn sync_track_topology_state(
     if app.tracks.is_empty() {
         sync_playhead_fields(rt, 0, 1);
         rt.set_reactive("SEQ", "steps", Value::List(vec![]));
-        rt.set_reactive("SEQ", "piano-roll-items", Value::List(vec![]));
-        rt.set_reactive("SEQ", "piano-roll-selection", Value::List(vec![]));
         rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
         rt.set_reactive("SEQ", "durations", Value::List(vec![]));
         rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
@@ -118,7 +115,7 @@ pub(crate) fn sync_track_topology_state(
         state.pattern.track_params[current_track_idx].get_num_steps(),
     );
     rt.set_reactive("SEQ", "steps", build_steps_value(state, current_track_idx));
-    sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
+    sync_track_automation_state(rt, app, state);
     sync_step_param_lists(rt, state, current_track_idx);
     sync_track_mixer_state(rt, app, state);
     sync_bus_mixer_state(rt, app);

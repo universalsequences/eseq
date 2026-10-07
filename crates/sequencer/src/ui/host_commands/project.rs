@@ -306,7 +306,6 @@ pub(super) fn handle(
                 ctx.track_names,
                 0,
                 &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
                 &record_armed,
                 &ctx.meters.cached_track_peak_levels,

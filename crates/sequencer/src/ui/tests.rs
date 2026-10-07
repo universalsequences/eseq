@@ -2266,7 +2266,6 @@
                 &mut track_names,
                 0,
                 &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
                 &record_armed,
                 &cached_track_peak_levels,
@@ -2378,7 +2377,6 @@
                 &mut track_names,
                 ct,
                 &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
                 &record_armed,
                 &cached_track_peak_levels,
@@ -3505,7 +3503,6 @@
                 &mut track_names,
                 0,
                 &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
                 &record_armed,
                 &cached_track_peak_levels,
@@ -3736,7 +3733,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -4437,7 +4433,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -4550,7 +4545,7 @@
                             build_selection_value(&selected_steps),
                         );
                         let phase = Instant::now();
-                        sync_piano_roll_state(rt, app, &state, TRACK, &piano_roll_selection);
+                        sync_track_automation_state(rt, app, &state);
                         epoch_piano_ms = duration_ms(phase.elapsed());
                         rt.set_reactive(
                             "SEQ",
@@ -5847,7 +5842,6 @@
                             current_track_idx: track,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -5947,7 +5941,7 @@
                             "selected-steps",
                             build_selection_value(&selected_steps),
                         );
-                        sync_piano_roll_state(rt, app, &state, track, &piano_roll_selection);
+                        sync_track_automation_state(rt, app, &state);
                         rt.set_reactive(
                             "SEQ",
                             "step-has-plocks",
@@ -6679,12 +6673,6 @@
                                 STEP_COUNT,
                             );
                         }
-                        let _ = sync_piano_roll_playhead(
-                            editor.runtime_mut(),
-                            &app,
-                            track,
-                            next_playhead,
-                        );
                         let binding_change = playhead_transition_changes_param_bindings(
                             &state,
                             track,
@@ -7883,7 +7871,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -8554,7 +8541,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -8679,7 +8665,7 @@
                             build_selection_value(&selected_steps),
                         );
                         let phase = Instant::now();
-                        sync_piano_roll_state(rt, app, &state, TRACK, &piano_roll_selection);
+                        sync_track_automation_state(rt, app, &state);
                         epoch_piano_ms = duration_ms(phase.elapsed());
                         rt.set_reactive(
                             "SEQ",
@@ -9692,7 +9678,6 @@
                             current_track_idx: ct,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -9758,7 +9743,7 @@
                         ct,
                         &expanded_step_projection,
                     );
-                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    sync_track_automation_state(rt, app, &state);
                     sync_step_param_lists(rt, &state, ct);
                     sync_track_mixer_state(rt, app, &state);
                     sync_bus_mixer_state(rt, app);
@@ -9901,7 +9886,7 @@
                         "selected-steps",
                         build_selection_value(&selected_steps),
                     );
-                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    sync_track_automation_state(rt, app, &state);
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",
@@ -11082,7 +11067,7 @@
                     let rt = editor.runtime_mut();
                     set_current_track_reactive(rt, app.tracks.len(), ct);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    sync_track_automation_state(rt, app, &state);
                     sync_step_param_lists(rt, &state, ct);
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.track_param_sync_revision,
@@ -11165,7 +11150,6 @@
                             current_track_idx: ct,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -11243,7 +11227,7 @@
                         "selected-steps",
                         build_selection_value(&selected_steps),
                     );
-                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    sync_track_automation_state(rt, app, &state);
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",
@@ -12672,7 +12656,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -13207,7 +13190,6 @@
                             current_track_idx: TRACK,
                             selected_steps: &selected_steps,
                             selected_neural_neurons: &neural,
-                            piano_roll_selection: &piano_roll_selection,
                             accumulator_names: &accumulator_names,
                             cached_track_peak_levels: &cached_track_peak_levels,
                             cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -14262,7 +14244,6 @@
                         current_track_idx: TRACK,
                         selected_steps: &selected_steps,
                         selected_neural_neurons: &neural,
-                        piano_roll_selection: &piano_roll_selection,
                         accumulator_names: &accumulator_names,
                         cached_track_peak_levels: &cached_track_peak_levels,
                         cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -14366,7 +14347,6 @@
                         current_track_idx: TRACK,
                         selected_steps: &selected_steps,
                         selected_neural_neurons: &neural,
-                        piano_roll_selection: &piano_roll_selection,
                         accumulator_names: &accumulator_names,
                         cached_track_peak_levels: &cached_track_peak_levels,
                         cached_bus_peak_levels: &cached_bus_peak_levels,
@@ -15002,7 +14982,6 @@
                 &mut track_names,
                 0,
                 &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
                 &record_armed,
                 &cached_track_peak_levels,

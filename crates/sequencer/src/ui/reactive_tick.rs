@@ -625,13 +625,7 @@ pub(crate) fn sync_reactive_tick(
                 );
             }
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
-            sync_piano_roll_state(
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.piano_roll_selection,
-            );
+            sync_track_automation_state(rt, &app, &ctx.shared.state);
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             // A track switch changes only track-addressed publication. Global
             // topology, mixer, meter, modulator, and accumulator snapshots are
@@ -1208,7 +1202,6 @@ pub(crate) fn sync_reactive_tick(
                 current_track_idx: ct,
                 selected_steps: &ctx.shared.selected_steps,
                 selected_neural_neurons: &selected_neural_snapshot,
-                piano_roll_selection: &ctx.shared.piano_roll_selection,
                 accumulator_names: &ctx.shared.accumulator_names,
                 cached_track_peak_levels: &ctx.meters.cached_track_peak_levels,
                 cached_bus_peak_levels: &ctx.meters.cached_bus_peak_levels,
@@ -1225,31 +1218,14 @@ pub(crate) fn sync_reactive_tick(
         }
         // Edit-focus refresh (clip-edit-target spec 3): project the
         // App-resolved target into the cell the `seq-piano-roll-action`
-        // native reads, and re-sync the piano roll whenever the focus itself
-        // moved — a clip bind/unbind, a scene launch changing the effective
-        // pattern under a pinned id, or a source dying (spec 3.3.1).
+        // native reads. The piano roll's own fields are host kinds
+        // (`piano-roll`, `note`), which follow the focus themselves.
         {
             let focus = PianoRollFocusSpec::from_focus(app.track_edit_focus(ct));
             let focus_changed = {
                 let mut cell = ctx.shared.piano_roll_focus.lock().unwrap();
                 std::mem::replace(&mut *cell, focus) != focus
             };
-            // The clip-shaped surfaces (`focus-clip-*`, the window overlay,
-            // the clip-use label) are keyed off the clip SELECTION, not the
-            // resolved write focus: two clips over the same pool pattern both
-            // resolve `Pool(p)`, and a pinned clip whose pattern is the
-            // effective one resolves `Live`. Diff the selection identity —
-            // plus the committed-song revision, which moves whenever the
-            // clip's start/end/offset does — so a re-select never leaves the
-            // panel and the overlay on the previous clip's numbers.
-            let clip_surface_key = (
-                app.song_clip_selection
-                    .map(|selection| (selection.track, selection.clip_id.0)),
-                app.focus_clip_source_kind(ct),
-                ctx.shared.state.committed_song_revision(),
-            );
-            let clip_surface_changed = ctx.frame.prev_focus_clip_surface != clip_surface_key;
-            ctx.frame.prev_focus_clip_surface = clip_surface_key;
             if focus_changed {
                 // The note set under the editor was just replaced, so any
                 // surviving selection would address the *new* source's ids
@@ -1265,21 +1241,6 @@ pub(crate) fn sync_reactive_tick(
                 if cleared_piano_selection {
                     ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            if focus_changed || clip_surface_changed {
-                let rt = editor.runtime_mut();
-                sync_piano_roll_state(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.piano_roll_selection,
-                );
-                needs_reactive_cycle = true;
-            }
-            if current_track_playhead_visible {
-                needs_reactive_cycle |=
-                    sync_piano_roll_playhead(editor.runtime_mut(), &app, ct, playhead as usize);
             }
         }
         // Kind instances (instance-kinds spec §5): an instance edit, undo/redo,
@@ -1359,7 +1320,7 @@ pub(crate) fn sync_reactive_tick(
             let sync_current_steps_elapsed;
             let sync_sequencer_elapsed;
             let sync_expanded_elapsed;
-            let sync_piano_elapsed;
+            let sync_track_automation_elapsed;
             let sync_step_params_elapsed;
             let sync_mixer_elapsed;
             let sync_track_params_elapsed;
@@ -1411,14 +1372,8 @@ pub(crate) fn sync_reactive_tick(
             }
             sync_expanded_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_piano_roll_state(
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.piano_roll_selection,
-            );
-            sync_piano_elapsed = started.elapsed();
+            sync_track_automation_state(rt, &app, &ctx.shared.state);
+            sync_track_automation_elapsed = started.elapsed();
             let started = Instant::now();
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             sync_step_params_elapsed = started.elapsed();
@@ -1481,7 +1436,7 @@ pub(crate) fn sync_reactive_tick(
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
                 eprintln!(
-                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
                     duration_ms(profile_total_started.elapsed()),
                     old_pattern_epoch,
                     epoch,
@@ -1490,7 +1445,7 @@ pub(crate) fn sync_reactive_tick(
                     duration_ms(sync_current_steps_elapsed),
                     duration_ms(sync_sequencer_elapsed),
                     duration_ms(sync_expanded_elapsed),
-                    duration_ms(sync_piano_elapsed),
+                    duration_ms(sync_track_automation_elapsed),
                     duration_ms(sync_step_params_elapsed),
                     duration_ms(sync_mixer_elapsed),
                     duration_ms(sync_track_params_elapsed),
@@ -1591,7 +1546,6 @@ pub(crate) fn sync_reactive_tick(
                     &mut *ctx.track_names,
                     ct,
                     &ctx.shared.selected_steps,
-                    &ctx.shared.piano_roll_selection,
                     &ctx.shared.accumulator_names,
                     &ctx.shared.record_armed,
                     &ctx.meters.cached_track_peak_levels,
@@ -1667,13 +1621,7 @@ pub(crate) fn sync_reactive_tick(
                     "selected-steps",
                     build_selection_value(&ctx.shared.selected_steps),
                 );
-                sync_piano_roll_state(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.piano_roll_selection,
-                );
+                sync_track_automation_state(rt, &app, &ctx.shared.state);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",

@@ -259,6 +259,12 @@ impl WidgetDefinition for AutomationLaneWidget {
         &["width", "height"]
     }
 
+    /// The view axis it shares with its `timeline`: a scroll or zoom
+    /// repaints the lane without rerunning the view.
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["view-start", "view-duration"]
+    }
+
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "points",
@@ -598,6 +604,49 @@ mod tests {
         assert_eq!(value_for_row(rect, scale, 4.0), 0.0);
         assert_eq!(value_for_row(rect, scale, 2.0), 64.0);
         assert_eq!(value_for_row(rect, scale, -50.0), 127.0, "clamps above");
+    }
+
+    /// A bound view axis (the piano roll's scroll) resolves when the press
+    /// lands, so scrolling repaints the lane without a re-render.
+    #[test]
+    fn a_bound_view_start_places_the_points() {
+        assert_eq!(
+            AUTOMATION_LANE_WIDGET.bindable_props(),
+            &["view-start", "view-duration"]
+        );
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let mut registry = crate::reactive::ReactiveRegistry::with_float_slots(slots.clone());
+        registry.register("VIEW", vec![("start", Value::Number(4.0))], true);
+        let mut props = velocity_props();
+        props.insert(
+            "view-start".to_string(),
+            Value::ReactiveRef {
+                namespace: "VIEW".to_string(),
+                field: "start".to_string(),
+                index: None,
+                kind: crate::vm::BindingKind::Float,
+                slot: slots.slot("VIEW", "start"),
+            },
+        );
+        // Step 4 now sits at the lane's left edge, col 10.
+        let outcome = AUTOMATION_LANE_WIDGET.mouse_event(
+            &node(props),
+            MouseEventKind::Down(MouseButton::Left),
+            10.2,
+            4.0,
+            None,
+            None,
+            KeyModifiers::NONE,
+            8.0,
+            16.0,
+        );
+        let MouseEventOutcome::Dispatch(event) = outcome else {
+            panic!("press on a point dispatches");
+        };
+        let output = AUTOMATION_LANE_WIDGET
+            .handle_event(&node(velocity_props()), event)
+            .expect("on-change output");
+        assert_eq!(output.args[1], Value::Number(4.0));
     }
 
     #[test]

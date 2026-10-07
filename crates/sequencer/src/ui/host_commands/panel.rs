@@ -439,7 +439,8 @@ fn record_rack_macro_edit(
 /// `:macro`, `:steps` with their `:step-tracks`, and a lock's `:value`, a
 /// number in 0–1): the steps whose lock differs (or that hold one, to
 /// clear) through `SetRackMacroPlockMulti` / `ClearRackMacroPlockMulti`,
-/// one undo entry, refreshed as the rack panel's `set-rack-macro-plock`
+/// one undo entry (a drag's locks of the same steps join one,
+/// [`super::devices::lock_steps`]), refreshed as the rack panel's `set-rack-macro-plock`
 /// plus the steps' p-lock presence (as `lock-strip!`).
 fn rack_macro_lock_edit(
     name: &str,

@@ -791,7 +791,6 @@ pub(super) fn sync_after_rack_structure_change(
         ctx.track_names,
         current,
         &ctx.shared.selected_steps,
-        &ctx.shared.piano_roll_selection,
         &ctx.shared.accumulator_names,
         &ctx.shared.record_armed,
         &ctx.meters.cached_track_peak_levels,

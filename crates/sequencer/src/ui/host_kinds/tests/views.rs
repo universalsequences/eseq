@@ -171,6 +171,16 @@ pub(super) fn widgets_with_prop(tree: &Value, prop: &str, out: &mut Vec<HashMap<
     }
 }
 
+/// The props of the first widget of `tree` whose (qualified) `:key` ends
+/// with `suffix`.
+pub(super) fn widget_keyed(tree: &Value, suffix: &str) -> Option<HashMap<String, Value>> {
+    let mut keyed = Vec::new();
+    widgets_with_prop(tree, "key", &mut keyed);
+    keyed
+        .into_iter()
+        .find(|w| matches!(&w["key"], Value::String(key) if key.ends_with(suffix)))
+}
+
 /// `source` without comments: a `;` outside a string starts one, up to the
 /// end of its line (string escapes included).
 fn strip_lisp_comments(source: &str) -> String {

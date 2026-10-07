@@ -3,8 +3,8 @@
 //! take's too, which `step`, the live pattern's, does not reach): whether
 //! each holds a note, where its notes sound, and its step parameters. The
 //! automation lane under the piano roll is a view over them, the notes and
-//! the device params' `step-locks` / `has-locks` (legacy
-//! `SEQ.piano-roll-automation`, `-automation-params`).
+//! the device params' and rack macros' `step-locks` / `has-locks`
+//! (`ui/piano-roll.lisp`).
 //!
 //! **Identity.** Positional (spec D2): keyed (track instance id, index)
 //! under the piano roll's track, registered for that track alone (the
