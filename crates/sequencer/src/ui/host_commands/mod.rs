@@ -495,7 +495,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
     set_current_track_reactive(rt, selected);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    sync_all_track_sequencer_state(rt, state, app, selected, selected_steps);
+    sync_all_track_sequencer_state(rt, state, app);
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
     sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
@@ -609,7 +609,7 @@ pub(crate) fn finish_swapped_instrument_track(
         let rt = editor.runtime_mut();
         set_current_track_reactive(rt, selected_track);
         sync_track_name_state(rt, track_names, app);
-        sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
+        sync_all_track_sequencer_state(rt, state, app);
         rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
         sync_step_param_lists(rt, state, selected_track);
         rt.set_reactive(

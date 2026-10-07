@@ -109,6 +109,23 @@ fn a_defwidget_with_instance_state_reads_host_kinds_and_only_repaints() {
 /// built on eseq.kinds, `#'` and defwidget instance state.
 const MINI_DAW: &str = include_str!("../../../../../../docs/examples/mini-daw.lisp");
 
+/// The instance field `value` binds (`#'`), if it is an instance binding.
+fn instance_ref(value: &Value) -> Option<(InstanceId, String)> {
+    match value {
+        Value::ReactiveRef {
+            namespace, field, ..
+        } => namespace
+            .strip_prefix("%instance/")
+            .map(|id| (id.parse().expect("instance id"), field.clone())),
+        _ => None,
+    }
+}
+
+/// The instance field a widget's `prop` binds (`#'`), if any.
+pub(super) fn bound(props: &HashMap<String, Value>, prop: &str) -> Option<(InstanceId, String)> {
+    props.get(prop).and_then(instance_ref)
+}
+
 /// Every binding in `tree`: an instance's as (instance id, field) in `out`,
 /// any other (a legacy namespace's) as `namespace.field` in `legacy`.
 pub(super) fn instance_bindings(
@@ -119,8 +136,8 @@ pub(super) fn instance_bindings(
     match tree {
         Value::ReactiveRef {
             namespace, field, ..
-        } => match namespace.strip_prefix("%instance/") {
-            Some(id) => out.push((id.parse().expect("instance id"), field.clone())),
+        } => match instance_ref(tree) {
+            Some(binding) => out.push(binding),
             None => legacy.push(format!("{namespace}.{field}")),
         },
         Value::Map(map) => {

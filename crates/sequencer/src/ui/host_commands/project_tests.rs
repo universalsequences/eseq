@@ -44,7 +44,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
     let record_armed = Arc::new(Mutex::new(vec![false]));
     let active_delete_target = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
     let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db");
@@ -63,7 +62,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         fx_epoch: Arc::new(AtomicUsize::new(0)),
         fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations: ui_invalidations.clone(),
-        expanded_step_projection: expanded_step_projection.clone(),
         active_delete_target: active_delete_target.clone(),
         active_delete_target_version: active_delete_target_version.clone(),
         auto_follow_override_until: Arc::new(Mutex::new(None)),

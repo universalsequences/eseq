@@ -780,7 +780,7 @@ impl TrackProcessSlot {
     /// The error dot's compile half (expr spec §2): a stored body whose class
     /// is not in the published library (`compiled` = the class was found).
     /// Run errors are separate: they change on the scheduler thread and
-    /// reach the UI through `SEQ.process-run-errors`.
+    /// reach the UI as the process kind's `p.error`.
     pub fn expr_compile_error(&self, compiled: bool) -> Option<String> {
         (self.expr_source.is_some() && !compiled)
             .then(|| format!("expr body is not compiled ({})", self.class_name))

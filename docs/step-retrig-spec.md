@@ -164,7 +164,8 @@ like pan; `rate` uses the log slider curve. Mode ids 7 and 8; bump
 `PROCESS_LANE_MODE_OFFSET` (`ui/state_values/process_and_macros.rs:3`) and
 `seqv-process-lane-mode-offset` (`content/ui/seqv-track-params.lisp:73`) to 9
 together. All three Rust mode<->param maps (`ui/input.rs:759`,
-`ui/state_values/expanded_step.rs:133`, `ui/reactive_sync.rs:376`) and every
+`ui/state_values/expanded_step.rs:133`, removed with the slot projection in
+eseq-0l17.66, `ui/reactive_sync.rs:376`) and every
 `(if (= mode N) ...)` ladder in `seqv-track-params.lisp` get the two modes.
 Reactive lists `retrigs` / `track-retrigs` / `retrig-rates` /
 `track-retrig-rates` are registered and published alongside `pans`.

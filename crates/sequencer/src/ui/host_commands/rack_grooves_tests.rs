@@ -206,7 +206,6 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         fx_epoch: Arc::new(AtomicUsize::new(0)),
         fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations: Arc::new(UiInvalidationQueue::new()),
-        expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
         active_delete_target: Arc::new(Mutex::new(None)),
         active_delete_target_version: Arc::new(AtomicUsize::new(0)),
         auto_follow_override_until: Arc::new(Mutex::new(None)),

@@ -603,32 +603,6 @@ pub(super) fn bus_send_process_target(bus: u64) -> Result<sequencer::process::Pa
     Ok(sequencer::process::ParamTarget::BusSend { bus })
 }
 
-fn nonnegative_usize_arg(name: &str, value: f64) -> Result<usize, String> {
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(format!("{name} must be a non-negative integer"));
-    }
-    Ok(value as usize)
-}
-
-fn expanded_step_viewport_from_numbers(
-    track: f64,
-    track_id: f64,
-    page: f64,
-    mode: f64,
-    cursor_step: f64,
-) -> Result<ExpandedStepViewport, String> {
-    let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;
-    Ok(ExpandedStepViewport {
-        track: nonnegative_usize_arg("track", track)?
-            .min(sequencer::sequencer::MAX_TRACKS.saturating_sub(1)),
-        track_id: nonnegative_usize_arg("track-id", track_id)?,
-        page: nonnegative_usize_arg("page", page)?.min(max_page),
-        mode: nonnegative_usize_arg("mode", mode)?,
-        cursor_step: nonnegative_usize_arg("cursor-step", cursor_step)?
-            .min(MAX_STEPS.saturating_sub(1)),
-    })
-}
-
 pub(super) fn value_string_list(value: Option<&Value>) -> Vec<String> {
     let Some(Value::List(items)) = value else {
         return Vec::new();
@@ -3103,7 +3077,6 @@ pub(crate) fn init_runtime(
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
-    expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
@@ -3211,7 +3184,6 @@ pub(crate) fn init_runtime(
                     build_track_instrument_run_modes(&app),
                 ),
                 ("track-names", build_track_names(&track_names)),
-                ("track-collapsed", build_track_collapsed(app)),
                 (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
@@ -3336,14 +3308,8 @@ pub(crate) fn init_runtime(
                     "track-process-slots",
                     build_all_track_process_slots_value(&state, track_count),
                 ),
-                (
-                    "track-lane-patch",
-                    build_all_track_lane_patch_value(&state, track_count),
-                ),
-                ("process-run-errors", build_process_run_errors_value(&state)),
                 ("process-library", build_process_library_value(&state)),
                 ("sync-labels", build_sync_labels()),
-                ("track-volumes", build_track_volumes(&state)),
                 (
                     "track-pans",
                     build_all_track_param_lists_value(&state, &app, StepParam::Pan),
@@ -3360,8 +3326,6 @@ pub(crate) fn init_runtime(
                     "track-retrig-rates",
                     build_all_track_param_lists_value(&state, &app, StepParam::RetrigRate),
                 ),
-                ("track-mutes", build_track_mutes(&state)),
-                ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
                 (
                     "bus-ids",
@@ -3379,33 +3343,6 @@ pub(crate) fn init_runtime(
                             .iter()
                             .map(|bus| bus.name.clone())
                             .collect::<Vec<_>>(),
-                    ),
-                ),
-                (
-                    "bus-volumes",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.volume as f64))))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "bus-mutes",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.mute))))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "bus-solos",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
-                            .collect(),
                     ),
                 ),
                 ("bus-effects", build_bus_effects_value(&app)),
@@ -3551,26 +3488,6 @@ pub(crate) fn init_runtime(
                     Box::leak(format!("playhead-active-{idx}").into_boxed_str()),
                     Value::Bool(idx == 0),
                 ));
-            }
-            for track in 0..track_count {
-                for step in 0..MAX_STEPS {
-                    fields.push((
-                        Box::leak(track_step_active_field(track, step).into_boxed_str()),
-                        Value::Bool(state.pattern.patterns[track].is_active(step)),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_duration_field(track, step).into_boxed_str()),
-                        Value::Bool(track_step_duration_covered(&state, track, step)),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_plocked_field(track, step).into_boxed_str()),
-                        Value::Bool(false),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_selected_field(track, step).into_boxed_str()),
-                        Value::Bool(false),
-                    ));
-                }
             }
             fields
         },
@@ -3721,60 +3638,6 @@ pub(crate) fn init_runtime(
             name: "paste-effect".to_string(),
             payload: Value::Nil,
         });
-        Ok(Value::Bool(true))
-    });
-
-    let projection = expanded_step_projection.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seqv-sync-expanded-step-slots", move |args, _ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(track_id)),
-            Some(Value::Number(page)),
-            Some(Value::Number(mode)),
-            Some(Value::Number(cursor_step)),
-        ) = (
-            args.first(),
-            args.get(1),
-            args.get(2),
-            args.get(3),
-            args.get(4),
-        )
-        else {
-            return Err(
-                "seqv-sync-expanded-step-slots: expected (track track-id page mode cursor-step)"
-                    .into(),
-            );
-        };
-        let viewport =
-            expanded_step_viewport_from_numbers(*track, *track_id, *page, *mode, *cursor_step)?;
-        if projection.set_viewport(viewport) {
-            ui_inv.push(UiInvalidation::ExpandedStepViewport {
-                track: viewport.track,
-                track_id: viewport.track_id,
-            });
-        }
-        Ok(Value::Bool(true))
-    });
-
-    let projection = expanded_step_projection.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seqv-clear-expanded-step-slots", move |args, _ctx| {
-        let Some(Value::Number(track_id)) = args.first() else {
-            return Err("seqv-clear-expanded-step-slots: expected track-id".into());
-        };
-        if *track_id < 0.0 {
-            return Err("seqv-clear-expanded-step-slots: track-id must be non-negative".into());
-        }
-        let track_id = *track_id as usize;
-        if let Some(viewport) = projection.viewport(track_id) {
-            if projection.remove_viewport(track_id) {
-                ui_inv.push(UiInvalidation::ExpandedStepViewport {
-                    track: viewport.track,
-                    track_id,
-                });
-            }
-        }
         Ok(Value::Bool(true))
     });
 
@@ -9269,21 +9132,6 @@ mod tests {
             accumulator_names.lock().unwrap().as_slice(),
             &["legacy-preview".to_string()]
         );
-    }
-
-    #[test]
-    fn expanded_step_viewport_parser_preserves_dynamic_process_modes() {
-        let viewport =
-            expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.0, 3.0).expect("viewport");
-        assert_eq!(viewport.track, 0);
-        assert_eq!(viewport.track_id, 12);
-        assert_eq!(viewport.page, 0);
-        assert_eq!(viewport.mode, 7);
-        assert_eq!(viewport.cursor_step, 3);
-
-        let err = expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.5, 3.0)
-            .expect_err("fractional mode should be rejected");
-        assert!(err.contains("mode"), "unexpected error: {err}");
     }
 
     impl Drop for TempDirGuard {

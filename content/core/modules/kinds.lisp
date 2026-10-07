@@ -52,7 +52,7 @@
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
         duplicate-groove! delete-groove! save-groove-to-library!
-        process-library set-process-enabled! set-inlet! set-lane-steps! move-process!
+        process-library set-process-enabled! set-inlet! set-fanout! set-lane-steps! move-process!
         add-process! remove-process! bind-port! add-fanout! unbind-port! clear-port!
         remove-fanout!
         browser sound-palette editor learn retro song-export settings agent
@@ -317,6 +317,11 @@
 ;; Set inlet i to v; :all true sets the shared project lane's.
 (def set-inlet! (i v &key (all false))
   (edit-process (process-target i.process) "inlet" :inlet i.name :value v :all all))
+
+;; Set bound "lo" or "hi" of fan-out entry fo to v (fo.lo / fo.hi's set!
+;; with a scope); :all true sets the shared project lane's.
+(def set-fanout! (fo bound v &key (all false))
+  (edit-process (fanout-address fo) (str "fanout-" bound) :value v :all all))
 
 ;; The browser, the sound palette, the editor and the app's views (spec
 ;; §14.2i). A sound by its track's stable id and its patch id, a MIDI input by
@@ -1071,9 +1076,13 @@
          (lanes     (list-of lane) :doc "Every lane of the chain, in the lane selector's order")
          (active-notes (list-of (list-of :number))
                     :doc "The notes sounding now, (note velocity trigger-id) per note, ascending; a piano-keyboard's :notes-by-track takes the rows"))
-  ;; View state, per track and not saved: the sequencer shows the track's
-  ;; step editor expanded.
-  :state ((expanded false)))
+  ;; View state, per track and not saved: the sequencer's expanded step
+  ;; editor (shown, its param mode, its step cursor and the 16-step page
+  ;; that cursor is on).
+  :state ((expanded false)
+          (param-mode 0)
+          (cursor 0)
+          (page 0)))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.

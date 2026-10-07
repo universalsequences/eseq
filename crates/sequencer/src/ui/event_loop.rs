@@ -402,18 +402,13 @@ pub(crate) fn run_event_loop(
         prev_track_peak_levels: Vec::new(),
         prev_rack_slot_peak_levels: Vec::new(),
         prev_bus_peak_levels: Vec::new(),
-        prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
         rack_pad_triggers: Vec::new(),
         prev_track_playheads: Vec::new(),
-        prev_track_process_lengths: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
-        prev_process_scope_values_version: shared.state.process_scope_values_version(),
-        prev_process_scope_cells_version: shared.state.process_scope_values_version(),
         prev_process_effective_params_version: shared.state.process_effective_params_version(),
-        prev_process_run_errors_version: None,
         prev_process_effective_params: Default::default(),
         prev_track_tint: None,
         prev_variant_tint: None,
@@ -1105,7 +1100,6 @@ pub(crate) fn run_event_loop(
                         &mut app,
                         &shared.current_track,
                         &shared.selected_steps,
-                        &shared.expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
@@ -1648,13 +1642,7 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
                         } else {
-                            sync_all_track_sequencer_state(
-                                rt,
-                                &shared.state,
-                                &app,
-                                ct,
-                                &shared.selected_steps,
-                            );
+                            sync_all_track_sequencer_state(rt, &shared.state, &app);
                             sync_playhead_fields(
                                 rt,
                                 playhead as usize,
@@ -1729,7 +1717,6 @@ pub(crate) fn run_event_loop(
                             )));
                         }
                         shared.ui_invalidations.clear();
-                        shared.expanded_step_projection.clear();
 
                         frame.prev_current_track = ct;
                         frame.prev_playhead = playhead;

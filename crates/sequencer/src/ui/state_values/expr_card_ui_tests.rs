@@ -229,10 +229,11 @@ fn expr_card_edit_buffer_commits_reports_errors_and_survives_removal() {
 
 /// Port overflow (§3.2 (a)): past three in ports the card shows two plus a
 /// `+n` badge, keeps any port a cable lands on, and the inspector still
-/// lists every inlet. A scheduler run error lights the dot through
-/// `SEQ.process-run-errors`.
+/// lists every inlet. (A scheduler run error lights the dot through the
+/// node process's `error`, which needs the host kinds:
+/// `host_kinds::tests::sequencer_editor`.)
 #[test]
-fn expr_card_overflow_badge_and_run_error_dot() {
+fn expr_card_overflow_badge_keeps_wired_in_ports() {
     let mut bay = Bay::open();
     let rand = bay.add("lane-rand");
     let expr = bay.add("expr");
@@ -271,24 +272,6 @@ fn expr_card_overflow_badge_and_run_error_dot() {
         let picker = find_layout_node_by_stable_key_suffix(&layout, &key).expect(&key);
         assert_finite_nonzero_rect(picker, &key);
     }
-
-    // A run error reaches the dot without re-rendering the bay.
-    let dot_active = |bay: &mut Bay| {
-        let layout = bay.layout();
-        let dot = find_layout_node_by_stable_key_suffix(&layout, &format!("lane-patch-expr-error-{expr}")).unwrap();
-        prop(dot, "active").cloned()
-    };
-    assert_eq!(dot_active(&mut bay), Some(Value::Number(0.0)));
-    bay.state.publish_process_run_errors([(expr, "step budget exceeded".to_string())].into_iter().collect());
-    bay.show_bay();
-    bay.editor.runtime_mut().set_reactive(
-        "SEQ",
-        "process-run-errors",
-        build_process_run_errors_value(&bay.state),
-    );
-    bay.editor.runtime_mut().run_reactive_cycle();
-    bay.editor.refresh_runtime_side_effects();
-    assert_eq!(dot_active(&mut bay), Some(Value::Number(1.0)));
 }
 
 /// Expr presets (spec §6.1, bead eseq-waa9.15): the node bay's add menu
@@ -463,7 +446,7 @@ fn expr_card_docked_code_keeps_completion_and_mode_across_commit_and_hide_show()
     let expr = expr as u64;
     bay.set_body(expr, "(* x 2)");
     bay.eval(&format!(
-        "(eseq.sequencer/lane-patch-select-lane (eseq.sequencer/lane-patch-node-namespace (instance-ref {graph}) 1) 0 {expr})"
+        "(eseq.sequencer/lane-patch-select-lane (eseq.sequencer/lane-patch-node-namespace (instance-ref {graph}) 1) {expr})"
     ));
     bay.eval("(eseq.seq-layout/refresh-current-layout)");
     let name = "*expr node 1 · slot 1*";

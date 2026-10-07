@@ -15,7 +15,7 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
-(import eseq.kinds :refer (buses groups))
+(import eseq.kinds :refer (buses groups selection transport))
 
 (export track-range-in-order
         selected-bus
@@ -31,6 +31,7 @@
         cursor-step-value
         set-cursor-step-value
         cursor-num-steps
+        current-track-index
         current-step
         page-count
         visible-page
@@ -115,6 +116,10 @@
 ;; module's own `eseq.seq-core-state/cursor-step`, a different slot.
 (def cursor-step-value () eseq.vanilla/cursor-step)
 
+;; COMPAT(eseq-0l17.14): the *step* panel (ui/effects/track-panels.lisp) binds
+;; the legacy `fx-step-*` fields, which the host republishes only on a step
+;; selection or a `set-cursor-step` command: a Lisp cursor move echoes them
+;; here until the panel reads selection.cursor-step / edit-step.
 (def set-cursor-step-value (step)
   (let ((parameter-step
           (if (> (or SEQ.fx-step-selection-count 0) 0)
@@ -134,13 +139,20 @@
 ;; The step cursor always tracks the current track's pattern length.  The old
 ;; bus-gate step sequencer (and its `SEQ.bus-num-steps` reactive list) is gone,
 ;; so a selected bus/group no longer implies a separate step count.
-(def cursor-num-steps () SEQ.tp-num-steps)
+(def cursor-num-steps ()
+  (let ((t selection.track))
+    (if t t.num-steps 16)))
+
+;; The current track's position (0 while there is none).
+(def current-track-index ()
+  (let ((t selection.track))
+    (if t t.index 0)))
 
 (def current-step ()
   (mod eseq.vanilla/cursor-step (max 1 (cursor-num-steps))))
 
 (def page-count ()
-  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
+  (max 1 (floor (/ (+ (cursor-num-steps) (- page-size 1)) page-size))))
 
 ;; Private: the app-wide sweep found no caller outside this file, and
 ;; `current-page` is one of the three names hazard (k) calls out by name as
@@ -149,13 +161,14 @@
   (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
 
 (def visible-page ()
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+  (if (and transport.playing selection.auto-follow (not (seq-has-selection?)))
     (playhead-page)
     (current-page)))
 
 (def playhead-page ()
-  (min SEQ.playhead-page
-    (- (page-count) 1)))
+  (let ((t selection.track))
+    (min (if t (max 0 t.playhead-page) 0)
+      (- (page-count) 1))))
 
 (def page-offset ()
   (* (visible-page) page-size))

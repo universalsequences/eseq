@@ -11,7 +11,8 @@
 ;; lands on the same alias by base name. Every aliased name is a function, so
 ;; hazard (m) cannot bite (function slots are written once, by their `def`).
 ;;
-;; NO IMPORTS, deliberately, for two independent reasons:
+;; No imports of the views it serves (only eseq.seq-core-state and the
+;; kinds), deliberately, for two independent reasons:
 ;;
 ;;  (1) HAZARD (n). `metal_seq_fx_lisp_lays_out_inline_custom_instrument_mod_selector`
 ;;      (src/ui/state_values/tests.rs) `read_to_string`s THIS FILE and evals only
@@ -51,6 +52,8 @@
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
+;; The editor's mode (eseq.kinds: no import edge back).
+(import eseq.kinds :refer (editor))
 
 (export seq-hide-samples-sidebar
         seq-hide-mixer-panel
@@ -207,7 +210,7 @@
     (open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-piano-roll-bottom ()
-  (seq-open-piano-roll-bottom-for-track SEQ.current-track))
+  (seq-open-piano-roll-bottom-for-track (eseq.seq-core-state/current-track-index)))
 
 (def seq-open-piano-roll-main ()
   (seq-open-piano-roll-bottom))
@@ -305,10 +308,9 @@
           (eseq.seq-layout/apply-fx-layout)))))))
 
 (def seq-toggle-main-or-piano-roll ()
-  (if (or (= SEQ.editor-mode "new-instrument")
-          (= SEQ.editor-mode "edit-instrument")
-          (= SEQ.editor-mode "new-effect")
-          (= SEQ.editor-mode "edit-effect"))
+  (if (let ((mode editor.mode))
+        (or (= mode "new-instrument") (= mode "edit-instrument")
+            (= mode "new-effect") (= mode "edit-effect")))
     (host-command "toggle-instrument-patcher-source" (dict))
     (if (piano-roll-open?)
       (seq-close-piano-roll)

@@ -1,13 +1,17 @@
 //! The factory sequencer's compact grid, its track and group headers and the
 //! rack clip run, ported to the kinds (kind-bindings spec §13 stage 8,
 //! eseq-0l17.11). The expanded step editor, its process lanes, the lane
-//! patchbay and the pad grid are not ported yet.
+//! patchbay and the pad grid: `sequencer_editor` (eseq-0l17.66).
 
-use super::views::{assert_ported, distro, instance_bindings, legacy_forms};
+use super::views::{assert_ported, distro, instance_bindings};
 use super::*;
 
 /// The fully ported files' sources.
-const PORTED: [(&str, &str); 2] = [
+const PORTED: [(&str, &str); 7] = [
+    (
+        "ui/sequencer.lisp",
+        include_str!("../../../../../../content/ui/sequencer.lisp"),
+    ),
     (
         "ui/track-collapse.lisp",
         include_str!("../../../../../../content/ui/track-collapse.lisp"),
@@ -16,39 +20,27 @@ const PORTED: [(&str, &str); 2] = [
         "ui/sequencer-keys.lisp",
         include_str!("../../../../../../content/ui/sequencer-keys.lisp"),
     ),
+    (
+        "ui/seqv-track-params.lisp",
+        include_str!("../../../../../../content/ui/seqv-track-params.lisp"),
+    ),
+    (
+        "ui/step-grid-interactions.lisp",
+        include_str!("../../../../../../content/ui/step-grid-interactions.lisp"),
+    ),
+    (
+        "ui/seq-grid-mode.lisp",
+        include_str!("../../../../../../content/ui/seq-grid-mode.lisp"),
+    ),
+    (
+        "ui/seq-panels.lisp",
+        include_str!("../../../../../../content/ui/seq-panels.lisp"),
+    ),
 ];
 
-const SEQUENCER: &str = include_str!("../../../../../../content/ui/sequencer.lisp");
-
-/// The ported part of ui/sequencer.lisp: from the top to the expanded step
-/// editor, and from the track rows to the pad grid.
-fn grid_source() -> String {
-    let section = |from: &str, to: &str| {
-        let start = SEQUENCER.find(from).unwrap_or_else(|| panic!("{from}"));
-        let end = start
-            + SEQUENCER[start..]
-                .find(to)
-                .unwrap_or_else(|| panic!("{to}"));
-        &SEQUENCER[start..end]
-    };
-    [
-        section(
-            "(module eseq.sequencer)",
-            ";; ── The expanded step editor ──",
-        ),
-        section(
-            ";; Which sound payloads track t",
-            ";; ── Pad grid performance view",
-        ),
-    ]
-    .concat()
-}
-
 #[test]
-fn ported_sequencer_grid_uses_no_legacy_binding_forms() {
+fn ported_sequencer_files_use_no_legacy_binding_forms() {
     assert_ported(&PORTED);
-    assert_eq!(legacy_forms(&grid_source()), Vec::<&str>::new(), "the grid");
-    assert!(SEQUENCER.contains("(import eseq.kinds :refer ("));
 }
 
 /// The step cells take their step and track, the playhead bars their track,

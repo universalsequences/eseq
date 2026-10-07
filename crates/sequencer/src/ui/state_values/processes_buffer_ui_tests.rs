@@ -71,7 +71,7 @@ impl Dock {
     fn select(&mut self, id: u64) {
         let graph = self.graph;
         self.eval(&format!(
-            "(eseq.sequencer/lane-patch-select-lane (eseq.sequencer/lane-patch-node-namespace (instance-ref {graph}) 1) 0 {id})"
+            "(eseq.sequencer/lane-patch-select-lane (eseq.sequencer/lane-patch-node-namespace (instance-ref {graph}) 1) {id})"
         ));
     }
 

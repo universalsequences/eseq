@@ -39,10 +39,6 @@ pub(crate) enum UiInvalidation {
         /// Step indexes whose membership in the selection changed.
         changed_steps: Vec<usize>,
     },
-    ExpandedStepViewport {
-        track: usize,
-        track_id: usize,
-    },
     TrackMixer {
         track: usize,
         change: TrackMixerInvalidation,
@@ -622,7 +618,6 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepInvalidationBatch { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })
-        | (UiInvalidation::TrackTopology(_), UiInvalidation::ExpandedStepViewport { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Instrument { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackFx { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::MidiFx { .. }) => true,
@@ -630,8 +625,7 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
             UiInvalidation::Pattern(PatternInvalidation::AllTracks),
             UiInvalidation::Step { .. }
             | UiInvalidation::StepInvalidationBatch { .. }
-            | UiInvalidation::StepSelection { .. }
-            | UiInvalidation::ExpandedStepViewport { .. },
+            | UiInvalidation::StepSelection { .. },
         ) => true,
         (
             UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track }),
@@ -642,9 +636,6 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
                 track: old_track, ..
             }
             | UiInvalidation::StepSelection {
-                track: old_track, ..
-            }
-            | UiInvalidation::ExpandedStepViewport {
                 track: old_track, ..
             },
         ) => track == old_track,

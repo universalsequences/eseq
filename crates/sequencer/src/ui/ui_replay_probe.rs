@@ -147,7 +147,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             assert!(editor.switch_active_tile_to_buffer_named(if phase == "scroll" { "*sequencer*" } else { "*fx*" }));
         }
         editor.mark_needs_redraw();
-        let hidden_fields = ["track-active-notes", "track-process-scopes"];
+        let hidden_fields = ["track-active-notes"];
         let hidden_snapshot = (phase == "scratch").then(|| hidden_fields.map(|field|
             editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone)));
         let compressor_keys = editor.visible_widget_layouts().iter().flat_map(|layout|
@@ -258,8 +258,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(cols as u16, rows as u16);
     editor.sync_reactive_bindings_for_visible_layouts();
-    let scope_version_before_reopen = frame.prev_process_scope_values_version;
-    let cells_version_before_reopen = frame.prev_process_scope_cells_version;
     meters.cached_peak_l_level = -1.0;
     meters.cached_track_peak_levels.clear();
     meters.last_meter_poll_at = Instant::now();
@@ -272,18 +270,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     }, &mut stats);
     assert!(meters.cached_peak_l_level >= 0.0, "reopened master meter samples immediately");
     assert_eq!(meters.cached_track_peak_levels.len(), app.tracks.len());
-    if editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes") {
-        assert_eq!(frame.prev_process_scope_values_version, shared.state.process_scope_values_version());
-    } else {
-        // Open track groups do not imply expanded lane editors. A restored
-        // layout without scope consumers must continue leaving histories alone.
-        assert_eq!(frame.prev_process_scope_values_version, scope_version_before_reopen);
-    }
-    if editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells") {
-        assert_eq!(frame.prev_process_scope_cells_version, shared.state.process_scope_values_version());
-    } else {
-        assert_eq!(frame.prev_process_scope_cells_version, cells_version_before_reopen);
-    }
     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
     backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render reopened panels"));
     target.save_png(&out.with_file_name(format!("{}-reopened.png", out.file_stem().unwrap().to_string_lossy()))).unwrap();

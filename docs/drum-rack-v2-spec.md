@@ -283,7 +283,7 @@ The grid view renders the rack as a header row plus full member rows:
     sources light it, because all three land on the pad's member track: a cell
     click, an armed rack's live keys, and the member's own sequenced steps.
     The light is therefore one bound field per member track
-    (`rack-pad-trigger-<track>`), fed by the audio thread's per-track trigger
+    (`rack-pad-trigger-<track>`; since eseq-0l17.66 the kinds' `pad.triggered`), fed by the audio thread's per-track trigger
     latch — so a hit shorter than a UI frame is never missed — and held up for
     as long as the note is actually sounding, decaying shortly after. Being a
     *bound* field, a hit repaints the cell without re-rendering the panel, and

@@ -109,7 +109,6 @@ pub(super) fn handle(
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_value_epoch = ctx.shared.fx_value_epoch.clone();
-    let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     let active_delete_target = ctx.shared.active_delete_target.clone();
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
@@ -737,7 +736,6 @@ pub(super) fn handle(
 
             let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-            let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
             let selected_neural_snapshot =
                 selected_neural_neurons.lock().unwrap().clone();
             let rt = editor.runtime_mut();
@@ -746,17 +744,7 @@ pub(super) fn handle(
             sync_pattern_state(rt, &state);
             set_current_track_reactive(rt, ct);
             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-            sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
-            if sequencer_visible {
-                let _ = sync_all_expanded_step_viewports(
-                    rt,
-                    &state,
-                    &app,
-                    &selected_steps,
-                    ct,
-                    &expanded_step_projection,
-                );
-            }
+            sync_all_track_sequencer_state(rt, &state, &app);
             sync_track_automation_state(rt, app, &state);
             sync_step_param_lists(rt, &state, ct);
             sync_track_mixer_state(rt, &app, &state);
@@ -884,7 +872,6 @@ pub(super) fn handle(
                     let mut sync_names_pattern_elapsed = Duration::ZERO;
                     let mut sync_current_steps_elapsed = Duration::ZERO;
                     let mut sync_sequencer_elapsed = Duration::ZERO;
-                    let mut sync_expanded_elapsed = Duration::ZERO;
                     let mut sync_track_automation_elapsed = Duration::ZERO;
                     let mut sync_step_params_elapsed = Duration::ZERO;
                     let mut sync_mixer_elapsed = Duration::ZERO;
@@ -909,8 +896,6 @@ pub(super) fn handle(
                     if switched.is_ok() {
                         let ct = current_track.load(Ordering::Relaxed);
                         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-                        let sequencer_visible =
-                            editor_has_visible_buffer(&editor, "*sequencer*");
                         let rt = editor.runtime_mut();
                         let started = Instant::now();
                         sync_shared_track_collapsed(&track_collapsed, &app);
@@ -921,26 +906,8 @@ pub(super) fn handle(
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                         sync_current_steps_elapsed = started.elapsed();
                         let started = Instant::now();
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &state,
-                            &app,
-                            ct,
-                            &selected_steps,
-                        );
+                        sync_all_track_sequencer_state(rt, &state, &app);
                         sync_sequencer_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        if sequencer_visible {
-                            let _ = sync_all_expanded_step_viewports(
-                                rt,
-                                &state,
-                                &app,
-                                &selected_steps,
-                                ct,
-                                &expanded_step_projection,
-                            );
-                        }
-                        sync_expanded_elapsed = started.elapsed();
                         let started = Instant::now();
                         sync_track_automation_state(rt, app, &state);
                         sync_track_automation_elapsed = started.elapsed();
@@ -1044,7 +1011,7 @@ pub(super) fn handle(
                     }
                     if profile_switch {
                         eprintln!(
-                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
                             idx,
                             pattern_changed,
                             duration_ms(profile_total_started.elapsed()),
@@ -1055,7 +1022,6 @@ pub(super) fn handle(
                             duration_ms(sync_names_pattern_elapsed),
                             duration_ms(sync_current_steps_elapsed),
                             duration_ms(sync_sequencer_elapsed),
-                            duration_ms(sync_expanded_elapsed),
                             duration_ms(sync_track_automation_elapsed),
                             duration_ms(sync_step_params_elapsed),
                             duration_ms(sync_mixer_elapsed),
@@ -1488,7 +1454,6 @@ mod tests {
             fx_epoch: Arc::new(AtomicUsize::new(0)),
             fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
-            expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),
             auto_follow_override_until: Arc::new(Mutex::new(None)),

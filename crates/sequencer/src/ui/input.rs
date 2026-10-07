@@ -801,21 +801,6 @@ fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
     }
 }
 
-fn metal_mode_for_step_param(param: StepParam) -> Option<usize> {
-    match param {
-        StepParam::Velocity => Some(0),
-        StepParam::Duration => Some(1),
-        StepParam::AuxA => Some(2),
-        StepParam::Transpose => Some(3),
-        StepParam::Pan => Some(4),
-        StepParam::Sync => Some(5),
-        StepParam::Delay => Some(6),
-        StepParam::Retrig => Some(7),
-        StepParam::RetrigRate => Some(8),
-        _ => None,
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SoftStepParamEditKind {
     StepParam(StepParam),
@@ -897,22 +882,9 @@ fn soft_step_param_edit_spec(
 fn sync_soft_step_param_commit(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
-    steps: &[usize],
-    param: StepParam,
 ) {
-    let runtime = editor.runtime_mut();
-    sync_step_param_lists(runtime, state, target.track);
-    if let Some(mode) = metal_mode_for_step_param(param) {
-        for viewport in expanded_step_projection.viewports_for_track(target.track) {
-            for step in steps {
-                if let Some(slot) = visible_slot_for_step(viewport, *step) {
-                    let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
-                }
-            }
-        }
-    }
+    sync_step_param_lists(editor.runtime_mut(), state, target.track);
 }
 
 fn commit_soft_step_param_edit(
@@ -920,7 +892,6 @@ fn commit_soft_step_param_edit(
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
     value: f64,
 ) -> bool {
@@ -943,9 +914,7 @@ fn commit_soft_step_param_edit(
             ).is_err() {
                 return false;
             }
-            sync_soft_step_param_commit(
-                editor, &app.state, expanded_step_projection, target, &steps, *param,
-            );
+            sync_soft_step_param_commit(editor, &app.state, target);
             true
         }
         SoftStepParamEditKind::ProcessLane { instance_id, inlet_name } => {
@@ -958,7 +927,6 @@ fn commit_soft_step_param_edit(
             sync_process_lane_track_state(
                 editor.runtime_mut(), &app.state, target.track,
                 current_track.load(Ordering::Relaxed),
-                &expanded_step_projection.viewports_for_track(target.track),
             );
             true
         }
@@ -1083,7 +1051,6 @@ pub(crate) fn handle_metal_soft_step_param_key(
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
 ) -> bool {
     use crossterm::event::KeyEventKind;
@@ -1189,7 +1156,6 @@ pub(crate) fn handle_metal_soft_step_param_key(
                 app,
                 current_track,
                 selected_steps,
-                expanded_step_projection,
                 &target,
                 value,
             ) {
@@ -2424,10 +2390,9 @@ mod live_keyboard_tests {
         number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
         sequencer_history_shortcut, sequencer_tab_shortcut_index_for,
         should_route_to_live_keyboard, should_toggle_play_on_space,
-        ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
-        UiInvalidationQueue, PROCESS_LANE_MODE_OFFSET, step_clipboard_shortcut_for,
+        UiInvalidationQueue, step_clipboard_shortcut_for,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -5491,14 +5456,6 @@ mod live_keyboard_tests {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: 0,
-            cursor_step: 2,
-        });
         let mut edit = SoftStepParamEdit::default();
 
         for key in [
@@ -5514,7 +5471,6 @@ mod live_keyboard_tests {
                     &mut app,
                     &current_track,
                     &Arc::new(Mutex::new(HashSet::new())),
-                    &expanded_step_projection,
                     &mut edit,
                 ),
                 "sequencer soft edit should consume {key:?}"
@@ -5550,14 +5506,6 @@ mod live_keyboard_tests {
             Some(Value::Number(0.5)),
             "soft edit commit should flush the reactive cycle immediately"
         );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit commit should update the visible expanded slider slot immediately"
-        );
     }
 
     fn check_process_lane_soft_entry(selection: &[usize]) {
@@ -5575,7 +5523,6 @@ mod live_keyboard_tests {
                 ("track-process-lanes", Value::List(vec![])),
                 ("process-slots", Value::List(vec![])),
                 ("track-process-slots", Value::List(vec![])),
-                ("track-lane-patch", Value::List(vec![])),
                 ("process-library", Value::List(vec![])),
             ],
             true,
@@ -5625,14 +5572,6 @@ mod live_keyboard_tests {
             .widget_layout()
             .expect("process lane number picker should lay out");
 
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: PROCESS_LANE_MODE_OFFSET,
-            cursor_step: 2,
-        });
         let mut edit = SoftStepParamEdit::default();
 
         for key in [
@@ -5646,7 +5585,6 @@ mod live_keyboard_tests {
                     &mut app,
                     &current_track,
                     &Arc::new(Mutex::new(selection.iter().copied().collect())),
-                    &expanded_step_projection,
                     &mut edit,
                 ),
                 "process lane soft edit should consume {key:?}"
@@ -5667,23 +5605,12 @@ mod live_keyboard_tests {
         );
         for step in selection {
             assert_eq!(amount_lane.values[*step], 2.0, "every selected lane step is edited");
-            assert_eq!(editor.runtime_mut().eval_str(&format!(
-                "(reactive-get \"SEQ\" \"seqv-slot-param-slider-0-9-{step}\")"
-            )).unwrap(), Some(Value::Number(2.0)));
         }
         assert_eq!(app.history.undo_len(), 1, "one typed commit is one undo entry");
         assert_eq!(
             state.pattern.step_data[0].get(2, StepParam::Transpose),
             0.0,
             "process lane soft edits must not mutate built-in step data"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-9-2")"#)
-                .unwrap(),
-            Some(Value::Number(if selection.is_empty() { 2.0 } else { 0.0 })),
-            "soft edit commit should update the visible process lane slider slot immediately"
         );
         assert_eq!(
             editor
@@ -5807,14 +5734,6 @@ mod live_keyboard_tests {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: 0,
-            cursor_step: 2,
-        });
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
             Arc::new(Mutex::new(None));
@@ -5847,7 +5766,6 @@ mod live_keyboard_tests {
                 &mut app,
                 &current_track,
                 &Arc::new(Mutex::new(HashSet::new())),
-                &expanded_step_projection,
                 &mut edit,
             ),
             "Enter should commit an already-editing sequencer number picker instead of falling through to cursor-toggle"
@@ -5865,14 +5783,6 @@ mod live_keyboard_tests {
                 .unwrap(),
             Some(Value::Number(0.25)),
             "commit should flush the reactive mirror immediately"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
-                .unwrap(),
-            Some(Value::Number(0.25)),
-            "Enter commit should update the visible expanded slider slot immediately"
         );
     }
 }

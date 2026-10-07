@@ -223,7 +223,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // in-place value-patch path instead of a full *fx* re-eval.
     let fx_value_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     // When set, pagination stays on the user-selected page until the cooldown expires.
@@ -274,7 +273,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_epoch.clone(),
         fx_epoch.clone(),
         ui_invalidations.clone(),
-        expanded_step_projection.clone(),
         selected_neural_neurons.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
@@ -309,7 +307,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fx_epoch: fx_epoch.clone(),
         fx_value_epoch: fx_value_epoch.clone(),
         ui_invalidations: ui_invalidations.clone(),
-        expanded_step_projection: expanded_step_projection.clone(),
         active_delete_target: active_delete_target.clone(),
         active_delete_target_version: active_delete_target_version.clone(),
         auto_follow_override_until: auto_follow_override_until.clone(),

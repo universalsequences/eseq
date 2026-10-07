@@ -23,19 +23,11 @@ fn clone_scene_copies_the_clicked_scene_into_its_bank_without_a_view_switch() {
     h.sync();
 
     h.eval("(eseq.kinds/clone-scene! (nth (scenes) 1))");
-    let commands = h.editor.drain_host_commands();
-    let names: Vec<&str> = commands
-        .iter()
-        .filter_map(|command| match command {
-            HostCommand::Custom { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
+    let commands = h.custom_commands();
+    let names: Vec<&str> = commands.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["clone-pattern"], "one command; no switch first");
-    for command in commands {
-        if let HostCommand::Custom { name, payload } = command {
-            h.command(&name, payload);
-        }
+    for (name, payload) in commands {
+        h.command(&name, payload);
     }
     let banks = h.app.state.scene_banks();
     assert_eq!(h.app.state.scene_count(), 3);

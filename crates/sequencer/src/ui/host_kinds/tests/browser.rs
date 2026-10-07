@@ -676,16 +676,7 @@ fn settings_follow_the_audio_and_midi_state() {
     // The setter names the input by its id (the service applies it).
     h.eval_7f("(def d0 (first settings.midi-devices))");
     h.eval_7f("(set! d0.enabled false)");
-    let commands = h.editor.drain_host_commands();
-    let payload = commands
-        .iter()
-        .find_map(|command| match command {
-            HostCommand::Custom { name, payload } if name == "midi-set-enabled" => {
-                Some(payload.clone())
-            }
-            _ => None,
-        })
-        .expect("midi-set-enabled");
+    let payload = h.last_custom("midi-set-enabled");
     assert_eq!(map_get(&payload, "id"), s("b"));
     assert_eq!(map_get(&payload, "enabled"), Value::Bool(false));
 }

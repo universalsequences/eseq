@@ -1,5 +1,5 @@
 use super::process_edit::{apply_process_edit, process_edit_from_payload};
-use super::track_settings::{bar_transpose_applied, slice3_edit_applied};
+use super::track_settings::slice3_edit_applied;
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -760,14 +760,15 @@ pub(super) fn handle(
                 ));
                 return;
             }
-            let track = track as usize;
-            let bar = bar as usize;
-            match app::edit::apply_bar_transpose_edit(&mut app, track, bar, value as f32) {
-                Ok(app::edit::EditOutcome::Applied(_)) => bar_transpose_applied(ctx, track),
-                Ok(_) => {}
-                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+            if let Err(error) = app::edit::apply_bar_transpose_edit(
+                &mut app,
+                track as usize,
+                bar as usize,
+                value as f32,
+            ) {
+                editor.handle_host_event(HostEvent::Error(format!(
                     "Bar transpose edit failed: {error:?}"
-                ))),
+                )));
             }
         }
         "toggle-step" => {
@@ -1595,7 +1596,6 @@ pub(super) fn handle(
                     rt,
                     &state,
                     &app,
-                    &ctx.shared.expanded_step_projection,
                     track,
                     &selected_steps,
                 );
@@ -1849,7 +1849,6 @@ mod tests {
         record_armed: Arc<Mutex<Vec<bool>>>,
         active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
         active_delete_target_version: Arc<AtomicUsize>,
-        expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
         ui_epoch: Arc<AtomicUsize>,
         ui_invalidations: Arc<UiInvalidationQueue>,
     }
@@ -1907,7 +1906,6 @@ mod tests {
             let record_armed = Arc::new(Mutex::new(vec![false]));
             let active_delete_target = Arc::new(Mutex::new(None));
             let active_delete_target_version = Arc::new(AtomicUsize::new(0));
-            let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
             let ui_epoch = Arc::new(AtomicUsize::new(0));
             let ui_invalidations = Arc::new(UiInvalidationQueue::new());
             let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db");
@@ -1926,7 +1924,6 @@ mod tests {
                 fx_epoch: Arc::new(AtomicUsize::new(0)),
                 fx_value_epoch: Arc::new(AtomicUsize::new(0)),
                 ui_invalidations: ui_invalidations.clone(),
-                expanded_step_projection: expanded_step_projection.clone(),
                 active_delete_target: active_delete_target.clone(),
                 active_delete_target_version: active_delete_target_version.clone(),
                 auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -1989,7 +1986,6 @@ mod tests {
                 record_armed,
                 active_delete_target,
                 active_delete_target_version,
-                expanded_step_projection,
                 ui_epoch,
                 ui_invalidations,
             }
@@ -2086,7 +2082,6 @@ mod tests {
                     cached_bus_peak_levels: &bus_peaks,
                     record_armed: &self.record_armed,
                     active_delete_target: &self.active_delete_target,
-                    expanded_step_projection: &self.expanded_step_projection,
                     fx_visible: true,
                     sequencer_visible: true,
                     mixer_visible: true,
@@ -2156,13 +2151,6 @@ mod tests {
                 other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
             }
         }
-
-        fn bool_field(&self, field: &str) -> bool {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::Bool(value)) => *value,
-                other => panic!("SEQ.{field} should be a bool, got {other:?}"),
-            }
-        }
     }
 
     /// Every surface a Transpose / Velocity edit from the `*step*` panel feeds.
@@ -2173,9 +2161,8 @@ mod tests {
     /// are now the ONLY writer for all of these:
     ///   - `SEQ.{transposes,velocities}` — read by the `*step*` panel's
     ///     `fx-step-param-value`, `set-cursor-step-value`, and `*metal*`.
-    ///   - `SEQ.track-{transposes,velocities}` — read by
-    ///     `seqv-track-param-values` for every non-current expanded lane.
-    ///   - `seq-track-step-param-{slider,haptic}-{track}-{mode}-{step}`.
+    ///   - `SEQ.track-{transposes,velocities}` — the per-track lists
+    ///     (the step editors read the `step` kind's fields instead).
     ///   - `fx-step-value-{param}` — the number-picker readout being dragged.
     ///   - the piano roll's notes — note pitch comes from the step transpose.
     #[test]
@@ -2204,18 +2191,7 @@ mod tests {
         assert_eq!(
             harness.nested_list_number("track-transposes", TRACK, STEP),
             7.0,
-            "the per-track transpose list-of-lists (eseq.seqv-track-params/seqv-track-param-values) \
-             must be published"
-        );
-        assert_eq!(
-            harness.number(&track_step_param_slider_field(TRACK, 3, STEP)),
-            7.0,
-            "the per-step transpose slider binding must be published"
-        );
-        assert_eq!(
-            harness.number(&track_step_param_haptic_field(TRACK, 3, STEP)),
-            7.0,
-            "the per-step transpose haptic binding must be published"
+            "the per-track transpose list-of-lists must be published"
         );
         assert_eq!(
             harness.number("fx-step-value-transpose"),
@@ -2252,14 +2228,6 @@ mod tests {
         assert_eq!(harness.list_number("velocities", STEP), 0.25);
         assert_eq!(
             harness.nested_list_number("track-velocities", TRACK, STEP),
-            0.25
-        );
-        assert_eq!(
-            harness.number(&track_step_param_slider_field(TRACK, 0, STEP)),
-            0.25
-        );
-        assert_eq!(
-            harness.number(&track_step_param_haptic_field(TRACK, 0, STEP)),
             0.25
         );
         assert_eq!(
@@ -2327,10 +2295,8 @@ mod tests {
         assert_eq!(harness.number("fx-step-value-velocity"), 0.375);
     }
 
-    /// Duration additionally paints the compact grid's duration bar, which is
-    /// a SEPARATE surface with a separate writer: the per-step
-    /// `seq-track-step-duration-{track}-{step}` bools cover every cell the
-    /// note now reaches, and `SEQ.track-duration-spans` is the list form.
+    /// Duration additionally paints the duration bar's list form
+    /// (`SEQ.track-duration-spans`; the step grid binds `step.held`).
     #[test]
     fn set_step_duration_publishes_the_duration_bar_surfaces_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();
@@ -2358,17 +2324,6 @@ mod tests {
             4.0,
             "the *step* panel's Duration number-picker readout must be published"
         );
-        // The duration bar: the note now reaches STEP..STEP+4.
-        for step in STEP..STEP + 4 {
-            assert!(
-                harness.bool_field(&track_step_duration_field(TRACK, step)),
-                "step {step} must be marked as covered by the duration bar"
-            );
-        }
-        assert!(
-            !harness.bool_field(&track_step_duration_field(TRACK, STEP + 4)),
-            "the cell past the note's reach must not be marked covered"
-        );
         assert!(
             harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
             "the list form of the duration span must be published too"
@@ -2376,37 +2331,36 @@ mod tests {
 
         // Shortening it must clear the cells it no longer reaches.
         harness.set_step_param("duration", 1.0);
-        for step in STEP + 1..STEP + 4 {
-            assert!(
-                !harness.bool_field(&track_step_duration_field(TRACK, step)),
-                "step {step} must be released when the note is shortened"
-            );
-        }
+        assert!(
+            !harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
+            "the span is released when the note is shortened"
+        );
     }
 
-    /// The compact step shell's p-lock tick / variant tint is
+    /// The step shells' p-lock tick / variant tint (`step.lock-kind`) is
     /// `plock_variant_step_render_values`, whose `live_track_has_seq_lock` term
     /// is true as soon as ANY `StepParam` departs from its default — so a
-    /// transpose edit flips `seq-track-step-plock-kind-{track}-{step}` 0 -> 1
-    /// and restoring the default flips it back. Nothing else writes that field
-    /// on a step-param edit now that the funnel skips `ui_epoch`.
+    /// transpose edit flips the step's kind 0 -> 1 and restoring the default
+    /// flips it back, without an epoch resync.
     #[test]
     fn set_step_param_flips_the_compact_shell_seq_lock_tick() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
+        let kind =
+            |harness: &Harness| plock_variant_step_render_values(&harness.state, TRACK)[STEP].kind;
         harness.set_step_param("transpose", 7.0);
         assert_eq!(
-            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
-            1.0,
+            kind(&harness),
+            1,
             "a step param off its default must light the compact shell's \
              seq-lock tick"
         );
 
         harness.set_step_param("transpose", 0.0);
         assert_eq!(
-            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
-            0.0,
+            kind(&harness),
+            0,
             "restoring the default must clear the tick again"
         );
         assert_eq!(

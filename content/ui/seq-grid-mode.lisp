@@ -28,6 +28,7 @@
 (module eseq.seq-grid-mode)
 
 (import eseq.seq-core-state :as core)
+(import eseq.kinds :refer (selection project))
 
 (export seq-grid-handle-key
         goto-page
@@ -91,19 +92,19 @@
 (def goto-page (page)
   (do
     (core/cool-off-follow)
-    (eseq.step-grid-interactions/set-track-cursor-step (min (* page core/page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (* page core/page-size) (- (max 1 (core/cursor-num-steps)) 1)))))
 
 (def double-track-pattern ()
   (do
     (core/cool-off-follow)
     (seq-double-track-pattern)
-    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 (core/cursor-num-steps)) 1)))))
 
 (def halve-track-pattern ()
   (do
     (core/cool-off-follow)
     (seq-halve-track-pattern)
-    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 (core/cursor-num-steps)) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
 ;; Inherits the shared sequencer keymap (arrows, RET, BS/Delete, UP/DOWN);
@@ -150,9 +151,9 @@
 (def set-retrig-rate-mode () (set! eseq.seq-core-state/param-mode 8))
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "e" "set-retrig-rate-mode")
 (def set-process-lane-mode ()
-  (if (> (len SEQ.process-lanes) 0)
-    (set! eseq.seq-core-state/param-mode eseq.seqv-track-params/seqv-process-lane-mode-offset)
-    nil))
+  (let ((t selection.track))
+    (when (and t (not (empty? t.lanes)))
+      (set! eseq.seq-core-state/param-mode eseq.seqv-track-params/seqv-process-lane-mode-offset))))
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "x" "set-process-lane-mode")
 
 
@@ -203,4 +204,6 @@
   (eseq.seqv-track-params/seqv-param-origin eseq.seq-core-state/param-mode))
 
 (def sync-current-label ()
-  (nth SEQ.sync-labels (floor (+ 0.5 (nth SEQ.syncs (core/current-step))))))
+  (let ((t selection.track)
+        (s (when t (nth t.steps (core/current-step)))))
+    (if s (nth project.sync-options (floor (+ 0.5 s.sync))) "")))

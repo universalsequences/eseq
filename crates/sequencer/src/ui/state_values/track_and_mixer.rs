@@ -133,22 +133,6 @@ pub(crate) fn build_track_colors(app: &app::App) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_collapsed_from_slice(collapsed: &[bool], track_count: usize) -> Value {
-    Value::List(
-        (0..track_count)
-            .map(|track| {
-                Rc::new(RefCell::new(Value::Bool(
-                    collapsed.get(track).copied().unwrap_or(false),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_track_collapsed(app: &app::App) -> Value {
-    build_track_collapsed_from_slice(&app.track_collapsed, app.tracks.len())
-}
-
 pub(crate) fn build_track_ids(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
@@ -251,43 +235,6 @@ pub(crate) fn sync_track_name_state(
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
-    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
-}
-
-/// Build a Lisp Value::List of per-track volumes (0.0–1.0).
-pub(crate) fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            let vol = state.pattern.track_params[t].get_volume();
-            Rc::new(RefCell::new(Value::Number(vol as f64)))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn track_volume_field(track: usize) -> String {
-    format!("track-{track}-volume")
-}
-
-pub(crate) fn sync_track_volume_binding_field(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-) {
-    if let Some(tp) = state.pattern.track_params.get(track) {
-        rt.set_reactive(
-            "SEQ",
-            &track_volume_field(track),
-            Value::Number(tp.get_volume() as f64),
-        );
-    }
-}
-
-pub(crate) fn sync_track_volume_binding_fields(rt: &mut Runtime, state: &Arc<SequencerState>) {
-    for track in 0..state.active_track_count() {
-        sync_track_volume_binding_field(rt, state, track);
-    }
 }
 
 /// The track's own send level to `bus` (0 without a send). `track` is in
@@ -322,30 +269,6 @@ pub(crate) fn displayed_track_send_amount(
 ) -> f32 {
     track_send_lock(state, track, bus, display_step)
         .unwrap_or_else(|| track_send_base(state, track, bus))
-}
-
-pub(crate) fn build_track_mutes(state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            Rc::new(RefCell::new(Value::Bool(
-                state.pattern.track_params[t].is_muted(),
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_track_solos(state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            Rc::new(RefCell::new(Value::Bool(
-                state.pattern.track_params[t].is_solo(),
-            )))
-        })
-        .collect();
-    Value::List(items)
 }
 
 pub(crate) fn build_track_muted_by_solo(app: &app::App, state: &Arc<SequencerState>) -> Value {
@@ -439,7 +362,6 @@ pub(crate) fn sync_track_mixer_state(
     state: &Arc<SequencerState>,
 ) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
-    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
     rt.set_reactive(
         "SEQ",
         "track-instrument-types",
@@ -459,10 +381,6 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-run-modes",
         build_track_instrument_run_modes(app),
     );
-    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
-    sync_track_volume_binding_fields(rt, state);
-    rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
-    rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
     rt.set_reactive(
         "SEQ",
         "track-muted-by-solo",
@@ -482,21 +400,6 @@ pub(crate) fn bus_output_destination(bus: &app::BusChannelState) -> sequencer::s
 
 pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
     let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
-    let volumes: Vec<Rc<RefCell<Value>>> = app
-        .buses
-        .iter()
-        .map(|bus| Rc::new(RefCell::new(Value::Number(bus.volume as f64))))
-        .collect();
-    let mutes: Vec<Rc<RefCell<Value>>> = app
-        .buses
-        .iter()
-        .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.mute))))
-        .collect();
-    let solos: Vec<Rc<RefCell<Value>>> = app
-        .buses
-        .iter()
-        .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
-        .collect();
     let ids: Vec<Rc<RefCell<Value>>> = app
         .buses
         .iter()
@@ -504,9 +407,6 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
         .collect();
     rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
     rt.set_reactive("SEQ", "bus-names", build_name_list(&names));
-    rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
-    rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
-    rt.set_reactive("SEQ", "bus-solos", Value::List(solos));
 }
 
 pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
@@ -516,16 +416,9 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
 }
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
-    rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-effective", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-names", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-solos", Value::List(vec![]));
 }

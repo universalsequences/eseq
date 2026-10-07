@@ -91,13 +91,6 @@ pub(crate) fn sync_all_rack_slot_selection_binding_fields(
 /// zero frames, while a held pad key keeps refreshing this and stays lit.
 pub(crate) const RACK_PAD_TRIGGER_HOLD: Duration = Duration::from_millis(140);
 
-/// Binding field a pad cell reads: `1.0` while the pad's member track is lit.
-/// Per track, not per (rack, pad note), so moving a pad to another note moves
-/// its light with it for free.
-pub(crate) fn rack_pad_trigger_field(track: usize) -> String {
-    format!("rack-pad-trigger-{track}")
-}
-
 /// Pad lights for every track, `false` everywhere outside a drum rack.
 ///
 /// Two sources feed it. `trigger_flash` is the audio thread's per-track latch,
@@ -137,36 +130,4 @@ pub(crate) fn read_rack_pad_trigger_flags(
         }
     }
     flags
-}
-
-/// Publish only the pads whose light changed. A rack that is not playing holds
-/// every flag at `false`, so an idle panel publishes nothing at all.
-pub(crate) fn sync_rack_pad_trigger_field_delta(
-    rt: &mut Runtime,
-    previous: &[bool],
-    flags: &[bool],
-) -> bool {
-    let mut effects_dirty = false;
-    for (track, &lit) in flags.iter().enumerate() {
-        if previous.get(track).copied().unwrap_or(false) == lit {
-            continue;
-        }
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &rack_pad_trigger_field(track),
-                Value::Number(if lit { 1.0 } else { 0.0 }),
-            )
-            .effects_dirty;
-    }
-    // A track that disappeared takes its light with it.
-    for track in flags.len()..previous.len() {
-        if !previous[track] {
-            continue;
-        }
-        effects_dirty |= rt
-            .set_reactive("SEQ", &rack_pad_trigger_field(track), Value::Number(0.0))
-            .effects_dirty;
-    }
-    effects_dirty
 }

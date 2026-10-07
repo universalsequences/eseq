@@ -417,7 +417,6 @@ seq-script-picker	eseq.seq-script-picker/seq-script-picker	content/ui/seq-script
 seq-script-remember-source-buffer	eseq.seq-script-picker/seq-script-remember-source-buffer	content/ui/seq-script-picker.lisp
 seq-script-scratch-entry	eseq.seq-script-picker/seq-script-scratch-entry	content/ui/seq-script-picker.lisp
 seq-select-main-step-tab-by-index	eseq.seq-step-tabs/seq-select-main-step-tab-by-index	content/ui/seq-step-tabs.lisp
-seq-set-process-lane-from-step	eseq.step-grid-interactions/seq-set-process-lane-from-step	content/ui/step-grid-interactions.lisp
 seq-set-record-quantize	eseq.transport/seq-set-record-quantize	content/ui/transport.lisp
 seq-set-scene-launch-quantize	eseq.transport/seq-set-scene-launch-quantize	content/ui/transport.lisp
 seq-set-step-param-from-step	eseq.step-grid-interactions/seq-set-step-param-from-step	content/ui/step-grid-interactions.lisp
@@ -449,11 +448,9 @@ seq-visible-main-panel-buffer	eseq.seq-step-tabs/seq-visible-main-panel-buffer	c
 seq-visible-track-indices	eseq.track-collapse/visible-track-indices	content/ui/track-collapse.lisp
 seqv-collapse-all-tracks	eseq.sequencer/collapse-all-tracks	content/ui/sequencer.lisp
 seqv-current-number-picker-key	eseq.sequencer/current-number-picker-key	content/ui/sequencer.lisp
-seqv-current-page	eseq.sequencer/track-current-page	content/ui/sequencer.lisp
 seqv-current-param-mode	eseq.sequencer/current-param-mode	content/ui/sequencer.lisp
 seqv-current-param-values	eseq.seqv-track-params/seqv-current-param-values	content/ui/seqv-track-params.lisp
 seqv-current-selected-step	eseq.sequencer/current-selected-step	content/ui/sequencer.lisp
-seqv-current-step	eseq.sequencer/track-current-step	content/ui/sequencer.lisp
 seqv-cursor-step	eseq.sequencer/track-cursor	content/ui/sequencer.lisp
 seqv-drop-new-track	eseq.sequencer/drop-new-track	content/ui/sequencer.lisp
 seqv-drop-on-track	eseq.sequencer/drop-on-track	content/ui/sequencer.lisp
@@ -479,7 +476,6 @@ seqv-param-mode	eseq.sequencer/track-param-mode	content/ui/sequencer.lisp
 seqv-param-mode-for-key	eseq.sequencer/param-mode-for-key	content/ui/sequencer.lisp
 seqv-param-name	eseq.seqv-track-params/seqv-param-name	content/ui/seqv-track-params.lisp
 seqv-param-origin	eseq.seqv-track-params/seqv-param-origin	content/ui/seqv-track-params.lisp
-seqv-param-value-at	eseq.seqv-track-params/seqv-param-value-at	content/ui/seqv-track-params.lisp
 seqv-process-lane-index	eseq.seqv-track-params/seqv-process-lane-index	content/ui/seqv-track-params.lisp
 seqv-process-lane-mode-offset	eseq.seqv-track-params/seqv-process-lane-mode-offset	content/ui/seqv-track-params.lisp
 seqv-process-lane-mode?	eseq.seqv-track-params/seqv-process-lane-mode?	content/ui/seqv-track-params.lisp
@@ -507,9 +503,7 @@ seqv-track-param-name	eseq.seqv-track-params/seqv-track-param-name	content/ui/se
 seqv-track-param-origin	eseq.seqv-track-params/seqv-track-param-origin	content/ui/seqv-track-params.lisp
 seqv-track-param-slider-max	eseq.seqv-track-params/seqv-track-param-slider-max	content/ui/seqv-track-params.lisp
 seqv-track-param-slider-min	eseq.seqv-track-params/seqv-track-param-slider-min	content/ui/seqv-track-params.lisp
-seqv-track-param-values	eseq.seqv-track-params/seqv-track-param-values	content/ui/seqv-track-params.lisp
 seqv-track-process-lane	eseq.seqv-track-params/seqv-track-process-lane	content/ui/seqv-track-params.lisp
-seqv-track-process-lanes	eseq.seqv-track-params/seqv-track-process-lanes	content/ui/seqv-track-params.lisp
 seqv-track-step-param-value	eseq.seqv-track-params/seqv-track-step-param-value	content/ui/seqv-track-params.lisp
 seqv-track-step-slider-param-value	eseq.seqv-track-params/seqv-track-step-slider-param-value	content/ui/seqv-track-params.lisp
 set-arrangement-cursor	eseq.arrangement/set-cursor	content/ui/arrangement.lisp

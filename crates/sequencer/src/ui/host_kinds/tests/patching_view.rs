@@ -96,16 +96,6 @@ impl Harness {
         self.custom_commands()
     }
 
-    /// The custom host commands Lisp queued (drained, not applied).
-    fn custom_commands(&mut self) -> Vec<(String, Value)> {
-        (self.editor.drain_host_commands().into_iter())
-            .filter_map(|command| match command {
-                HostCommand::Custom { name, payload } => Some((name, payload)),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// Apply `commands` as the event loop does, then sync and render.
     fn apply(&mut self, commands: Vec<(String, Value)>) {
         for (name, payload) in commands {

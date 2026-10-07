@@ -116,7 +116,6 @@ pub(super) fn rack_param_applied(
             target,
             &shared.selected_steps,
             rows.unwrap_or(RackPlockRowsSync::Unchanged),
-            &shared.expanded_step_projection,
             &shared.ui_epoch,
         ),
     }
@@ -338,7 +337,6 @@ pub(super) fn rack_slot_strip_applied(
             RackDirectDisplayTarget::SlotParam { slot_idx, param },
             &shared.selected_steps,
             RackPlockRowsSync::Unchanged,
-            &shared.expanded_step_projection,
             &shared.ui_epoch,
         );
     }
@@ -385,7 +383,6 @@ pub(super) fn rack_slot_plock_applied(
         RackDirectDisplayTarget::SlotParam { slot_idx, param },
         &shared.selected_steps,
         rows,
-        &shared.expanded_step_projection,
         &shared.ui_epoch,
     );
     if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
@@ -415,7 +412,6 @@ pub(super) fn rack_slot_voices_applied(
         },
         &shared.selected_steps,
         RackPlockRowsSync::Unchanged,
-        &shared.expanded_step_projection,
         &shared.ui_epoch,
     );
 }
@@ -900,7 +896,7 @@ pub(super) fn handle(
                             refresh_rack_direct_params_reactive(
                                 &mut editor, &app, &state, track, &targets, &selected_steps,
                                 if new_plock_row { RackPlockRowsSync::RowSetChanged } else { RackPlockRowsSync::Unchanged },
-                                &ctx.shared.expanded_step_projection, &ui_epoch,
+                                &ui_epoch,
                             );
                         }
                     }
@@ -2638,17 +2634,7 @@ mod tests {
 
             let mut runtime = Runtime::new();
             runtime.register_reactive("SEQ", Vec::new(), true);
-            let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
-            // Seed the per-step compact-grid render bindings the way a full
-            // `ui_epoch` sync would for a step with no p-locks.
-            {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    &track_step_plock_kind_field(TRACK, STEP),
-                    Value::Number(0.0),
-                );
-            }
+            let editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
             let sample_db = sequencer::sample_db::SampleDb::open_in_memory()
                 .expect("open in-memory sample db");
@@ -2667,7 +2653,6 @@ mod tests {
                 fx_epoch: Arc::new(AtomicUsize::new(0)),
                 fx_value_epoch: Arc::new(AtomicUsize::new(0)),
                 ui_invalidations: Arc::new(UiInvalidationQueue::new()),
-                expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
                 active_delete_target: Arc::new(Mutex::new(None)),
                 active_delete_target_version: Arc::new(AtomicUsize::new(0)),
                 auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -3123,18 +3108,9 @@ mod tests {
             "the first write of a lock runs the epoch-driven resync exactly once"
         );
         assert_ne!(
-            reactive_number(&h.editor, &track_step_plock_kind_field(TRACK, STEP)),
-            0.0,
-            "the first lock write must light the compact grid's p-lock tick itself"
-        );
-        assert!(
-            matches!(
-                h.editor
-                    .runtime()
-                    .reactive_field_value("SEQ", &track_step_plocked_field(TRACK, STEP)),
-                Some(Value::Bool(true))
-            ),
-            "the per-step p-lock presence bool must be published by the first write"
+            plock_variant_step_render_values(&h.state, TRACK)[STEP].kind,
+            0,
+            "the first lock write gives the step a p-lock tick (`step.lock-kind`)"
         );
         assert_eq!(
             reactive_number(&h.editor, &value_field),

@@ -3394,6 +3394,22 @@ pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
+/// Whether the patch port whose id (`:track`) is `port` is the pending drag
+/// source: its `:pending` prop is true, or its `:pending-port` prop (a
+/// number, or a bound float read now) is `port`. The bound form lets a view
+/// arm a port with a repaint rather than a re-render.
+pub fn patch_port_pending(props: &HashMap<String, Value>, port: usize) -> bool {
+    if matches!(props.get("pending"), Some(Value::Bool(true))) {
+        return true;
+    }
+    let pending = match props.get("pending-port") {
+        Some(Value::Number(n)) => *n,
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot),
+        _ => return false,
+    };
+    pending >= 0.0 && pending == port as f64
+}
+
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     let value = match props.get(key) {
         Some(Value::Number(n)) => *n as f32,

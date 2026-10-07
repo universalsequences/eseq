@@ -285,7 +285,7 @@ pub(super) fn handle(
                 rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                 set_current_track_reactive(rt, idx);
                 rt.set_reactive("SEQ", "track-names", build_track_names(&ctx.track_names));
-                sync_all_track_sequencer_state(rt, &state, &app, idx, &selected_steps);
+                sync_all_track_sequencer_state(rt, &state, &app);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                 sync_step_param_lists(rt, &state, idx);
                 sync_track_mixer_state(rt, &app, &state);
@@ -591,18 +591,8 @@ pub(super) fn handle(
                         );
                         rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                         set_current_track_reactive(rt, selected);
-                        rt.set_reactive(
-                            "SEQ",
-                            "track-names",
-                            build_track_names(&ctx.track_names),
-                        );
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &state,
-                            &app,
-                            selected,
-                            &selected_steps,
-                        );
+                        rt.set_reactive("SEQ", "track-names", build_track_names(&ctx.track_names));
+                        sync_all_track_sequencer_state(rt, &state, &app);
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, selected));
                         sync_step_param_lists(rt, &state, selected);
                         sync_track_mixer_state(rt, &app, &state);

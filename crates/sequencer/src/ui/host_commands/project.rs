@@ -33,7 +33,6 @@ pub(super) fn handle(
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
-    let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
     let bus_state = ctx.shared.bus_state.clone();
@@ -419,7 +418,6 @@ pub(super) fn handle(
             };
             eprintln!("metal_seq: host load-project name={project_name}");
             ui_invalidations.clear();
-            expanded_step_projection.clear();
             match app.queue_project_load_named(&project_name) {
                 Ok(()) => {
                     eprintln!("metal_seq: queued project load name={project_name}");

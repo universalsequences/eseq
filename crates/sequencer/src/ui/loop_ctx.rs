@@ -181,31 +181,19 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_track_peak_levels: Vec<f64>,
     pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) prev_bus_peak_levels: Vec<f64>,
-    /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
-    /// the instant each rack member last triggered, which is what the light
-    /// decays from.
-    pub(crate) prev_rack_pad_triggers: Vec<bool>,
+    /// Drum-rack pad lights (eseq-4b5.16): the instant each rack member last
+    /// triggered, which is what the light decays from.
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
     /// The flags of the last tick, published or not (`pad.triggered` reads
     /// them through `KindsMeters`).
     pub(crate) rack_pad_triggers: Vec<bool>,
     pub(crate) prev_track_playheads: Vec<u32>,
-    /// Last published length-lane marker step per track (`length!`).
-    pub(crate) prev_track_process_lengths: Vec<Option<usize>>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
     pub(crate) prev_current_track_playhead_visible: bool,
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
-    /// Scope version last published to `track-process-scopes`.
-    pub(crate) prev_process_scope_values_version: u64,
-    /// Scope version last published to `process-scope-cells`.
-    pub(crate) prev_process_scope_cells_version: u64,
     pub(crate) prev_process_effective_params_version: u64,
-    /// Run-error version last published to `process-run-errors`; `None`
-    /// until the first publish, so a reader that opens after the errors
-    /// settled still gets them.
-    pub(crate) prev_process_run_errors_version: Option<u64>,
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.
     pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,
@@ -312,7 +300,6 @@ pub(crate) struct SharedHandles {
     /// must use `fx_epoch` instead.
     pub(crate) fx_value_epoch: Arc<AtomicUsize>,
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
-    pub(crate) expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     pub(crate) active_delete_target_version: Arc<AtomicUsize>,
     pub(crate) auto_follow_override_until: Arc<Mutex<Option<Instant>>>,

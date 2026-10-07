@@ -36,7 +36,7 @@
 (module eseq.step-grid-interactions)
 
 (import eseq.seq-core-state :as core)
-;; `selection` for the kind-based gestures (down / drag / up / double-click).
+;; `selection`: the current track, and the kind-based gestures (down / drag / up / double-click).
 (import eseq.kinds :refer (selection))
 ;; Rack membership for the rack-wide select-all (drum rack v2 groups).
 (import eseq.drum-rack-v2)
@@ -67,9 +67,7 @@
         step-double-click-for-track
         step-double-click
         seq-set-step-param-from-step
-        seq-set-process-lane-from-step
         seq-set-step-param-from-selection-or-step
-        seq-set-process-lane-from-selection-or-step
         select-all-steps
         seq-global-select-all
         seq-global-select-all-steps
@@ -112,7 +110,7 @@
   (+ (eseq.seq-core-state/page-offset) i))
 
 (def step-visible? (i)
-  (< (step-index i) SEQ.tp-num-steps))
+  (< (step-index i) (eseq.seq-core-state/cursor-num-steps)))
 
 (def cursor-left ()
   (if (seq-has-selection?)
@@ -198,7 +196,7 @@
 (def set-track-cursor-step (step)
   (do
     (eseq.seq-core-state/set-cursor-step-value step)
-    (eseq.vanilla/sequencer-cursor-step-changed SEQ.current-track step)))
+    (eseq.vanilla/sequencer-cursor-step-changed (eseq.seq-core-state/current-track-index) step)))
 
 ;; PINNED (hazard m): the shared drag-gesture state, read and `set!` flat by
 ;; vanilla callers. See the file header.
@@ -330,7 +328,7 @@
   (step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
-  (step-select-drag-over-for-track SEQ.current-track step evt))
+  (step-select-drag-over-for-track (eseq.seq-core-state/current-track-index) step evt))
 
 (def step-pointer-down-for-track (track step evt use-selection)
   (if (selection-click? evt)
@@ -356,7 +354,7 @@
           (step-select-drag-over-for-track track step evt))))))
 
 (def step-pointer-down (step evt)
-  (step-pointer-down-for-track SEQ.current-track step evt true))
+  (step-pointer-down-for-track (eseq.seq-core-state/current-track-index) step evt true))
 
 (def step-pointer-up (step evt)
   (do
@@ -382,7 +380,7 @@
     nil))
 
 (def step-double-click (step evt)
-  (step-double-click-for-track SEQ.current-track step evt))
+  (step-double-click-for-track (eseq.seq-core-state/current-track-index) step evt))
 
 (def seq-set-step-param-from-step (step param value)
   (if (step-selected? step)
@@ -391,41 +389,12 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
-(def seq-selected-step-indexes ()
-  (seq-selected-step-indexes-native))
-
-(def seq-set-process-lane-step-value (track lane step value)
-  (seq-set-process-lane-step
-    track
-    (get lane :instance-id)
-    (get lane :inlet)
-    step
-    value))
-
-(def seq-set-process-lane-from-step (track mode step value)
-  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
-    (if (step-selected? step)
-      (seq-set-process-lane-steps
-        track (get lane :instance-id) (get lane :inlet)
-        (seq-selected-step-indexes) value)
-      (do
-        (if (seq-has-selection?) (seq-clear-selection) nil)
-        (seq-set-process-lane-step-value track lane step value)))))
-
-;; Selection-first variants for the row-wide number picker: a live selection
+;; Selection-first variant for a row-wide number picker: a live selection
 ;; wins over the cursor step, whether or not the cursor sits inside it.
 (def seq-set-step-param-from-selection-or-step (step param value)
   (if (seq-has-selection?)
     (seq-set-step-param-plock param value)
     (seq-set-step-param step param value)))
-
-(def seq-set-process-lane-from-selection-or-step (track mode step value)
-  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
-    (if (seq-has-selection?)
-      (seq-set-process-lane-steps
-        track (get lane :instance-id) (get lane :inlet)
-        (seq-selected-step-indexes) value)
-      (seq-set-process-lane-step-value track lane step value))))
 
 ;; Tracks a Cmd+A spans beyond the current one: every member of the selected
 ;; drum rack (the rack header/bus is selected), else the multi-track selection
@@ -434,9 +403,8 @@
   (let ((rack (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)))
     (if (>= rack 0)
       (eseq.drum-rack-v2/members rack)
-      (if (>= (len SEQ.selected-tracks) 2)
-        SEQ.selected-tracks
-        '()))))
+      (let ((tracks (map (lambda (t) t.index) selection.tracks)))
+        (if (>= (len tracks) 2) tracks '())))))
 
 (def track-in-list? (tracks track)
   (> (len (filter (lambda (t) (= t track)) tracks)) 0))
@@ -451,7 +419,7 @@
     (let ((tracks (select-all-tracks)))
       (if (>= (len tracks) 2)
         (do
-          (if (track-in-list? tracks SEQ.current-track)
+          (if (track-in-list? tracks (eseq.seq-core-state/current-track-index))
             nil
             (seq-set-track (nth tracks 0)))
           (seq-select-all-steps-on-tracks tracks))

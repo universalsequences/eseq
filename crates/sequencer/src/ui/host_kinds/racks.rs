@@ -33,9 +33,8 @@
 //!   a rack or a pool groove moved, so an amount drag lists nothing; pushed
 //!   when it changed.
 //! - Live: `pad.triggered` (the tick's pad lights,
-//!   `read_rack_pad_trigger_flags`, shared with `SEQ.rack-pad-trigger-*`),
-//!   kept in an [`ObservedList`]; `group.armed` is the group sync's
-//!   (`mixer.rs`).
+//!   `read_rack_pad_trigger_flags`), kept in an [`ObservedList`];
+//!   `group.armed` is the group sync's (`mixer.rs`).
 
 use super::*;
 use sequencer::groove::library::library_generation;

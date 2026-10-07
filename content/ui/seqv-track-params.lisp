@@ -1,46 +1,28 @@
-;; SEQV per-track accessors: track lists, process lanes, param min/max/color/origin.
-;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
+;; The step editors' param modes: what each mode edits on a track and how its
+;; sliders scale. Modes 0..8 are the built-in step params (step instances'
+;; fields); a mode from `seqv-process-lane-mode-offset` on picks a process
+;; lane by its place in t.lanes. Tracks, steps and lanes are eseq.kinds
+;; instances; the `seqv-current-…` / `seqv-param-…` forms read the current
+;; track (selection.track), for the *step* panel (ui/effects/track-panels.lisp)
+;; and the *metal* grid mode (ui/seq-grid-mode.lisp).
 ;;
-;; This is the per-track param accessor hub: ui/sequencer.lisp, ui/seq-grid-mode.lisp,
-;; ui/step-grid-interactions.lisp, ui/effects/track-panels.lisp and several Rust test
-;; call sites reach its names by their flat `seqv-` spellings, so it converts with NO
-;; renames and a full set of *identity* compat aliases (the seq-core-state /
-;; step-grid-interactions precedent, spec §10 wave-7 addendum): an unconverted vanilla
-;; caller matches the alias key flat, and a converted module's bare reference qualifies
-;; against itself, misses, and lands on the same alias by base name. Every aliased name
-;; is a function (or one write-once constant, `seqv-process-lane-mode-offset`), both
-;; immune to hazard (m): function slots are written once, by their `def`.
-;;
-;; The `seqv-` prefix is NOT stripped. It is the flat spelling ui/sequencer.lisp
-;; (eseq.sequencer, a UI root that must never be imported) and src/ui/input.rs use, and
-;; several names here are deliberate wrappers around vanilla names that stripping would
-;; collapse into unbounded recursion — `seqv-step-param-value` vs `step-param-value`,
-;; `seqv-step-slider-param-value` vs `step-slider-param-value`, `seqv-param-decimals`
-;; vs `param-decimals` (all three vanilla halves live in ui/step-grid-interactions.lisp).
-;;
-;; `duration-slider-position` / `duration-slider-value` come from
-;; eseq.step-grid-interactions, which main.lisp loads immediately before this file
-;; (:46 then :47), so the import is load-order safe and load-once. The reverse edge is
-;; deliberately NOT requalified: step-grid-interactions.lisp calls
-;; `seqv-track-process-lane` and `seqv-param-decimals` bare and must keep doing so —
-;; making it import this module would create a mutual import cycle with the file that
-;; loads first. Its bare calls resolve through the identity aliases below.
-;;
-;; No `set!`s, no widgets, no `:key`s, no modes, no macros, no hooks: hazards
-;; (a)/(d)/(e)/(g)/(h)/(j)/(l)/(m) do not fire here. Hazard (n) does not fire either —
-;; no Rust harness reads or slices this file's source.
+;; The `seqv-` prefix stays: several names here wrap ui/step-grid-interactions'
+;; unprefixed ones (`seqv-step-param-value` around `step-param-value`, …), and
+;; the other views spell them so.
 (module eseq.seqv-track-params)
 
 (import eseq.step-grid-interactions :as sgi)
+(import eseq.kinds :refer (selection project))
 
 (export seqv-process-lane-mode-offset
         seqv-process-lane-mode?
         seqv-process-lane-index
-        seqv-track-process-lanes
         seqv-track-process-lane
+        seqv-step-value
+        seqv-step-ref
+        seqv-set-step-value!
         seqv-current-param-values
-        seqv-track-param-values
-        seqv-param-value-at
+        seqv-current-param-value
         seqv-param-min
         seqv-param-max
         seqv-param-haptic-pivot-position
@@ -51,6 +33,8 @@
         seqv-range-origin
         seqv-param-origin
         seqv-param-decimals
+        seqv-param-curved?
+        seqv-param-slider-position
         seqv-track-param-min
         seqv-track-param-max
         seqv-track-param-name
@@ -64,12 +48,6 @@
         seqv-track-step-param-value
         seqv-track-step-slider-param-value)
 
-
-(def seqv-track-list (lists track)
-  (if (< track (len lists))
-    (nth lists track)
-    '()))
-
 ;; Modes 0..8 are the built-in step params; process lanes start after them.
 ;; MUST match PROCESS_LANE_MODE_OFFSET in
 ;; crates/sequencer/src/ui/state_values/process_and_macros.rs.
@@ -81,250 +59,231 @@
 (def seqv-process-lane-index (mode)
   (- mode seqv-process-lane-mode-offset))
 
-(def seqv-empty-process-lane ()
-  (dict
-    :values '()
-    :min 0
-    :max 1
-    :default 0
-    :decimals 2
-    :label "Process"
-    :short-label "proc"
-    :instance-id 0
-    :inlet ""))
+;; The lane a lane mode picks on track t (one of t.lanes), or nil (a built-in
+;; mode, no track, or a lane the track no longer has).
+(def seqv-track-process-lane (t mode)
+  (when (and t (seqv-process-lane-mode? mode))
+    (nth t.lanes (seqv-process-lane-index mode))))
 
-(def seqv-list-ref (items idx fallback)
-  (if (and (>= idx 0) (< idx (len items)))
-    (nth items idx)
-    fallback))
+;; The step fields of the built-in param modes, in one place: step s's value
+;; of mode `mode`, a binding to it (`#'`), and its setter.
+(def seqv-step-value (s mode)
+  (match mode
+    0 s.velocity
+    1 s.duration
+    2 s.aux-a
+    3 s.transpose
+    4 s.pan
+    5 s.sync
+    6 s.delay
+    7 s.retrig
+    _ s.retrig-rate))
 
-(def seqv-track-process-lanes (track)
-  (seqv-list-ref SEQ.track-process-lanes track '()))
+(def seqv-step-ref (s mode)
+  (match mode
+    0 #'s.velocity
+    1 #'s.duration
+    2 #'s.aux-a
+    3 #'s.transpose
+    4 #'s.pan
+    5 #'s.sync
+    6 #'s.delay
+    7 #'s.retrig
+    _ #'s.retrig-rate))
 
-(def seqv-track-process-slots (track)
-  (seqv-list-ref SEQ.track-process-slots track '()))
+(def seqv-set-step-value! (s mode v)
+  (match mode
+    0 (set! s.velocity v)
+    1 (set! s.duration v)
+    2 (set! s.aux-a v)
+    3 (set! s.transpose v)
+    4 (set! s.pan v)
+    5 (set! s.sync v)
+    6 (set! s.delay v)
+    7 (set! s.retrig v)
+    _ (set! s.retrig-rate v)))
 
-(def seqv-current-process-lane (mode)
-  (seqv-list-ref
-    SEQ.process-lanes
-    (seqv-process-lane-index mode)
-    (seqv-empty-process-lane)))
-
-(def seqv-track-process-lane (track mode)
-  (seqv-list-ref
-    (seqv-track-process-lanes track)
-    (seqv-process-lane-index mode)
-    (seqv-empty-process-lane)))
-
+;; The current track's values of mode `mode`, by step (the *metal* grid
+;; mode's slider list).
 (def seqv-current-param-values (mode)
-  (if (seqv-process-lane-mode? mode)
-    (seqv-track-param-values SEQ.current-track mode)
-    (if (= mode 0) SEQ.velocities
-      (if (= mode 1) SEQ.durations
-        (if (= mode 2) SEQ.auxas
-          (if (= mode 3) SEQ.transposes
-            (if (= mode 4) SEQ.pans
-              (if (= mode 5) SEQ.syncs
-                (if (= mode 6) SEQ.delays
-                  (if (= mode 7) SEQ.retrigs
-                    SEQ.retrig-rates))))))))))
+  (let ((t selection.track))
+    (if (seqv-process-lane-mode? mode)
+      (let ((lane (seqv-track-process-lane t mode))) (if lane lane.values '()))
+      (if t (map (lambda (s) (seqv-step-value s mode)) t.steps) '()))))
 
-(def seqv-track-param-values (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (seqv-list-ref
-      (seqv-list-ref SEQ.track-process-lane-values track '())
-      (seqv-process-lane-index mode) '())
-    (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
-      (if (= mode 1) (seqv-track-list SEQ.track-durations track)
-        (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
-          (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
-            (if (= mode 4) (seqv-track-list SEQ.track-pans track)
-              (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
-                (if (= mode 6) (seqv-track-list SEQ.track-delays track)
-                  (if (= mode 7) (seqv-track-list SEQ.track-retrigs track)
-                    (seqv-track-list SEQ.track-retrig-rates track)))))))))))
+;; The current track's value of mode `mode` at step `step` (0 past its end):
+;; one step's field, where the list form reads every step.
+(def seqv-current-param-value (mode step)
+  (let ((t selection.track))
+    (if (seqv-process-lane-mode? mode)
+      (let ((lane (seqv-track-process-lane t mode)))
+        (if lane (or (nth lane.values step) 0) 0))
+      (let ((s (when t (nth t.steps step))))
+        (if s (seqv-step-value s mode) 0)))))
 
-(def seqv-param-values (track mode)
-  (if (= track SEQ.current-track)
-    (seqv-current-param-values mode)
-    (seqv-track-param-values track mode)))
+(def builtin-param-min (mode)
+  (match mode
+    3 -12
+    4 -1
+    8 1
+    _ 0))
 
-(def seqv-param-value-at (track mode step)
-  (let ((values (seqv-param-values track mode)))
-    (if (< step (len values))
-      (nth values step)
-      0)))
+(def builtin-param-max (mode)
+  (match mode
+    0 1
+    1 32
+    2 16
+    3 12
+    4 1
+    5 (- (len project.sync-options) 1)
+    7 127
+    8 1024
+    _ 1))
 
+(def builtin-param-name (mode)
+  (match mode
+    0 "Velocity"
+    1 "Duration"
+    2 "Aux A"
+    3 "Transpose"
+    4 "Pan"
+    5 "Sync"
+    6 "Delay"
+    7 "Retrig"
+    _ "Rate"))
+
+;; The current track's ranges, names and precision for mode `mode`.
 (def seqv-param-min (mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :min)
-    (if (= mode 0) 0
-      (if (= mode 1) 0
-        (if (= mode 2) 0
-          (if (= mode 3) -12
-            (if (= mode 4) -1
-              (if (= mode 8) 1
-                0))))))))
+  (seqv-track-param-min selection.track mode))
 
 (def seqv-param-max (mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :max)
-    (if (= mode 0) 1
-      (if (= mode 1) 32
-        (if (= mode 2) 16
-          (if (= mode 3) 12
-            (if (= mode 4) 1
-              (if (= mode 5) (- (len SEQ.sync-labels) 1)
-                (if (= mode 7) 127
-                  (if (= mode 8) 1024
-                    1))))))))))
+  (seqv-track-param-max selection.track mode))
 
-;; Modes 1 (duration), 7 (retrig) and 8 (retrig rate) ride bespoke slider curves:
-;; the lane slider travels 0..1 and the value is mapped through the curve, so
-;; equal travel is equal musical interval instead of equal number.
-(def seqv-param-slider-min (mode)
-  (if (or (= mode 1) (= mode 7) (= mode 8)) 0 (seqv-param-min mode)))
+(def seqv-param-name (mode)
+  (seqv-track-param-name selection.track mode))
 
-(def seqv-param-slider-max (mode)
-  (if (or (= mode 1) (= mode 7) (= mode 8)) 1 (seqv-param-max mode)))
+(def seqv-param-origin (mode)
+  (seqv-track-param-origin selection.track mode))
 
-(def seqv-param-slider-value (track mode step)
-  (if (= mode 1)
-    (sgi/duration-slider-position (seqv-param-value-at track mode step))
-    (if (= mode 8)
-      (sgi/retrig-rate-slider-position (seqv-param-value-at track mode step))
-      (if (= mode 7)
-        (sgi/retrig-slider-position (seqv-param-value-at track mode step))
-        (seqv-param-value-at track mode step)))))
+(def seqv-param-decimals (mode)
+  (seqv-track-param-decimals selection.track mode))
+
+;; Modes 1 (duration), 7 (retrig) and 8 (retrig rate) ride bespoke slider
+;; curves: the slider travels 0..1 and the value is mapped through the curve,
+;; so equal travel is equal musical interval instead of equal number.
+(def seqv-param-curved? (mode)
+  (or (= mode 1) (= mode 7) (= mode 8)))
+
+;; Where value v of mode `mode` sits on its slider.
+(def seqv-param-slider-position (mode v)
+  (match mode
+    1 (sgi/duration-slider-position v)
+    7 (sgi/retrig-slider-position v)
+    8 (sgi/retrig-rate-slider-position v)
+    _ v))
 
 (def seqv-param-haptic-pivot-position (mode)
   (if (= mode 1) 0.5 1))
-
-(def seqv-param-haptic-pivot-value (mode)
-  (if (= mode 1) 2 (seqv-param-max mode)))
 
 (def seqv-param-haptic-exponent (mode)
   (if (= mode 1) 4 1))
 
 (def seqv-param-keyword (mode)
-  (if (seqv-process-lane-mode? mode) :process-lane
-    (if (= mode 0) :velocity
-      (if (= mode 1) :duration
-        (if (= mode 2) :aux-a
-          (if (= mode 3) :transpose
-            (if (= mode 4) :pan
-              (if (= mode 5) :sync
-                (if (= mode 6) :delay
-                  (if (= mode 7) :retrig
-                    :retrig-rate))))))))))
+  (if (seqv-process-lane-mode? mode)
+    :process-lane
+    (match mode
+      0 :velocity
+      1 :duration
+      2 :aux-a
+      3 :transpose
+      4 :pan
+      5 :sync
+      6 :delay
+      7 :retrig
+      _ :retrig-rate)))
 
 (def seqv-param-color (mode)
-  (if (seqv-process-lane-mode? mode) :process-lane-accent
-    (if (= mode 0) :blue
-      (if (= mode 1) :green
-        (if (= mode 2) :magenta
-          (if (= mode 3) :yellow
-            (if (= mode 4) :red
-              (if (= mode 5) :green
-                (if (= mode 6) :cyan
-                  (if (= mode 7) :orange
-                    :magenta))))))))))
-
-(def seqv-param-name (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :label)
-    (if (= mode 0) "Velocity"
-      (if (= mode 1) "Duration"
-        (if (= mode 2) "Aux A"
-          (if (= mode 3) "Transpose"
-            (if (= mode 4) "Pan"
-              (if (= mode 5) "Sync"
-                (if (= mode 6) "Delay"
-                  (if (= mode 7) "Retrig"
-                    "Rate"))))))))))
+    :process-lane-accent
+    (match mode
+      0 :blue
+      1 :green
+      2 :magenta
+      3 :yellow
+      4 :red
+      5 :green
+      6 :cyan
+      7 :orange
+      _ :magenta)))
 
 (def seqv-range-origin (min-value max-value)
   (if (and (< min-value 0) (= (abs min-value) max-value))
     0
     min-value))
 
-(def seqv-param-origin (mode)
+;; Track t's ranges, names and precision for mode `mode`: a lane mode reads
+;; its lane (one that is gone reads as an empty 0..1 lane).
+(def seqv-track-param-min (t mode)
   (if (seqv-process-lane-mode? mode)
-    (seqv-range-origin (seqv-param-min mode) (seqv-param-max mode))
-    (if (= mode 3) 0
-      (if (= mode 4) 0
-        (if (= mode 5) 0
-          ;; Rate rides a 0..1 slider curve (see seqv-param-slider-min), so
-          ;; its fill grows from the bottom, not from param-min (= 1 = top).
-          (if (= mode 8) 0
-            (seqv-param-min mode)))))))
+    (let ((lane (seqv-track-process-lane t mode))) (if lane lane.min 0))
+    (builtin-param-min mode)))
 
-(def seqv-param-decimals (mode)
+(def seqv-track-param-max (t mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :decimals)
+    (let ((lane (seqv-track-process-lane t mode))) (if lane lane.max 1))
+    (builtin-param-max mode)))
+
+(def seqv-track-param-name (t mode)
+  (if (seqv-process-lane-mode? mode)
+    (let ((lane (seqv-track-process-lane t mode))) (if lane lane.label "Process"))
+    (builtin-param-name mode)))
+
+(def seqv-track-param-origin (t mode)
+  (if (seqv-process-lane-mode? mode)
+    (seqv-range-origin (seqv-track-param-min t mode) (seqv-track-param-max t mode))
+    ;; Rate rides a 0..1 slider curve, so its fill grows from the bottom,
+    ;; not from its minimum.
+    (match mode
+      3 0
+      4 0
+      5 0
+      8 0
+      _ (builtin-param-min mode))))
+
+(def seqv-track-param-decimals (t mode)
+  (if (seqv-process-lane-mode? mode)
+    (let ((lane (seqv-track-process-lane t mode))) (if lane lane.decimals 2))
     ;; Transpose, Retrig and Rate are whole numbers.
     (if (or (= mode 3) (= mode 7) (= mode 8)) 0 2)))
 
-(def seqv-track-param-min (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :min)
-    (seqv-param-min mode)))
+(def seqv-track-param-slider-min (t mode)
+  (if (seqv-param-curved? mode) 0 (seqv-track-param-min t mode)))
 
-(def seqv-track-param-max (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :max)
-    (seqv-param-max mode)))
+(def seqv-track-param-slider-max (t mode)
+  (if (seqv-param-curved? mode) 1 (seqv-track-param-max t mode)))
 
-(def seqv-track-param-name (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :label)
-    (seqv-param-name mode)))
+(def seqv-track-param-haptic-pivot-value (t mode)
+  (if (= mode 1) 2 (seqv-track-param-max t mode)))
 
-(def seqv-track-param-origin (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (seqv-range-origin (seqv-track-param-min track mode) (seqv-track-param-max track mode))
-    (seqv-param-origin mode)))
-
-(def seqv-track-param-decimals (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :decimals)
-    (seqv-param-decimals mode)))
-
-(def seqv-track-param-slider-min (track mode)
-  (if (or (= mode 1) (= mode 7) (= mode 8)) 0 (seqv-track-param-min track mode)))
-
-(def seqv-track-param-slider-max (track mode)
-  (if (or (= mode 1) (= mode 7) (= mode 8)) 1 (seqv-track-param-max track mode)))
-
-(def seqv-track-param-haptic-pivot-value (track mode)
-  (if (= mode 1) 2 (seqv-track-param-max track mode)))
-
-;; NB: wrapper around eseq.step-grid-interactions' `step-param-value` — the `seqv-`
-;; prefix must stay (hazard k: stripping it would make this call itself).
+;; NB: wrapper around eseq.step-grid-interactions' `step-param-value` — the
+;; `seqv-` prefix must stay (stripping it would make this call itself).
 (def seqv-step-param-value (mode value)
-  (if (or (= mode 3) (= (seqv-param-decimals mode) 0))
-    (round value)
-    value))
+  (seqv-track-step-param-value selection.track mode value))
 
 (def seqv-step-slider-param-value (mode value)
-  (if (= mode 1)
-    (sgi/duration-slider-value value)
-    (if (= mode 8)
-      (sgi/retrig-rate-slider-value value)
-      (if (= mode 7)
-        (round (sgi/retrig-slider-value value))
-        (seqv-step-param-value mode value)))))
+  (seqv-track-step-slider-param-value selection.track mode value))
 
-(def seqv-track-step-param-value (track mode value)
-  (if (or (= mode 3) (= (seqv-track-param-decimals track mode) 0))
+;; A typed (picker) value for mode `mode` on track t: whole numbers where the
+;; param takes them.
+(def seqv-track-step-param-value (t mode value)
+  (if (or (= mode 3) (= (seqv-track-param-decimals t mode) 0))
     (round value)
     value))
 
-(def seqv-track-step-slider-param-value (track mode value)
-  (if (= mode 1)
-    (sgi/duration-slider-value value)
-    (if (= mode 8)
-      (sgi/retrig-rate-slider-value value)
-      (if (= mode 7)
-        (round (sgi/retrig-slider-value value))
-        (seqv-track-step-param-value track mode value)))))
+;; The value a slider position sets for mode `mode` on track t.
+(def seqv-track-step-slider-param-value (t mode value)
+  (match mode
+    1 (sgi/duration-slider-value value)
+    8 (sgi/retrig-rate-slider-value value)
+    7 (round (sgi/retrig-slider-value value))
+    _ (seqv-track-step-param-value t mode value)))

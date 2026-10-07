@@ -94,7 +94,6 @@ impl Harness {
             fx_epoch: Arc::new(AtomicUsize::new(0)),
             fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
-            expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),
             auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -144,7 +143,6 @@ impl Harness {
             shared.ui_epoch.clone(),
             shared.fx_epoch.clone(),
             shared.ui_invalidations.clone(),
-            shared.expanded_step_projection.clone(),
             shared.selected_neural_neurons.clone(),
             shared.active_delete_target.clone(),
             shared.active_delete_target_version.clone(),
@@ -311,6 +309,45 @@ impl Harness {
             .runtime_mut()
             .set_hidden_effect_buffer_names(HashSet::new());
         self.editor.runtime_mut().run_reactive_cycle();
+    }
+
+    /// Fire widget `widget`'s `handler` with `arg`, then apply what it
+    /// queued, sync and render, as one event-loop turn (`fire` in
+    /// patching_view returns the queued commands instead).
+    fn fire_and_show(&mut self, widget: &HashMap<String, Value>, handler: &str, arg: Value) {
+        let callback = widget
+            .get(handler)
+            .unwrap_or_else(|| panic!("no {handler} on {widget:?}"))
+            .clone();
+        self.editor
+            .runtime_mut()
+            .invoke(callback, vec![arg])
+            .unwrap_or_else(|error| panic!("{handler}: {error:?}"));
+        self.drain();
+        self.sync();
+        self.show_all();
+    }
+
+    /// The custom host commands Lisp queued, in order, taken off the queue.
+    fn custom_commands(&mut self) -> Vec<(String, Value)> {
+        self.editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                HostCommand::Custom { name, payload } => Some((name, payload)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The payload of the custom host command `name` Lisp queued last.
+    fn last_custom(&mut self, name: &str) -> Value {
+        self.custom_commands()
+            .into_iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, payload)| payload)
+            .last()
+            .unwrap_or_else(|| panic!("no {name} queued"))
     }
 
     /// Start or stop the transport (the host kinds read it on the next
@@ -491,6 +528,7 @@ mod piano_roll_view;
 mod racks;
 mod scenes;
 mod schema;
+mod sequencer_editor;
 mod sequencer_view;
 mod settings;
 mod steps;

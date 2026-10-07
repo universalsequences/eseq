@@ -35,7 +35,6 @@ pub(super) fn handle(
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let keyboard_tx = ctx.shared.keyboard_tx.clone();
-    let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     match name {
         "set-instrument-param" => {
             if let Value::Map(ref map) = payload {
@@ -127,7 +126,6 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
-                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     current_track_idx: track,
                                     param_idx,
@@ -451,7 +449,6 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
-                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     current_track_idx: track,
                                     param_idx,
@@ -501,7 +498,6 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
-                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     current_track_idx: track,
                                     param_idx,
@@ -574,7 +570,6 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
-                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     current_track_idx: track,
                                     param_idx,
@@ -679,7 +674,6 @@ pub(super) fn handle(
                                 state: &state,
                                 selected_steps: &selected_steps,
                                 selection: &neural_selection,
-                                expanded_step_projection: &expanded_step_projection,
                                 track,
                                 current_track_idx: track,
                                 param_idx,
@@ -839,7 +833,6 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
-                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     current_track_idx: track,
                                     param_idx,
@@ -1123,11 +1116,11 @@ mod tests {
         );
     }
 
-    /// The compact step-sequencer grid binds its p-lock tick to
-    /// `seq-track-step-plock-kind-{track}-{step}` and its tint to the per-step
-    /// `seq-track-step-variant-{r,g,b}-*` fields. A knob drag with a step
+    /// The step grids draw a step's p-lock tick and tint from the kinds'
+    /// `step.lock-kind` / `variant-color`, which read the p-lock render
+    /// (`plock_variant_step_render_values`). A knob drag with a step
     /// selected no longer bumps `ui_epoch`, so the p-lock authoring path must
-    /// publish those fields itself. Drives the real
+    /// leave that render current itself. Drives the real
     /// `dispatch_custom_host_command` -> `instrument_params::handle` seam
     /// rather than any sync helper, because both previous fixes for this bug
     /// were validated against helpers/mirrors and missed the real path.
@@ -1248,7 +1241,6 @@ mod tests {
             fx_epoch: fx_epoch.clone(),
             fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
-            expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),
             auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -1299,26 +1291,11 @@ mod tests {
         };
         let mut track_names = vec!["Track 1".to_string()];
 
-        // Seed the per-step render bindings the way a full `ui_epoch` sync
-        // would for a step with no p-locks: kind 0, black tint.
-        {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                &track_step_plock_kind_field(TRACK, STEP),
-                Value::Number(0.0),
-            );
-            for channel in ['r', 'g', 'b'] {
-                rt.set_reactive(
-                    "SEQ",
-                    &track_step_variant_color_field(TRACK, STEP, channel),
-                    Value::Number(0.0),
-                );
-            }
-        }
+        let render =
+            |state: &Arc<SequencerState>| plock_variant_step_render_values(state, TRACK)[STEP];
         assert_eq!(
-            reactive_number(&editor, &track_step_plock_kind_field(TRACK, STEP)),
-            0.0,
+            render(&state).kind,
+            0,
             "precondition: the selected step starts with no p-lock tick"
         );
 
@@ -1345,31 +1322,12 @@ mod tests {
                 .is_some(),
             "the handler must have written the instrument p-lock"
         );
-        assert_ne!(
-            reactive_number(&editor, &track_step_plock_kind_field(TRACK, STEP)),
-            0.0,
-            "the compact grid's p-lock tick field must be published by the \
-             p-lock authoring path (it no longer bumps ui_epoch)"
-        );
-        let tint: Vec<f64> = ['r', 'g', 'b']
-            .into_iter()
-            .map(|channel| {
-                reactive_number(&editor, &track_step_variant_color_field(TRACK, STEP, channel))
-            })
-            .collect();
+        // The step grids' p-lock tick and tint (`step.lock-kind`,
+        // `variant-color`, `plocked`) read this render.
+        assert_ne!(render(&state).kind, 0, "the step now carries a p-lock tick");
         assert!(
-            tint.iter().any(|channel| *channel != 0.0),
-            "the compact grid's per-step variant tint must be published too, got {tint:?}"
-        );
-        assert!(
-            matches!(
-                editor.runtime().reactive_field_value(
-                    "SEQ",
-                    &track_step_plocked_field(TRACK, STEP)
-                ),
-                Some(Value::Bool(true))
-            ),
-            "the per-step p-lock presence bool must stay in sync"
+            render(&state).color.iter().any(|channel| *channel != 0.0),
+            "the step's variant tint is set too"
         );
 
         // With no selection, record+play diverts the normal base-param host

@@ -64,20 +64,6 @@ pub(super) fn slice3_edit_applied(
     }
 }
 
-/// After a bar transpose landed (`set-bar-transpose`,
-/// `set-track-bar-transpose`): refresh the track's expanded step viewports.
-pub(super) fn bar_transpose_applied(ctx: &LoopCtx<'_>, track: usize) {
-    let shared = ctx.shared;
-    for viewport in shared.expanded_step_projection.viewports_for_track(track) {
-        shared
-            .ui_invalidations
-            .push(UiInvalidation::ExpandedStepViewport {
-                track,
-                track_id: viewport.track_id,
-            });
-    }
-}
-
 /// A setter's value under the value rule (see the module docs), named
 /// `what` in errors. Shared with the arrangement setters.
 pub(super) struct SetValue<'a> {
@@ -545,12 +531,9 @@ fn set_bar_transpose(
     let bar = bar.integer(0, sequencer::sequencer::BARS_PER_PATTERN - 1)?;
     let limit = f64::from(sequencer::sequencer::BAR_TRANSPOSE_LIMIT);
     let value = SetValue::of(map, "value", "bar transpose").number(-limit, limit)?;
-    let changed = super::ScriptEdit::run(app, ctx, true, |app| {
+    super::ScriptEdit::run(app, ctx, true, |app| {
         app::edit::apply_bar_transpose_edit(app, track, bar, value as f32)
     })?;
-    if changed {
-        bar_transpose_applied(ctx, track);
-    }
     Ok(())
 }
 

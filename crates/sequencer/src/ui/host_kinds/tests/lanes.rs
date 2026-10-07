@@ -241,40 +241,8 @@ fn lanes_processes_and_the_library_read_like_the_legacy_fields() {
             assert_eq!(*port, list(expected), "port {entry:?}");
         }
     }
-    // The patchbay (SEQ.track-lane-patch): in ports, and every reader of a
-    // connectable port as the process it wires into.
-    let patch = items(&build_track_lane_patch_value(&state, 0));
-    assert_eq!(patch.len(), slots.len());
-    for (index, entry) in patch.iter().enumerate() {
-        let in_ports = items(&get(entry, "in-ports"))
-            .iter()
-            .map(|port| get(port, "name"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            h.eval_lanes(&format!(
-                "(let ((p (nth t0.processes {index}))) p.in-ports)"
-            )),
-            list(in_ports)
-        );
-        for out in items(&get(entry, "out-ports")) {
-            let Value::String(name) = get(&out, "name") else {
-                panic!("a port name")
-            };
-            let wired = h.lanes_list(&format!(
-                "(let ((pt (part (let ((p (nth t0.processes {index}))) p.ports) \"{name}\")))
-                   (append (if pt.target-process
-                             (list (list pt.target-process.index pt.target-inlet))
-                             '())
-                           (map (lambda (fo) (list fo.target-process.index fo.target-inlet))
-                                (filter (lambda (fo) fo.target-process) pt.fanout))))"
-            ));
-            let expected: Vec<Value> = items(&get(&out, "readers"))
-                .iter()
-                .map(|reader| list(fields_of(reader, &["slot-index", "inlet"])))
-                .collect();
-            assert_eq!(wired, expected, "readers of {name} on slot {index}");
-        }
-    }
+    // The patchbay's wiring: a port's target process and inlet, and its
+    // fan-out entries'.
     // reset's wire drives tacc, and through its fan-out acc A and acc B.
     assert_eq!(
         h.eval_lanes(

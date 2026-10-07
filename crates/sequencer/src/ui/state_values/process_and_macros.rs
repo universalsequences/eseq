@@ -722,7 +722,6 @@ pub(crate) fn sync_process_lane_track_state(
     state: &Arc<SequencerState>,
     track: usize,
     current_track: usize,
-    viewports: &[ExpandedStepViewport],
 ) -> bool {
     let entries = process_lane_entries_for_track(state, track);
     let metadata = list_value(entries.iter().enumerate().map(|(index, entry)| {
@@ -736,28 +735,6 @@ pub(crate) fn sync_process_lane_track_state(
     ).effects_dirty;
     if track == current_track {
         dirty |= rt.set_reactive("SEQ", "process-lanes", metadata).effects_dirty;
-    }
-    let num_steps = state.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
-    for viewport in viewports {
-        let Some(entry) = viewport.mode.checked_sub(PROCESS_LANE_MODE_OFFSET)
-            .and_then(|index| entries.get(index)) else { continue; };
-        for slot in 0..PAGE_SIZE {
-            let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
-            let value = if step < num_steps { entry.values[step] } else { 0.0 };
-            for field in [
-                expanded_step_slot_param_slider_field(viewport.track_id, viewport.mode, slot),
-                expanded_step_slot_param_haptic_field(viewport.track_id, viewport.mode, slot),
-            ] {
-                dirty |= rt.set_reactive("SEQ", &field, Value::Number(value as f64)).effects_dirty;
-            }
-        }
-        let value = if viewport.cursor_step < num_steps {
-            entry.values[viewport.cursor_step]
-        } else { 0.0 };
-        dirty |= rt.set_reactive(
-            "SEQ", &expanded_step_cursor_param_value_field(viewport.track_id),
-            Value::Number(value as f64),
-        ).effects_dirty;
     }
     dirty
 }
@@ -1036,10 +1013,6 @@ pub(crate) fn build_all_track_process_slots_value(
 pub(crate) const LANE_PATCH_PORT_STRIDE: usize = 16;
 pub(crate) const LANE_PATCH_TRACK_STRIDE: usize = 4096;
 
-pub(crate) fn lane_patch_port_id(track: usize, slot_index: usize, ordinal: usize) -> usize {
-    (track * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
-}
-
 /// The chain slot a writer's process-inlet `target` lands on, with the
 /// inlet: wiring stays within a layer, as the scheduler resolves it
 /// (`resolve_process_inlet_target` in the scheduler): a project slot drives
@@ -1100,183 +1073,6 @@ pub(crate) fn lane_patch_in_port(
     inlet.lane || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate) || wired
 }
 
-/// `SEQ.track-lane-patch`: per track, one entry per composed chain slot in
-/// fire order, with the cable-level view the lane patchbay draws
-/// (docs/default-process-lanes-spec.md, patchbay). Each slot lists its
-/// connectable out ports with every reader (the primary binding, then the
-/// fan-out entries on that port, each resolved to a chain index), its
-/// wireable in ports (lane inlets, gate inlets, and any inlet a reader entry
-/// on this track already targets) with the cable ids writing into them, and
-/// its mappable ports for the target chip.
-pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let Some(chain) = state.composed_track_process_chain(track) else {
-        return list_value(Vec::<Value>::new());
-    };
-    let published = state.published_process_authoring();
-    let def_for = |slot: &sequencer::process::TrackProcessSlot| process_slot_def(&published, slot);
-
-    struct Reader {
-        slot_index: usize,
-        inlet: String,
-        source: &'static str,
-        fanout_index: Option<usize>,
-    }
-    let mut out_ports: Vec<Vec<(String, usize, bool, Vec<Reader>)>> = Vec::new();
-    let mut in_writers: std::collections::BTreeMap<(usize, String), Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for (slot_index, slot) in chain.slots.iter().enumerate() {
-        let mut entries = Vec::new();
-        let connectable = def_for(slot)
-            .map(|def| {
-                def.ports
-                    .iter()
-                    .filter(|port| port.is_connectable())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for (ordinal, port) in connectable.iter().enumerate() {
-            let port_id = lane_patch_port_id(track, slot_index, ordinal);
-            // A new cable fills the primary binding when nothing holds it;
-            // otherwise it becomes a fan-out entry on the port.
-            let primary_free = slot.unbound_ports.contains(&port.name)
-                || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
-            let readers: Vec<Reader> = process_port_readers(&chain, slot, &port.name)
-                .into_iter()
-                .map(|(fanout_index, index, inlet)| Reader {
-                    slot_index: index,
-                    inlet: inlet.to_string(),
-                    source: if fanout_index.is_some() {
-                        "fanout"
-                    } else {
-                        "primary"
-                    },
-                    fanout_index,
-                })
-                .collect();
-            for reader in &readers {
-                in_writers
-                    .entry((reader.slot_index, reader.inlet.clone()))
-                    .or_default()
-                    .push(port_id);
-            }
-            entries.push((port.name.clone(), port_id, primary_free, readers));
-        }
-        out_ports.push(entries);
-    }
-
-    list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
-        let def = def_for(slot);
-        let in_ports = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| {
-                        lane_patch_in_port(
-                            inlet,
-                            in_writers.contains_key(&(slot_index, inlet.name.clone())),
-                        )
-                    })
-                    .enumerate()
-                    .map(|(ordinal, inlet)| {
-                        let writers = in_writers
-                            .get(&(slot_index, inlet.name.clone()))
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        map_value([
-                            ("name", Value::String(inlet.name.clone())),
-                            ("ordinal", Value::Number(ordinal as f64)),
-                            ("lane", Value::Bool(inlet.lane)),
-                            ("kind", Value::String(process_inlet_kind_name(&inlet.kind).to_string())),
-                            (
-                                "writers",
-                                list_value(writers.iter().map(|id| Value::Number(*id as f64))),
-                            ),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let param_ports = def
-            .map(|def| {
-                def.ports
-                    .iter()
-                    .filter(|port| port.is_mappable())
-                    .map(|port| process_port_value(slot, port))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let display_name = slot
-            .instance_name
-            .clone()
-            .unwrap_or_else(|| slot.class_name.clone());
-        map_value([
-            ("slot-index", Value::Number(slot_index as f64)),
-            ("instance-id", Value::Number(slot.instance_id.0 as f64)),
-            ("name", Value::String(display_name)),
-            ("class", Value::String(slot.class_name.clone())),
-            ("project", Value::Bool(slot.project_layer)),
-            ("enabled", Value::Bool(slot.enabled)),
-            ("default-lane", Value::Bool(sequencer::process::is_default_lane_slot(slot))),
-            (
-                "out-ports",
-                list_value(out_ports[slot_index].iter().enumerate().map(
-                    |(ordinal, (name, port_id, primary_free, readers))| {
-                        map_value([
-                            ("name", Value::String(name.clone())),
-                            ("ordinal", Value::Number(ordinal as f64)),
-                            ("port-id", Value::Number(*port_id as f64)),
-                            ("primary-free", Value::Bool(*primary_free)),
-                            (
-                                "readers",
-                                list_value(readers.iter().map(|reader| {
-                                    map_value([
-                                        ("slot-index", Value::Number(reader.slot_index as f64)),
-                                        (
-                                            "instance-id",
-                                            Value::Number(
-                                                chain.slots[reader.slot_index].instance_id.0 as f64,
-                                            ),
-                                        ),
-                                        ("inlet", Value::String(reader.inlet.clone())),
-                                        ("source", Value::String(reader.source.to_string())),
-                                        (
-                                            "fanout-index",
-                                            reader
-                                                .fanout_index
-                                                .map(|index| Value::Number(index as f64))
-                                                .unwrap_or(Value::Nil),
-                                        ),
-                                    ])
-                                })),
-                            ),
-                        ])
-                    },
-                )),
-            ),
-            ("in-ports", list_value(in_ports)),
-            ("param-ports", list_value(param_ports)),
-            // Expr cards (docs/expr-process-spec.md §2); same keys as the
-            // node patch (`graph_node_lane_patch_value`).
-            ("expr", Value::Bool(slot.is_expr_card())),
-            (
-                "expr-line",
-                slot.expr_preview_line().map(Value::String).unwrap_or(Value::Nil),
-            ),
-            (
-                "compile-error",
-                slot.expr_compile_error(def.is_some()).map(Value::String).unwrap_or(Value::Nil),
-            ),
-        ])
-    }))
-}
-
-pub(crate) fn build_all_track_lane_patch_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_track_lane_patch_value(state, track)))
-}
-
 /// The library's classes (`SEQ.process-library`, the host kinds'
 /// `process-class`): compiled expr bodies (`expr#<hash>`) are reached
 /// through the plain `expr` card, never offered as classes
@@ -1330,43 +1126,6 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ),
         ])
     }))
-}
-
-/// `SEQ.track-process-scopes`: per track, one entry per composed chain slot
-/// with that slot's state history on this track (project slots have
-/// per-track runtime state, so the same lane scopes differently per track).
-/// `values` is the first declared state cell's history, `cells` the rest.
-pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> Value {
-    let scopes = state.process_scope_values();
-    let published = state.published_process_authoring();
-    let tracks = (0..state.active_track_count()).map(|track| {
-        let Some(chain) = state.composed_track_process_chain(track) else {
-            return list_value(std::iter::empty());
-        };
-        let entries = chain.slots.iter().filter_map(|slot| {
-            let runtime_id =
-                sequencer::process::track_process_slot_runtime_id(slot, track).0;
-            let cells = scopes.get(&runtime_id)?;
-            let def = process_slot_def(&published, slot);
-            let primary = def
-                .and_then(|def| def.state.first().map(|cell| cell.name.clone()))
-                .or_else(|| cells.keys().next().cloned())?;
-            let values = cells.get(&primary).cloned().unwrap_or_default();
-            let current = values.last().copied().unwrap_or(0.0);
-            Some(map_value([
-                ("instance-id", Value::Number(slot.instance_id.0 as f64)),
-                ("state", Value::String(primary)),
-                ("current", Value::Number(current as f64)),
-                (
-                    "values",
-                    list_value(values.iter().map(|value| Value::Number(*value as f64))),
-                ),
-                ("cells", process_scope_cells_value(cells)),
-            ]))
-        });
-        list_value(entries.collect::<Vec<_>>())
-    });
-    list_value(tracks.collect::<Vec<_>>())
 }
 
 /// Descriptor indices of `track`'s instrument params that an *enabled*
@@ -1425,65 +1184,6 @@ pub(crate) fn process_bound_bus_sends(state: &SequencerState, track: usize) -> H
     bound
 }
 
-/// Every numeric state cell's history of one process instance, by cell
-/// name: `{:snap (0 -1 ...) :root (...)}`.
-fn process_scope_cells_value(cells: &HashMap<String, Vec<f32>>) -> Value {
-    let mut map = HashMap::new();
-    for (name, values) in cells {
-        map.insert(
-            name.clone(),
-            value_cell(list_value(values.iter().map(|value| Value::Number(*value as f64)))),
-        );
-    }
-    Value::Map(map)
-}
-
-/// `SEQ.process-scope-cells`: one `{:runtime-id :cells}` entry per process
-/// instance that has fired, for scopes a track chain does not reach — a
-/// graph node's patch slots, whose runtime id is their instance id.
-pub(crate) fn build_process_scope_cells_value(state: &Arc<SequencerState>) -> Value {
-    let scopes = state.process_scope_values();
-    let mut ids = scopes.keys().copied().collect::<Vec<_>>();
-    ids.sort_unstable();
-    list_value(ids.into_iter().map(|id| {
-        map_value([
-            ("runtime-id", Value::Number(id as f64)),
-            ("cells", process_scope_cells_value(&scopes[&id])),
-        ])
-    }))
-}
-
-/// `SEQ.process-run-errors`: one `{:runtime-id :error}` entry per process
-/// runtime whose latest run failed (an expr card's body raised or ran out of
-/// step budget; docs/expr-process-spec.md §2/§10). Node slots run under
-/// their instance id, so the node bay's error dot matches on `:instance-id`.
-pub(crate) fn build_process_run_errors_value(state: &Arc<SequencerState>) -> Value {
-    list_value(state.process_run_errors().into_iter().map(|(id, error)| {
-        map_value([
-            ("runtime-id", Value::Number(id as f64)),
-            ("error", Value::String(error)),
-        ])
-    }))
-}
-
-pub(crate) fn sync_process_scope_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_scopes: bool,
-    scope_cells: bool,
-) {
-    if track_scopes {
-        rt.set_reactive(
-            "SEQ",
-            "track-process-scopes",
-            build_track_process_scopes_value(state),
-        );
-    }
-    if scope_cells {
-        rt.set_reactive("SEQ", "process-scope-cells", build_process_scope_cells_value(state));
-    }
-}
-
 pub(crate) fn sync_process_chain_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1508,11 +1208,6 @@ pub(crate) fn sync_process_chain_state(
         "SEQ",
         "track-process-slots",
         build_all_track_process_slots_value(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-lane-patch",
-        build_all_track_lane_patch_value(state, track_count),
     );
     rt.set_reactive("SEQ", "process-library", build_process_library_value(state));
 }

@@ -274,51 +274,6 @@ pub(crate) fn sync_reactive_tick(
             editor.mark_needs_redraw();
         }
     }
-    // Process run errors (expr cards' error dot): republish when the
-    // scheduler's error set changed, and once for a reader that opened
-    // after it last changed.
-    let process_run_errors_version = ctx.shared.state.process_run_errors_version();
-    if ctx.frame.prev_process_run_errors_version != Some(process_run_errors_version)
-        && editor.runtime().has_live_reactive_consumers("SEQ", "process-run-errors")
-    {
-        ctx.frame.prev_process_run_errors_version = Some(process_run_errors_version);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "process-run-errors",
-            state_values::build_process_run_errors_value(&ctx.shared.state),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.mark_needs_redraw();
-    }
-    // Lane strip scopes: republish the state histories whenever the
-    // scheduler fired a step process since the last frame.
-    let process_scope_values_version = ctx.shared.state.process_scope_values_version();
-    let track_scopes = editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes");
-    let scope_cells = editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells");
-    let (publish_tracks, publish_cells) = process_scope_publish(
-        process_scope_values_version,
-        ctx.frame.prev_process_scope_values_version,
-        ctx.frame.prev_process_scope_cells_version,
-        track_scopes,
-        scope_cells,
-    );
-    if publish_tracks || publish_cells {
-        if publish_tracks {
-            ctx.frame.prev_process_scope_values_version = process_scope_values_version;
-        }
-        if publish_cells {
-            ctx.frame.prev_process_scope_cells_version = process_scope_values_version;
-        }
-        state_values::sync_process_scope_state(
-            editor.runtime_mut(),
-            &ctx.shared.state,
-            publish_tracks,
-            publish_cells,
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.mark_needs_redraw();
-    }
-
     // Keep plugin-delay-compensation pads in sync with whatever mutated the
     // effect chains this frame (installs, undo/redo, project load, scenes).
     // Change-detecting: writes to the graph only when the pad set differs.
@@ -343,7 +298,7 @@ pub(crate) fn sync_reactive_tick(
         let ct = ctx.shared.current_track.load(Ordering::Relaxed);
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
-        sync_all_track_sequencer_state(rt, &ctx.shared.state, &app, ct, &ctx.shared.selected_steps);
+        sync_all_track_sequencer_state(rt, &ctx.shared.state, &app);
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
@@ -933,57 +888,19 @@ pub(crate) fn sync_reactive_tick(
         );
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
-        // not be skipped — but publishing is gated on the panel that draws
-        // them, exactly as the modulator readouts below are.
-        {
-            let rack_pad_triggers = read_rack_pad_trigger_flags(
-                &app,
-                &ctx.shared.state,
-                &track_active_notes,
-                &mut ctx.frame.rack_pad_triggered_at,
-                Instant::now(),
-            );
-            // `prev` mirrors what the runtime holds, so it is NOT updated
-            // while the panel is hidden: the first visible tick then publishes
-            // exactly what changed in the meantime — a pad that decayed while
-            // hidden goes dark, one that lit comes up — instead of leaving a
-            // stale light behind.
-            if fx_visible && rack_pad_triggers != ctx.frame.prev_rack_pad_triggers {
-                needs_reactive_cycle |= sync_rack_pad_trigger_field_delta(
-                    editor.runtime_mut(),
-                    &ctx.frame.prev_rack_pad_triggers,
-                    &rack_pad_triggers,
-                );
-                ctx.frame.prev_rack_pad_triggers.clone_from(&rack_pad_triggers);
-            }
-            // Host kinds read every tick's flags (`pad.triggered`, gated by
-            // its observers, not by a panel).
-            ctx.frame.rack_pad_triggers = rack_pad_triggers;
-        }
+        // not be skipped. Host kinds read them as `pad.triggered`, gated by
+        // that field's observers.
+        ctx.frame.rack_pad_triggers = read_rack_pad_trigger_flags(
+            &app,
+            &ctx.shared.state,
+            &track_active_notes,
+            &mut ctx.frame.rack_pad_triggered_at,
+            Instant::now(),
+        );
         // The modulator envelopes and the modulation sources' phases reach
         // the panels as eseq.kinds fields (device.modulator-phase / -level,
         // param.mod-phase), which read the meter cache themselves.
         if sequencer_visible {
-            // Length-lane marker (`length!`) of the expanded editors: changes
-            // at most once per cycle, so republish only the tracks whose
-            // marker moved.
-            let lengths = track_process_lengths_snapshot(&ctx.shared.state, &app);
-            if lengths != ctx.frame.prev_track_process_lengths {
-                let rt = editor.runtime_mut();
-                for (track, marker) in lengths.iter().enumerate() {
-                    if ctx.frame.prev_track_process_lengths.get(track) == Some(marker) {
-                        continue;
-                    }
-                    for viewport in ctx.shared.expanded_step_projection.all_viewports() {
-                        if viewport.track == track {
-                            needs_reactive_cycle |=
-                                sync_expanded_step_viewport_length(rt, &ctx.shared.state, viewport);
-                        }
-                    }
-                }
-                ctx.frame.prev_track_process_lengths = lengths;
-            }
-            let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
             if sync_tracker_grid_playhead_delta(
                 editor.runtime_mut(),
                 &ctx.shared.state,
@@ -991,32 +908,6 @@ pub(crate) fn sync_reactive_tick(
                 &mut ctx.frame.prev_track_playheads,
             ) {
                 needs_reactive_cycle = true;
-            }
-            if previous_track_playheads != ctx.frame.prev_track_playheads {
-                let auto_follow_now = auto_follow_enabled(&ctx.shared.auto_follow_override_until);
-                let selection_empty = ctx.shared.selected_steps.lock().unwrap().is_empty();
-                let selected = ctx.shared.selected_steps.lock().unwrap();
-                let rt = editor.runtime_mut();
-                for mut viewport in ctx.shared.expanded_step_projection.all_viewports() {
-                    if viewport.track >= app.tracks.len() {
-                        continue;
-                    }
-                    let active_step = track_active_playhead_step(&ctx.shared.state, viewport.track);
-                    let active_page = active_step / PAGE_SIZE;
-                    if playing && auto_follow_now && selection_empty {
-                        if viewport.page != active_page {
-                            viewport.page = active_page;
-                            viewport.cursor_step = active_step;
-                            ctx.shared.expanded_step_projection.set_viewport(viewport);
-                            needs_reactive_cycle |= sync_expanded_step_viewport(
-                                rt, &ctx.shared.state, &app, &selected, ct, viewport,
-                            );
-                            continue;
-                        }
-                    }
-                    needs_reactive_cycle |=
-                        sync_expanded_step_viewport_playhead(rt, &ctx.shared.state, viewport);
-                }
             }
         } else {
             ctx.frame.prev_track_playheads = track_playheads_snapshot(&ctx.shared.state, &app);
@@ -1126,7 +1017,6 @@ pub(crate) fn sync_reactive_tick(
                 cached_bus_peak_levels: &ctx.meters.cached_bus_peak_levels,
                 record_armed: &ctx.shared.record_armed,
                 active_delete_target: &ctx.shared.active_delete_target,
-                expanded_step_projection: &ctx.shared.expanded_step_projection,
                 fx_visible,
                 sequencer_visible,
                 mixer_visible,
@@ -1237,7 +1127,6 @@ pub(crate) fn sync_reactive_tick(
             let mut sync_playhead_elapsed = Duration::ZERO;
             let sync_current_steps_elapsed;
             let sync_sequencer_elapsed;
-            let sync_expanded_elapsed;
             let sync_track_automation_elapsed;
             let sync_step_params_elapsed;
             let sync_mixer_elapsed;
@@ -1268,26 +1157,8 @@ pub(crate) fn sync_reactive_tick(
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
             sync_current_steps_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_all_track_sequencer_state(
-                rt,
-                &ctx.shared.state,
-                &app,
-                ct,
-                &ctx.shared.selected_steps,
-            );
+            sync_all_track_sequencer_state(rt, &ctx.shared.state, &app);
             sync_sequencer_elapsed = started.elapsed();
-            let started = Instant::now();
-            if sequencer_visible {
-                let _ = sync_all_expanded_step_viewports(
-                    rt,
-                    &ctx.shared.state,
-                    &app,
-                    &ctx.shared.selected_steps,
-                    ct,
-                    &ctx.shared.expanded_step_projection,
-                );
-            }
-            sync_expanded_elapsed = started.elapsed();
             let started = Instant::now();
             sync_track_automation_state(rt, &app, &ctx.shared.state);
             sync_track_automation_elapsed = started.elapsed();
@@ -1352,7 +1223,7 @@ pub(crate) fn sync_reactive_tick(
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
                 eprintln!(
-                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms expanded_step_viewports={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
                     duration_ms(profile_total_started.elapsed()),
                     old_pattern_epoch,
                     epoch,
@@ -1360,7 +1231,6 @@ pub(crate) fn sync_reactive_tick(
                     duration_ms(sync_playhead_elapsed),
                     duration_ms(sync_current_steps_elapsed),
                     duration_ms(sync_sequencer_elapsed),
-                    duration_ms(sync_expanded_elapsed),
                     duration_ms(sync_track_automation_elapsed),
                     duration_ms(sync_step_params_elapsed),
                     duration_ms(sync_mixer_elapsed),
@@ -1462,23 +1332,7 @@ pub(crate) fn sync_reactive_tick(
                 rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
                 sync_step_param_lists(rt, &ctx.shared.state, ct);
                 if metal_visible || sequencer_visible {
-                    sync_all_track_sequencer_state(
-                        rt,
-                        &ctx.shared.state,
-                        &app,
-                        ct,
-                        &ctx.shared.selected_steps,
-                    );
-                }
-                if sequencer_visible {
-                    let _ = sync_all_expanded_step_viewports(
-                        rt,
-                        &ctx.shared.state,
-                        &app,
-                        &ctx.shared.selected_steps,
-                        ct,
-                        &ctx.shared.expanded_step_projection,
-                    );
+                    sync_all_track_sequencer_state(rt, &ctx.shared.state, &app);
                 }
                 sync_track_mixer_state(rt, &app, &ctx.shared.state);
                 sync_bus_mixer_state(rt, &app);
@@ -1889,35 +1743,4 @@ pub(crate) fn reactive_tick_and_render(
         }
     }
     Ok(TickFlow::Continue)
-}
-
-/// Which process-scope fields to republish this frame. Each field keeps its
-/// own watermark, so a version consumed while only one field had a consumer
-/// is still published to the other once it gains one.
-fn process_scope_publish(
-    version: u64,
-    prev_tracks: u64,
-    prev_cells: u64,
-    track_consumer: bool,
-    cells_consumer: bool,
-) -> (bool, bool) {
-    (
-        track_consumer && version != prev_tracks,
-        cells_consumer && version != prev_cells,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::process_scope_publish;
-
-    #[test]
-    fn process_scope_cells_publish_after_tracks_consumed_version() {
-        // Only the lane strip is live: tracks consume version 5.
-        assert_eq!(process_scope_publish(5, 4, 4, true, false), (true, false));
-        // A cells consumer opens later with the version still at 5.
-        assert_eq!(process_scope_publish(5, 5, 4, true, true), (false, true));
-        // Both caught up: nothing to publish.
-        assert_eq!(process_scope_publish(5, 5, 5, true, true), (false, false));
-    }
 }

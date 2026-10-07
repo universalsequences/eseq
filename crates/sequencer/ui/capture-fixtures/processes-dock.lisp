@@ -23,4 +23,4 @@
         (eseq.seq-step-tabs/seq-select-main-step-tab-by-buffer (eseq.seq-step-tabs/seq-instance-tab-buffer 1))
         (alez.neural.variable-reset/gvr-expand-node g 1)
         (eseq.sequencer/lane-patch-select-lane
-          (eseq.sequencer/lane-patch-node-namespace g 1) 0 expr-id)))))
+          (eseq.sequencer/lane-patch-node-namespace g 1) expr-id)))))

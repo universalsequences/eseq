@@ -7,7 +7,7 @@
 
 (module eseq.view-kit)
 
-(export open-menu! menu-of nothing listed? index-of prop-if rgb-part color-rgba
+(export open-menu! menu-of nothing listed? index-of named prop-if rgb-part color-rgba
         dimmed dimmed-part track-color-part)
 
 ;; m's context menu opens at the pointer event's grid point.
@@ -34,6 +34,11 @@
     (if (>= found 0) found (if (= (nth xs i) value) i found))
     -1
     (range 0 (len xs))))
+
+;; The first of xs (instances or anything with a `name` field) named
+;; `name`, or nil.
+(def named (xs name)
+  (first (filter (lambda (x) (= x.name name)) xs)))
 
 ;; `(k v)` to splice into a widget's props when v is set, else nothing.
 (def prop-if (k v) (if v (list k v) (list)))

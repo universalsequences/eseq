@@ -438,7 +438,8 @@ unchanged, so nothing else in the UI moves.
 **Not built:** drag reorder of clip cells (the run renders from a reactive field
 with no drop target; `ProjectScenes::reorder_rack_clip` exists for when it is
 wired). The activity strip is built and reuses the per-track
-`rack-pad-trigger-<track>` bindings the pad map already reads, so it needed no
+`rack-pad-trigger-<track>` bindings the pad map already reads (since
+eseq-0l17.66 `pad.triggered`), so it needed no
 new host feed.
 
 ### 6.2 Mixer

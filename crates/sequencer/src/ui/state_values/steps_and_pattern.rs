@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(super) fn sampler_modulation_depth_display_range(
     depth_desc: &sequencer::effects::ParamDescriptor,
     target: &sequencer::effects::InstrumentModulationTarget,
@@ -99,28 +98,10 @@ impl ReactiveSetStats {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AllTrackStepBindingSyncProfile {
-    pub elapsed: Duration,
-    pub active_elapsed: Duration,
-    pub duration_elapsed: Duration,
-    pub plocked_elapsed: Duration,
-    pub selected_elapsed: Duration,
-    pub slider_elapsed: Duration,
-    pub haptic_elapsed: Duration,
-    pub active_sets: ReactiveSetStats,
-    pub duration_sets: ReactiveSetStats,
-    pub plocked_sets: ReactiveSetStats,
-    pub selected_sets: ReactiveSetStats,
-    pub slider_sets: ReactiveSetStats,
-    pub haptic_sets: ReactiveSetStats,
-}
-
-#[derive(Clone, Debug, Default)]
 pub(crate) struct AllTrackSequencerSyncProfile {
     pub elapsed: Duration,
     pub track_steps: Duration,
     pub track_num_steps: Duration,
-    pub track_timebases: Duration,
     pub track_duration_spans: Duration,
     pub track_step_has_plocks: Duration,
     pub track_playheads: Duration,
@@ -131,7 +112,6 @@ pub(crate) struct AllTrackSequencerSyncProfile {
     pub track_pans: Duration,
     pub track_syncs: Duration,
     pub track_delays: Duration,
-    pub step_bindings: AllTrackStepBindingSyncProfile,
     pub playhead_fields: Duration,
 }
 
@@ -182,19 +162,6 @@ pub(super) fn build_track_timebase_labels_value(
         })
         .collect();
     Value::List(items)
-}
-
-pub(crate) fn build_all_track_timebase_labels_value(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    current_track_idx: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) -> Value {
-    let selected_step = {
-        let selected = selected_steps.lock().unwrap();
-        selected.iter().copied().min()
-    };
-    build_track_timebase_labels_value(state, app.tracks.len(), current_track_idx, selected_step)
 }
 
 pub(crate) fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
@@ -252,41 +219,6 @@ pub(crate) fn fill_track_held_steps(
         }
         reach > step as f64
     }));
-}
-
-pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
-    format!("seq-track-step-active-{track}-{step}")
-}
-
-/// Registry field caching a hex digest of all four per-step binding lanes for
-/// a track. When it is unchanged, the per-step field writes are skipped
-/// entirely; single-step sync paths invalidate it by writing Nil.
-pub(crate) fn track_step_binding_rev_field(track: usize) -> String {
-    format!("seq-track-step-binding-rev-{track}")
-}
-
-pub(crate) fn track_step_duration_field(track: usize, step: usize) -> String {
-    format!("seq-track-step-duration-{track}-{step}")
-}
-
-pub(crate) fn track_step_plocked_field(track: usize, step: usize) -> String {
-    format!("seq-track-step-plocked-{track}-{step}")
-}
-
-pub(crate) fn track_step_plock_kind_field(track: usize, step: usize) -> String {
-    format!("seq-track-step-plock-kind-{track}-{step}")
-}
-
-pub(crate) fn track_step_variant_color_field(
-    track: usize,
-    step: usize,
-    channel: char,
-) -> String {
-    format!("seq-track-step-variant-{channel}-{track}-{step}")
-}
-
-pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
-    format!("seq-track-step-selected-{track}-{step}")
 }
 
 /// The delete target that selects a mod route (`route.selected`).
@@ -498,12 +430,4 @@ pub(crate) fn set_current_track_reactive(rt: &mut Runtime, current_track_idx: us
         "current-track",
         Value::Number(current_track_idx as f64),
     );
-}
-
-pub(crate) fn track_step_param_slider_field(track: usize, mode: usize, step: usize) -> String {
-    format!("seq-track-step-param-slider-{track}-{mode}-{step}")
-}
-
-pub(crate) fn track_step_param_haptic_field(track: usize, mode: usize, step: usize) -> String {
-    format!("seq-track-step-param-haptic-{track}-{mode}-{step}")
 }

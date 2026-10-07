@@ -1288,7 +1288,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let fx_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     let auto_follow_override_until = Arc::new(Mutex::new(None::<Instant>));
@@ -1324,7 +1323,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&ui_epoch),
         Arc::clone(&fx_epoch),
         Arc::clone(&ui_invalidations),
-        Arc::clone(&expanded_step_projection),
         Arc::clone(&selected_neural_neurons),
         Arc::clone(&active_delete_target),
         Arc::clone(&active_delete_target_version),
@@ -1455,16 +1453,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     {
         editor.runtime_mut().set_reactive("SEQ", "instances", value);
     }
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
-
-    // Expanded editors register their viewports while evaluating the fixture's
-    // UI state. The live reactive tick publishes these projections; headless
-    // capture must do the same before its first frame, or every slot stays zero.
-    reactive_sync::sync_all_expanded_step_viewports(
-        editor.runtime_mut(), &state, &app, &selected_steps,
-        current_track.load(std::sync::atomic::Ordering::Relaxed), &expanded_step_projection,
-    );
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 

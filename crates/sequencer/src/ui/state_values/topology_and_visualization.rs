@@ -58,7 +58,6 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "step-variant-b", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-timebases", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
@@ -79,7 +78,6 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-process-lane-values", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-lanes", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-process-slots", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-lane-patch", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-library", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
@@ -95,7 +93,7 @@ pub(crate) fn sync_track_topology_state(
         return;
     }
 
-    sync_all_track_sequencer_state(rt, state, app, current_track_idx, selected_steps);
+    sync_all_track_sequencer_state(rt, state, app);
     let cursor_step = fx_step_cursor_from_runtime(rt);
     sync_fx_step_cursor_binding_fields(
         rt,

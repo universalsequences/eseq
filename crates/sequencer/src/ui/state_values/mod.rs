@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 mod device_slot;
 mod drum_rack;
 mod effects_panel;
-mod expanded_step;
 mod host_commands;
 mod instrument_panel;
 mod meters_and_modulation;
@@ -22,11 +21,11 @@ mod sound_palette;
 mod steps_and_pattern;
 mod topology_and_visualization;
 mod track_and_mixer;
+mod track_steps;
 
 pub(crate) use device_slot::*;
 pub(crate) use drum_rack::*;
 pub(crate) use effects_panel::*;
-pub(crate) use expanded_step::*;
 pub(crate) use self::host_commands::*;
 pub(crate) use instrument_panel::*;
 pub(crate) use meters_and_modulation::*;
@@ -46,6 +45,7 @@ pub(crate) use sound_palette::*;
 pub(crate) use steps_and_pattern::*;
 pub(crate) use topology_and_visualization::*;
 pub(crate) use track_and_mixer::*;
+pub(crate) use track_steps::*;
 use topology_and_visualization::value_cell;
 
 #[cfg(test)]

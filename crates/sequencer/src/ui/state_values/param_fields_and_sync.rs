@@ -1070,28 +1070,17 @@ pub(crate) fn sync_all_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &app::App,
-    current_track_idx: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
-    sync_all_track_sequencer_state_inner(rt, state, app, current_track_idx, selected_steps, None);
+    sync_all_track_sequencer_state_inner(rt, state, app, None);
 }
 
 pub(crate) fn sync_all_track_sequencer_state_profiled(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &app::App,
-    current_track_idx: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> AllTrackSequencerSyncProfile {
     let mut profile = AllTrackSequencerSyncProfile::default();
-    sync_all_track_sequencer_state_inner(
-        rt,
-        state,
-        app,
-        current_track_idx,
-        selected_steps,
-        Some(&mut profile),
-    );
+    sync_all_track_sequencer_state_inner(rt, state, app, Some(&mut profile));
     profile
 }
 
@@ -1099,8 +1088,6 @@ pub(super) fn sync_all_track_sequencer_state_inner(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &app::App,
-    current_track_idx: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     mut profile: Option<&mut AllTrackSequencerSyncProfile>,
 ) {
     let total_started = profile.as_ref().map(|_| Instant::now());
@@ -1122,16 +1109,6 @@ pub(super) fn sync_all_track_sequencer_state_inner(
     );
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_num_steps = started.expect("profile timer").elapsed();
-    }
-
-    let started = profile.as_ref().map(|_| Instant::now());
-    rt.set_reactive(
-        "SEQ",
-        "track-timebases",
-        build_all_track_timebase_labels_value(state, app, current_track_idx, selected_steps),
-    );
-    if let Some(profile) = profile.as_deref_mut() {
-        profile.track_timebases = started.expect("profile timer").elapsed();
     }
 
     let started = profile.as_ref().map(|_| Instant::now());
@@ -1267,28 +1244,6 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         build_all_track_process_lanes_value(state, app.tracks.len()),
     );
     super::super::piano_roll::sync_track_automation_state(rt, app, state);
-
-    if let Some(profile) = profile.as_deref_mut() {
-        profile.step_bindings = sync_all_track_step_binding_fields_profiled(
-            rt,
-            state,
-            app,
-            current_track_idx,
-            selected_steps,
-            &plock_masks,
-            &variants,
-        );
-    } else {
-        sync_all_track_step_binding_fields(
-            rt,
-            state,
-            app,
-            current_track_idx,
-            selected_steps,
-            &plock_masks,
-            &variants,
-        );
-    }
 
     let started = profile.as_ref().map(|_| Instant::now());
     super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
