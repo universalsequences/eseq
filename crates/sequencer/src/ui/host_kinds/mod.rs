@@ -278,6 +278,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_SOLOED: FieldKey = (TRACK, "soloed");
     pub(crate) const TRACK_COLLAPSED: FieldKey = (TRACK, "collapsed");
     pub(crate) const TRACK_PLAYHEAD: FieldKey = (TRACK, "playhead");
+    pub(crate) const TRACK_PLAYHEAD_PAGE: FieldKey = (TRACK, "playhead-page");
+    pub(crate) const TRACK_LENGTH_STEP: FieldKey = (TRACK, "length-step");
     pub(crate) const TRACK_TIMEBASE: FieldKey = (TRACK, "timebase");
     pub(crate) const TRACK_INSTRUMENT_TYPE: FieldKey = (TRACK, "instrument-type");
     pub(crate) const TRACK_RACK: FieldKey = (TRACK, "rack");
@@ -1241,6 +1243,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_SOLOED, ":bool", Live),
     (f::TRACK_COLLAPSED, ":bool", Live),
     (f::TRACK_PLAYHEAD, ":int", Live),
+    (f::TRACK_PLAYHEAD_PAGE, ":int", Live),
+    (f::TRACK_LENGTH_STEP, ":int", Live),
     (f::TRACK_TIMEBASE, ":string", Live),
     (f::TRACK_INSTRUMENT_TYPE, ":string", Model),
     (f::TRACK_RACK, ":bool", Model),

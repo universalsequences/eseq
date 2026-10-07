@@ -7,7 +7,8 @@
 
 (module eseq.view-kit)
 
-(export open-menu! menu-of nothing listed? index-of prop-if rgb-part color-rgba)
+(export open-menu! menu-of nothing listed? index-of prop-if rgb-part color-rgba
+        dimmed dimmed-part track-color-part)
 
 ;; m's context menu opens at the pointer event's grid point.
 (def open-menu! (m event)
@@ -43,3 +44,18 @@
 ;; Color c (an :rgb value) as an rgba with `alpha`.
 (def color-rgba (c alpha)
   (rgba (rgb-part c 0) (rgb-part c 1) (rgb-part c 2) alpha))
+
+;; Component value v (component i: 0 r, 1 g, 2 b) pulled toward a dark gray
+;; while `dim` (a track or bus that is not heard draws its color so).
+(def dimmed (v i dim)
+  (if dim (+ (* v 0.34) (* (if (= i 2) 0.11 0.10) 0.66)) v))
+
+;; Component i of color c (an :rgb value), dimmed while `dim`.
+(def dimmed-part (c i dim) (dimmed (rgb-part c i) i dim))
+
+;; Component i of track t's color, dimmed while `dim`; a stock blue's when
+;; there is no t.
+(def track-color-part (t i dim)
+  (if t
+    (dimmed-part t.color i dim)
+    (dimmed (nth (list 0.34 0.48 0.98) i) i dim)))

@@ -577,8 +577,7 @@ track, one new subdivision per bar.
   displaced the pending one.
 - **Length marker** (eseq-ks8x.1): an amber underline beneath the step the
   lane last set the length to, in the grid (drawn inside
-  `seqv-playhead-row-bar` via its `len-col` binding, field
-  `track-length-row-{track}-{row}`) and the expanded view
+  `seqv-playhead-row-bar` from `track.length-step`) and the expanded view
   (`seqv-slot-length-mark`, field `seqv-slot-length-active-{id}-{slot}`).
   The clock keeps `length_marker` even when the request equals the authored
   length (no override then); the lookahead publishes it to

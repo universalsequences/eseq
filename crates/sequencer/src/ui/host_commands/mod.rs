@@ -493,7 +493,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     let rt = editor.runtime_mut();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-    set_current_track_reactive(rt, app.tracks.len(), selected);
+    set_current_track_reactive(rt, selected);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     sync_all_track_sequencer_state(rt, state, app, selected, selected_steps);
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
@@ -607,7 +607,7 @@ pub(crate) fn finish_swapped_instrument_track(
     app.ui.cursor_track = selected_track;
     if !app.tracks.is_empty() {
         let rt = editor.runtime_mut();
-        set_current_track_reactive(rt, app.tracks.len(), selected_track);
+        set_current_track_reactive(rt, selected_track);
         sync_track_name_state(rt, track_names, app);
         sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
         rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));

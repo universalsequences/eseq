@@ -739,8 +739,8 @@ impl HostKinds {
         pusher.push(song, f::SONG_BOUND_CLIP, instance_or_nil(bound));
     }
 
-    /// `track.governed` (`song_take_lane_states`, shared with
-    /// `SEQ.song-track-governed`), re-derived only when its inputs moved.
+    /// `track.governed` (`song_take_lane_states`), re-derived only when
+    /// its inputs moved.
     pub(super) fn sync_governed(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
         let key = GovernKey {
             authority: app.song_playback_authority_active(),

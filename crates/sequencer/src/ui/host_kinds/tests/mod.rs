@@ -313,6 +313,21 @@ impl Harness {
         self.editor.runtime_mut().run_reactive_cycle();
     }
 
+    /// Start or stop the transport (the host kinds read it on the next
+    /// sync).
+    fn set_playing(&self, playing: bool) {
+        self.shared
+            .state
+            .transport
+            .playing
+            .store(playing, Ordering::Relaxed);
+    }
+
+    /// Field `name` of the track at position `index`.
+    fn track_field(&mut self, index: usize, name: &str) -> Value {
+        self.eval(&format!("(let ((t (track {index}))) t.{name})"))
+    }
+
     /// A Lisp-held `#'` slot's current value.
     fn slot(&mut self, global: &str) -> f64 {
         match self.eval(&format!("(do {global})")) {
@@ -476,6 +491,7 @@ mod piano_roll_view;
 mod racks;
 mod scenes;
 mod schema;
+mod sequencer_view;
 mod settings;
 mod steps;
 mod table_editor;

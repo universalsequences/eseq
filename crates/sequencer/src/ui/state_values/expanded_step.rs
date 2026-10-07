@@ -799,15 +799,6 @@ pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &app::A
         .collect()
 }
 
-pub(super) fn track_playhead_row_field(track: usize, row: usize) -> String {
-    format!("track-playhead-row-{track}-{row}")
-}
-
-/// Column of the length-lane step in this grid row, or -1 (`length!`).
-pub(crate) fn track_length_row_field(track: usize, row: usize) -> String {
-    format!("track-length-row-{track}-{row}")
-}
-
 /// The step a length lane (`length!`) last set the track's length to, as a
 /// 0-based index, while the transport plays; `None` when no lane drives it.
 pub(crate) fn track_process_length_step(state: &Arc<SequencerState>, track: usize) -> Option<usize> {
@@ -818,47 +809,10 @@ pub(crate) fn track_process_length_step(state: &Arc<SequencerState>, track: usiz
     (steps > 0).then(|| steps.min(MAX_STEPS) - 1)
 }
 
-/// Publish every grid row's length-lane column for `track`.
-pub(crate) fn sync_track_length_row_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-) -> bool {
-    let marker = track_process_length_step(state, track);
-    let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
-    let mut dirty = false;
-    for row in 0..max_rows {
-        let col = match marker {
-            Some(step) if step / PAGE_SIZE == row => (step % PAGE_SIZE) as f64,
-            _ => -1.0,
-        };
-        dirty |= rt
-            .set_reactive("SEQ", &track_length_row_field(track, row), Value::Number(col))
-            .effects_dirty;
-    }
-    dirty
-}
-
 pub(crate) fn track_process_lengths_snapshot(state: &Arc<SequencerState>, app: &app::App) -> Vec<Option<usize>> {
     (0..app.tracks.len())
         .map(|track| track_process_length_step(state, track))
         .collect()
-}
-
-/// Row-granular companion to [`track_playhead_row_field`]. That field carries the
-/// active column and uses -1 for "inactive", which a widget's float `active` prop
-/// can't read (column 0 is falsy, -1 is truthy). This publishes a plain 0/1 so
-/// labels can swap `color`/`active-color` straight off the reactive slot.
-pub(crate) fn track_playhead_row_active_field(track: usize, row: usize) -> String {
-    format!("track-playhead-row-active-{track}-{row}")
-}
-
-pub(crate) fn track_playhead_active_field(track: usize, step: usize) -> String {
-    format!("track-playhead-active-{track}-{step}")
-}
-
-pub(crate) fn track_playhead_page_field(track: usize) -> String {
-    format!("track-playhead-page-{track}")
 }
 
 pub(crate) fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
@@ -896,88 +850,22 @@ pub(super) fn track_playhead_row_count(state: &Arc<SequencerState>, track: usize
     (num_steps + PAGE_SIZE - 1) / PAGE_SIZE
 }
 
-pub(crate) fn sync_all_track_playhead_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    app: &app::App,
-) {
-    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
+/// The tracker's grid lists go dark while the transport is stopped (the step
+/// grid's playheads are `track.playhead` and `step.playing`, eseq.kinds).
+pub(crate) fn clear_tracker_grid_playhead_fields(rt: &mut Runtime, app: &app::App) {
+    if !super::super::piano_roll::track_automation_wanted(rt) {
+        return;
+    }
     for track in 0..app.tracks.len() {
-        let active_step = track_active_playhead_step(state, track);
-        let active_row = active_step / PAGE_SIZE;
-        let active_col = active_step % PAGE_SIZE;
-        let row_count = track_playhead_row_count(state, track);
-        sync_track_length_row_fields(rt, state, track);
         rt.set_reactive(
             "SEQ",
-            &track_playhead_page_field(track),
-            Value::Number(active_row as f64),
+            &super::super::piano_roll::tracker_grid_playhead_field(track),
+            Value::List(vec![]),
         );
-        for step in 0..MAX_STEPS {
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_active_field(track, step),
-                Value::Bool(step == active_step),
-            );
-        }
-        let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
-        for row in 0..max_rows {
-            let active = row == active_row && row < row_count;
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_row_field(track, row),
-                Value::Number(if active { active_col as f64 } else { -1.0 }),
-            );
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_row_active_field(track, row),
-                Value::Bool(active),
-            );
-        }
-    }
-}
-
-pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &app::App) {
-    let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
-    // The tracker's per-row grid lists go dark with everything else.
-    if super::super::piano_roll::track_automation_wanted(rt) {
-        for track in 0..app.tracks.len() {
-            rt.set_reactive(
-                "SEQ",
-                &super::super::piano_roll::tracker_grid_playhead_field(track),
-                Value::List(vec![]),
-            );
-            rt.set_reactive(
-                "SEQ",
-                &super::super::piano_roll::tracker_grid_playhead_row_field(track),
-                Value::Number(-1.0),
-            );
-        }
-    }
-    for track in 0..app.tracks.len() {
-        for step in 0..MAX_STEPS {
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_active_field(track, step),
-                Value::Bool(false),
-            );
-        }
-        for row in 0..max_rows {
-            rt.set_reactive(
-                "SEQ",
-                &track_length_row_field(track, row),
-                Value::Number(-1.0),
-            );
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_row_field(track, row),
-                Value::Number(-1.0),
-            );
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_row_active_field(track, row),
-                Value::Bool(false),
-            );
-        }
+        rt.set_reactive(
+            "SEQ",
+            &super::super::piano_roll::tracker_grid_playhead_row_field(track),
+            Value::Number(-1.0),
+        );
     }
 }

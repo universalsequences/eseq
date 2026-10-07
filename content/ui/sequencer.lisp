@@ -1,25 +1,26 @@
 ;; ui/sequencer.lisp — Project step sequencer view.
 ;; Renders to *sequencer* buffer. Shows every track's step grid laid out
 ;; vertically. Loaded by ui/main.lisp.
+;;
+;; The grid's host state comes from eseq.kinds (docs/kind-bindings-spec.md):
+;; tracks, their steps, groups and their buses, rack clips. The step cells,
+;; the playhead bars and the header's meter, fader, arm, mute and solo bind
+;; their fields with #' (`step-cell` takes the step and its track), so
+;; playback, step edits, mixing and metering repaint without re-running a
+;; row. The step cursor, the selection anchor, the expanded tracks and the
+;; rack clip menu are this view's own state: `:key ()` singletons below.
+;; The expanded step editor, its process lanes, the lane patchbay and the
+;; drum rack pad grid still read the legacy fields (eseq-0l17.11 follow-ups).
 
 (module eseq.sequencer)
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
 
-;; Migration aliases (module spec §10 step 2) for the names unconverted callers
-;; still spell flat.  Nine are lisp-side — arrangement.lisp reuses the track
-;; header and its selection binding, mixer.lisp opens the piano roll,
-;; seq-panels.lisp toggles the expanded lane, seq-grid-mode.lisp routes the
-;; *sequencer* keymap (both the `(seqv-handle-key …)` call and the "C-h"
-;; `mode-bind-key` handler string, which dispatches through `invoke_global` and
-;; therefore through the alias rung).  The rest are entry points src/ui/input.rs and
-;; the Rust state_values / ui tests drive by name.  Deleted as each consumer
-;; converts.
-
 (import eseq.track-collapse)
 
-;; Drum rack v2: rack lookups over SEQ.groups (docs/drum-rack-v2-spec.md).
+;; Drum rack v2: the pad grid's rack lookups over SEQ.groups
+;; (docs/drum-rack-v2-spec.md).
 (import eseq.drum-rack-v2)
 
 (import eseq.seq-panels)
@@ -35,14 +36,22 @@
 (import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part dimmed-part
+                               track-color-part))
+(import eseq.kinds :refer (track tracks groups selection transport project launch-rack-clip!
+                           save-rack-clip-as! delete-rack-clip! take-none take-governed))
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
         harmony-snap-meter process-scope-cells-for
         lane-patch-run-error lane-patch-expr-error lane-patch-hidden-in-port-count
         lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
         lane-patch-node-select lane-patch-node-host?
-        track-selected-binding
-        expanded-track-ids
+        grid-cursor
+        grid-select
+        seq-view
+        clip-menu
+        clip-rename
+        expanded-tracks
         select-track-for-edit
         open-piano-roll-for-track
         show-fx-for-group
@@ -71,12 +80,14 @@
         collapse-all-tracks
         toggle-current-track-expanded
         handle-key
+        track-click
         track-menu-click
         drop-sample-on-track
         drop-on-track
         drop-new-track
         step-slider-track-material
         track-header
+        grid-items
         grid-step-pointer-down
         grid-step-pointer-up
         track-current-step
@@ -91,39 +102,61 @@
         choose-pad-role
         rack-pad-map)
 
-(def track-peak (i)
-  (bind-seq (str "track-peak-" i)))
+;; ── View state ──
 
-(def track-volume-field (track)
-  (str "track-" track "-volume"))
+;; The step cursor the grid draws: the shared step cursor
+;; (`eseq.seq-core-state/cursor-step-value`), mirrored by
+;; `cursor-step-changed` whenever it moves. The selected tracks' cells show
+;; it, wrapped to each track's length.
+(def-kind grid-cursor
+  :key ()
+  :state ((step 0)))
 
-(def track-volume-binding (track)
-  (bind-seq (track-volume-field track)))
+;; The stable end of a Finder-style range selection (shift-click); a plain
+;; selection starts a new range, cmd-click leaves it alone.
+(def-kind grid-select
+  :key ()
+  :state ((anchor track :default nil)))
 
-(def track-volume-value (track)
-  (if (< track (len SEQ.track-volumes))
-    (nth SEQ.track-volumes track)
-    1.0))
+;; The expanded step editors, by stable track id (`t.tid`), so they follow
+;; their track through a delete and its undo or a reorder: the expanded
+;; tracks' tids, and per track its param mode (`(dict :tid tid :mode m)`)
+;; and step cursor (`(dict :tid tid :step s)`). Rows draw `t.expanded`
+;; (track view state in eseq.kinds, so a toggle re-renders that row alone),
+;; which `*seq-expand-sync*` keeps in step with `expanded`; the rest is read
+;; only by handlers, so a mode or cursor change re-renders nothing.
+(def-kind seq-view
+  :key ()
+  :state ((expanded '())
+          (modes '())
+          (cursors '())))
 
-(def track-volume-from-event (track event)
-  (let ((sx (get event :sx)))
-    (if (= sx nil)
-      (track-volume-value track)
-      (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0)))))))
+;; The rack clip menu (where it opened, the clip it targets) and the inline
+;; clip rename in progress (the clip, nil when none is, and the draft).
+(def-kind clip-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (clip rack-clip :default nil)))
 
-(def set-track-volume-from-event (track event)
-  (do
-    (activate-track-for-edit track)
-    (seq-set-track-volume track (track-volume-from-event track event))))
+(def-kind clip-rename
+  :key ()
+  :state ((clip rack-clip :default nil)
+          (draft "")))
 
-(def track-color-r-binding (track)
-  (bind-seq-nth "track-color-r-effective" track))
+;; ── Tracks ──
 
-(def track-color-g-binding (track)
-  (bind-seq-nth "track-color-g-effective" track))
+;; Track i, from a position the host hands over (drop meta, a key handler,
+;; the step cursor hook); nil when there is none.
+(def track-at (i) (if (= i nil) nil (track i)))
 
-(def track-color-b-binding (track)
-  (bind-seq-nth "track-color-b-effective" track))
+(def pointer-volume (event)
+  (max 0.0 (min 1.0 (* 0.5 (+ event.sx 1.0)))))
+
+;; x's (a track's or a bus's) volume from a fader click or drag.
+(def set-volume! (x event)
+  (unless (= event.sx nil)
+    (set! x.volume (pointer-volume event))))
 
 (def track-name-max-chars 9)
 
@@ -132,259 +165,136 @@
     (str (substring name 0 (- track-name-max-chars 2)) "..")
     name))
 
-;; Bound, never a raw `selected-bus` read: reading the defstate here made
-;; every track row (and every arrangement lane reusing this binding) re-render
-;; on each bus/group selection. The *sel-sync* projection in
-;; ui/seq-core-state.lisp owns that read and gates the Rust-owned per-track
-;; selection into one bindable field per row (eseq-4jv).
-(def track-selected-binding (i)
-  (eseq.seq-core-state/track-selected-vis-binding i))
+;; Entry `(dict :tid tid …)` of `entries` for t, or nil.
+(def entry-for (entries t)
+  (first (filter (lambda (entry) (= (get entry :tid) t.tid)) entries)))
 
-(def track-color (i)
-  (if (< i (len SEQ.track-colors))
-    (nth SEQ.track-colors i)
-    (list 0.34 0.48 0.98)))
+;; `entries` with t's entry replaced by `(dict :tid t.tid key value)`, less
+;; those of tracks no longer listed.
+(def with-entry (entries t key value)
+  (let ((tids (map (lambda (x) x.tid) (tracks))))
+    (cons (dict :tid t.tid key value)
+          (filter (lambda (entry)
+                    (let ((tid (get entry :tid)))
+                      (and (not (= tid t.tid)) (listed? tid tids))))
+                  entries))))
 
-(def track-color-r (i muted)
-  (let ((r (nth (track-color i) 0)))
-    (if muted (+ (* r 0.34) (* 0.10 0.66)) r)))
+(def project-cursor-step (t step)
+  (mod step (max 1 t.num-steps)))
 
-(def track-color-g (i muted)
-  (let ((g (nth (track-color i) 1)))
-    (if muted (+ (* g 0.34) (* 0.10 0.66)) g)))
-
-(def track-color-b (i muted)
-  (let ((b (nth (track-color i) 2)))
-    (if muted (+ (* b 0.34) (* 0.11 0.66)) b)))
-
-(def row-bg (selected muted)
-  (if selected
-    :mixer-strip-selected-bg
-    (if muted
-      :mixer-strip-muted-bg
-      :buffer-bg)))
-
-(def row-border (selected)
-  (if selected
-    :mixer-strip-selected-border
-    :mixer-strip-border))
-
-(def timebase-options
-  '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
-
-(def track-timebase (i)
-  (if (< i (len SEQ.track-timebases))
-    (nth SEQ.track-timebases i)
-    "16"))
-
-(def set-row-timebase (track label)
-  (let ((plock-selected
-      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (if plock-selected
-        (seq-plock-timebase label)
-        (seq-set-timebase label)))))
-
-(defstate expanded-track-ids '())
-
-(defstate track-editor-state '())
-
-(def list-contains? (xs item)
-  (> (len (filter (lambda (x) (= x item)) xs)) 0))
-
-(def list-remove (xs item)
-  (filter (lambda (x) (not (= x item))) xs))
-
-(def expanded-track-field (track-id)
-  (str "track-expanded-" track-id))
-
-(def track-id-at (track)
-  (if (< track (len SEQ.track-ids))
-    (nth SEQ.track-ids track)
-    track))
-
-(def track-index-for-id (track-id)
-  (let ((matches
-      (filter
-        (lambda (i) (= (nth SEQ.track-ids i) track-id))
-        (range 0 (len SEQ.track-ids)))))
-    (if (> (len matches) 0)
-      (nth matches 0)
-      -1)))
-
-(def project-cursor-step (track step)
-  (mod step (max 1 (track-num-steps track))))
-
-;; `cursor-step` is a mutable vanilla global; a module must read it through its
-;; owner's accessor or the late-binding heal freezes the value (§10 hazard m).
-(def global-cursor-step-for-track (track)
-  (project-cursor-step track (eseq.seq-core-state/cursor-step-value)))
-
-(def sync-track-cursor-to-global (track)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (set-track-cursor
-      (track-id-at track)
-      (eseq.seq-core-state/cursor-step-value))
-    nil))
+(def sync-track-cursor-to-global (t)
+  (set-track-cursor t (eseq.seq-core-state/cursor-step-value)))
 
 (def sync-all-track-cursors-to-global ()
-  (for-each
-    (lambda (track) (sync-track-cursor-to-global track))
-    (range 0 (len SEQ.track-ids))))
+  (for-each sync-track-cursor-to-global (tracks)))
 
-;; Plain selections reset the range anchor; additive clicks leave it intact.
-(def track-selection-anchor nil)
-
-;; Selecting an edit target must not change workspace layout. Opening FX is an
-;; explicit gesture owned by show-fx-for-track (track-name double-click).
-(def select-track-for-edit (track)
-  (do
-    (set! track-selection-anchor track)
-    (set! eseq.seq-core-state/selected-bus -1)
-    (if (= SEQ.current-track track) nil (seq-clear-selection))
-    (seq-set-track track)
-    (sync-track-cursor-to-global track)))
+;; Selecting an edit target must not change workspace layout: opening an
+;; editor is an explicit gesture (a name double-click opens the piano roll).
+(def select-track-for-edit (t)
+  (set! grid-select.anchor t)
+  (set! eseq.seq-core-state/selected-bus -1)
+  (unless t.selected (seq-clear-selection))
+  (set! selection.track t)
+  (sync-track-cursor-to-global t))
 
 (def track-selection-click? (event)
-  (or (get event :shift) (get event :additive-selection)))
+  (or event.shift event.additive-selection))
 
-(def track-click (event track)
-  (do
-    (if (get event :shift)
-      (let ((anchor (if (= track-selection-anchor nil)
-                      SEQ.current-track
-                      track-selection-anchor)))
-        (do
-          (set! track-selection-anchor anchor)
-          (set! eseq.seq-core-state/selected-bus -1)
-          (seq-select-tracks
-            (eseq.seq-core-state/track-range-in-order
-              (eseq.drum-rack-v2/visible-track-order) anchor track)
-            track)))
-      (if (get event :additive-selection)
-        (do
-          (set! eseq.seq-core-state/selected-bus -1)
-          (seq-toggle-track-selected track))
-        (select-track-for-edit track)))
-    (sync-track-cursor-to-global track)))
+;; Shift-click = select the range from the anchor in the grid's visual order;
+;; cmd-click = toggle membership; a plain click selects the track for edit.
+;; A held anchor whose track is gone falls back to the current track.
+(def track-click (event t)
+  (if event.shift
+    (let ((held grid-select.anchor)
+          (anchor (if (listed? held (tracks)) held (or selection.track t))))
+      (set! grid-select.anchor anchor)
+      (set! eseq.seq-core-state/selected-bus -1)
+      (seq-select-tracks
+        (map (lambda (m) m.index)
+          (eseq.seq-core-state/track-range-in-order (visible-tracks) anchor t))
+        t.index))
+    (if event.additive-selection
+      (do
+        (set! eseq.seq-core-state/selected-bus -1)
+        (seq-toggle-track-selected t.index))
+      (select-track-for-edit t)))
+  (sync-track-cursor-to-global t))
 
 ;; Modified track-control clicks select tracks without also editing a control.
-(def track-control-click (event track action)
+(def track-control-click (event t action)
   (if (track-selection-click? event)
-    (track-click event track)
+    (track-click event t)
     (action)))
 
-(def activate-track-for-edit (track)
-  (select-track-for-edit track))
+;; A header control's click on t: a modified click selects tracks, a plain
+;; one selects t for edit and runs `action`.
+(def track-toggle-click (t action)
+  (lambda (event)
+    (track-control-click event t
+      (lambda () (select-track-for-edit t) (action)))))
 
-(def open-piano-roll-for-track (track)
-  (do
-    ;; A badge's first click may arm deletion; double-click is navigation.
-    (seq-clear-delete-target)
-    (activate-track-for-edit track)
-    (if (eseq.track-collapse/empty-instrument? track)
-      (eseq.browser/open-device-picker)
-      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
-        (eseq.seq-panels/seq-show-fx-lower-panel)
-        (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track)))))
+(def open-piano-roll-for-track (t)
+  ;; A badge's first click may arm deletion; double-click is navigation.
+  (seq-clear-delete-target)
+  (select-track-for-edit t)
+  (if (= t.instrument-type "empty")
+    (eseq.browser/open-device-picker)
+    (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+      (eseq.seq-panels/seq-show-fx-lower-panel)
+      (eseq.seq-panels/seq-open-piano-roll-bottom-for-track t.index))))
 
-(def show-fx-for-track (track)
-  (do
-    (select-track-for-edit track)
-    (if (eseq.track-collapse/empty-instrument? track)
-      (eseq.browser/open-device-picker)
-      (eseq.seq-panels/seq-show-fx-lower-panel))))
+;; ── Expanded step editors ──
 
-(def track-expanded? (track-id)
-  (reactive-get "SEQV" (expanded-track-field track-id)))
+(def expanded-tracks ()
+  (filter (lambda (t) t.expanded) (tracks)))
 
-(def set-track-expanded (track-id expanded)
-  (do
-    (reactive-set "SEQV" (expanded-track-field track-id) expanded)
-    (if expanded
-      (let ((track (track-index-for-id track-id)))
-        (if (>= track 0)
-          (sync-expanded-step-slots-for track track-id)
-          nil))
-      (seqv-clear-expanded-step-slots track-id))
-    (set! expanded-track-ids
-      (if expanded
-        (if (list-contains? expanded-track-ids track-id)
-          expanded-track-ids
-          (append expanded-track-ids (list track-id)))
-        (list-remove expanded-track-ids track-id)))))
+(def set-track-expanded (t expanded)
+  (let ((others (filter (lambda (tid) (not (= tid t.tid))) seq-view.expanded)))
+    (set! seq-view.expanded (if expanded (cons t.tid others) others)))
+  (set! t.expanded expanded)
+  (if expanded
+    (sync-expanded-step-slots-for t)
+    (seqv-clear-expanded-step-slots t.tid)))
 
-(def editor-state-for (track-id)
-  (let ((matches (filter
-      (lambda (state) (= (get state :id) track-id))
-      track-editor-state)))
-    (if (> (len matches) 0)
-      (nth matches 0)
-      (dict :id track-id :param-mode 0 :cursor-step nil))))
-
-(def upsert-editor-state (track-id next-state)
-  (if (list-contains? (map (lambda (state) (get state :id)) track-editor-state) track-id)
-    (set! track-editor-state
-      (map
-        (lambda (state)
-          (if (= (get state :id) track-id) next-state state))
-        track-editor-state))
-    (set! track-editor-state (append track-editor-state (list next-state)))))
-
-(def track-param-mode (track-id)
-  (get (editor-state-for track-id) :param-mode))
-
-(def set-track-param-mode (track-id mode)
-  (do
-    (upsert-editor-state track-id
-      (merge (editor-state-for track-id) :param-mode mode))
-    (let ((track (track-index-for-id track-id)))
-      (if (>= track 0)
-        (sync-expanded-step-slots-for track track-id)
-        nil))))
-
-(def track-cursor (track-id)
-  (let ((track (track-index-for-id track-id)))
-    (if (>= track 0)
-      (let ((stored-step (reactive-get "SEQV" (str "cursor-step-" track-id))))
-        (if (= stored-step nil)
-          (global-cursor-step-for-track track)
-          (project-cursor-step track stored-step)))
-      0)))
-
-(def cursor-highlight-field (track step)
-  (str "seqv-track-cursor-" track "-" step))
-
-(def cursor-highlight-binding (track step)
-  (bind "SEQV" (cursor-highlight-field track step)))
-
-;; Clearing must target the exact field set last time. Recomputing it from the
-;; stored step goes stale when num-steps or the id->index mapping changed in
-;; between, leaving ghost cursor highlights behind.
-(def set-track-cursor (track-id step)
-  (let ((track (track-index-for-id track-id)))
-    (if (>= track 0)
-      (let ((previous-field (reactive-get "SEQV" (str "cursor-field-" track-id)))
-          (next-field (cursor-highlight-field track (project-cursor-step track step)))
-          (projected-step (project-cursor-step track step)))
-        (do
-          (reactive-set "SEQV" (str "cursor-step-" track-id) projected-step)
-          (if (or (= previous-field nil) (= previous-field next-field))
-            nil
-            (reactive-set "SEQV" previous-field false))
-          (reactive-set "SEQV" next-field true)
-          (reactive-set "SEQV" (str "cursor-field-" track-id) next-field)
-          (if (track-expanded? track-id)
-            (sync-expanded-step-slots-for track track-id)
-            nil)))
-      nil)))
-
-(def cursor-step-changed (track step)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (set-track-cursor (track-id-at track) step)
+;; `t.expanded` is keyed by the track's position: when tracks move (a delete,
+;; its undo, a reorder), each position takes the expansion of the track now
+;; there. Nil-returning, like `*sel-sync*`; setting a field to its value is
+;; no change, so only the rows whose track moved re-render.
+(effect-buffer "*seq-expand-sync*"
+  (let ((tids seq-view.expanded))
+    (for-each (lambda (t)
+                (let ((expanded (listed? t.tid tids)))
+                  (unless (= t.expanded expanded)
+                    (set! t.expanded expanded))))
+      (tracks))
     nil))
+
+(def track-param-mode (t)
+  (let ((entry (entry-for seq-view.modes t)))
+    (if entry (get entry :mode) 0)))
+
+(def set-track-param-mode (t mode)
+  (set! seq-view.modes (with-entry seq-view.modes t :mode mode))
+  (sync-expanded-step-slots-for t))
+
+;; t's step cursor: its own once set, else the shared one, wrapped to its
+;; length.
+(def track-cursor (t)
+  (let ((entry (entry-for seq-view.cursors t)))
+    (project-cursor-step t
+      (if entry (get entry :step) (eseq.seq-core-state/cursor-step-value)))))
+
+(def set-track-cursor (t step)
+  (set! seq-view.cursors (with-entry seq-view.cursors t :step (project-cursor-step t step)))
+  (when t.expanded
+    (sync-expanded-step-slots-for t)))
+
+;; The step cursor moved to `step` on the track at position `track` (the
+;; grid's cursor hook): the grid draws it there.
+(def cursor-step-changed (track step)
+  (set! grid-cursor.step step)
+  (let ((t (track-at track)))
+    (when t (set-track-cursor t step))))
 
 ;; Stub-then-override protocol (module spec §10 hazard i). The flat name stays
 ;; pinned through the §3 cross-module def escape hatch because
@@ -393,17 +303,13 @@
 (def eseq.vanilla/sequencer-cursor-step-changed (track step)
   (eseq.sequencer/cursor-step-changed track step))
 
-(def current-track-id ()
-  (track-id-at SEQ.current-track))
-
-(def current-track-expanded? ()
-  (track-expanded? (current-track-id)))
-
 (def current-selected-step ()
-  (track-cursor (current-track-id)))
+  (let ((t selection.track))
+    (if t (track-cursor t) 0)))
 
 (def current-param-mode ()
-  (track-param-mode (current-track-id)))
+  (let ((t selection.track))
+    (if t (track-param-mode t) 0)))
 
 ;; Returns a widget stable key for Rust to look up verbatim
 ;; (`current_step_param_number_picker_key`, src/ui/input.rs:762, feeds
@@ -412,113 +318,102 @@
 ;; Rust has to emit the qualified spelling itself — the module name is part of
 ;; the value, not just of the def.
 (def current-number-picker-key ()
-  (str "eseq.sequencer/expanded-param-number-picker-" (current-track-id)))
+  (let ((t selection.track))
+    (if t (str "eseq.sequencer/expanded-param-number-picker-" t.tid) "")))
 
 (def select-current-param-mode (mode)
-  (set-track-param-mode (current-track-id) mode))
+  (let ((t selection.track))
+    (when t (set-track-param-mode t mode))))
 
 (def param-mode-for-key (key)
   (if (not (= (len key) 1))
     -1
-    (if (or (= key "v") (= key "V"))
-      0
-      (if (or (= key "d") (= key "D"))
-        1
-        (if (or (= key "t") (= key "T"))
-          3
-          (if (or (= key "p") (= key "P"))
-            4
-            (if (or (= key "s") (= key "S"))
-              5
-              (if (or (= key "x") (= key "X"))
-                (if (> (len SEQ.process-lanes) 0) eseq.seqv-track-params/seqv-process-lane-mode-offset -1)
-                -1))))))))
+    (match (string-downcase key)
+      "v" 0
+      "d" 1
+      "t" 3
+      "p" 4
+      "s" 5
+      "x" (let ((t selection.track))
+            (if (and t (not (empty? t.lanes)))
+              eseq.seqv-track-params/seqv-process-lane-mode-offset
+              -1))
+      _ -1)))
 
 ;; A selected drum rack keeps its bus selection: Cmd+A then spans its members
 ;; (step-grid-interactions/select-all-steps).
 (def select-all-current-track-steps ()
-  (do
-    (if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0)
-      nil
-      (set! eseq.seq-core-state/selected-bus -1))
-    (eseq.step-grid-interactions/select-all-steps)))
+  (when (< (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0)
+    (set! eseq.seq-core-state/selected-bus -1))
+  (eseq.step-grid-interactions/select-all-steps))
 
 (def collapse-all-tracks ()
-  (do
-    (for-each
-      (lambda (track-id) (set-track-expanded track-id false))
-      expanded-track-ids)
-    (set! expanded-track-ids '())))
+  (for-each (lambda (t) (set-track-expanded t false)) (expanded-tracks)))
 
 (def toggle-current-track-expanded ()
-  (let ((track-id (current-track-id)))
-    (do
-      (set! eseq.seq-core-state/selected-bus -1)
-      (set-track-expanded track-id (not (track-expanded? track-id))))))
+  (let ((t selection.track))
+    (set! eseq.seq-core-state/selected-bus -1)
+    (when t (set-track-expanded t (not t.expanded)))))
 
+;; The grid's keys: a param mode's letter picks that mode, the others run
+;; their action. Whether the key was handled.
 (def handle-key (key text)
   (let ((mode (param-mode-for-key key)))
     (if (>= mode 0)
       (do (select-current-param-mode mode) true)
-      (if (= key "LEFT")
-        (do (eseq.step-grid-interactions/cursor-left) true)
-        (if (= key "RIGHT")
-          (do (eseq.step-grid-interactions/cursor-right) true)
-          (if (= key "C-a")
-            (do (select-all-current-track-steps) true)
-            (if (or (= key "C-h") (= key "C-H"))
-              (do (collapse-all-tracks) true)
-              (if (or (= key "BS") (= key "Delete"))
-                (do
-                  (if (lane-patch-delete-selected)
-                    nil
-                    (eseq.step-grid-interactions/delete-selected-steps))
-                  true)
-                (if (= key "RET")
-                  (do (eseq.step-grid-interactions/cursor-toggle) true)
-                  false)))))))))
+      (let ((action (match key
+                      "LEFT" eseq.step-grid-interactions/cursor-left
+                      "RIGHT" eseq.step-grid-interactions/cursor-right
+                      "C-a" select-all-current-track-steps
+                      "C-h" collapse-all-tracks
+                      "C-H" collapse-all-tracks
+                      "BS" delete-key
+                      "Delete" delete-key
+                      "RET" eseq.step-grid-interactions/cursor-toggle
+                      _ nil)))
+        (when action (action) true)))))
 
-(def track-menu-click (track)
-  (let ((track-id (track-id-at track)))
-    (do
-      (activate-track-for-edit track)
-      (set-track-expanded track-id (not (track-expanded? track-id))))))
+;; BS / Delete: a selected patch-bay cable goes first, else the selected steps.
+(def delete-key ()
+  (unless (lane-patch-delete-selected)
+    (eseq.step-grid-interactions/delete-selected-steps)))
+
+(def track-menu-click (t)
+  (select-track-for-edit t)
+  (set-track-expanded t (not t.expanded)))
+
+;; ── Drops ──
+;; Drop events carry the host's drop meta: a track by position, the address
+;; the add/drop host commands take.
 
 (def drop-sample-on-track (event)
-  (let ((payload (get event :payload))
-        (target (get event :target)))
-    (let ((path (get payload :path))
-          (track (get target :track)))
-      (if path
-        (do
-          (if (not (get target :from-pad))
-            (activate-track-for-edit track))
-          (eseq.browser/drop-sample-on-track event))
-        (status "Drop a sample file, not a folder")))))
+  (let ((target (get event :target))
+        (t (track-at (get target :track))))
+    (if (get (get event :payload) :path)
+      (do
+        (when (and t (not (get target :from-pad)))
+          (select-track-for-edit t))
+        (eseq.browser/drop-sample-on-track event))
+      (status "Drop a sample file, not a folder"))))
 
 (def drop-on-track (event)
-  (if (= (get event :drag-type) "sound")
+  (if (listed? (get event :drag-type) (list "sound" "instrument" "instrument-preset"))
     (eseq.browser/drop-sound-on-track event)
-    (if (or (= (get event :drag-type) "instrument")
-            (= (get event :drag-type) "instrument-preset"))
-      (eseq.browser/drop-sound-on-track event)
-      (drop-sample-on-track event))))
+    (drop-sample-on-track event)))
 
 (def drop-new-track (event)
-  (let ((payload (get event :payload)))
-    (let ((path (get payload :path))
-          (name (get payload :name)))
-      (if (= (get event :drag-type) "sound")
-        (if path
-          (host-command "add-track-from-sound" (dict :path path))
-          (status "Drop a Sound item, not a folder"))
-        (if (= (get event :drag-type) "instrument")
-          (eseq.browser/drop-instrument-new-track payload)
-          (if (= (get event :drag-type) "instrument-preset")
-            (eseq.browser/drop-preset-new-track payload nil)
-            (if path
-              (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-              (status "Drop a sample file, not a folder"))))))))
+  (let ((payload (get event :payload))
+        (path (get payload :path)))
+    (match (get event :drag-type)
+      "sound" (if path
+                (host-command "add-track-from-sound" (dict :path path))
+                (status "Drop a Sound item, not a folder"))
+      "instrument" (eseq.browser/drop-instrument-new-track payload)
+      "instrument-preset" (eseq.browser/drop-preset-new-track payload nil)
+      _ (if path
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+          (status "Drop a sample file, not a folder")))))
+
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -566,22 +461,41 @@
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
 
+;; A group's color badge (its color by value).
 (defwidget seqv-track-color-badge
   :width 0.68 :height 1.5
   :paint-margin 0.08
   :state (track-r track-g track-b)
-  :bindable (track-r track-g track-b)
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.28)
       (rgba track-r track-g track-b 1.0)))
   )
 
+;; Shader color c (a vec3) pulled toward gray, as a track that is not heard
+;; (or whose lane a take governs) draws it: `eseq.view-kit/dimmed` in a
+;; shader. Shaders spell it `eseq.sequencer/silenced` (module spec §10
+;; hazard h).
+(defmacro silenced (c)
+  `(+ (* ,c 0.34) (* (vec3 0.10 0.10 0.11) 0.66)))
+
+;; A track's color badge: its color, pulled toward gray while it is not
+;; heard (muted, or silenced by a solo).
+(defwidget seqv-track-badge
+  :width 0.68 :height 1.5
+  :paint-margin 0.08
+  :state (track)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.28)
+      (rgba
+        (if (= track.audible 1) track.color (eseq.sequencer/silenced track.color))
+        1.0))))
+
 (defwidget seqv-track-volume-meter
   :width 8.2 :height 1.05
   :paint-margin 0.28
   :state (level volume)
-  :bindable (level volume)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
         (vol (min 1.0 (max 0.0 volume)))
@@ -697,170 +611,209 @@
                 (+ (* track-b 0.30) 0.08)
                 0.85))))))
 
+
+;; One grid row's playhead bar (row `row`, steps 16·row onward, of `track`):
+;; the playing step's column, and an amber underline beneath the step a
+;; length lane (`length!`) last set the pattern length to, drawn first so
+;; the playhead passes over it.
 (defwidget seqv-playhead-row-bar
   :width 48.8 :height 0.24
   :paint-margin 0.18
-  :state (col len-col)
-  :bindable (col len-col)
+  :state (track row)
   :shader
-  (sdf/layer
-  ;; Length-lane marker (`length!`): an amber underline beneath the step the
-  ;; lane last set the pattern length to. Drawn first so the playhead passes
-  ;; over it.
-  (if (< len-col 0)
+  (let ((col (if (= (floor (/ track.playhead 16.0)) row) (- track.playhead (* row 16.0)) -1.0))
+        (len-col (if (= (floor (/ track.length-step 16.0)) row)
+                   (- track.length-step (* row 16.0))
+                   -1.0)))
+    (sdf/layer
+      (if (< len-col 0)
+        (rgba 0 0 0 0)
+        (let ((len-start (/ (+ len-col 0.08) 16.0))
+              (len-end (/ (+ len-col 0.92) 16.0))
+              (len-half-w (* 0.5 aspect (- len-end len-start))))
+          (sdf/fill
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect len-half-w 0.2 0.06))
+            (material :color (rgba 0.94 0.63 0.24 0.95)))))
+      (if (< col 0)
+        (rgba 0 0 0 0)
+        (let ((step-w (/ 1.0 16.0))
+              (center (/ (+ col 0.5) 16.0))
+              (trail-start (max 0.0 (- center (* step-w 1.55))))
+              (start (- center (* step-w 0.46)))
+              (end (+ center (* step-w 0.46)))
+              (trail-half-w (* 0.5 aspect (- end trail-start)))
+              (__half_w (* 0.5 aspect (- end start)))
+              (__half_h 0.32)
+              (__radius 0.07))
+          (sdf/layer
+            (sdf/fill
+              (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ trail-start end)))))
+                    (y (* 0.5 y)))
+                (sdf/rounded-rect trail-half-w 0.09 0.06))
+              (material
+                :color
+                (rgba 0.32 0.48 1.0
+                  (* 0.42
+                    (smoothstep trail-start center (/ (+ x aspect) (* 2.0 aspect)))
+                    (smoothstep 0.82 0.0 (abs y))))))
+            (sdf/fill
+              (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ start end)))))
+                    (y (* 0.5 y)))
+                (sdf/rounded-rect __half_w __half_h __radius))
+              (material
+                :color
+                (mix
+                  (rgba 0.20 0.42 1.0 0.38)
+                  (rgba 0.82 0.92 1.0 1.0)
+                  (smoothstep 0.85 0.0 (abs y)))
+                :shadow (shadow
+                  :color (rgba 0.25 0.45 1.0 0.72)
+                  :blur 0.12
+                  :offset (vec2 0 0))))))))))
+
+;; The lamp behind row `row`'s number in `track`'s grid, the row's
+;; background: lit while the playhead plays in that row.
+(defwidget seqv-row-lamp
+  :width 1 :height 1
+  :state (track row)
+  :shader
+  (if (< track.playhead 0)
     (rgba 0 0 0 0)
-    (let ((len-start (/ (+ len-col 0.08) 16.0))
-          (len-end (/ (+ len-col 0.92) 16.0))
-          (len-half-w (* 0.5 aspect (- len-end len-start))))
-      (sdf/fill
-        (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
-              (y (* 0.5 y)))
-          (sdf/rounded-rect len-half-w 0.2 0.06))
-        (material :color (rgba 0.94 0.63 0.24 0.95)))))
-  (if (< col 0)
-    (rgba 0 0 0 0)
-    (let ((step-w (/ 1.0 16.0))
-          (center (/ (+ col 0.5) 16.0))
-          (trail-start (max 0.0 (- center (* step-w 1.55))))
-          (start (- center (* step-w 0.46)))
-          (end (+ center (* step-w 0.46)))
-          (trail-half-w (* 0.5 aspect (- end trail-start)))
-          (__half_w (* 0.5 aspect (- end start)))
-          (__half_h 0.32)
-          (__radius 0.07))
+    (if (= (floor (/ track.playhead 16.0)) row)
       (sdf/layer
         (sdf/fill
-          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ trail-start end)))))
-                (y (* 0.5 y)))
-            (sdf/rounded-rect trail-half-w 0.09 0.06))
-          (material
-            :color
-            (rgba 0.32 0.48 1.0
-              (* 0.42
-                (smoothstep trail-start center (/ (+ x aspect) (* 2.0 aspect)))
-                (smoothstep 0.82 0.0 (abs y))))))
-        (sdf/fill
-          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ start end)))))
-                (y (* 0.5 y)))
-            (sdf/rounded-rect __half_w __half_h __radius))
-          (material
-            :color
-            (mix
-              (rgba 0.20 0.42 1.0 0.38)
-              (rgba 0.82 0.92 1.0 1.0)
-              (smoothstep 0.85 0.0 (abs y)))
-            :shadow (shadow
-              :color (rgba 0.25 0.45 1.0 0.72)
-              :blur 0.12
-              :offset (vec2 0 0)))))))))
+          (let ((x (+ x (- aspect 1.16))))
+            (sdf/rounded-rect 0.5 0.5 0.25))
+          (material :color (rgba 0.32 0.48 1.0 0.55))))
+      (rgba 0 0 0 0))))
 
+;; The step shell's layers, shared by the grid's `seqv-step-shell` and the
+;; expanded editor's `seqv-slot-shell`: the gate `active`, the p-lock kind
+;; `lock` (0 none, 1 a lock, 2 a p-lock variant) with the variant's color
+;; `variant` (a vec3), and `under`, layers drawn first (the grid's duration
+;; span). The widget declares `track`, `selected` and `off-fill-r/-g/-b`.
+;; Shaders spell it `eseq.sequencer/step-shell-shader` (hazard h).
+(defmacro step-shell-shader (active lock variant &rest under)
+  `(let ((active ,active)
+         (plock-kind ,lock)
+         (muted (- 1.0 track.audible))
+         (tc (if (= track.governed 1) (eseq.sequencer/silenced track.color) track.color))
+         (vcol (rgba ,variant 1.0))
+         (seqcol (rgba 0.545 0.545 0.588 0.95))
+         (radius (if (= active 1) 1 0.7))
+         (border input-color)
+         (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
+     (sdf/layer
+       ,@under
+       ;; border
+       (sdf/fill (sdf/circle (* radius 0.8))
+         (material
+           :lighting (lighting :edge-min -0.12 :edge-max 0.9
+             :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
+           :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2))
+                     (eseq.materials/color border border))))
+       (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
+         (material
+           :lighting (lighting :edge-min -0.15 :edge-max 1.0
+             :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
+           :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
+       ;; p-lock indicator
+       (sdf/fill
+         (sdf/translate 0.0 0.89
+           (sdf/rounded-rect 0.17 0.08 0.09))
+         (material
+           ;; The tick tracks p-locks, not the gate: off steps are a
+           ;; deliberate p-lock target (warp bpm, sampler ranges) and must
+           ;; show the same indicator an on step shows. Only the muted
+           ;; neutral fill still keys off `active`.
+           :color (if (= plock-kind 0)
+                    (if (= active 1)
+                      (if (= muted 1) border (rgba 0 0 0 0))
+                      (rgba 0 0 0 0))
+                    (if (= muted 1)
+                      border
+                      (if (= plock-kind 2) vcol seqcol)))
+           :shadow (shadow
+                     :color (if (= muted 1)
+                              (rgba 0 0 0 0)
+                              (if (= plock-kind 2) (rgba ,variant 0.70) (rgba 0 0 0 0)))
+                     :blur (if (= muted 1) 0.0 (if (= plock-kind 2) 0.12 0.0))
+                     :offset (vec2 0 0))))
+       ;; toggled fill
+       (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
+         (material
+           :lighting (lighting :edge-min -0.15 :edge-max 1.15
+             :light (vec3 0.01 -0.4 1.8) :shininess 32.0)
+           :color (if (= active 1)
+                    (if (= muted 1)
+                      (* 0.7 (eseq.materials/color offcol border))
+                      (eseq.materials/color
+                        (rgba (* tc (vec3 0.72 0.72 0.82)) 1.0)
+                        (rgba tc 1.0)))
+                    (rgba 0 0 0 0)))))))
+
+;; A step's shell: its gate, selection, p-lock tick (in the variant's color
+;; for a p-lock variant) and, while the step is held by an earlier step's
+;; duration, the span that duration covers. `selected` is the step's
+;; (`#'step.selected`): a scalar state, so the renderer's selected rim
+;; (`:selected-color`) follows it. Colored by its track, dimmed while a take
+;; governs the lane; a track that is not heard swaps the colored layers for
+;; neutral ones.
 (defwidget seqv-step-shell
   :width 1.5 :height 2.5
   :paint-margin 1
-  :state (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b off-fill-r off-fill-g off-fill-b)
-  :bindable (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b)
+  :state (step track selected off-fill-r off-fill-g off-fill-b)
   :shader
-  (if (= hide 1)
-    (rgba 0 0 0 0)
-    (let ((vcol (rgba variant-r variant-g variant-b 1.0))
-        (seqcol (rgba 0.545 0.545 0.588 0.95))
-        (radius (if (= active 1) 1 0.7))
-        (border input-color)
-        (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
-      ;; duration visualization
-      (sdf/layer
-        (sdf/fill
-          (sdf/translate 0.0 0.0
-            (sdf/rounded-rect (* 3.0 width) (* 1.0 height) 0))
-          (material
-            :lighting (lighting :edge-min -0.32 :edge-max 1.293
-              :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-            :color (* 0.7 (if (= duration 1)
-                (if (= muted 1)
-                  (rgba 0 0 0 0)
-                  (eseq.materials/color
-                    (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
-                    (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
-                (rgba 0 0 0 0)))))
-        ;; border
-        (sdf/fill (sdf/circle (* radius 0.8))
-          (material
-            :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
-            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (eseq.materials/color border border)))
-          )
-        
-        (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
-          (material
-            :lighting (lighting :edge-min -0.15 :edge-max 1.0
-              :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
-            :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
-        ;; p-lock indicator
-        (sdf/fill
-          (sdf/translate 0.0 0.89
-            (sdf/rounded-rect 0.17 0.08 0.09))
-          (material
-            ;; The tick tracks p-locks, not the gate: off steps are a
-            ;; deliberate p-lock target (warp bpm, sampler ranges) and must
-            ;; show the same indicator an on step shows. Only the muted
-            ;; neutral fill still keys off `active`.
-            :color (if (= plock-kind 0)
-              (if (= active 1)
-                (if (= muted 1)
-                  border
-                  (rgba 0 0 0 0))
-                (rgba 0 0 0 0))
-              (if (= muted 1)
-                border
-                (if (= plock-kind 2)
-                  vcol
-                  seqcol)))
-            :shadow (shadow
-              :color (if (= muted 1)
-                (rgba 0 0 0 0)
-                (if (= plock-kind 2)
-                  (rgba variant-r variant-g variant-b 0.70)
-                  (rgba 0 0 0 0)))
-              :blur (if (= muted 1)
-                0.0
-                (if (= plock-kind 2) 0.12 0.0))
-              :offset (vec2 0 0))))
-        ;; toggled fill
-        (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
-          (material
-            :lighting (lighting :edge-min -0.15 :edge-max 1.15
-              :light (vec3 0.01 -0.4 1.8) :shininess 32.0)
-            :color (if (= active 1)
-              (if (= muted 1)
-                (* 0.7 (eseq.materials/color offcol border))
-                (eseq.materials/color
-                  (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-                  (rgba track-r track-g track-b 1.0)))
-              (rgba 0 0 0 0))))))))
+  (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color
+    ;; duration span
+    (sdf/fill
+      (sdf/translate 0.0 0.0
+        (sdf/rounded-rect (* 3.0 width) (* 1.0 height) 0))
+      (material
+        :lighting (lighting :edge-min -0.32 :edge-max 1.293
+          :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
+        :color (* 0.7 (if (= step.held 1)
+                        (if (= muted 1)
+                          (rgba 0 0 0 0)
+                          (eseq.materials/color
+                            (mix border (rgba (* tc 0.85) 0.5) (if (= selected 1) 0.8 0.6))
+                            (if (= selected 1) border (rgba tc 0.6))))
+                        (rgba 0 0 0 0)))))))
 
-;; SEQ.song-track-governed carries one number per track (takes spec 10 UX):
-;; 0 = the lane is not playing a take (pattern lanes stay fully editable —
-;; jam with the step sequencer while the arrangement plays), 1 = the lane is
-;; take-governed (dimmed steps + non-interactive grid + lit Back-to-Song
-;; play button), 2 = a take lane the performer manually latched away
-;; (editable again; the grey play button returns it to the song).
-(def track-take-state (i)
-  (let ((state (nth SEQ.song-track-governed i)))
-    (if (= state nil) 0 state)))
+;; The step cursor's frame around a step cell: drawn on the selected tracks'
+;; cells at `cursor` (bound to `grid-cursor.step`), wrapped to each track's
+;; length.
+(defwidget seqv-step-cursor
+  :width 1 :height 1
+  :state (step track cursor)
+  :shader
+  (let ((n (max 1.0 track.num-steps))
+        (at (- cursor (* n (floor (/ cursor n))))))
+    (sdf/layer
+      (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.10)
+        0.055
+        (rgba 0.72 0.76 0.84 (* 0.95 (if (= step.index at) 1 0) track.in-selection))))))
 
-(def track-song-governed? (i)
-  (= (track-take-state i) 1))
+;; A track's take state (`track.governed`, takes spec 10 UX): take-none, the
+;; lane plays its pattern and stays fully editable (jam with the step
+;; sequencer while the arrangement plays); take-governed, a take plays on the
+;; lane (dimmed steps, non-interactive grid, lit Back-to-Song play button);
+;; take-latched, a take lane the performer manually latched away (editable
+;; again; the grey play button returns it to the song).
+(def song-governed? (t)
+  (= t.governed take-governed))
 
 ;; Per-track take-lane indicator / Back-to-Song button: a play triangle that
 ;; sits lit green while a take governs the lane and grey while the lane is
 ;; manually latched (clicking then hands it back to the song). `take-state`
-;; is the SEQ.song-track-governed value (0/1/2); at 0 the triangle renders
-;; fully transparent — the box is ALWAYS in the layout so lanes flipping
-;; between pattern and take never trigger a re-layout, only a repaint.
+;; is `track.governed`; at take-none the triangle renders fully transparent
+;; — the box is ALWAYS in the layout so lanes flipping between pattern and
+;; take never trigger a re-layout, only a repaint.
 (defwidget seqv-back-to-song-icon
   :width 1.5 :height 1.5
   :state (take-state)
-  :bindable (take-state)
   :shader
   (sdf/layer
     (sdf/fill
@@ -880,7 +833,6 @@
 (defwidget seqv-back-to-song-bg
   :width 1.5 :height 1.5
   :state (take-state)
-  :bindable (take-state)
   :shader
         (if (= take-state 1)
           (rgba 0.3 0.3 0.3 0.5)
@@ -888,49 +840,33 @@
             (rgba 0.32 0.33 0.37 0.5)
             (rgba 0 0 0 0))))
 
-;; Legacy step tick, moved verbatim from ui/step-grid.lisp when the *metal*
-;; buffer was unplugged from main.lisp. The expanded lane used it until its
-;; toggle switched to the shared `seqv-step-shell`; kept only so a reloaded
-;; step-grid.lisp still resolves (its identical copy is harmless — this one
-;; loads later and wins).
-(defwidget metal-track-tick
-  :width 1.5 :height 1.5
-  :state (active plocked selected track-r track-g track-b)
-  :bindable (active plocked selected track-r track-g track-b)
-  :shader
-  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
-    (sdf/translate 0 sel-y
-      (sdf/layer
-        (sdf/fill (sdf/circle 1)
-          (material
-            :lighting (lighting :edge-min -0.35 :edge-max 0.5
-              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-            :color
-            (* (if (= active 1) 1 0.3)
-               (eseq.materials/color
-                 (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
-                 (rgba track-r track-g track-b 1.0)))))))))
-
 ;; Compact mixer track row — the common track actions plus an inline
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; Names and structural edits rebuild only this header. Mute/solo styling
 ;; uses bindings throughout, including the name, so it never rebuilds a tree.
-(def track-header (i is-bare-track)
-  (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
-    (track-header-body i is-bare-track)))
+;; The arrangement draws its track headers with this one (`bare` true).
+(def track-header (t bare)
+  (subtree :key (str "seqv-track-header-" t.tid)
+    (track-header-body t bare)))
 
-(def track-volume-control (i)
-  (v-stack (box :height 0.13 )
+;; A fader over x's (a track's or a bus's) level meter, keyed `key`.
+(def volume-meter (key x on-click on-drag)
+  (v-stack (box :height 0.13)
     (box
-      :key (str "track-volume-control-" i)
+      :key key
       :width 8.2 :height 1.25
       :background "seqv-track-volume-meter"
-      :level (track-peak i)
-      :volume (track-volume-binding i)
-      :on-click (lambda (event)
-        (track-control-click event i (lambda () (set-track-volume-from-event i event))))
-      :on-drag (lambda (event) (set-track-volume-from-event i event))))
-  )
+      :level #'x.peak
+      :volume #'x.volume
+      :on-click on-click
+      :on-drag on-drag)))
+
+(def track-volume-control (t)
+  (volume-meter (str "track-volume-control-" t.index) t
+    (lambda (event)
+      (track-control-click event t
+        (lambda () (select-track-for-edit t) (set-volume! t event))))
+    (lambda (event) (select-track-for-edit t) (set-volume! t event))))
 
 ;; Step-grid sizing knob (content-tiers spec: customize tier). Every step
 ;; cell, the ghost filler cells that pad short rows, and the track colour
@@ -953,105 +889,103 @@
 (def track-row-label-height ()
   (* step-cell-height 0.71))
 
-(def track-header-body (i is-bare-track)
-  (let ((name (nth SEQ.track-names i)))
+;; A header toggle (mute, solo) lit by `on`, a binding.
+(def header-toggle (text key on &key (bg :sequencer-toggle-off-bg)
+                    (active-bg :sequencer-solo-on-bg) (color :gray)
+                    (active-color :sequencer-solo-on-fg) (on-click nil))
+  (button text
+    :key key
+    :width 1.55 :height 1.2 :padding 0 :font-size 10
+    :border-color :transparent
+    :active on
+    :background-color bg
+    :active-background-color active-bg
+    :color color
+    :active-color active-color
+    :on-click on-click))
+
+(def track-header-body (t bare)
+  (let ((i t.index)
+        (c t.color))
     (box :background "seqv-track-container"
       :padding 0.1
-      
-      :on-click (lambda (event) (track-click event i))
+
+      :on-click (lambda (event) (track-click event t))
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "color-badge-" i)
           :width 0.68 :height (track-color-badge-height)
-          :background "seqv-track-color-badge"
-          :track-r (track-color-r-binding i)
-          :track-g (track-color-g-binding i)
-          :track-b (track-color-b-binding i)
-          :on-click (lambda (event) (track-click event i)))
+          :background "seqv-track-badge"
+          :track t
+          :on-click (lambda (event) (track-click event t)))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "arm-" i)
-          :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-record-arm i))))))
-        (if is-bare-track (box :width 1.55))
-        (button (str (+ i 1))
-          :key (str "mute-" i)
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :border-color :transparent
-          :active (bind-seq-nth "track-mutes" i)
-          :background-color :control-on-bg
-          :active-background-color :sequencer-toggle-off-bg
-          :color :control-on-fg
-          :active-color :gray
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-mute i))))))
-        (button "S"
-          :key (str "solo-" i)
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :active (bind-seq-nth "track-solos" i)
-          :background-color :sequencer-toggle-off-bg
-          :active-background-color :sequencer-solo-on-bg
-          :border-color :transparent
-          :color :gray
-          :active-color :sequencer-solo-on-fg
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-solo i))))))
+          :active #'t.armed
+          :on-click (track-toggle-click t (lambda () (toggle! t.armed))))
+        (if bare (box :width 1.55))
+        (header-toggle (str (+ i 1)) (str "mute-" i) #'t.muted
+          :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
+          :color :control-on-fg :active-color :gray
+          :on-click (track-toggle-click t (lambda () (toggle! t.muted))))
+        (header-toggle "S" (str "solo-" i) #'t.soloed
+          :on-click (track-toggle-click t (lambda () (toggle! t.soloed))))
         (box :width 8.6 :height 1
           :key (str "select-" i)
           :background-color :transparent
-          :on-click (lambda (event) (track-click event i))
-          :on-double-click (lambda (evt) (open-piano-roll-for-track i))
-          (badge (track-name-display name)
+          :on-click (lambda (event) (track-click event t))
+          :on-double-click (lambda (evt) (open-piano-roll-for-track t))
+          ;; Lit (the plain look) while the track is heard: a binding
+          ;; cannot be negated, so the silenced look is `:color`.
+          (badge (track-name-display t.name)
             :key (str "track-name-label-" i)
-            :icon (eseq.track-collapse/type-icon i)
-            ;; Bound track color fills the device glyph (Logic-style).
-            :track-r (track-color-r-binding i)
-            :track-g (track-color-g-binding i)
-            :track-b (track-color-b-binding i)
+            :icon (eseq.track-collapse/instrument-icon t.instrument-type)
+            ;; The track color fills the device glyph (Logic-style),
+            ;; dimmed while the track is silent.
+            :track-r (dimmed-part c 0 true)
+            :track-g (dimmed-part c 1 true)
+            :track-b (dimmed-part c 2 true)
+            :muted-track-r (rgb-part c 0)
+            :muted-track-g (rgb-part c 1)
+            :muted-track-b (rgb-part c 2)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent
             :border-color :transparent
             :highlight-color :transparent
             :shadow-color :transparent
-            :muted (bind-seq-nth "track-muted-effective" i)
-            :color :dim
-            :muted-color (rgba 0.4 0.4 0.4 0.6)
+            :muted #'t.audible
+            :color (rgba 0.4 0.4 0.4 0.6)
+            :muted-color :dim
             :bg :transparent))
         (box :width 0.5)
-        (track-volume-control i)
+        (track-volume-control t)
         ;; Take-lane indicator (takes spec 10 UX): green = a take governs
         ;; the lane (steps dim, grid read-only); grey = the performer
         ;; latched the lane away — click returns it to the song; invisible
-        ;; on pattern lanes. Always laid out — the reactive take-state only
+        ;; on pattern lanes. Always laid out — the bound take state only
         ;; repaints the widget, so pattern<->take flips never re-layout.
-        (box :width 2 :height :fill 
+        (box :width 2 :height :fill
           :background "seqv-back-to-song-bg"
-          :take-state (bind-seq-nth "song-track-governed" i)
+          :take-state #'t.governed
           (box :width 2 :height 1.5
             :background "seqv-back-to-song-icon"
             :key (str "back-to-song-" i)
-            :take-state (bind-seq-nth "song-track-governed" i)
-            :on-click |x y r|
-            (if (> (track-take-state i) 0)
-              (seq-song-back-to-song-track i)
-              nil)))))))
+            :take-state #'t.governed
+            :on-click (lambda (event)
+              (when (> t.governed take-none)
+                (set! t.latched false)))))))))
 
-(def track-actions (i)
+(def track-actions (t)
   (h-stack :gap 0.35 :padding 0.85
     (box
-      :key (str "expand-" i)
+      :key (str "expand-" t.index)
       :width 3.5 :height 1.0
       :background "seqv-ellipsis-button"
-      :expanded (if (track-expanded? (nth SEQ.track-ids i)) 1 0)
+      :expanded (if t.expanded 1 0)
       :on-click (lambda (event)
-        (track-control-click event i (lambda () (track-menu-click i)))))
-    (box :width 0.1 :height 0.0)
-    ))
+        (track-control-click event t (lambda () (track-menu-click t)))))
+    (box :width 0.1 :height 0.0)))
 
 (def row-width 16)
 
@@ -1072,6 +1006,8 @@
     expanded-step-playhead-height
     (* 3 expanded-step-column-gap)))
 
+;; A step-cell gesture's track (nil between gestures) and, while dragging a
+;; step's duration edge, that step.
 (def drag-track nil)
 (def duration-drag-source nil)
 
@@ -1079,143 +1015,153 @@
   (let ((sx (get evt :sx)))
     (and (not (= sx nil)) (> sx 0.48))))
 
-(def set-duration-from-drag (track source step)
-  (do
-    (seq-set-track track)
-    (seq-set-step-param source :duration (max 1 (min 32 (+ (- step source) 1))))))
-
-(def grid-step-select-drag-start (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (do
-      (set! eseq.seq-core-state/selected-bus -1)
-      (seq-set-track track)
-      (set! drag-track track)
-      (eseq.step-grid-interactions/step-select-drag-start step evt))))
-
-(def grid-step-select-drag-over (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (if (and (= drag-track track) (not (= duration-drag-source nil)))
-      (set-duration-from-drag track duration-drag-source step)
-      (if (= drag-track track)
-        (do
-          (seq-set-track track)
-          (eseq.step-grid-interactions/step-select-drag-over-for-track track step evt))
-        nil))))
+(def set-duration-from-drag (source step)
+  (set! selection.track source.track)
+  (seq-set-step-param source.index :duration (max 1 (min 32 (+ (- step source.index) 1)))))
 
 ;; Song-governed lanes are non-interactive (takes spec 10 UX): while the
 ;; arrangement holds launch authority the Seq grid is a dimmed read-only view
 ;; of the session pattern — edits would silently target a pattern the lane is
 ;; not playing.
-(def grid-step-pointer-down (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (let ((use-selection (= SEQ.current-track track)))
-      (do
+(def grid-step-pointer-down (s evt)
+  (let ((t s.track))
+    (unless (song-governed? t)
+      ;; Read before selecting: a selection applies on the current track only.
+      (let ((use-selection t.selected)
+            (edge-drag (and s.active
+                            (not (eseq.step-grid-interactions/selection-click? evt))
+                            (duration-edge? evt))))
         (set! eseq.seq-core-state/selected-bus -1)
-        (seq-set-track track)
-        (set! drag-track track)
-        (if (and (seq-track-step-active? track step) (not (eseq.step-grid-interactions/selection-click? evt)) (duration-edge? evt))
+        (set! selection.track t)
+        (set! drag-track t)
+        (if edge-drag
           (do
-            (set! duration-drag-source step)
+            (set! duration-drag-source s)
             (eseq.step-grid-interactions/step-clear-drag-state)
             (eseq.seq-core-state/cool-off-follow)
-            (eseq.step-grid-interactions/set-track-cursor-step step)
-            (set-duration-from-drag track step step))
-          (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))))
+            (eseq.step-grid-interactions/set-track-cursor-step s.index)
+            (set-duration-from-drag s s.index))
+          (eseq.step-grid-interactions/step-pointer-down-for-track
+            t.index s.index evt use-selection))))))
 
-(def grid-step-double-click (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (do
-      (seq-set-track track)
-      (eseq.step-grid-interactions/step-double-click-for-track track step evt))))
+(def grid-step-drag (s evt)
+  (let ((t s.track))
+    (when (and (= drag-track t) (not (song-governed? t)))
+      (if duration-drag-source
+        (set-duration-from-drag duration-drag-source s.index)
+        (do
+          (set! selection.track t)
+          (eseq.step-grid-interactions/step-select-drag-over-for-track t.index s.index evt))))))
 
-(def grid-step-pointer-up (track step evt)
-  (do
-    (if (and (= drag-track track)
-          (= duration-drag-source nil)
-          (not (track-song-governed? track)))
-      (do
-        (seq-set-track track)
-        (eseq.step-grid-interactions/step-pointer-up step evt))
-      nil)
+(def grid-step-double-click (s evt)
+  (let ((t s.track))
+    (unless (song-governed? t)
+      (set! selection.track t)
+      (eseq.step-grid-interactions/step-double-click-for-track t.index s.index evt))))
+
+(def grid-step-pointer-up (s evt)
+  (let ((t s.track))
+    (when (and (= drag-track t) (= duration-drag-source nil) (not (song-governed? t)))
+      (set! selection.track t)
+      (eseq.step-grid-interactions/step-pointer-up s.index evt))
     (set! drag-track nil)
     (set! duration-drag-source nil)))
-
-;; Single tight step button (no slider, no number).
-(def track-step-value (lists track step fallback)
-  (let ((track-list (if (< track (len lists)) (nth lists track) '())))
-    (if (< step (len track-list))
-      (nth track-list step)
-      fallback)))
 
 (def step-odd (step)
   (let ((odd1 (mod (floor (/ step 4)) 2))
       (odd2 (mod (floor (/ step 32)) 2)))
     (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
-(def step-cell (track step)
-  ;; Step cells use the step-color channels: same as the track color but
-  ;; additionally dimmed while the lane is take-governed. Muting is passed
-  ;; separately so the shader can replace colored layers with opaque neutral
-  ;; materials instead of receiving an already-dimmed track color.
-  (let ((track-r (bind-seq-nth "step-color-r-effective" track))
-      (track-g (bind-seq-nth "step-color-g-effective" track))
-      (track-b (bind-seq-nth "step-color-b-effective" track))
-      (muted (bind-seq-nth "track-muted-effective" track))
-      (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
-      (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
-      (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
-      (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
+;; Step s of track t: the cursor frame around the step's shell.
+(def step-cell (t s)
+  (box
+    :width step-cell-width :height step-cell-height
+    :key (str "step-cell-" t.index "-" s.index)
+    :on-mouse-down (lambda (evt) (grid-step-pointer-down s evt))
+    :on-drag (lambda (evt) (grid-step-drag s evt))
+    :on-mouse-up (lambda (evt) (grid-step-pointer-up s evt))
+    :on-double-click (lambda (evt) (grid-step-double-click s evt))
+    :background "seqv-step-cursor"
+    :step s
+    :track t
+    :cursor #'grid-cursor.step
     (box
       :width step-cell-width :height step-cell-height
-      :key (str "step-cell-" track "-" step)
-      :on-mouse-down (lambda (evt)
-        (grid-step-pointer-down track step evt))
-      :on-drag (lambda (evt)
-        (grid-step-select-drag-over track step evt))
-      :on-mouse-up (lambda (evt)
-        (grid-step-pointer-up track step evt))
-      :on-double-click (lambda (evt)
-        (grid-step-double-click track step evt))
-      :active (cursor-highlight-binding track step)
-      :selected (track-selected-binding track)
-      :hide 0
-      :background "cursor-highlight"
-      (box
-        :width step-cell-width :height step-cell-height
-        :align :center
-        :active (bind-seq (str "seq-track-step-active-" track "-" step))
-        :plock-kind plock-kind
-        :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-        :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-        :muted muted
-        :hide 0
-        :track-r track-r :track-g track-g :track-b track-b
-        :variant-r variant-r :variant-g variant-g :variant-b variant-b
-        :color :sequencer-step-border
-        :selected-color :sequencer-step-selected-border
-        :off-fill (if (= (step-odd step) 1)
-          :sequencer-step-off-fill-alt
-          :sequencer-step-off-fill)
-        :background "seqv-step-shell"))))
+      :align :center
+      :step s
+      :track t
+      :selected #'s.selected
+      :color :sequencer-step-border
+      :selected-color :sequencer-step-selected-border
+      :off-fill (if (= (step-odd s.index) 1)
+        :sequencer-step-off-fill-alt
+        :sequencer-step-off-fill)
+      :background "seqv-step-shell")))
 
-(def playhead-row (track track-id row)
+(def playhead-row (t row)
   (box
-    :key (str "playhead-row-" track-id "-" row)
+    :key (str "playhead-row-" t.tid "-" row)
     :width (* row-width step-cell-width) :height 0.24
     :background "seqv-playhead-row-bar"
-    :col (bind-seq (str "track-playhead-row-" track "-" row))
-    :len-col (bind-seq (str "track-length-row-" track "-" row))))
+    :track t
+    :row row))
+
+;; Row `row`'s number beside a grid of `rows` rows (hidden for one row).
+(def row-label (row rows)
+  (box :height (track-row-label-height) :v-align :center
+    (v-stack :gap 0
+      (label (+ row 1)
+        :color (if (> rows 1) :dim :buffer-bg)
+        :v-align :center
+        :width 0.1 :bg :transparent :font-size 8)
+      (box :width 0.2 :height (* (track-row-label-height) 0.02)))))
+
+;; Track t's step grid: 16 cells a row, the last row padded with plain
+;; spacers (hit testing reaches the track row through them), a playhead bar
+;; under each row. A row's number lights by its lamp (a repaint), so the
+;; playhead moving on never re-renders a row.
+(def track-grid (t)
+  (let ((rows (chunks t.steps row-width))
+        (count (max 1 (len rows))))
+    (box :key (str "track-step-grid-" t.index) :padding 0.15
+      (box :background-color :buffer-bg
+        (v-stack :gap -0.04
+          (box :width 0.1 :height 0.342 :bg :transparent)
+          (each (range 0 count) |row|
+            (let ((steps (if (< row (len rows)) (nth rows row) (list))))
+              (v-stack :gap -0.16
+                (box :background "seqv-row-lamp" :track t :row (if (> count 1) row -1)
+                  (h-stack :align :center
+                    (box :width 0.1)
+                    (row-label row count)
+                    (h-stack :gap 0.0
+                      (each steps |s| (step-cell t s))
+                      (each (range (len steps) row-width) |col|
+                        (box :width step-cell-width :height step-cell-height)))))
+                (h-stack (box :width 1)
+                  (playhead-row t row))))))))))
+
+;; The expanded editor's slot twin of `seqv-step-shell`: the slot's step
+;; fields arrive as the host's per-slot projection (COMPAT(eseq-0l17.11)).
+(defwidget seqv-slot-shell
+  :width 1.5 :height 2.5
+  :paint-margin 1
+  :state (active plock-kind selected track variant-r variant-g variant-b
+          off-fill-r off-fill-g off-fill-b)
+  :shader
+  (eseq.sequencer/step-shell-shader active plock-kind (vec3 variant-r variant-g variant-b)))
+
+;; ── The expanded step editor ──
+;; COMPAT(eseq-0l17.11): the editor still binds the host's per-slot
+;; projection (`seqv-sync-expanded-step-slots`, keyed by the track's `tid`)
+;; and the legacy step and lane fields; it moves to step and lane instances
+;; with the follow-up port.
 
 ;; Expanded view twin of the grid's length underline: amber bar beneath the
 ;; step number of the step a length lane last set the pattern length to.
 (defwidget seqv-slot-length-mark
   :width 2.8 :height 0.3
   :state (active)
-  :bindable (active)
   :shader
   (if (= active 1)
     (sdf/layer
@@ -1223,19 +1169,19 @@
         (material :color (rgba 0.94 0.63 0.24 0.95))))
     (rgba 0 0 0 0)))
 
-(def track-num-steps (track)
-  (if (< track (len SEQ.track-num-steps))
-    (nth SEQ.track-num-steps track)
-    16))
+(def track-num-steps (i)
+  (let ((t (track-at i)))
+    (if t t.num-steps 16)))
 
-(def expanded-track-color-r (track)
-  (nth (track-color track) 0))
+;; Component c (0 r, 1 g, 2 b) of track i's color.
+(def expanded-track-color (i c)
+  (track-color-part (track-at i) c false))
 
-(def expanded-track-color-g (track)
-  (nth (track-color track) 1))
+(def expanded-track-color-r (track) (expanded-track-color track 0))
 
-(def expanded-track-color-b (track)
-  (nth (track-color track) 2))
+(def expanded-track-color-g (track) (expanded-track-color track 1))
+
+(def expanded-track-color-b (track) (expanded-track-color track 2))
 
 (def expanded-slider-fill (track)
   (rgba (expanded-track-color-r track) (expanded-track-color-g track) (expanded-track-color-b track) 1.0))
@@ -1247,22 +1193,8 @@
     :process-lane-accent
     (expanded-slider-fill track)))
 
-(def expanded-slider-muted-fill (track)
-  (rgba
-    (+ (* (expanded-track-color-r track) 0.30) (* 0.08 0.70))
-    (+ (* (expanded-track-color-g track) 0.30) (* 0.08 0.70))
-    (+ (* (expanded-track-color-b track) 0.30) (* 0.12 0.70))
-    0.50))
-
-(def expanded-slider-muted-dot (track)
-  (rgba
-    (+ (* (expanded-track-color-r track) 0.28) (* 0.25 0.72))
-    (+ (* (expanded-track-color-g track) 0.28) (* 0.25 0.72))
-    (+ (* (expanded-track-color-b track) 0.28) (* 0.30 0.72))
-    0.55))
-
 (def track-current-step (track track-id)
-  (track-cursor track-id))
+  (track-cursor (track-at track)))
 
 (def page-count (track)
   (max 1 (floor (/ (+ (track-num-steps track) (- eseq.seq-core-state/page-size 1)) eseq.seq-core-state/page-size))))
@@ -1271,13 +1203,11 @@
   (min (floor (/ (track-current-step track track-id) eseq.seq-core-state/page-size)) (- (page-count track) 1)))
 
 (def playhead-page (track)
-  (let ((page (reactive-get "SEQ" (str "track-playhead-page-" track))))
-    (min
-      (if page page 0)
-      (- (page-count track) 1))))
+  (let ((t (track-at track)))
+    (min (max 0 t.playhead-page) (- (page-count track) 1))))
 
 (def visible-page (track track-id)
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+  (if (and transport.playing selection.auto-follow (not (seq-has-selection?)))
     (playhead-page track)
     (track-current-page track track-id)))
 
@@ -1290,13 +1220,13 @@
 (def expanded-step-visible? (track track-id i)
   (< (expanded-step-index track track-id i) (track-num-steps track)))
 
-(def sync-expanded-step-slots-for (track track-id)
+(def sync-expanded-step-slots-for (t)
   (seqv-sync-expanded-step-slots
-    track
-    track-id
-    (visible-page track track-id)
-    (track-param-mode track-id)
-    (track-current-step track track-id)))
+    t.index
+    t.tid
+    (visible-page t.index t.tid)
+    (track-param-mode t)
+    (track-cursor t)))
 
 (def slot-field (name track-id slot)
   (str "seqv-slot-" name "-" track-id "-" slot))
@@ -1329,20 +1259,11 @@
 (def slot-step-index-value (track-id slot)
   (reactive-value (slot-step-index-binding track-id slot)))
 
-(def slot-visible-binding (track-id slot)
-  (bind-seq (slot-field "visible" track-id slot)))
-
-(def slot-visible? (track-id slot)
-  (> (reactive-value (slot-visible-binding track-id slot)) 0.5))
-
 (def slot-label-binding (track-id slot)
   (bind-seq (slot-field "step-label" track-id slot)))
 
 (def slot-active-binding (track-id slot)
   (bind-seq (slot-field "active" track-id slot)))
-
-(def slot-plocked-binding (track-id slot)
-  (bind-seq (slot-field "plocked" track-id slot)))
 
 (def slot-plock-kind-binding (track-id slot)
   (bind-seq (slot-field "plock-kind" track-id slot)))
@@ -1380,26 +1301,8 @@
 (def expanded-cursor-sync-index-binding (track-id)
   (bind-seq (str "seqv-cursor-sync-index-" track-id)))
 
-(def step-active-binding (track step)
-  (bind-seq (str "seq-track-step-active-" track "-" step)))
-
-(def step-plocked-binding (track step)
-  (bind-seq (str "seq-track-step-plocked-" track "-" step)))
-
-(def step-selected-binding (track step)
-  (bind-seq (str "seq-track-step-selected-" track "-" step)))
-
-(def step-param-slider-binding (track mode step)
-  (bind-seq (str "seq-track-step-param-slider-" track "-" mode "-" step)))
-
-(def step-param-haptic-binding (track mode step)
-  (bind-seq (str "seq-track-step-param-haptic-" track "-" mode "-" step)))
-
 (def expanded-sync-label-index (label)
-  (reduce |acc index|
-    (if (= label (nth SEQ.sync-labels index)) index acc)
-    0
-    (range 0 (len SEQ.sync-labels))))
+  (max 0 (index-of project.sync-options label)))
 
 (def set-expanded-cursor (track track-id step)
   (do
@@ -1408,7 +1311,7 @@
 (def expanded-step-click (track track-id step evt)
   (if (expanded-step-visible? track track-id (- step (page-offset track track-id)))
     (do
-      (activate-track-for-edit track)
+      (select-track-for-edit (track-at track))
       (eseq.seq-core-state/cool-off-follow)
       (set-expanded-cursor track track-id step)
       (if (eseq.step-grid-interactions/selection-click? evt)
@@ -1421,15 +1324,16 @@
     (eseq.step-grid-interactions/step-select-drag-over-for-track-no-cursor track step evt)))
 
 (def expanded-step-pointer-down (track track-id step evt)
-  (let ((use-selection (= SEQ.current-track track)))
+  (let ((t (track-at track))
+        (use-selection t.selected))
     (do
-      (activate-track-for-edit track)
+      (select-track-for-edit t)
       (set-expanded-cursor track track-id step)
       (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))
 
 (def expanded-step-pointer-up (track track-id step evt)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (set-expanded-cursor track track-id step)
     (eseq.step-grid-interactions/step-pointer-up step evt)))
 
@@ -1459,7 +1363,7 @@
 
 (def expanded-step-double-click (track track-id step evt)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (eseq.step-grid-interactions/step-double-click-for-track track step evt)))
 
 (def expanded-slot-double-click (track track-id slot evt)
@@ -1533,7 +1437,7 @@
 
 (def set-expanded-step-param (track track-id step mode slider-value)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (eseq.seq-core-state/cool-off-follow)
     (set-expanded-cursor track track-id step)
     (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
@@ -1550,7 +1454,7 @@
 
 (def set-expanded-current-param (track track-id mode value)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (eseq.seq-core-state/cool-off-follow)
     (eseq.step-grid-interactions/set-track-cursor-step (track-current-step track track-id))
     ;; The track's number picker is one control for the whole row: with a
@@ -1567,33 +1471,23 @@
         (eseq.seqv-track-params/seqv-param-keyword mode)
         (eseq.seqv-track-params/seqv-step-param-value mode value)))))
 
-(def set-expanded-timebase (track label)
-  (let ((plock-selected
-      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (if plock-selected
-        (seq-plock-timebase label)
-        (seq-set-timebase label)))))
-
 (def goto-page (track track-id page)
   (let ((step (min (* page eseq.seq-core-state/page-size) (- (max 1 (track-num-steps track)) 1))))
     (do
-      (activate-track-for-edit track)
+      (select-track-for-edit (track-at track))
       (eseq.seq-core-state/cool-off-follow)
       (eseq.step-grid-interactions/set-track-cursor-step step))))
 
 (def double-track-pattern (track track-id)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (eseq.seq-core-state/cool-off-follow)
     (seq-double-track-pattern)
     (sync-all-track-cursors-to-global)))
 
 (def halve-track-pattern (track track-id)
   (do
-    (activate-track-for-edit track)
+    (select-track-for-edit (track-at track))
     (eseq.seq-core-state/cool-off-follow)
     (seq-halve-track-pattern)
     (sync-all-track-cursors-to-global)))
@@ -1660,19 +1554,19 @@
                    (if (lane-edit-all?) " (all tracks)" ""))))))
 
 (def param-tab (track track-id mode tab-label)
-  (let ((armed (param-tab-map-armed? track)))
+  (let ((armed (param-tab-map-armed? track))
+        (t (track-at track))
+        (current (= (track-param-mode t) mode)))
     (box :width (param-tab-width mode) :height 2
       :key (str "expanded-param-tab-" track-id "-" mode)
-      :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
+      :bg (if current (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
       :background-color (if armed :process-map-arm-bg (rgba 0 0 0 0))
       :corner-radius (eseq.seq-core-state/radius 6)
       :on-click |x y r| (if armed
                           (param-tab-bind track mode)
-                          (do (activate-track-for-edit track) (set-track-param-mode track-id mode)))
+                          (do (select-track-for-edit t) (set-track-param-mode t mode)))
       (label tab-label :font-size 12
-        :color (if armed
-                 :process-lane-accent
-                 (if (= (track-param-mode track-id) mode) :primary :dim))
+        :color (if armed :process-lane-accent (if current :primary :dim))
         :bg :transparent))))
 
 (def process-lane-instance-lane-count (track instance-id)
@@ -1728,14 +1622,13 @@
     nil))
 
 (def select-process-lane-option (track track-id label)
-  (let ((lane-idx (process-lane-selector-index track label)))
-    (do
-      (activate-track-for-edit track)
-      (if (>= lane-idx 0)
-        (set-track-param-mode track-id (+ eseq.seqv-track-params/seqv-process-lane-mode-offset lane-idx))
-        (if (eseq.seqv-track-params/seqv-process-lane-mode? (track-param-mode track-id))
-          (set-track-param-mode track-id 3)
-          nil)))))
+  (let ((lane-idx (process-lane-selector-index track label))
+        (t (track-at track)))
+    (select-track-for-edit t)
+    (if (>= lane-idx 0)
+      (set-track-param-mode t (+ eseq.seqv-track-params/seqv-process-lane-mode-offset lane-idx))
+      (when (eseq.seqv-track-params/seqv-process-lane-mode? (track-param-mode t))
+        (set-track-param-mode t 3)))))
 
 (def process-lane-selector (track track-id mode)
   (dropdown
@@ -1870,7 +1763,7 @@
     (if (get port :target-step-param)
       (get port :target-step-param)
       (if (get port :target-instance-id)
-        (let ((target (track-process-slot SEQ.current-track (get port :target-instance-id))))
+        (let ((target (track-process-slot selection.track.index (get port :target-instance-id))))
           (if target (slot-display-name target) (get port :target)))
         (get port :target)))))
 
@@ -1924,7 +1817,7 @@
   (if (get entry :target-step-param)
     (get entry :target-step-param)
     (if (get entry :target-instance-id)
-      (let ((target (track-process-slot SEQ.current-track (get entry :target-instance-id))))
+      (let ((target (track-process-slot selection.track.index (get entry :target-instance-id))))
         (if target (slot-display-name target) (get entry :target)))
       (get entry :target))))
 
@@ -2049,15 +1942,14 @@
 
 ;; Track-typed inlets (grab's `source`) pick from the track list by name.
 (def lane-track-option (index)
-  (str (+ index 1) " " (if (< index (len SEQ.track-names)) (nth SEQ.track-names index) "")))
+  (let ((t (track-at index)))
+    (str (+ index 1) " " (if t t.name ""))))
 
 (def lane-track-options ()
-  (map lane-track-option (range 0 (len SEQ.track-names))))
+  (map (lambda (t) (lane-track-option t.index)) (tracks)))
 
 (def lane-track-option-index (label)
-  (reduce |acc index| (if (= label (lane-track-option index)) index acc)
-    0
-    (range 0 (len SEQ.track-names))))
+  (max 0 (index-of (lane-track-options) label)))
 
 (def lane-strip-track-inlet-row (track slot inlet)
   (h-stack :width :fill :gap 0.3 :align :center
@@ -2662,7 +2554,7 @@
 (def lane-patch-lane-selected? (track track-id instance-id)
   (if (lane-patch-node? track)
     (= lane-patch-node-selected instance-id)
-    (let ((lane (selected-process-lane track (track-param-mode track-id))))
+    (let ((lane (selected-process-lane track (track-param-mode (track-at track)))))
       (if lane (= (get lane :instance-id) instance-id) false))))
 
 ;; Clicking a box selects its lane in the strip, the same as picking it in
@@ -2676,8 +2568,8 @@
       (if (< index 0)
         nil
         (do
-          (activate-track-for-edit track)
-          (set-track-param-mode track-id
+          (select-track-for-edit (track-at track))
+          (set-track-param-mode (track-at track)
             (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index)))))))
 
 ;; ── Expr cards (docs/expr-process-spec.md §2) ──────────────────────────
@@ -2819,7 +2711,7 @@
 ;; on in the new card order `ids` (or its neighbour when that lane is gone).
 ;; Node bays select by instance id and need nothing here.
 (def lane-patch-reselect-lane (track track-id ids)
-  (let ((lane (selected-process-lane track (track-param-mode track-id)))
+  (let ((lane (selected-process-lane track (track-param-mode (track-at track))))
         (lane-ids (map (lambda (lane) (get lane :instance-id))
                     (eseq.seqv-track-params/seqv-track-process-lanes track))))
     (if (= lane nil)
@@ -2828,10 +2720,10 @@
             (old-index (lane-patch-id-index lane-ids (get lane :instance-id))))
         (let ((index (lane-patch-id-index new-lane-ids (get lane :instance-id))))
           (if (>= index 0)
-            (set-track-param-mode track-id
+            (set-track-param-mode (track-at track)
               (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index))
             (if (> (len new-lane-ids) 0)
-              (set-track-param-mode track-id
+              (set-track-param-mode (track-at track)
                 (+ eseq.seqv-track-params/seqv-process-lane-mode-offset
                    (min old-index (- (len new-lane-ids) 1))))
               nil)))))))
@@ -3210,7 +3102,7 @@
     nil))
 
 (def expanded-track-quick-controls (track track-id)
-  (let ((mode (track-param-mode track-id)))
+  (let ((mode (track-param-mode (track-at track))))
     (v-stack 
       (box :height 0.4 :width 1)
       (h-stack :gap 0.55 :align :center
@@ -3222,7 +3114,7 @@
           (dropdown
             :key (str "expanded-sync-picker-" track-id)
             :value-index (expanded-cursor-sync-index-binding track-id)
-            :options SEQ.sync-labels
+            :options project.sync-options
             :on-change (lambda (label)
               (set-expanded-current-param track track-id mode (expanded-sync-label-index label)))
             :width 8 :height 1.3 :font-size 11)
@@ -3284,7 +3176,8 @@
                     :height 1.1 :font-size 7))))))))))
 
 (def expanded-track-editor (track track-id)
-  (let ((mode (track-param-mode track-id)))
+  (let ((t (track-at track))
+        (mode (track-param-mode t)))
     (box :padding 0.85
       (box 
         :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
@@ -3314,7 +3207,7 @@
                     :key (str "expanded-step-column-" track-id "-" i)
                     :background "cursor-highlight"
                     :active (slot-cursor-binding track-id i)
-                    :selected (track-selected-binding track)
+                    :selected #'t.in-selection
                     :on-click (lambda (evt)
                       (expanded-slot-click track track-id i evt))
                     :on-drag (lambda (evt)
@@ -3338,7 +3231,7 @@
                             :haptic-pivot-position (eseq.seqv-track-params/seqv-param-haptic-pivot-position mode)
                             :haptic-pivot-value (eseq.seqv-track-params/seqv-track-param-haptic-pivot-value track mode)
                             :haptic-exponent (eseq.seqv-track-params/seqv-param-haptic-exponent mode)
-                            :items (if (= mode 5) SEQ.sync-labels '())
+                            :items (if (= mode 5) project.sync-options '())
                             :font-size 11
                             :color :white
                             :fill (expanded-slider-fill-for-mode track mode)
@@ -3350,20 +3243,15 @@
                             :material (eseq.sequencer/step-slider-track-material)
                             :on-change (lambda (v)
                               (set-expanded-slot-param track track-id i mode v)))
-                          ;; Same shell widget as the compact grid's step-cell, so
-                          ;; the expanded toggle inherits its p-lock tick (incl.
+                          ;; The slot twin of the compact grid's step shell, so the
+                          ;; expanded toggle inherits its p-lock tick (incl.
                           ;; variant colors) and active/selected/muted rendering.
                           (box
                             :key (str "expanded-step-toggle-" track-id "-" i)
                             :active active-ref
                             :plock-kind (slot-plock-kind-binding track-id i)
                             :selected selected-ref
-                            :duration 0
-                            :muted (bind-seq-nth "track-muted-effective" track)
-                            :hide 0
-                            :track-r (bind-seq-nth "step-color-r-effective" track)
-                            :track-g (bind-seq-nth "step-color-g-effective" track)
-                            :track-b (bind-seq-nth "step-color-b-effective" track)
+                            :track t
                             :variant-r (slot-variant-r-binding track-id i)
                             :variant-g (slot-variant-g-binding track-id i)
                             :variant-b (slot-variant-b-binding track-id i)
@@ -3372,7 +3260,7 @@
                             :off-fill (if (= (step-odd i) 1)
                               :sequencer-step-off-fill-alt
                               :sequencer-step-off-fill)
-                            :background "seqv-step-shell"
+                            :background "seqv-slot-shell"
                             :align :center :width 3 :height expanded-step-toggle-height
                             :on-mouse-down (lambda (evt)
                               (expanded-slot-pointer-down track track-id i evt))
@@ -3409,93 +3297,58 @@
     )
   )
 
-(def track-grid (track-idx)
-  (let ((num-steps (nth SEQ.track-num-steps track-idx))
-      (rows (max 1 (floor (/ (+ num-steps (- row-width 1)) row-width)))))
-    (box :key (str "track-step-grid-" track-idx) :padding 0.15
-      (box :background-color :buffer-bg
-        (v-stack :gap -0.04
-          (box :width 0.1 :height 0.342 :bg :transparent)
-          (each (range 0 rows) |row|
-            (v-stack :gap -0.16
-              (h-stack :align :center
-                (box :width 0.1)
-                
-                (box  :height (track-row-label-height) :v-align :center 
-                  (v-stack :gap 0
-                    ;; `active` is a reactive float slot the label reads at paint
-                    ;; time, so the playing row brightens without re-evaluating or
-                    ;; re-laying out the grid.
-                    (label (+ row 1)
-                      :color (if (> rows 1) :dim :buffer-bg)
-                      :active (if (> rows 1) (bind-seq (str "track-playhead-row-active-" track-idx "-" row)) 0)
-                      :active-color :white
-                    :v-align :center
-                      :width 0.1 :bg :transparent :font-size 8)
-                    (box :width 0.2 :height (* (track-row-label-height) 0.02))
-                    )
-                  )
-                (h-stack :gap 0.0
-                  (each (range 0 row-width) |col|
-                    (let ((step (+ (* row row-width) col)))
-                      (if (< step num-steps)
-                        (step-cell track-idx step)
-                        ;; Preserve the grid width without an interactive ghost
-                        ;; step: hit testing must reach the enclosing track row.
-                        (box :width step-cell-width :height step-cell-height))))))
-              (h-stack (box :width 1)
-                (playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
-    )
-  )
-
-;; Which sound payloads a track will accept as a replacement of what it already
-;; plays. Shared by the track row and the pad grid's occupied cells: dropping on
-;; a pad replaces that pad's sound on its member track, so the two must agree.
-(def sound-drop-types (i)
-  (if (eseq.track-collapse/replaceable-instrument? i)
+;; Which sound payloads track t will accept as a replacement of what it
+;; already plays. Shared by the track row and the pad grid's occupied cells:
+;; dropping on a pad replaces that pad's sound on its member track, so the
+;; two must agree.
+(def sound-drop-types (t)
+  (if (eseq.track-collapse/replaceable-type? t.instrument-type)
     (list "sample" "instrument" "instrument-preset" "sound")
-    (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample"))))
+    (list "sample")))
 
 ;; One track's grid row. Rack members render through this exact path — a rack
 ;; member is an ordinary track, so its pattern length, timebase p-locks,
 ;; accumulator and expanded step editor all come along for free.
-;; :muted is a binding (not a value read) so mute/solo changes update the row
-;; chrome without rerunning the enclosing subtree.
-(def track-row (i is-bare-track)
-  (box :width :fill
-      :key (str "track-drop-" i)
-      :selected (track-selected-binding i)
-      :muted (bind-seq-nth "track-muted-effective" i)
-      :background-color :buffer-bg
-      :selected-background-color :mixer-strip-selected-bg
-      :muted-background-color :mixer-strip-muted-bg
-      :border-width 2
-      :corner-radius (eseq.seq-core-state/radius 10)
-      :border-color :mixer-strip-border
-      :selected-border-color :mixer-strip-selected-border
-      :muted-border-color :mixer-strip-border
-      :drop-hover-border-color :mixer-strip-selected-border
-      :drop-types (sound-drop-types i)
-      :drop-meta (dict :kind "track" :track i)
-      :on-drop (lambda (event) (drop-on-track event))
-      :padding 0.0145
-      :on-click (lambda (event) (track-click event i))
-      :on-double-click (lambda (event) (open-piano-roll-for-track i))
-      (if (track-expanded? (nth SEQ.track-ids i))
-        (v-stack 
-          :width :fill :gap 0.2
+;; The selection and the silenced look are bindings (not value reads) so
+;; selection, mute and solo changes update the row chrome without rerunning
+;; the enclosing subtree. A binding cannot be negated: `:muted` is bound to
+;; `t.audible`, so the plain props carry the silenced look.
+(def track-row (t bare)
+  (let ((i t.index))
+    (box :width :fill
+        :key (str "track-drop-" i)
+        :selected #'t.in-selection
+        :muted #'t.audible
+        :background-color :mixer-strip-muted-bg
+        :selected-background-color :mixer-strip-selected-bg
+        :muted-background-color :buffer-bg
+        :border-width 2
+        :corner-radius (eseq.seq-core-state/radius 10)
+        :border-color :mixer-strip-border
+        :selected-border-color :mixer-strip-selected-border
+        :muted-border-color :mixer-strip-border
+        :drop-hover-border-color :mixer-strip-selected-border
+        :drop-types (sound-drop-types t)
+        :drop-meta (dict :kind "track" :track i)
+        :on-drop (lambda (event) (drop-on-track event))
+        :padding 0.0145
+        :on-click (lambda (event) (track-click event t))
+        :on-double-click (lambda (event) (open-piano-roll-for-track t))
+        (if t.expanded
+          (v-stack
+            :width :fill :gap 0.2
+            (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+              (track-header t bare)
+              (expanded-track-quick-controls i t.tid)
+              (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+              (track-actions t))
+            (expanded-track-editor i t.tid))
           (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-            (track-header i is-bare-track)
-            (expanded-track-quick-controls i (nth SEQ.track-ids i))
-            (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-            (track-actions i))
-          (expanded-track-editor i (nth SEQ.track-ids i)))
-        (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-          (v-stack (box :height 0.1)
-            (track-header i is-bare-track))
-          (track-grid i)
-          (box :flex 1 :width :fill :height 0.1 :bg :transparent)
-          (track-actions i)))))
+            (v-stack (box :height 0.1)
+              (track-header t bare))
+            (track-grid t)
+            (box :flex 1 :width :fill :height 0.1 :bg :transparent)
+            (track-actions t))))))
 
 ;; ── Track groups ────────────────────────────────────────────────────────
 ;; Regular groups and drum racks share one nested block: a header row owns the
@@ -3503,11 +3356,11 @@
 ;; beneath as ordinary rows. A drum rack additionally owns pad-play arming and
 ;; rack-specific member chrome; regular groups deliberately have no Arm control.
 
-(def group-ui-kind (gidx)
-  (if (eseq.drum-rack-v2/rack? gidx) "rack" "group"))
+(def group-ui-kind (g)
+  (if g.rack "rack" "group"))
 
-(def group-element-key (gidx element)
-  (str (group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
+(def group-element-key (g element)
+  (str (group-ui-kind g) "-" element "-" g.gid))
 
 ;; Keep group fills opaque because the rounded-box renderer draws its border
 ;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
@@ -3516,94 +3369,405 @@
 (def group-container-bg (c)
   (let ((bg THEME.buffer_bg))
     (rgba
-      (+ (* (nth c 0) 0.22) (* (nth bg 0) 0.78))
-      (+ (* (nth c 1) 0.22) (* (nth bg 1) 0.78))
-      (+ (* (nth c 2) 0.22) (* (nth bg 2) 0.78))
+      (+ (* (rgb-part c 0) 0.22) (* (nth bg 0) 0.78))
+      (+ (* (rgb-part c 1) 0.22) (* (nth bg 1) 0.78))
+      (+ (* (rgb-part c 2) 0.22) (* (nth bg 2) 0.78))
       1.0)))
 
-(def group-bus-volume-from-event (bus-idx event)
-  (let ((sx (get event :sx)))
-    (if (= sx nil)
-      nil
-      (seq-set-bus-volume bus-idx (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0))))))))
-
-;; Volume/meter for a group's backing bus. Group bus lists are rebuilt per
-;; frame, so an unresolved index degrades to a spacer instead of an error.
-(def group-volume-control (gidx bus-idx)
-  (v-stack (box :height 0.13)
-    (if (>= bus-idx 0)
-      (box
-        :key (group-element-key gidx "volume-control")
-        :width 8.2 :height 1.25
-        :background "seqv-track-volume-meter"
-        :level (bind-seq (str "bus-peak-" bus-idx))
-        :volume (bind-seq-nth "bus-volumes" bus-idx)
-        :on-click (lambda (event) (group-bus-volume-from-event bus-idx event))
-        :on-drag (lambda (event) (group-bus-volume-from-event bus-idx event)))
+;; Volume/meter for a group's backing bus b; a spacer while it has none.
+(def group-volume-control (g b)
+  (if b
+    (let ((set-from (lambda (event) (set-volume! b event))))
+      (volume-meter (group-element-key g "volume-control") b set-from set-from))
+    (v-stack (box :height 0.13)
       (box :width 8.2 :height 1.25 :bg :transparent))))
 
 ;; Selecting a group selects its backing bus, exactly as the mixer header does,
 ;; so the fx panel follows the group chain.
-(def select-group (gidx)
-  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
-    (if (>= bus-idx 0)
-      (set! eseq.seq-core-state/selected-bus bus-idx)
-      false)))
+(def select-group (g)
+  (when g.bus (set! eseq.seq-core-state/selected-bus g.bus.index)))
 
-(def show-fx-for-group (gidx)
-  (do
-    (seq-clear-delete-target)
-    (seq-clear-selection)
-    (select-group gidx)
-    (eseq.seq-panels/seq-show-fx-lower-panel)))
+(def show-fx-for-group (g)
+  (seq-clear-delete-target)
+  (seq-clear-selection)
+  (select-group g)
+  (eseq.seq-panels/seq-show-fx-lower-panel))
 
 ;; Selection visibility rides the *sel-sync* SEQV field, never a raw
 ;; `selected-bus` read: this block wraps every member row, so a render-time
 ;; read here re-rendered the whole group on each selection (eseq-4jv).
-(def group-selected-binding (gidx)
-  (eseq.seq-core-state/group-selected-vis-binding (eseq.drum-rack-v2/group-id gidx)))
+;; COMPAT(eseq-0l17): until the bus selection is a kind field.
+(def group-selected-binding (g)
+  (eseq.seq-core-state/group-selected-vis-binding g.gid))
 
-;; ── Group member chrome ─────────────────────────────────────────────────
 ;; Every group member gets the same indented prefix used by drum racks. It
 ;; visually connects the ordinary track row to the containing group header.
-
-(def rack-pad-badge (gidx pad)
-  (h-stack :gap 0.08 :align :center
-    (button "-"
-      :key (str "rack-pad-down-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :width 1.0 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent
-      :color :dim
-      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad -1))
-    (badge (get pad :label)
-      :key (str "rack-pad-note-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :font-size 9 :width 2.6 :height 0.9 :padding 0
-      :h-align :center
-      :background-color '(rgba 0.18 0.22 0.23 1.0)
-      :border-color :transparent
-      :highlight-color :transparent
-      :shadow-color :transparent
-      :color :white)
-    (button "+"
-      :key (str "rack-pad-up-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :width 1.0 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent
-      :color :dim
-      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
-
-(def group-member-chrome (gidx i)
-  (group-track-indicator
-    :key (str "group-track-indicator-" (eseq.drum-rack-v2/group-id gidx) "-" i))
-  )
-
-(def group-member-row (gidx i)
+(def group-member-row (g t)
   (h-stack :width :fill :gap 0.15 :align :start
-    (group-member-chrome gidx i)
-    (box :width 0 :flex 1 (track-row i false))))
+    (group-track-indicator
+      :key (str "group-track-indicator-" g.gid "-" t.tid))
+    (box :width 0 :flex 1 (track-row t false))))
+
+(def group-type-icon (g)
+  ;; The browser lists Drum Rack and Instrument Rack under the same :sampler
+  ;; rack glyph, so both the drum-rack group and the slot-based rack use it.
+  (if g.rack :sampler nil))
+
+(def group-header-body (g)
+  (let ((c g.color)
+        (b g.bus)
+        (on-select (lambda (event) (select-group g))))
+    (box :background "seqv-track-container"
+      :padding 0.1
+      :on-click on-select
+      ;; A fill row: the clip grid at the end flexes into whatever width the
+      ;; panel has left and wraps there, so a wide window shows more cells
+      ;; per row and a long bank grows the header instead of running off it.
+      (h-stack :width :fill :gap 0.4 :align :center
+        (box
+          :key (group-element-key g "color-badge")
+          :width 0.68 :height 2.0
+          :background "seqv-track-color-badge"
+          :track-r (rgb-part c 0)
+          :track-g (rgb-part c 1)
+          :track-b (rgb-part c 2)
+          :on-click on-select)
+        (disclosure-button
+          :key (group-element-key g "collapse")
+          :width 1.55 :height 1.4
+          :collapsed g.collapsed
+          :col 1
+          :surface-alpha 1.0
+          :focusable true
+          :on-click (lambda (event) (toggle! g.collapsed)))
+        ;; Arm = drum-rack pad-play mode. A regular group is not an input
+        ;; target and therefore contributes no Arm control or placeholder.
+        (if g.rack
+          (box :width 2 :height 1.5
+            :background "seqv-rec-arm-dot"
+            :key (group-element-key g "arm")
+            :active #'g.armed
+            :on-click (lambda (event)
+              (select-group g)
+              (toggle! g.armed)))
+          (box :width 2.0 :height 0.0 :bg :transparent))
+        (header-toggle "M" (group-element-key g "mute") (if b #'b.muted false)
+          :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
+          :color :black :active-color :gray
+          :on-click (lambda (event)
+            (when b
+              (select-group g)
+              (toggle! b.muted))))
+        (header-toggle "S" (group-element-key g "solo") (if b #'b.soloed false)
+          :active-color :white
+          :on-click (lambda (event)
+            (when b
+              (select-group g)
+              (toggle! b.soloed))))
+        (box :width 8.6 :height 1
+          :key (group-element-key g "select")
+          :background-color :transparent
+          :on-click on-select
+          :on-double-click (lambda (event) (show-fx-for-group g))
+          (badge (track-name-display g.name)
+            :key (group-element-key g "name-label")
+            :icon (group-type-icon g)
+            :font-size 11 :width 8.6 :height 1 :padding 0
+            :h-align :left
+            :background-color :transparent
+            :border-color :transparent
+            :highlight-color :transparent
+            :shadow-color :transparent
+            :muted (if b #'b.muted false)
+            :color :dim
+            :muted-color (rgba 0.4 0.4 0.4 0.6)
+            :bg :transparent))
+        (box :width 0.3)
+        ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
+        ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
+        ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
+        ;; name/meter shape an ordinary track header has.
+        (group-volume-control g b)
+        ;; A clip-bearing rack's clip grid sits in the header's empty right half
+        ;; (§6.1), starting where the member rows' step grids start.
+        (rack-clip-grid g)))))
+
+;; ── Rack clip grid (docs/rack-clips-and-break-kits-spec.md §6.1) ─────────
+;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
+;; Max-style preset box grid. The cell the CURRENT scene plays is lit;
+;; clicking one launches it (quantized exactly like a scene launch),
+;; right-clicking opens a menu (rename in place, launch, save what the rack
+;; is playing now as a new clip, delete), and the trailing number picker
+;; shows the lit clip's number and launches whatever number is typed in.
+;; Drag reorder is not wired yet; the bank order is the create order.
+
+;; The cells are the mixer's `track-pattern-cell-bg` boxes (ui/mixer.lisp)
+;; without the sound glyph on top: unnumbered, tinted with the rack color,
+;; lit when active. They sit in a `wrap` that fills the header's right half,
+;; so the column count follows the panel width and a long bank wraps onto
+;; more rows rather than stretching the row past the window.
+(def rack-clip-cell-width 3.6)
+(def rack-clip-cell-height 1.8)
+(def rack-clip-rename-width 4.6)
+
+;; Whether the held clip rc is still in its rack's bank (a delete, an undo or
+;; a project load drops it).
+(def clip-listed? (rc)
+  (and rc rc.group (listed? rc rc.group.clips)))
+
+(def begin-clip-rename (rc)
+  (set! clip-menu.open false)
+  (set! clip-rename.draft rc.name)
+  (set! clip-rename.clip rc))
+
+(def finish-clip-rename (commit)
+  (let ((rc clip-rename.clip))
+    (when (and commit (clip-listed? rc))
+      (set! rc.name clip-rename.draft))
+    (set! clip-rename.clip nil)
+    (set! clip-rename.draft "")))
+
+(def open-clip-menu (event rc)
+  (set! clip-menu.clip rc)
+  (open-menu! clip-menu event))
+
+;; The menu's action on its clip, while that clip is still in the bank.
+(def clip-menu-action (action)
+  (lambda (event)
+    (let ((rc clip-menu.clip))
+      (set! clip-menu.open false)
+      (when (clip-listed? rc) (action rc)))))
+
+;; Mounted once at the buffer root (like the mixer's track menu) so it
+;; overlays the grid instead of being clipped by the header row.
+(def rack-clip-context-menu ()
+  (menu-of clip-menu
+    (menu-item "Rename…" :key "rack-clip-menu-rename"
+      :on-select (clip-menu-action begin-clip-rename))
+    (menu-item "Launch" :key "rack-clip-menu-launch"
+      :on-select (clip-menu-action launch-rack-clip!))
+    (menu-separator)
+    (menu-item "New Clip from Playing" :key "rack-clip-menu-save-new"
+      :on-select (clip-menu-action (lambda (rc) (save-rack-clip-as! rc.group ""))))
+    (menu-item "Delete" :key "rack-clip-menu-delete"
+      :on-select (clip-menu-action delete-rack-clip!))))
+
+;; The rack color c, scaled by `k`.
+(def tint (c k) (map (lambda (i) (* k (rgb-part c i))) (range 0 3)))
+
+;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed). A
+;; subtree of its own: a rename's start, its keystrokes and its end re-run
+;; this cell alone.
+(def rack-clip-cell (g rc tinted)
+  (subtree :key (str "rack-clip-cell-" g.gid "-" rc.cid)
+    ;; An unkeyed root: the subtree's key would replace the cell's, which
+    ;; tests and captures find.
+    (h-stack (rack-clip-cell-body g rc tinted))))
+
+(def rack-clip-cell-body (g rc tinted)
+  (let ((renaming (= clip-rename.clip rc)))
+    (box :key (str "rack-clip-" g.gid "-" rc.cid)
+      :debug-name "rack-clip-cell"
+      :width (if renaming rack-clip-rename-width rack-clip-cell-width)
+      :height rack-clip-cell-height
+      :padding (if renaming 0.1 0.3)
+      :bg :transparent
+      :background "track-pattern-cell-bg"
+      :active #'rc.active
+      :assigned 1
+      :override 0
+      :selected 0
+      :track-r (nth tinted 0)
+      :track-g (nth tinted 1)
+      :track-b (nth tinted 2)
+      :on-click (lambda (event)
+        (if event.shift
+          (begin-clip-rename rc)
+          (launch-rack-clip! rc)))
+      :on-right-click (lambda (event) (open-clip-menu event rc))
+      (if renaming
+        (text-input
+          :key (str "rack-clip-rename-" g.gid "-" rc.cid)
+          :width 4.3 :height 0.7 :font-size 10
+          :value clip-rename.draft
+          :auto-focus true
+          :select-all-on-focus true
+          :on-change (lambda (name) (set! clip-rename.draft name))
+          :on-submit (lambda () (finish-clip-rename true))
+          :on-cancel (lambda () (finish-clip-rename false))
+          :on-blur (lambda () (finish-clip-rename true)))
+        (label rc.cid
+          :color :dimmer :active #'rc.active :active-color :white
+          :font-size 10 :bg :transparent :v-align :center :h-align :center)))))
+
+;; The last cell is a number picker showing the lit clip's number (0 while
+;; the rack is silent): read it at a glance, or type/drag a number to launch
+;; that clip (quantized like a click on its cell). Save and delete live in
+;; the right-click menu. A subtree of its own, which alone reads the bank and
+;; the playing clip: a launch re-renders it alone.
+(def rack-clip-number-picker (g tinted)
+  (subtree :key (str "rack-clip-number-run-" g.gid)
+    (rack-clip-number-run g tinted)))
+
+(def rack-clip-number-run (g tinted)
+  (let ((clips g.clips)
+        (playing g.rack-clip))
+    (h-stack
+      (number-picker :key (str "rack-clip-number-" g.gid)
+        :width 5.2 :height rack-clip-cell-height :font-size 10
+        ;; Same skin as the launch cells: rack-tinted rim, and the well is the
+        ;; cell shader's 70% dark layer composited over that tint.
+        :border-color (rgba (nth tinted 0) (nth tinted 1) (nth tinted 2) 1.0)
+        :border-width 2
+        :background-color (rgba
+          (+ (* 0.3 (nth tinted 0)) 0.014)
+          (+ (* 0.3 (nth tinted 1)) 0.0175)
+          (+ (* 0.3 (nth tinted 2)) 0.021)
+          1.0)
+        :corner-radius 4
+        :value (if playing (+ playing.index 1) 0)
+        :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
+        :on-change (lambda (v)
+          (let ((i (- (round v) 1)))
+            (when (and (>= i 0) (< i (len clips)) (not (= (nth clips i) g.rack-clip)))
+              (launch-rack-clip! (nth clips i)))))))))
+
+;; One dot per member, lit by its pad's trigger, like the pad map.
+(def rack-activity-strip (g)
+  (h-stack :key (str "rack-activity-" g.gid) :gap 0.08 :align :center
+    (each g.tracks |m|
+      (box :key (str "rack-activity-dot-" g.gid "-" m.tid)
+        :width 0.42 :height 0.42
+        :corner-radius (eseq.seq-core-state/radius 3)
+        :background-color '(rgba 0.19 0.20 0.21 1.0)
+        :selected (if m.pad #'m.pad.triggered false)
+        :selected-background-color '(rgba 0.95 0.98 1.0 1.0)))))
+
+(def rack-clip-grid (g)
+  (let ((clips g.clips)
+        (tinted (tint g.color 0.65)))
+    (when (and g.rack (> (len clips) 0))
+      (h-stack :key (str "rack-clip-run-" g.gid) :gap 0.4 :align :center :width :fill :flex 1
+        ;; Lines the first cell up with the member rows' step grids.
+        (box :width 2.2 :height 0.0 :bg :transparent)
+        (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
+          (wrap :key (str "rack-clip-grid-" g.gid)
+            :width 48 :gap 0.12 :row-gap 0.12 :align :center
+            (each clips |rc|
+              (rack-clip-cell g rc tinted))
+            (rack-clip-number-picker g tinted)))
+        (box :height 0.1 :width :fill :flex 1)
+        (rack-activity-strip g)
+        (box :width 1.0 :height 0.0 :bg :transparent)))))
+
+(def group-header-row (g)
+  (subtree :key (str "seqv-" (group-ui-kind g) "-header-" g.gid)
+    (group-header-body g)))
+
+(def group-block (g)
+  (let ((c g.color))
+    (box :width :fill
+      :key (group-element-key g "block")
+      :selected (group-selected-binding g)
+      :background-color (group-container-bg c)
+      :selected-background-color (group-container-bg c)
+      :border-width 2
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :corner-radius (eseq.seq-core-state/radius 10)
+      :padding 0.345
+      ;; Hit testing chooses the deepest clickable widget, so member-track
+      ;; clicks keep selecting the track; only exposed container chrome reaches
+      ;; this handler and selects the group's backing bus for the FX panel.
+      :on-click (lambda (event) (select-group g))
+      (v-stack :width :fill :gap 0.1
+        (group-header-row g)
+        (if g.collapsed
+          (nothing)
+          (v-stack :width :fill :gap 0.0
+            (each (shown-members g) |m|
+              (subtree :key (str "sequencer-track-" m.tid)
+                (group-member-row g m)))
+            (each g.racks |child|
+              (subtree :key (str "sequencer-rack-" child.gid)
+                (group-block child)))))))))
+
+;; ── Grid render order ───────────────────────────────────────────────────
+;; Loose tracks stay in track order. Every top-level group collapses its member
+;; run into one item anchored at its lowest member, so regular groups and drum
+;; racks use the same nested block model. Unanchored groups (an empty, lazy
+;; drum rack) follow the tracks. A group drawn inside another's block (a rack
+;; in a plain group) is its parent's to draw.
+
+;; The lowest position among tracks, or -1 for none.
+(def lowest-index (ts)
+  (reduce |acc t| (if (or (< acc 0) (< t.index acc)) t.index acc) -1 ts))
+
+;; Where a group sits in track order: its lowest member, or that of a rack
+;; drawn inside it; -1 before it claims a track.
+(def group-anchor (g)
+  (reduce |acc child|
+    (let ((a (lowest-index child.tracks)))
+      (if (< acc 0) a (if (< a 0) acc (min a acc))))
+    (lowest-index g.tracks)
+    g.racks))
+
+;; The grid's rows in order: `(dict :kind "track" :track t)` for a loose
+;; track the grid shows (not collapsed), `(dict :kind "group" :group g)` for
+;; a top-level group.
+(def grid-items ()
+  (let ((top (filter (lambda (g) (= g.parent nil)) (groups)))
+        (anchored (map (lambda (g) (list g (group-anchor g))) top)))
+    (append
+      (reduce |acc t|
+        (let ((hit (first (filter (lambda (ga) (= (nth ga 1) t.index)) anchored))))
+          (if hit
+            (append acc (list (dict :kind "group" :group (nth hit 0))))
+            (if (or t.group t.collapsed)
+              acc
+              (append acc (list (dict :kind "track" :track t))))))
+        (list)
+        (tracks))
+      (map (lambda (ga) (dict :kind "group" :group (nth ga 0)))
+        (filter (lambda (ga) (< (nth ga 1) 0)) anchored)))))
+
+;; Group g's member tracks the grid shows: collapsed ones hide exactly as
+;; loose ones do.
+(def shown-members (g)
+  (filter (lambda (m) (not m.collapsed)) g.tracks))
+
+;; Group g's track rows in the order `group-block` draws them: its shown
+;; members, then each rack drawn inside it; none while it is collapsed.
+(def group-track-order (g)
+  (if g.collapsed
+    (list)
+    (reduce |acc child| (append acc (group-track-order child))
+      (shown-members g)
+      g.racks)))
+
+;; The grid's track rows in render order (the shift-click range).
+(def visible-tracks ()
+  (reduce |acc item|
+    (append acc
+      (if (= (get item :kind) "group")
+        (group-track-order (get item :group))
+        (list (get item :track))))
+    (list)
+    (grid-items)))
+
+(def grid-render-item (item)
+  (if (= (get item :kind) "group")
+    (let ((g (get item :group)))
+      (subtree :key (str "sequencer-" (group-ui-kind g) "-" g.gid)
+        (group-block g)))
+    (let ((t (get item :track)))
+      (subtree :key (str "sequencer-track-" t.tid)
+        (track-row t true)))))
 
 ;; ── Pad grid performance view ───────────────────────────────────────────
+;; COMPAT(eseq-0l17.11): addressed by group position (`gidx`), the *fx*
+;; rack panel's address (ui/effects/buffers.lisp), over drum-rack-v2's
+;; SEQ.groups lookups until the pad grid ports to `g.pads`.
 ;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
 ;; owns no sequencing state: a cell reads its pad from SEQ.groups and a hit
 ;; goes straight down the live pad path. The grid renders in the *fx* buffer's
@@ -3643,11 +3807,16 @@
 (def pad-at (gidx cell)
   (eseq.drum-rack-v2/pad-at-note gidx (pad-cell-note gidx cell)))
 
+;; The member track a pad plays, or nil (an empty cell).
+(def pad-member (pad)
+  (if (= pad nil) nil (pad-track-at (get pad :track))))
+
+(def pad-track-at (i)
+  (if (>= i 0) (track-at i) nil))
+
 (def pad-cell-name (pad)
-  (let ((track (get pad :track)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (nth SEQ.track-names track)
-      "")))
+  (let ((t (pad-member pad)))
+    (if t t.name "")))
 
 ;; The pad the rack's *fx* panel is focused on, as (group id, pad note) — the
 ;; pad map's own key, so the focus survives track reindexing exactly as chokes
@@ -3716,16 +3885,14 @@
 ;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
 ;; same replacement a drop on the member's grid row does — so pad identity,
 ;; pattern data, mixer settings and chokes all stay put.
-(def pad-cell-track (pad)
-  (if (= pad nil) -1 (get pad :track)))
 
 ;; Every cell also takes a dragged pad ("rack-pad"): dropping one on an empty
 ;; cell moves it to that note, dropping it on an occupied cell swaps the two.
 (def pad-cell-drop-types (pad)
-  (let ((track (pad-cell-track pad)))
+  (let ((t (pad-member pad)))
     (cons "rack-pad"
-      (if (and (>= track 0) (< track SEQ.num-tracks))
-        (sound-drop-types track)
+      (if t
+        (sound-drop-types t)
         (list "sample" "instrument" "instrument-preset")))))
 
 ;; A pad dragged from the grid carries its rack and note; the drop target
@@ -3742,19 +3909,19 @@
       (status "Drag pads within one rack"))))
 
 (def pad-cell-drop-meta (gidx cell pad)
-  (let ((track (pad-cell-track pad)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (dict :kind "track" :track track :from-pad true)
+  (let ((t (pad-member pad)))
+    (if t
+      (dict :kind "track" :track t.index :from-pad true)
       (dict :kind "rack-pad"
         :group-id (eseq.drum-rack-v2/group-id gidx)
         :cell cell
         :pad-note (pad-cell-note gidx cell)))))
 
 (def drop-on-pad-cell (event gidx cell)
-  (let ((track (pad-cell-track (pad-at gidx cell))))
+  (let ((t (pad-member (pad-at gidx cell))))
     (if (= (get event :drag-type) "rack-pad")
       (drop-pad-on-note event gidx (pad-cell-note gidx cell))
-      (if (and (>= track 0) (< track SEQ.num-tracks))
+      (if t
         (drop-on-track event)
         (drop-on-empty-pad event gidx cell)))))
 
@@ -3764,10 +3931,8 @@
 ;; the rack panel to that member's instrument and effects — in place, without
 ;; touching the workspace layout.
 (def open-pad-member-fx (gidx pad)
-  (let ((track (pad-cell-track pad)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (select-track-for-edit track)
-      nil)))
+  (let ((t (pad-member pad)))
+    (when t (select-track-for-edit t))))
 
 ;; Pad context menu (docs/rack-groove-spec.md, "Pad roles"): Role ▸ with
 ;; "Standard (<inferred>)" first — the role the standard layout gives the
@@ -3825,8 +3990,12 @@
 ;; repaints the cell without re-rendering the grid, the way a mixer meter does;
 ;; the persistent pad focus keeps its own border, computed below.
 (def pad-trigger-binding (pad)
-  (let ((track (pad-cell-track pad)))
-    (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)))
+  (let ((t (pad-member pad)))
+    (if t (pad-track-trigger t.index) nil)))
+
+;; Lit while the track at position i sounds.
+(def pad-track-trigger (i)
+  (bind-seq (str "rack-pad-trigger-" i)))
 
 (def pad-cell (gidx cell)
   (let ((pad (pad-at gidx cell)))
@@ -3992,7 +4161,7 @@
         '(rgba 0.60 0.72 0.75 1.0)
         :buffer-bg
         )
-      :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
+      :selected (if (>= track 0) (pad-track-trigger track) nil)
       :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
       :drop-types (list "rack-pad")
       :drop-hover-background-color :mixer-strip-selected-border
@@ -4036,300 +4205,6 @@
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
           (pad-map-row gidx gid tracks row page))))))
 
-(def group-header-body (gidx)
-  (let ((c (eseq.drum-rack-v2/color gidx))
-      (bus-idx (eseq.drum-rack-v2/bus-index gidx))
-      (rack (eseq.drum-rack-v2/rack? gidx))
-      (armed (eseq.drum-rack-v2/armed? gidx))
-      (muted (if (>= bus-idx 0) (bind-seq-nth "bus-mutes" bus-idx) 0))
-      (soloed (if (>= bus-idx 0) (bind-seq-nth "bus-solos" bus-idx) 0)))
-    (box :background "seqv-track-container"
-      :padding 0.1
-      :on-click |x y r| (select-group gidx)
-      ;; A fill row: the clip grid at the end flexes into whatever width the
-      ;; panel has left and wraps there, so a wide window shows more cells
-      ;; per row and a long bank grows the header instead of running off it.
-      (h-stack :width :fill :gap 0.4 :align :center
-        (box
-          :key (group-element-key gidx "color-badge")
-          :width 0.68 :height 2.0
-          :background "seqv-track-color-badge"
-          :track-r (nth c 0)
-          :track-g (nth c 1)
-          :track-b (nth c 2)
-          :on-click |x y r| (select-group gidx))
-        (disclosure-button 
-          :key (group-element-key gidx "collapse")
-          :width 1.55 :height 1.4
-          :collapsed (eseq.drum-rack-v2/collapsed? gidx)
-          :col 1
-          :surface-alpha 1.0
-          :focusable true
-          :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
-        ;; Arm = drum-rack pad-play mode. A regular group is not an input
-        ;; target and therefore contributes no Arm control or placeholder.
-        (if rack
-          (box :width 2 :height 1.5
-            :background "seqv-rec-arm-dot"
-            :key (group-element-key gidx "arm")
-            :active (if armed 1 0)
-            :on-click |x y r| (do
-              (select-group gidx)
-              (eseq.drum-rack-v2/toggle-armed gidx)))
-          (box :width 2.0 :height 0.0 :bg :transparent))
-        (button "M"
-          :key (group-element-key gidx "mute")
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :border-color :transparent
-          :active muted
-          :background-color :control-on-bg
-          :active-background-color :sequencer-toggle-off-bg
-          :color :black
-          :active-color :gray
-          :on-click |x y r| (if (>= bus-idx 0)
-            (do (select-group gidx) (seq-toggle-bus-mute bus-idx))
-            nil))
-        (button "S"
-          :key (group-element-key gidx "solo")
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :active soloed
-          :background-color :sequencer-toggle-off-bg
-          :active-background-color :sequencer-solo-on-bg
-          :border-color :transparent
-          :color :gray
-          :active-color :white
-          :on-click |x y r| (if (>= bus-idx 0)
-            (do (select-group gidx) (seq-toggle-bus-solo bus-idx))
-            nil))
-        (box :width 8.6 :height 1
-          :key (group-element-key gidx "select")
-          :background-color :transparent
-          :on-click |x y r| (select-group gidx)
-          :on-double-click (lambda (event) (show-fx-for-group gidx))
-          (badge (track-name-display (eseq.drum-rack-v2/group-name gidx))
-            :key (group-element-key gidx "name-label")
-            :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
-            :font-size 11 :width 8.6 :height 1 :padding 0
-            :h-align :left
-            :background-color :transparent
-            :border-color :transparent
-            :highlight-color :transparent
-            :shadow-color :transparent
-            :muted muted
-            :color :dim
-            :muted-color (rgba 0.4 0.4 0.4 0.6)
-            :bg :transparent))
-        (box :width 0.3)
-        ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
-        ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
-        ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
-        ;; name/meter shape an ordinary track header has.
-        (group-volume-control gidx bus-idx)
-        ;; A clip-bearing rack's clip grid sits in the header's empty right half
-        ;; (§6.1), starting where the member rows' step grids start.
-        (rack-clip-grid gidx c)))))
-
-(defstate clip-renaming -1)
-(defstate clip-rename-draft "")
-;; Right-click menu over a clip cell: nil while closed, else a dict with the
-;; rack id, the clip id and the pointer cell it opened at.
-(defstate clip-menu nil)
-
-;; ── Rack clip grid (docs/rack-clips-and-break-kits-spec.md §6.1) ─────────
-;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
-;; Max-style preset box grid. The cell the CURRENT scene points at is lit;
-;; clicking one launches it (quantized exactly like a scene launch),
-;; right-clicking opens a menu (rename in place, launch, save what the rack
-;; is playing now as a new clip, delete), and the trailing number picker
-;; shows the lit clip's number and launches whatever number is typed in.
-;; Drag reorder is not wired yet (the grid is rendered from SEQ.rack-clip-banks,
-;; which carries no drop target); the bank order is the create order.
-
-;; The cells are the mixer's `track-pattern-cell-bg` boxes (ui/mixer.lisp)
-;; without the sound glyph on top: unnumbered, tinted with the rack color,
-;; lit when active. They sit in a `wrap` that fills the header's right half,
-;; so the column count follows the panel width and a long bank wraps onto
-;; more rows rather than stretching the row past the window.
-(def rack-clip-cell-width 3.6)
-(def rack-clip-cell-height 1.8)
-(def rack-clip-rename-width 4.6)
-
-(def begin-clip-rename (clip)
-  (do
-    (set! clip-menu nil)
-    (set! clip-renaming (get clip :id))
-    (set! clip-rename-draft (get clip :name))))
-
-(def finish-clip-rename (gid clip-id commit)
-  (do
-    (if commit (eseq.drum-rack-v2/rename-clip gid clip-id clip-rename-draft) nil)
-    (set! clip-renaming -1)
-    (set! clip-rename-draft "")))
-
-(def open-clip-menu (event gid clip)
-  (set! clip-menu (dict :gid gid :clip clip
-    :col (get event :col) :row (get event :row))))
-
-;; Mounted once at the buffer root (like the mixer's track menu) so it
-;; overlays the grid instead of being clipped by the header row.
-(def rack-clip-context-menu ()
-  (let ((menu clip-menu)
-      (gid (get clip-menu :gid))
-      (clip (get clip-menu :clip)))
-    (context-menu :is-open (not (= menu nil))
-      :anchor-col (or (get menu :col) 0)
-      :anchor-row (or (get menu :row) 0)
-      :on-close (lambda () (set! clip-menu nil))
-      (menu-item "Rename…" :key "rack-clip-menu-rename"
-        :on-select (lambda (event) (begin-clip-rename clip)))
-      (menu-item "Launch" :key "rack-clip-menu-launch"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/launch-clip gid (get clip :id)))))
-      (menu-separator)
-      (menu-item "New Clip from Playing" :key "rack-clip-menu-save-new"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/save-clip-as gid ""))))
-      (menu-item "Delete" :key "rack-clip-menu-delete"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/delete-clip gid (get clip :id))))))))
-
-(def rack-clip-cell (gid clip c)
-  (let ((id (get clip :id))
-      (renaming (= clip-renaming id)))
-    (box :key (str "rack-clip-" gid "-" id)
-      :debug-name "rack-clip-cell"
-      :width (if renaming rack-clip-rename-width rack-clip-cell-width)
-      :height rack-clip-cell-height
-      :padding (if renaming 0.1 0.3)
-      :bg :transparent
-      :background "track-pattern-cell-bg"
-      :active (bind-seq (str "rack-clip-active-" gid "-" id))
-      :assigned 1
-      :override 0
-      :selected 0
-      :track-r (* 0.65 (nth c 0))
-      :track-g (* 0.65 (nth c 1))
-      :track-b (* 0.65 (nth c 2))
-      :on-click (lambda (event)
-        (if (get event :shift)
-          (begin-clip-rename clip)
-          (eseq.drum-rack-v2/launch-clip gid id)))
-      :on-right-click (lambda (event) (open-clip-menu event gid clip))
-      (if renaming
-        (text-input
-          :key (str "rack-clip-rename-" gid "-" id)
-          :width 4.3 :height 0.7 :font-size 10
-          :value clip-rename-draft
-          :auto-focus true
-          :select-all-on-focus true
-          :on-change (lambda (name) (set! clip-rename-draft name))
-          :on-submit (lambda () (finish-clip-rename gid id true))
-          :on-cancel (lambda () (finish-clip-rename gid id false))
-          :on-blur (lambda () (finish-clip-rename gid id true)))
-        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 10 :bg :transparent :v-align :center :h-align :center)
-        )
-      
-      )))
-
-;; The last cell is a number picker showing the lit clip's number: read it at
-;; a glance, or type/drag a number to launch that clip (quantized like a
-;; click on its cell). Save and delete live in the right-click menu.
-(def rack-clip-number-picker (gid clips c)
-  (number-picker :key (str "rack-clip-number-" gid)
-    :width 5.2 :height rack-clip-cell-height :font-size 10
-    ;; Same skin as the launch cells: rack-tinted rim, and the well is the
-    ;; cell shader's 70% dark layer composited over that tint.
-    :border-color (rgba (* 0.65 (nth c 0)) (* 0.65 (nth c 1)) (* 0.65 (nth c 2)) 1.0)
-    :border-width 2
-    :background-color (rgba
-      (+ (* 0.195 (nth c 0)) 0.014)
-      (+ (* 0.195 (nth c 1)) 0.0175)
-      (+ (* 0.195 (nth c 2)) 0.021)
-      1.0)
-    :corner-radius 4
-    :value (bind-seq (str "rack-clip-index-" gid))
-    :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
-    :on-change (lambda (v)
-      (let ((i (- (round v) 1)))
-        (if (and (>= i 0) (< i (len clips))
-              (not (= (get (nth clips i) :id) (eseq.drum-rack-v2/active-clip gid))))
-          (eseq.drum-rack-v2/launch-clip gid (get (nth clips i) :id))
-          nil)))))
-
-;; One dot per member, lit by the same per-track trigger binding the pad map
-;; uses — no new host feed for the activity strip.
-(def rack-activity-strip (gidx gid)
-  (h-stack :key (str "rack-activity-" gid) :gap 0.08 :align :center
-    (each (eseq.drum-rack-v2/members gidx) |m|
-      (box :key (str "rack-activity-dot-" gid "-" (nth SEQ.track-ids m))
-        :width 0.42 :height 0.42
-        :corner-radius (eseq.seq-core-state/radius 3)
-        :background-color '(rgba 0.19 0.20 0.21 1.0)
-        :selected (bind-seq (str "rack-pad-trigger-" m))
-        :selected-background-color '(rgba 0.95 0.98 1.0 1.0)))))
-
-(def rack-clip-grid (gidx c)
-  (let ((gid (eseq.drum-rack-v2/group-id gidx))
-      (rack (eseq.drum-rack-v2/rack? gidx)))
-    (if (and rack (eseq.drum-rack-v2/has-clips? gid))
-      (let ((clips (eseq.drum-rack-v2/clips gid)))
-        (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
-          ;; Lines the first cell up with the member rows' step grids.
-          (box :width 2.2 :height 0.0 :bg :transparent)
-          (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
-            (wrap :key (str "rack-clip-grid-" gid)
-              :width 48 :gap 0.12 :row-gap 0.12 :align :center
-              (each clips |clip i|
-                (rack-clip-cell gid clip c))
-              (rack-clip-number-picker gid clips c)))
-          (box :height 0.1 :width :fill :flex 1)
-          (rack-activity-strip gidx gid)
-          (box :width 1.0 :height 0.0 :bg :transparent)))
-      nil)))
-
-(def group-header-row (gidx)
-  (subtree :key (str "seqv-" (group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
-    (group-header-body gidx)))
-
-(def group-block (gidx)
-  (let ((c (eseq.drum-rack-v2/color gidx)))
-    (box :width :fill
-      :key (group-element-key gidx "block")
-      :selected (group-selected-binding gidx)
-      :background-color (group-container-bg c)
-      :selected-background-color (group-container-bg c)
-      :border-width 2
-      :border-color :mixer-strip-border
-      :selected-border-color :mixer-strip-selected-border
-      :corner-radius (eseq.seq-core-state/radius 10)
-      :padding 0.345
-      ;; Hit testing chooses the deepest clickable widget, so member-track
-      ;; clicks keep selecting the track; only exposed container chrome reaches
-      ;; this handler and selects the group's backing bus for the FX panel.
-      :on-click |x y r| (select-group gidx)
-      (v-stack :width :fill :gap 0.1
-        (group-header-row gidx)
-        (if (eseq.drum-rack-v2/collapsed? gidx)
-          (box :width 0.0 :height 0.0 :bg :transparent)
-          (v-stack :width :fill :gap 0.0
-            (each (eseq.drum-rack-v2/visible-members gidx) |m|
-              (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
-                (group-member-row gidx m)))
-            (each (eseq.drum-rack-v2/child-racks gidx) |child|
-              (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id child))
-                (group-block child)))))))))
-
-(def grid-render-item (item)
-  (if (= (get item :kind) "group")
-    (let ((gidx (get item :gidx)))
-      (subtree :key (str "sequencer-" (group-ui-kind gidx) "-" (eseq.drum-rack-v2/group-id gidx))
-        (group-block gidx)))
-    (let ((i (get item :track)))
-      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        (track-row i true)))))
 
 (effect-buffer "*sequencer*"
   (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0
@@ -4350,7 +4225,7 @@
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0
-      (each (eseq.drum-rack-v2/grid-render-items) |item|
+      (each (grid-items) |item|
         (grid-render-item item)))
 
      (box :key "new-track-drop-zone"
@@ -4373,4 +4248,5 @@
 
 (set-buffer-mode-for "*sequencer*" "eseq.seq-grid-mode/seq-grid-mode")
 
-(cursor-step-changed SEQ.current-track (eseq.seq-core-state/cursor-step-value))
+;; The grid starts on the shared step cursor.
+(set! grid-cursor.step (eseq.seq-core-state/cursor-step-value))

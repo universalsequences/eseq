@@ -1625,7 +1625,7 @@ pub(crate) fn run_event_loop(
                             "num-tracks",
                             Value::Number(track_names.len() as f64),
                         );
-                        set_current_track_reactive(rt, app.tracks.len(), ct);
+                        set_current_track_reactive(rt, ct);
                         rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                         rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
                         rt.set_reactive(

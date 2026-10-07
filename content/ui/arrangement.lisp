@@ -1206,7 +1206,7 @@
   ;; spec 3.4).
   (let ((ids (real-clip-ids i (get event :ids)))
         (c (if (empty? ids) nil (find-track-clip i (first ids)))))
-    (eseq.sequencer/select-track-for-edit i)
+    (eseq.sequencer/select-track-for-edit (track i))
     (set! arr-select.scenes '())
     (set! arr-select.rect nil)
     ;; A clip and a region are mutually exclusive (region spec 4.1); the
@@ -1225,7 +1225,7 @@
     c))
 
 (def track-clear-selection (i event)
-  (eseq.sequencer/select-track-for-edit i)
+  (eseq.sequencer/select-track-for-edit (track i))
   (deselect-clips!)
   (release-selection!)
   (set-cursor (get event :time) i))
@@ -1327,7 +1327,7 @@
         (track-clear-selection i event))
       :set-cursor
       (do
-        (eseq.sequencer/select-track-for-edit i)
+        (eseq.sequencer/select-track-for-edit (track i))
         (set-cursor (get event :time) i))
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the host's region.
@@ -1744,13 +1744,14 @@
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
 (def track-header (i)
-  (box
-    :key (str "track-header-" i)
-    :height :fill :width header-width
-    :selected (eseq.sequencer/track-selected-binding i)
-    :background-color :buffer-bg
-    :selected-background-color :mixer-strip-selected-bg
-    (eseq.sequencer/track-header i true)))
+  (let ((t (track i)))
+    (box
+      :key (str "track-header-" i)
+      :height :fill :width header-width
+      :selected #'t.in-selection
+      :background-color :buffer-bg
+      :selected-background-color :mixer-strip-selected-bg
+      (eseq.sequencer/track-header t true))))
 
 ;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a

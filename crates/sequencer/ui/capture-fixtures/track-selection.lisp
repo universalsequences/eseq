@@ -8,5 +8,5 @@
 
 (def capture-after-sync ()
   (do
-    (eseq.sequencer/track-click (dict) 0)
-    (eseq.sequencer/track-click (dict :shift true) 1)))
+    (eseq.sequencer/track-click (dict) (eseq.kinds/track 0))
+    (eseq.sequencer/track-click (dict :shift true) (eseq.kinds/track 1))))

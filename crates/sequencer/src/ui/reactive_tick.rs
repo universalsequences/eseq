@@ -220,7 +220,7 @@ pub(crate) fn sync_reactive_tick(
     let track_tint = eseqlisp::theme::track_display_key();
     if Some(track_tint) != ctx.frame.prev_track_tint {
         ctx.frame.prev_track_tint = Some(track_tint);
-        sync_track_color_state(editor.runtime_mut(), app, &ctx.shared.state);
+        sync_track_color_state(editor.runtime_mut(), app);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
@@ -611,7 +611,7 @@ pub(crate) fn sync_reactive_tick(
             let param_sync_revision =
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
-            set_current_track_reactive(rt, app.tracks.len(), ct);
+            set_current_track_reactive(rt, ct);
             if current_track_playhead_visible {
                 sync_playhead_fields(
                     rt,
@@ -735,7 +735,7 @@ pub(crate) fn sync_reactive_tick(
             let selected_snapshot = ctx.shared.selected_tracks.lock().unwrap().clone();
             if selected_snapshot != ctx.frame.prev_selected_tracks {
                 let rt = editor.runtime_mut();
-                sync_selected_tracks_bindings(rt, app.tracks.len(), ct, &selected_snapshot);
+                sync_selected_tracks_bindings(rt, &selected_snapshot);
                 ctx.frame.prev_selected_tracks = selected_snapshot;
                 needs_reactive_cycle = true;
             }
@@ -752,9 +752,9 @@ pub(crate) fn sync_reactive_tick(
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             if sequencer_visible {
                 if playing {
-                    sync_all_track_playhead_fields(rt, &ctx.shared.state, &app);
+                    piano_roll::sync_tracker_grid_playhead_fields(rt, &ctx.shared.state, &app);
                 } else {
-                    clear_all_track_playhead_fields(rt, &app);
+                    clear_tracker_grid_playhead_fields(rt, &app);
                 }
             }
             ctx.frame.prev_playing = playing;
@@ -1016,8 +1016,9 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
         }
         if sequencer_visible {
-            // Length-lane marker (`length!`): changes at most once per cycle,
-            // so republish only the tracks whose marker moved.
+            // Length-lane marker (`length!`) of the expanded editors: changes
+            // at most once per cycle, so republish only the tracks whose
+            // marker moved.
             let lengths = track_process_lengths_snapshot(&ctx.shared.state, &app);
             if lengths != ctx.frame.prev_track_process_lengths {
                 let rt = editor.runtime_mut();
@@ -1025,8 +1026,6 @@ pub(crate) fn sync_reactive_tick(
                     if ctx.frame.prev_track_process_lengths.get(track) == Some(marker) {
                         continue;
                     }
-                    needs_reactive_cycle |=
-                        sync_track_length_row_fields(rt, &ctx.shared.state, track);
                     for viewport in ctx.shared.expanded_step_projection.all_viewports() {
                         if viewport.track == track {
                             needs_reactive_cycle |=
@@ -1037,7 +1036,7 @@ pub(crate) fn sync_reactive_tick(
                 ctx.frame.prev_track_process_lengths = lengths;
             }
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
-            if sync_track_playhead_field_delta(
+            if sync_tracker_grid_playhead_delta(
                 editor.runtime_mut(),
                 &ctx.shared.state,
                 &app,

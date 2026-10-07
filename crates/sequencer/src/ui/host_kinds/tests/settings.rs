@@ -955,12 +955,15 @@ fn the_cursor_step_setter_moves_the_grid_cursor_to_the_steps_track() {
     // The step panel shows the new track's step.
     assert_eq!(h.legacy("fx-step-cursor-number"), Value::Number(10.0));
     assert_eq!(h.legacy("fx-step-value-velocity"), Value::Number(0.75));
-    // The grid's cursor highlight moved, as a click on the step moves it.
-    let highlight = h
-        .rt()
-        .reactive_field_value("SEQV", "seqv-track-cursor-1-9")
-        .cloned();
-    assert_eq!(highlight, Some(Value::Bool(true)));
+    // The grid's cursor moved, as a click on the step moves it.
+    assert_eq!(
+        h.eval_7i("(let ((c eseq.sequencer/grid-cursor)) c.step)"),
+        Value::Number(9.0)
+    );
+    assert_eq!(
+        h.eval_7i("(eseq.sequencer/track-cursor t1)"),
+        Value::Number(9.0)
+    );
     let tid = h.app.track_registry.id_at(1).unwrap().0;
     assert_eq!(h.app.history.undo_len(), undo, "no history");
     // A step past the track's length is an error.

@@ -15,6 +15,8 @@
 ;; mode-bind-key from user lisp; `M-x describe-key` shows the winner.
 (module eseq.sequencer-keys)
 
+(import eseq.kinds :refer (track tracks selection))
+
 (export mode-name
         cursor-left
         cursor-right
@@ -59,11 +61,10 @@
         (mod (+ current delta) count)))))
 
 (def select-track-delta (delta)
-  (let ((count SEQ.num-tracks))
-    (if (> count 0)
+  (let ((current selection.track))
+    (when current
       (eseq.sequencer/select-track-for-edit
-        (track-relative (min SEQ.current-track (- count 1)) delta count))
-      nil)))
+        (track (track-relative current.index delta (len (tracks))))))))
 
 (def track-up () (do (select-track-delta -1) true))
 (def track-down () (do (select-track-delta 1) true))

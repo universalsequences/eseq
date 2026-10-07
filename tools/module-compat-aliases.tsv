@@ -448,9 +448,6 @@ seq-toggle-samples-sidebar	eseq.seq-panels/seq-toggle-samples-sidebar	content/ui
 seq-toggle-sound-palette	eseq.sound-palette/toggle-open	content/ui/sound-palette.lisp
 seq-toggle-track-collapsed-ui	eseq.track-collapse/toggle-collapsed-ui	content/ui/track-collapse.lisp
 seq-track-collapsed?	eseq.track-collapse/collapsed?	content/ui/track-collapse.lisp
-seq-track-custom-instrument?	eseq.track-collapse/custom-instrument?	content/ui/track-collapse.lisp
-seq-track-replaceable-instrument?	eseq.track-collapse/replaceable-instrument?	content/ui/track-collapse.lisp
-seq-track-sound-replaceable?	eseq.track-collapse/sound-replaceable?	content/ui/track-collapse.lisp
 seq-track-type-icon	eseq.track-collapse/type-icon	content/ui/track-collapse.lisp
 seq-unregister-step-sequencer-tab	eseq.seq-step-tabs/seq-unregister-step-sequencer-tab	content/ui/seq-step-tabs.lisp
 seq-visible-main-panel-buffer	eseq.seq-step-tabs/seq-visible-main-panel-buffer	content/ui/seq-step-tabs.lisp
@@ -474,7 +471,6 @@ seqv-drum-sound-mode?	eseq.seqv-track-params/seqv-drum-sound-mode?	content/ui/se
 seqv-drum-sound-short-labels	eseq.seqv-track-params/seqv-drum-sound-short-labels	content/ui/seqv-track-params.lisp
 seqv-drum-sound-transpose-at-index	eseq.seqv-track-params/seqv-drum-sound-transpose-at-index	content/ui/seqv-track-params.lisp
 seqv-drum-sound-transpose-for-label	eseq.seqv-track-params/seqv-drum-sound-transpose-for-label	content/ui/seqv-track-params.lisp
-seqv-expanded-track-ids	eseq.sequencer/expanded-track-ids	content/ui/sequencer.lisp
 seqv-handle-key	eseq.sequencer/handle-key	content/ui/sequencer.lisp
 seqv-open-piano-roll-for-track	eseq.sequencer/open-piano-roll-for-track	content/ui/sequencer.lisp
 seqv-param-color	eseq.seqv-track-params/seqv-param-color	content/ui/seqv-track-params.lisp
@@ -519,7 +515,6 @@ seqv-track-param-slider-min	eseq.seqv-track-params/seqv-track-param-slider-min	c
 seqv-track-param-values	eseq.seqv-track-params/seqv-track-param-values	content/ui/seqv-track-params.lisp
 seqv-track-process-lane	eseq.seqv-track-params/seqv-track-process-lane	content/ui/seqv-track-params.lisp
 seqv-track-process-lanes	eseq.seqv-track-params/seqv-track-process-lanes	content/ui/seqv-track-params.lisp
-seqv-track-selected-binding	eseq.sequencer/track-selected-binding	content/ui/sequencer.lisp
 seqv-track-step-param-value	eseq.seqv-track-params/seqv-track-step-param-value	content/ui/seqv-track-params.lisp
 seqv-track-step-slider-param-value	eseq.seqv-track-params/seqv-track-step-slider-param-value	content/ui/seqv-track-params.lisp
 set-arrangement-cursor	eseq.arrangement/set-cursor	content/ui/arrangement.lisp

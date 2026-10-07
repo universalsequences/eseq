@@ -3982,7 +3982,7 @@
                 assert!(state.pattern.patterns[TRACK].is_active(33));
                 editor
                     .runtime_mut()
-                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 33 (dict :sx -1))")
+                    .eval_str("(let ((t (eseq.kinds/track 0))) (eseq.sequencer/grid-step-pointer-up (nth t.steps 33) (dict :sx -1)))")
                     .expect("finish pianohold toggle drag");
                 state.pattern.patterns[TRACK].set_step_active(32, false);
                 state.pattern.patterns[TRACK].set_step_active(33, false);
@@ -7903,12 +7903,18 @@
                 }
             };
 
-            let track_ids = app
-                .graph
-                .track_node_ids
-                .iter()
-                .take(3)
-                .map(|ids| ids.pan_id)
+            // The expanded editors key their widgets by the track's `tid`.
+            let track_ids = (0..3)
+                .map(|track| {
+                    let tid = editor
+                        .runtime_mut()
+                        .eval_str(&format!("(let ((t (eseq.kinds/track {track}))) t.tid)"))
+                        .expect("track tid");
+                    match tid {
+                        Some(Value::Number(tid)) => tid as u64,
+                        other => panic!("track {track} tid: {other:?}"),
+                    }
+                })
                 .collect::<Vec<_>>();
             let percentile = |samples: &mut Vec<f64>, fraction: f64| {
                 samples.sort_by(|a, b| a.total_cmp(b));
@@ -7928,13 +7934,13 @@
             };
 
             for expanded_tracks in [1usize, 3usize] {
-                for track_id in track_ids.iter().take(expanded_tracks) {
+                for track in 0..expanded_tracks {
                     editor
                         .runtime_mut()
                         .eval_str(&format!(
-                            "(eseq.sequencer/set-track-expanded {track_id} true)"
+                            "(eseq.sequencer/set-track-expanded (eseq.kinds/track {track}) true)"
                         ))
-                        .unwrap_or_else(|error| panic!("expand track {track_id}: {error:?}"));
+                        .unwrap_or_else(|error| panic!("expand track {track}: {error:?}"));
                 }
                 finish_visible_update(&mut editor, &mut app, &mut tile_retained);
 
@@ -8071,13 +8077,16 @@
                             "crossed step {step} must hold {expected}, got {actual}"
                         );
                     }
-                    let cursor_field = format!("cursor-step-{}", track_ids[TRACK]);
                     assert_eq!(
                         editor
-                            .runtime()
-                            .reactive_field_value("SEQV", &cursor_field)
+                            .runtime_mut()
+                            .eval_str(&format!(
+                                "(eseq.sequencer/track-cursor (eseq.kinds/track {TRACK}))"
+                            ))
+                            .ok()
+                            .flatten()
                             .and_then(|value| match value {
-                                Value::Number(value) => Some(*value as usize),
+                                Value::Number(value) => Some(value as usize),
                                 _ => None,
                             }),
                         Some(final_slot),
@@ -11012,7 +11021,7 @@
                     reset_sampler_waveform_view(editor);
                     let revision = build_revision(&state, app);
                     let rt = editor.runtime_mut();
-                    set_current_track_reactive(rt, app.tracks.len(), ct);
+                    set_current_track_reactive(rt, ct);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_track_automation_state(rt, app, &state);
                     sync_step_param_lists(rt, &state, ct);
@@ -11062,8 +11071,6 @@
                     if selected_snapshot != frame.prev_selected_tracks {
                         sync_selected_tracks_bindings(
                             editor.runtime_mut(),
-                            app.tracks.len(),
-                            ct,
                             &selected_snapshot,
                         );
                         frame.prev_selected_tracks = selected_snapshot;
@@ -11911,8 +11918,14 @@
                             );
                             if !baseline_mode {
                                 assert_eq!(
-                                    sel_vis_value(editor, &format!("sel-track-vis-{track}")),
-                                    1.0,
+                                    editor
+                                        .runtime_mut()
+                                        .eval_str(&format!(
+                                            "(let ((t (eseq.kinds/track {track}))) t.in-selection)"
+                                        ))
+                                        .ok()
+                                        .flatten(),
+                                    Some(Value::Bool(true)),
                                     "{label}: the selected track's highlight field must be lit"
                                 );
                                 assert_eq!(
@@ -11933,17 +11946,6 @@
                                     sel_vis_value(editor, &format!("sel-group-vis-{group_id}")),
                                     1.0,
                                     "{label}: the group highlight field must light on group select"
-                                );
-                                assert_eq!(
-                                    sel_vis_value(
-                                        editor,
-                                        &format!(
-                                            "sel-track-vis-{}",
-                                            current_track.load(Ordering::Relaxed)
-                                        ),
-                                    ),
-                                    0.0,
-                                    "{label}: track highlights must gate off while the group owns the fx panel"
                                 );
                             }
                         }
@@ -13323,7 +13325,7 @@
                 // precondition and is intentionally outside the sample.
                 editor
                     .runtime_mut()
-                    .eval_str("(eseq.sequencer/grid-step-pointer-down 0 8 (dict :sx -1))")
+                    .eval_str("(let ((t (eseq.kinds/track 0))) (eseq.sequencer/grid-step-pointer-down (nth t.steps 8) (dict :sx -1)))")
                     .expect("arm selected-step move gesture");
                 assert_eq!(
                     editor.runtime_mut().eval_str("step-move-last").unwrap(),
@@ -13362,7 +13364,7 @@
                 }
                 editor
                     .runtime_mut()
-                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 9 (dict :sx -1))")
+                    .eval_str("(let ((t (eseq.kinds/track 0))) (eseq.sequencer/grid-step-pointer-up (nth t.steps 9) (dict :sx -1)))")
                     .expect("finish benchmark selected-step drag");
 
                 selected_steps.lock().unwrap().clear();
@@ -13413,7 +13415,7 @@
                 }
                 editor
                     .runtime_mut()
-                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 33 (dict :sx -1))")
+                    .eval_str("(let ((t (eseq.kinds/track 0))) (eseq.sequencer/grid-step-pointer-up (nth t.steps 33) (dict :sx -1)))")
                     .expect("finish benchmark toggle drag");
 
                 // delete-16: sixteen active steps selected, then the real

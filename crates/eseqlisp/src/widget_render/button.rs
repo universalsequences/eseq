@@ -183,23 +183,30 @@ fn icon_fill(props: &HashMap<String, Value>) -> Option<Color> {
     {
         return Some(color);
     }
-    // Track channels arrive either as literal numbers or, from
-    // `bind-seq-nth`, as reactive refs; `get_f32_prop` reads both.
+    // Track channels arrive either as literal numbers or as reactive refs;
+    // `get_f32_prop` reads both. While `muted`, `muted-track-r/-g/-b` (when
+    // given) color the glyph instead, as `muted-color` does the label.
     let bound = |key: &str| {
         matches!(
             props.get(key),
             Some(Value::Number(_)) | Some(Value::ReactiveRef { .. })
         )
     };
-    if !(bound("track-r") && bound("track-g") && bound("track-b")) {
-        return None;
+    let channels = |[r, g, b]: [&str; 3]| {
+        (bound(r) && bound(g) && bound(b)).then(|| {
+            Color::rgba(
+                super::get_f32_prop(props, r, 0.0),
+                super::get_f32_prop(props, g, 0.0),
+                super::get_f32_prop(props, b, 0.0),
+                1.0,
+            )
+        })
+    };
+    let fill = channels(["track-r", "track-g", "track-b"])?;
+    if get_bool_prop(props, "muted", false) {
+        return channels(["muted-track-r", "muted-track-g", "muted-track-b"]).or(Some(fill));
     }
-    Some(Color::rgba(
-        super::get_f32_prop(props, "track-r", 0.0),
-        super::get_f32_prop(props, "track-g", 0.0),
-        super::get_f32_prop(props, "track-b", 0.0),
-        1.0,
-    ))
+    Some(fill)
 }
 
 fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
@@ -754,6 +761,9 @@ impl WidgetDefinition for ButtonWidget {
             "track-r",
             "track-g",
             "track-b",
+            "muted-track-r",
+            "muted-track-g",
+            "muted-track-b",
         ]
     }
 
@@ -765,6 +775,9 @@ impl WidgetDefinition for ButtonWidget {
             "track-r",
             "track-g",
             "track-b",
+            "muted-track-r",
+            "muted-track-g",
+            "muted-track-b",
             "width",
             "height",
             "font-size",
@@ -1290,6 +1303,9 @@ mod tests {
                 "track-r",
                 "track-g",
                 "track-b",
+                "muted-track-r",
+                "muted-track-g",
+                "muted-track-b",
             ]
         );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
@@ -1429,9 +1445,30 @@ mod tests {
     }
 
     #[test]
+    fn muted_track_color_fills_the_icon_while_muted() {
+        let icon_fill_of = |muted: bool| {
+            let node = test_button_node(HashMap::from([
+                ("text".to_string(), Value::String("Kick".to_string())),
+                ("icon".to_string(), Value::Keyword("piano".to_string())),
+                ("muted".to_string(), Value::Bool(muted)),
+                ("track-r".to_string(), Value::Number(0.2)),
+                ("track-g".to_string(), Value::Number(0.2)),
+                ("track-b".to_string(), Value::Number(0.2)),
+                ("muted-track-r".to_string(), Value::Number(0.9)),
+                ("muted-track-g".to_string(), Value::Number(0.5)),
+                ("muted-track-b".to_string(), Value::Number(0.1)),
+            ]));
+            icon_fill(&node.props).expect("a track-colored icon")
+        };
+        assert_eq!((icon_fill_of(false).r, icon_fill_of(false).b), (0.2, 0.2));
+        let muted = icon_fill_of(true);
+        assert_eq!((muted.r, muted.g, muted.b), (0.9, 0.5, 0.1));
+    }
+
+    #[test]
     fn reactive_track_color_fills_the_badge_icon() {
-        // The sequencer header binds `:track-r/g/b` with `bind-seq-nth`, so
-        // the props hold reactive refs, not literal numbers.
+        // A header may bind `:track-r/g/b`, so the props hold reactive refs,
+        // not literal numbers.
         use std::sync::{Arc, atomic::AtomicU64};
         let channel = |field: &str, value: f64| Value::ReactiveRef {
             namespace: "SEQ".to_string(),
@@ -1443,9 +1480,9 @@ mod tests {
         let node = test_button_node(HashMap::from([
             ("text".to_string(), Value::String("md-snare".to_string())),
             ("icon".to_string(), Value::Keyword("piano".to_string())),
-            ("track-r".to_string(), channel("track-color-r-effective", 0.96)),
-            ("track-g".to_string(), channel("track-color-g-effective", 0.4)),
-            ("track-b".to_string(), channel("track-color-b-effective", 0.5)),
+            ("track-r".to_string(), channel("track-r", 0.96)),
+            ("track-g".to_string(), channel("track-g", 0.4)),
+            ("track-b".to_string(), channel("track-b", 0.5)),
         ]));
         let prims = ButtonWidget.build_primitives("badge", &node, test_viewport());
         let icon = prims

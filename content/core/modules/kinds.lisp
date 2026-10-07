@@ -1015,6 +1015,8 @@
          (soloed    :bool   :set set-track-soloed)
          (collapsed :bool   :set set-track-collapsed :doc "Lane collapsed in the sequencer")
          (playhead  :int    :doc "The playing step, -1 while stopped")
+         (playhead-page :int :doc "The 16-step page the playhead is on (playhead / 16), -1 while stopped")
+         (length-step :int  :doc "The step a length lane (length!) last set the pattern length to, while playing; -1 when none")
          (timebase  :string :doc "Step timebase: 1/16, 1/8T, …")
          (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
          (instrument-id :string :doc "The instrument it plays, as the browser's Instruments tab names it (builtin:sampler, …); empty for an empty track or a drum rack")
@@ -1064,7 +1066,10 @@
          (processes (list-of process) :doc "The process chain, in fire order: the project lanes, then the track's own")
          (lanes     (list-of lane) :doc "Every lane of the chain, in the lane selector's order")
          (active-notes (list-of (list-of :number))
-                    :doc "The notes sounding now, (note velocity trigger-id) per note, ascending; a piano-keyboard's :notes-by-track takes the rows")))
+                    :doc "The notes sounding now, (note velocity trigger-id) per note, ascending; a piano-keyboard's :notes-by-track takes the rows"))
+  ;; View state, per track and not saved: the sequencer shows the track's
+  ;; step editor expanded.
+  :state ((expanded false)))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.

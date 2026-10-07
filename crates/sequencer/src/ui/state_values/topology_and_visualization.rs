@@ -14,7 +14,7 @@ pub(crate) fn sync_track_topology_state(
     sync_track_name_state(rt, track_names, app);
     sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
-    set_current_track_reactive(rt, app.tracks.len(), current_track_idx);
+    set_current_track_reactive(rt, current_track_idx);
     rt.set_reactive(
         "SEQ",
         "record-armed",
@@ -625,8 +625,8 @@ pub(crate) fn sync_labels() -> impl Iterator<Item = String> {
     })
 }
 
-/// Per-rack clip bank for the collapsed rack row and the mixer strip
-/// (rack-clips spec §6): `{group-id, active, clips: [{id name}]}`. `active` is
+/// Per-rack clip bank (rack-clips spec §6), read by drum-rack-v2's lookups:
+/// `{group-id, active, clips: [{id name}]}`. `active` is
 /// the clip the CURRENT scene points at, or -1 for silence. A rack with no
 /// bank (legacy) contributes no entry, which is how the UI tells the two
 /// apart and offers "Convert to clips".
@@ -634,15 +634,6 @@ pub(crate) fn sync_rack_clip_state(rt: &mut Runtime, state: &Arc<SequencerState>
     let mut changed = false;
     let banks = state.with_scenes(|scenes| {
         list_value(scenes.rack_banks().iter().map(|bank| {
-            let active = scenes.current_rack_clip(bank.group_id);
-            let index = bank.clips.iter().position(|clip| Some(clip.id) == active)
-                .map_or(0, |index| index + 1);
-            changed |= rt.set_reactive("SEQ", &format!("rack-clip-index-{}", bank.group_id),
-                Value::Number(index as f64)).changed;
-            for clip in &bank.clips {
-                changed |= rt.set_reactive("SEQ", &format!("rack-clip-active-{}-{}", bank.group_id, clip.id),
-                    Value::Number(if Some(clip.id) == active { 1.0 } else { 0.0 })).changed;
-            }
             map_value([
                 ("group-id", Value::Number(bank.group_id as f64)),
                 ("clips", list_value(bank.clips.iter().map(|clip| map_value([
@@ -652,8 +643,6 @@ pub(crate) fn sync_rack_clip_state(rt: &mut Runtime, state: &Arc<SequencerState>
             ])
         }))
     });
-    // Roster/labels are structural; changing the active clip only updates
-    // retained numeric bindings, without rebuilding the sequencer header.
     changed |= rt.set_reactive("SEQ", "rack-clip-banks", banks).changed;
     changed |= rt.set_reactive("SEQ", "rack-clips", build_rack_clips_value(state)).changed;
     changed

@@ -285,7 +285,7 @@ pub(super) fn handle(
                     Value::Number(ctx.track_names.len() as f64),
                 );
                 rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                set_current_track_reactive(rt, app.tracks.len(), idx);
+                set_current_track_reactive(rt, idx);
                 rt.set_reactive("SEQ", "track-names", build_track_names(&ctx.track_names));
                 sync_all_track_sequencer_state(rt, &state, &app, idx, &selected_steps);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
@@ -592,7 +592,7 @@ pub(super) fn handle(
                             Value::Number(ctx.track_names.len() as f64),
                         );
                         rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                        set_current_track_reactive(rt, app.tracks.len(), selected);
+                        set_current_track_reactive(rt, selected);
                         rt.set_reactive(
                             "SEQ",
                             "track-names",
@@ -1257,17 +1257,11 @@ pub(super) fn handle(
                 *bus_state.lock().unwrap() = app.buses.clone();
                 *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                 *track_groups.lock().unwrap() = app.groups.clone();
-                let ct = current_track.load(Ordering::Relaxed);
                 let rt = editor.runtime_mut();
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 sync_groups_bindings(rt, &app.groups, &app.grooves);
-                sync_selected_tracks_bindings(
-                    rt,
-                    app.tracks.len(),
-                    ct,
-                    &HashSet::new(),
-                );
+                sync_selected_tracks_bindings(rt, &HashSet::new());
                 let _ =
                     rt.eval_str(&format!("(set! eseq.seq-core-state/selected-bus {selected_bus_index})"));
                 rt.run_reactive_cycle();

@@ -37,26 +37,20 @@ fn mute_and_solo_repaint_all_channel_views_without_rebuilding_layout() {
 
     let state = Arc::new(SequencerState::new(8, vec![]));
     let mut app = test_app_for_track_visual_state(state.clone());
-    // The mixer and the patch mixer bind kinds: mixer_mute_and_solo_only_repaint.
-    for buffer in ["*sequencer*", "*step*", "*arrangement*"] {
+    // The mixer, the patch mixer, the sequencer grid and the arrangement's
+    // headers bind kinds: mute_and_solo_only_repaint_through_kinds.
+    for buffer in ["*step*"] {
         let id = editor.buffers.iter().find(|item| item.name == buffer).expect(buffer).id;
         editor.set_active_buffer(id);
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 240, 100);
         let layout = editor.widget_layout().expect(buffer);
-        match buffer {
-            "*sequencer*" => {
-                assert_binding(&layout, "/mute-0", "active", "track-mutes", 0);
-                assert_binding(&layout, "/solo-0", "active", "track-solos", 0);
-                assert_binding(&layout, "/track-name-label-0", "muted", "track-muted-effective", 0);
-                assert_binding(&layout, "/group-solo-8", "active", "bus-solos", 2);
-            }
-            "*step*" => assert_binding(&layout, "/step-track-badge", "muted", "track-muted-effective", 0),
-            "*arrangement*" => {
-                assert_binding(&layout, "/solo-0", "active", "track-solos", 0);
-                assert_binding(&layout, "/track-name-label-0", "muted", "track-muted-effective", 0);
-            }
-            _ => unreachable!(),
-        }
+        assert_binding(
+            &layout,
+            "/step-track-badge",
+            "muted",
+            "track-muted-effective",
+            0,
+        );
         for (field, index) in [("track-solos", 0), ("track-mutes", 0),
             ("track-mutes", 3), ("bus-solos", 2), ("bus-mutes", 2)] {
             for enabled in [true, false] {
@@ -139,11 +133,12 @@ fn bound_kind_states<'a>(
     for child in &node.children { bound_kind_states(child, namespaces, states); }
 }
 
-/// The mixer and the patch mixer bind mute, solo, audibility, arm, the
-/// faders and the meters through kinds: a change of any repaints the bound
-/// widgets and never re-runs, rebuilds or relayouts the view.
+/// The mixer, the patch mixer, the sequencer grid and the arrangement's track
+/// headers bind mute, solo, audibility, arm, the selection, the faders and
+/// the meters through kinds: a change of any repaints the bound widgets and
+/// never re-runs, rebuilds or relayouts the view.
 #[test]
-fn mixer_mute_and_solo_only_repaint() {
+fn mute_and_solo_only_repaint_through_kinds() {
     let mut editor = full_grid_editor_for_scroll_tests();
     apply_sequencer_perf_pattern(&mut editor, 8, 64, 0);
     let mut group = regular_group_fixture(false);
@@ -157,17 +152,36 @@ fn mixer_mute_and_solo_only_repaint() {
     editor.refresh_runtime_side_effects();
     let namespaces: Vec<String> = [t0, t3, bus].iter().map(|id| format!("%instance/{id}")).collect();
 
-    for buffer in ["*mixer*", "*patch-mixer*"] {
+    for buffer in ["*mixer*", "*patch-mixer*", "*sequencer*", "*arrangement*"] {
         let id = editor.buffers.iter().find(|item| item.name == buffer).expect(buffer).id;
         editor.set_active_buffer(id);
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 240, 100);
         let layout = editor.widget_layout().expect(buffer);
-        assert_kind_binding(&layout, "/track-label-content-0", "muted", t0, "audible");
-        assert_kind_binding(&layout, "/track-label-content-0", "active", t0, "delete-target");
+        if buffer == "*mixer*" || buffer == "*patch-mixer*" {
+            assert_kind_binding(&layout, "/track-label-content-0", "muted", t0, "audible");
+            assert_kind_binding(
+                &layout,
+                "/track-label-content-0",
+                "active",
+                t0,
+                "delete-target",
+            );
+        } else {
+            assert_kind_binding(&layout, "/solo-0", "active", t0, "soloed");
+            assert_kind_binding(&layout, "/track-name-label-0", "muted", t0, "audible");
+        }
         if buffer == "*mixer*" {
             assert_kind_binding(&layout, "/track-collapsed-label-content-3", "muted", t3, "audible");
+        }
+        if buffer == "*mixer*" || buffer == "*sequencer*" {
             assert_kind_binding(&layout, "/group-solo-8", "active", bus, "soloed");
             assert_kind_binding(&layout, "/group-mute-8", "active", bus, "muted");
+        }
+        if buffer == "*sequencer*" {
+            assert_kind_binding(&layout, "/mute-0", "active", t0, "muted");
+            assert_kind_binding(&layout, "/arm-0", "active", t0, "armed");
+            assert_kind_binding(&layout, "/track-volume-control-0", "volume", t0, "volume");
+            assert_kind_binding(&layout, "/track-volume-control-0", "level", t0, "peak");
         }
         for (id, field, on, off) in [
             (t0, "audible", Value::Bool(false), Value::Bool(true)),

@@ -68,7 +68,7 @@ fn the_mixer_binds_its_host_state_through_kinds_and_only_repaints_while_mixing()
             );
         }
     }
-    let sends = h.eval_all("(let ((t (track 0))) t.sends)");
+    let sends = h.track_field(0, "sends");
     for send in h.instances(sends) {
         for field in ["display", "locked", "amount"] {
             assert!(
@@ -96,14 +96,8 @@ fn the_mixer_binds_its_host_state_through_kinds_and_only_repaints_while_mixing()
     assert!(h.sync());
     h.show_all();
     h.editor.refresh_runtime_side_effects();
-    assert_eq!(
-        h.eval_all("(let ((t (track 0))) t.volume)"),
-        Value::Number(0.3_f32 as f64)
-    );
-    assert_eq!(
-        h.eval_all("(let ((t (track 0))) t.audible)"),
-        Value::Bool(false)
-    );
+    assert_eq!(h.track_field(0, "volume"), Value::Number(0.3_f32 as f64));
+    assert_eq!(h.track_field(0, "audible"), Value::Bool(false));
     assert_eq!(
         h.eval_all("(let ((b (nth (buses) 1))) b.muted)"),
         Value::Bool(true)

@@ -113,27 +113,10 @@ fn hsl([r, g, b]: [f32; 3]) -> (f32, f32, f32) {
     (hue.rem_euclid(360.0), sat.min(1.0), light)
 }
 
-/// Republish all color projections together on a theme switch. Mute and take
-/// dimming are applied after the tint, just as they are for authored colors.
-pub(crate) fn sync_track_color_state(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-) {
+/// Republish the color projections together on a theme switch.
+pub(crate) fn sync_track_color_state(rt: &mut Runtime, app: &app::App) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
     rt.set_reactive("SEQ", "groups", build_groups_value(&app.groups));
-    for channel in 0..3 {
-        rt.set_reactive(
-            "SEQ",
-            track_color_channel_effective_field(channel),
-            build_track_color_channel_effective(app, state, channel),
-        );
-        rt.set_reactive(
-            "SEQ",
-            step_color_channel_effective_field(channel),
-            build_step_color_channel_effective(app, state, channel),
-        );
-    }
 }
 
 pub(crate) fn build_track_colors(app: &app::App) -> Value {
@@ -493,80 +476,6 @@ pub(crate) fn build_track_muted_effective(app: &app::App, state: &Arc<SequencerS
     Value::List(items)
 }
 
-/// Per-track UI color channel with the mute dim baked in, matching the Lisp
-/// seqv-track-color-r/g/b formulas used by row chrome and compact controls.
-pub(crate) fn build_track_color_channel_effective(
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    channel: usize,
-) -> Value {
-    let count = state.active_track_count();
-    let solo = app.solo_audibility();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|track| {
-            let muted = track_effectively_muted(state, track, &solo);
-            let value = track_color_channel_effective_value(app, track, channel, muted);
-            Rc::new(RefCell::new(Value::Number(value)))
-        })
-        .collect();
-    Value::List(items)
-}
-
-/// Step-cell color channel: the raw track color, dimmed only for take-governed
-/// lanes (takes spec 10 UX). Muting is a separate shader state so muted steps
-/// can use fully opaque neutral materials instead of translucent track colors.
-pub(crate) fn build_step_color_channel_effective(
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    channel: usize,
-) -> Value {
-    let count = state.active_track_count();
-    let take_states = super::song_state::song_take_lane_states(app);
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|track| {
-            let dimmed = take_states.get(track) == Some(&1);
-            let value = track_color_channel_effective_value(app, track, channel, dimmed);
-            Rc::new(RefCell::new(Value::Number(value)))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(super) fn step_color_channel_effective_field(channel: usize) -> &'static str {
-    match channel {
-        0 => "step-color-r-effective",
-        1 => "step-color-g-effective",
-        _ => "step-color-b-effective",
-    }
-}
-
-pub(super) fn track_color_channel_effective_value(
-    app: &app::App,
-    track: usize,
-    channel: usize,
-    dimmed: bool,
-) -> f64 {
-    let color = track_display_color(app, track);
-    let (raw, dim_base) = match channel {
-        0 => (color.r as f64, 0.10),
-        1 => (color.g as f64, 0.10),
-        _ => (color.b as f64, 0.11),
-    };
-    if dimmed {
-        raw * 0.34 + dim_base * 0.66
-    } else {
-        raw
-    }
-}
-
-pub(super) fn track_color_channel_effective_field(channel: usize) -> &'static str {
-    match channel {
-        0 => "track-color-r-effective",
-        1 => "track-color-g-effective",
-        _ => "track-color-b-effective",
-    }
-}
-
 pub(crate) fn sync_track_mute_visual_binding_fields(
     rt: &mut Runtime,
     app: &app::App,
@@ -576,7 +485,6 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
 ) -> bool {
     let count = state.active_track_count();
     let solo = app.solo_audibility();
-    let take_states = super::song_state::song_take_lane_states(app);
     let mut effects_dirty = false;
 
     for track in tracks {
@@ -603,34 +511,6 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
                 Value::Number(if muted { 1.0 } else { 0.0 }),
             )
             .effects_dirty;
-
-        for channel in 0..3 {
-            effects_dirty |= rt
-                .set_reactive_list_index(
-                    "SEQ",
-                    track_color_channel_effective_field(channel),
-                    track,
-                    Value::Number(track_color_channel_effective_value(
-                        app, track, channel, muted,
-                    )),
-                )
-                .effects_dirty;
-        }
-        // Step-cell channels only dim take-governed lanes. Effective mute is
-        // passed independently to the step shader above.
-        let step_dimmed = take_states.get(track) == Some(&1);
-        for channel in 0..3 {
-            effects_dirty |= rt
-                .set_reactive_list_index(
-                    "SEQ",
-                    step_color_channel_effective_field(channel),
-                    track,
-                    Value::Number(track_color_channel_effective_value(
-                        app, track, channel, step_dimmed,
-                    )),
-                )
-                .effects_dirty;
-        }
     }
 
     effects_dirty
@@ -675,36 +555,6 @@ pub(crate) fn sync_track_mixer_state(
         "SEQ",
         "track-muted-effective",
         build_track_muted_effective(app, state),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "step-color-r-effective",
-        build_step_color_channel_effective(app, state, 0),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "step-color-g-effective",
-        build_step_color_channel_effective(app, state, 1),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "step-color-b-effective",
-        build_step_color_channel_effective(app, state, 2),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-color-r-effective",
-        build_track_color_channel_effective(app, state, 0),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-color-g-effective",
-        build_track_color_channel_effective(app, state, 1),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-color-b-effective",
-        build_track_color_channel_effective(app, state, 2),
     );
 }
 
@@ -757,9 +607,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-effective", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-color-r-effective", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-color-g-effective", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-color-b-effective", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-names", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));

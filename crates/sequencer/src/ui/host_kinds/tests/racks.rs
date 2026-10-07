@@ -270,9 +270,7 @@ fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
         h.eval_7h(&format!("(def cx (nth g.clips {index}))"));
         assert_eq!(get(clip, "id"), h.eval_7h("cx.cid"));
         assert_eq!(get(clip, "name"), h.eval_7h("cx.name"));
-        let cid = num(get(clip, "id")) as u64;
-        let active = h.seq_7h(&format!("rack-clip-active-{gid}-{cid}"));
-        let active = Value::Bool(active == Value::Number(1.0));
+        let active = Value::Bool(get(clip, "id") == get(&banks[0], "active"));
         assert_eq!(active, h.eval_7h("cx.active"));
     }
     let scene_clips = list(get(&banks[0], "scene-clips"));
@@ -286,8 +284,6 @@ fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
         let scenes = h.eval_7h("(map (lambda (sc) sc.index) cx.scenes)");
         assert_eq!(list(scenes), legacy, "clip {index}'s scenes");
     }
-    let index = h.seq_7h(&format!("rack-clip-index-{gid}"));
-    assert_eq!(index, Value::Number(1.0), "the legacy index is 1-based");
     // Silence: no clip plays.
     h.run_7h("(silence-rack! g)");
     assert_eq!(h.eval_7h("g.rack-clip"), Value::Nil);

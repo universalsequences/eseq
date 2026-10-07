@@ -80,7 +80,7 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
     let rt = editor.runtime_mut();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-    set_current_track_reactive(rt, app.tracks.len(), selected_track);
+    set_current_track_reactive(rt, selected_track);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
@@ -2804,7 +2804,7 @@ pub(super) fn load_or_convert_sampler_track(
         current_track.store(selected_track, Ordering::Relaxed);
         app.ui.cursor_track = selected_track;
         let rt = editor.runtime_mut();
-        set_current_track_reactive(rt, app.tracks.len(), selected_track);
+        set_current_track_reactive(rt, selected_track);
         rt.set_reactive(
             "SEQ",
             "instrument-panel",
@@ -2907,7 +2907,7 @@ pub(super) fn load_or_convert_sampler_track(
     app.ui.cursor_track = selected_track;
 
     let rt = editor.runtime_mut();
-    set_current_track_reactive(rt, app.tracks.len(), selected_track);
+    set_current_track_reactive(rt, selected_track);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive(
         "SEQ",

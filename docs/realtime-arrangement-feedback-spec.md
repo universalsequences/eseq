@@ -113,8 +113,8 @@ ownership of the whole `[P, Q)` splice is worth keeping simple.
 - Exception: **manually latched lanes already hear edits.** The lookahead
   merges the live snapshot over the row snapshot per chunk for every latched
   bit (`lookahead.rs:304-323`), consistent with the Seq UI only blocking
-  pointer gestures on take-governed lanes (state `1` in
-  `SEQ.song-track-governed`; ordinary lanes are never dimmed or blocked
+  pointer gestures on take-governed lanes (`track.governed` is
+  `take-governed`; ordinary lanes are never dimmed or blocked
   mid-playback — `song_state.rs:389`).
 - The timeline never sees note edits either: `SEQ.song-lane-events` rebuilds
   on `pattern_epoch`, which **no step edit bumps** — and an invariant test

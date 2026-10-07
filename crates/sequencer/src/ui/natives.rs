@@ -3184,7 +3184,6 @@ pub(crate) fn init_runtime(
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
-                ("song-track-governed", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
@@ -3655,10 +3654,6 @@ pub(crate) fn init_runtime(
             fields.extend(tuning_reactive_fields(&state.pattern.track_params[0]));
             for idx in 0..track_count {
                 fields.push((
-                    Box::leak(track_selected_field(idx).into_boxed_str()),
-                    Value::Bool(idx == 0),
-                ));
-                fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
@@ -3697,10 +3692,6 @@ pub(crate) fn init_runtime(
                 ));
             }
             for track in 0..track_count {
-                fields.push((
-                    Box::leak(track_playhead_page_field(track).into_boxed_str()),
-                    Value::Number((track_active_playhead_step(&state, track) / PAGE_SIZE) as f64),
-                ));
                 for step in 0..MAX_STEPS {
                     fields.push((
                         Box::leak(track_step_active_field(track, step).into_boxed_str()),
@@ -3717,10 +3708,6 @@ pub(crate) fn init_runtime(
                     fields.push((
                         Box::leak(track_step_selected_field(track, step).into_boxed_str()),
                         Value::Bool(false),
-                    ));
-                    fields.push((
-                        Box::leak(track_playhead_active_field(track, step).into_boxed_str()),
-                        Value::Bool(step == track_active_playhead_step(&state, track)),
                     ));
                 }
             }

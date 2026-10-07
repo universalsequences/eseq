@@ -1391,7 +1391,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         record_preset_listings();
         // This also publishes group topology, which hook gestures need to
         // calculate the same visible track order as the rendered UI.
-        sync_track_color_state(runtime, &app, &state);
+        sync_track_color_state(runtime, &app);
         sync_track_topology_state(
             runtime,
             &app,
@@ -1440,10 +1440,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     // clicks. Publish it before drawing, as the live reactive tick does.
     let selected_track = current_track.load(std::sync::atomic::Ordering::Relaxed);
     editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(selected_track as f64));
-    sync_selected_tracks_bindings(
-        editor.runtime_mut(), app.tracks.len(), selected_track,
-        &selected_tracks.lock().unwrap(),
-    );
+    sync_selected_tracks_bindings(editor.runtime_mut(), &selected_tracks.lock().unwrap());
     // Capture has no meter tick. Seed the same effective-value bindings at
     // rest, so mod-capable curves draw their resolved base rather than reading
     // an uninitialized reactive field as zero. No DSP or watchlist is needed.
@@ -1484,7 +1481,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // capture-after-sync may apply a theme after the initial project sync.
     // Mirror the live loop's display-color refresh before rendering.
-    sync_track_color_state(editor.runtime_mut(), &app, &state);
+    sync_track_color_state(editor.runtime_mut(), &app);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     sync_host_kinds(&mut editor, &app);

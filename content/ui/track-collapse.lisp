@@ -1,61 +1,29 @@
-;; Shared project-backed track collapse helpers.
+;; Shared project-backed track collapse helpers, over eseq.kinds tracks.
 
 (module eseq.track-collapse)
 
+(import eseq.kinds :refer (track tracks))
+
 (export collapsed?
         visible-track-indices
-        custom-instrument?
-        empty-instrument?
-        replaceable-instrument?
-        sound-replaceable?
         type-icon
         instrument-icon
         replaceable-type?
-        group-type-icon
         toggle-collapsed-ui)
 
-;; Migration compat aliases (spec §10 slice 3): browser.lisp, mixer.lisp,
-;; sequencer.lisp and arrangement.lisp all call these bare and are still
-;; unconverted. `toggle-collapsed-ui` has no caller today, but it is
-;; command-shaped (the kind of name a `bind-key`/`:on-key` string reaches by
-;; spelling), so it keeps an alias too.
-
-(def collapsed? (track)
-  (and (< track (len SEQ.track-collapsed))
-    (nth SEQ.track-collapsed track)))
+;; Whether the track at position i is collapsed (drum-rack-v2's member rows
+;; address tracks by position).
+(def collapsed? (i)
+  (let ((t (track i)))
+    (and t t.collapsed)))
 
 (def visible-track-indices ()
-  (filter
-    (lambda (track) (not (collapsed? track)))
-    (range 0 SEQ.num-tracks)))
-
-(def custom-instrument? (track)
-  (and (>= track 0)
-    (< track SEQ.num-tracks)
-    (< track (len SEQ.track-instrument-types))
-    (= (nth SEQ.track-instrument-types track) "custom")))
-
-(def empty-instrument? (track)
-  (and (>= track 0)
-    (< track SEQ.num-tracks)
-    (< track (len SEQ.track-instrument-types))
-    (= (nth SEQ.track-instrument-types track) "empty")))
+  (map (lambda (t) t.index) (filter (lambda (t) (not t.collapsed)) (tracks))))
 
 ;; Whether a track playing instrument type `kind` (track.instrument-type)
 ;; takes a dropped sound or instrument in place of its own.
 (def replaceable-type? (kind)
   (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))
-
-(def replaceable-instrument? (track)
-  (and (>= track 0)
-    (< track SEQ.num-tracks)
-    (< track (len SEQ.track-instrument-types))
-    (replaceable-type? (nth SEQ.track-instrument-types track))))
-
-;; COMPAT(eseq-0l17): replaceable-instrument? under the name
-;; ui/sequencer.lisp still calls; goes when that view ports to the kinds.
-(def sound-replaceable? (track)
-  (replaceable-instrument? track))
 
 ;; Track identity icons intentionally share the same icon names as the sound
 ;; browser tabs. Keeping the mapping here prevents the mixer and sequencer from
@@ -69,15 +37,11 @@
     "empty" :midi
     _ nil))
 
-(def type-icon (track)
-  (if (< track (len SEQ.track-instrument-types))
-    (instrument-icon (nth SEQ.track-instrument-types track))
-    nil))
+;; The icon of the track at position i (the piano roll's header).
+(def type-icon (i)
+  (let ((t (track i)))
+    (if t (instrument-icon t.instrument-type) nil)))
 
-(def group-type-icon (group)
-  ;; The browser lists Drum Rack and Instrument Rack under the same :sampler
-  ;; rack glyph, so both the drum-rack group and the slot-based rack use it.
-  (if (get group :rack) :sampler nil))
-
-(def toggle-collapsed-ui (track)
-  (seq-toggle-track-collapsed track))
+(def toggle-collapsed-ui (i)
+  (let ((t (track i)))
+    (when t (toggle! t.collapsed))))

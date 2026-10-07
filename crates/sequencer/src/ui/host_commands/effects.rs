@@ -1762,7 +1762,7 @@ pub(super) fn handle(
                 if let Some(slot_idx) = app.next_free_custom_slot() {
                     app.start_effect_compile(&effect_name, slot_idx);
                     let rt = editor.runtime_mut();
-                    set_current_track_reactive(rt, app.tracks.len(), track);
+                    set_current_track_reactive(rt, track);
                     rt.set_reactive("SEQ", "compiling", Value::Bool(true));
                     sync_track_mixer_state(rt, &app, &state);
                     sync_sidebar_browser(rt, &app, track);
@@ -1853,7 +1853,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
+                        set_current_track_reactive(rt, track);
                         rt.set_reactive(
                             "SEQ",
                             "effects",
@@ -1962,7 +1962,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
+                        set_current_track_reactive(rt, track);
                         rt.set_reactive(
                             "SEQ",
                             "midi-effects",
@@ -2017,7 +2017,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
+                        set_current_track_reactive(rt, track);
                         rt.set_reactive(
                             "SEQ",
                             "effects",
@@ -2075,7 +2075,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
+                        set_current_track_reactive(rt, track);
                         rt.set_reactive(
                             "SEQ",
                             "effects",
@@ -2127,7 +2127,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
+                        set_current_track_reactive(rt, track);
                         rt.set_reactive(
                             "SEQ",
                             "midi-effects",
@@ -2178,7 +2178,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), target_track);
+                        set_current_track_reactive(rt, target_track);
                         rt.set_reactive(
                             "SEQ",
                             "effects",
@@ -2257,7 +2257,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), target_track);
+                        set_current_track_reactive(rt, target_track);
                         rt.set_reactive(
                             "SEQ",
                             "midi-effects",

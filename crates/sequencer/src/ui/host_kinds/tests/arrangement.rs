@@ -519,10 +519,7 @@ fn arrangement_live_fields_are_computed_only_while_observed() {
     }
     // A cold read answers without observing.
     h.shared.state.latch_song_manual_override([0]);
-    assert_eq!(
-        h.eval_7d("(let ((t (track 0))) t.latched)"),
-        Value::Bool(true)
-    );
+    assert_eq!(h.track_field(0, "latched"), Value::Bool(true));
     assert_eq!(h.eval_7d("song.manual-latch"), Value::Bool(true));
     h.shared.state.clear_song_manual_latch();
     // One observed cell of several: one computation per tick.
@@ -682,7 +679,7 @@ fn arrangement_setter_rejections_latch_the_edit_error_and_stale_ids_fail() {
     assert_eq!(h.app.song_edit_error, None);
     // A pattern id that is not in the track's pool.
     h.app.song_edit_error = None;
-    let track = h.eval_7d("(let ((t (track 0))) t.tid)");
+    let track = h.track_field(0, "tid");
     h.command(
         "set-clip",
         map_value([

@@ -3409,11 +3409,11 @@ mod live_keyboard_tests {
                 (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
                 (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
                 (def eseq.drum-rack-v2/track-relative (track delta) nil)
-                (def eseq.sequencer/select-track-for-edit (track)
+                (def eseq.sequencer/select-track-for-edit (t)
                   (do
                     (set! eseq.seq-core-state/selected-bus -1)
-                    (set! selected-track-via-seqv track)
-                    (seq-set-track track)))
+                    (set! selected-track-via-seqv t.index)
+                    (seq-set-track t.index)))
                 "#,
             )
             .expect("install sequencer key hooks");
@@ -3428,6 +3428,24 @@ mod live_keyboard_tests {
         editor.refresh_runtime_side_effects();
     }
 
+    /// Track `index` as the current track (`selection.track`), as the host
+    /// kinds publish it.
+    fn select_kind_track(editor: &mut Editor, index: usize) {
+        let rt = editor.runtime_mut();
+        let track = rt
+            .keyed_instance("eseq.kinds:track", &[index as u64])
+            .expect("track");
+        let selection = rt
+            .singleton_instance("eseq.kinds:selection")
+            .expect("selection");
+        rt.set_instance_field(selection, "track", Value::Instance(track))
+            .unwrap();
+        rt.run_reactive_cycle();
+    }
+
+    /// `track_count` tracks (`project.tracks`, each with its `index`) with
+    /// track `current` selected, and `seq-set-track` recording the current
+    /// track it is handed.
     fn install_track_selection(editor: &mut Editor, track_count: usize, current: usize) -> Arc<AtomicUsize> {
         let current_track = Arc::new(AtomicUsize::new(current));
         let native_track = Arc::clone(&current_track);
@@ -3443,12 +3461,23 @@ mod live_keyboard_tests {
         editor
             .runtime_mut()
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(current as f64));
+        let rt = editor.runtime_mut();
+        let tracks: Vec<_> = (0..track_count)
+            .map(|index| {
+                let track = rt
+                    .register_keyed_instance("eseq.kinds:track", &[index as u64])
+                    .unwrap();
+                rt.set_instance_field(track, "index", Value::Number(index as f64))
+                    .unwrap();
+                Rc::new(RefCell::new(Value::Instance(track)))
+            })
+            .collect();
+        let project = rt
+            .singleton_instance("eseq.kinds:project")
+            .expect("project");
+        rt.set_instance_field(project, "tracks", Value::List(tracks))
+            .unwrap();
+        select_kind_track(editor, current);
         current_track
     }
 
@@ -3570,10 +3599,10 @@ mod live_keyboard_tests {
 
         editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 1);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        select_kind_track(&mut editor, 1);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
+        select_kind_track(&mut editor, 0);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 2, "UP wraps from the first track");
     }
@@ -3598,7 +3627,7 @@ mod live_keyboard_tests {
         let current_track = install_track_selection(&mut editor, 12, 7);
         editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 10);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(10.0));
+        select_kind_track(&mut editor, 10);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 7);
     }
@@ -4672,8 +4701,8 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.sequencer/expanded-track-ids '(0 1))
-                (def eseq.sequencer/collapse-all-tracks () (set! eseq.sequencer/expanded-track-ids '()))
+                (defstate collapse-count 0)
+                (def eseq.sequencer/collapse-all-tracks () (set! collapse-count (+ collapse-count 1)))
                 "#,
             )
             .expect("install collapse handler");
@@ -4692,11 +4721,8 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.sequencer/expanded-track-ids")
-                .unwrap(),
-            Some(eseqlisp::vm::Value::List(vec![]))
+            editor.runtime_mut().eval_str("collapse-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(1.0))
         );
     }
 

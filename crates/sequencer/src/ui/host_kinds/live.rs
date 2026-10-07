@@ -510,6 +510,15 @@ pub(super) fn live_value<S: KindStore>(
                 f::TRACK_PLAYHEAD => {
                     number(sources.playing_step(track).map_or(-1.0, |step| step as f64))
                 }
+                f::TRACK_PLAYHEAD_PAGE => number(
+                    sources
+                        .playing_step(track)
+                        .map_or(-1.0, |step| (step / PAGE_SIZE) as f64),
+                ),
+                f::TRACK_LENGTH_STEP => number(
+                    track_process_length_step(&sources.state, track)
+                        .map_or(-1.0, |step| step as f64),
+                ),
                 f::TRACK_TIMEBASE => Value::String(params.get_timebase().label().to_string()),
                 f::TRACK_MOD_OUT_LEVEL => {
                     let shared = shared.borrow();

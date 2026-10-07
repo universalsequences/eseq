@@ -35,7 +35,7 @@
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks :refer (scene-viewed-bank clip-in-viewed-bank?))
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
-                              rgb-part color-rgba))
+                              rgb-part color-rgba track-color-part))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
                            mod-in-level launch-cell! launch-rack-clip! save-rack-clip-as!
                            convert-rack-to-clips!))
@@ -256,28 +256,16 @@
 
 ;; ── Colors ──
 
-;; Muted strips pull component i (0 r, 1 g, 2 b) of their color toward a
-;; dark gray.
-(def dimmed (v i muted)
-  (if muted (+ (* v 0.34) (* (if (= i 2) 0.11 0.10) 0.66)) v))
-
-(def color-part (c i muted) (dimmed (rgb-part c i) i muted))
-
 (def track-rgba (t muted alpha)
-  (let ((c t.color))
-    (rgba (color-part c 0 muted) (color-part c 1 muted) (color-part c 2 muted) alpha)))
+  (rgba (track-color-part t 0 muted) (track-color-part t 1 muted) (track-color-part t 2 muted)
+        alpha))
 
 ;; COMPAT(eseq-0l17): positional shims. Track i's color components, dimmed
 ;; when muted (the track panel header paints itself with them;
 ;; effects/track-panels.lisp); a stock blue when there is no track i.
-(def track-color-part (i muted part)
-  (let ((t (track i)))
-    (if t
-      (color-part t.color part muted)
-      (dimmed (nth (list 0.34 0.48 0.98) part) part muted))))
-(def track-color-r (i muted) (track-color-part i muted 0))
-(def track-color-g (i muted) (track-color-part i muted 1))
-(def track-color-b (i muted) (track-color-part i muted 2))
+(def track-color-r (i muted) (track-color-part (track i) 0 muted))
+(def track-color-g (i muted) (track-color-part (track i) 1 muted))
+(def track-color-b (i muted) (track-color-part (track i) 2 muted))
 
 (def arm-color (rgba 0.95 0.20 0.18 1.0))
 
@@ -1221,7 +1209,7 @@
             :muted-background-color (track-rgba t false 1.0)
             :selected-background-color :fx-panel-header-selected-bg
             :on-click (lambda (event) (track-click event t select-track-delete-target))
-            :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track t.index)))
+            :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track t)))
       body)))
 
 ;; Renames rebuild the label; mute/solo and selection only repaint bindings.
@@ -1532,7 +1520,7 @@
           :selected #'g.delete-target
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (select-group-delete-target g))
-          :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g.index))
+          :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
           :on-right-click (lambda (event) (open-strip-menu event nil g))
           (h-stack :gap 0.2 :align :center
             (box :width 0.05)

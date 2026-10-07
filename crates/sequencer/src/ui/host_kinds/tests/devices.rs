@@ -1027,17 +1027,13 @@ fn rack_slot_strip_controls_read_their_base_display_and_lock_state() {
     h.shared.selected_steps.lock().unwrap().clear();
     let transport = &h.shared.state.transport;
     transport.track_playheads[2].store(5, Ordering::Relaxed);
-    transport.playing.store(true, Ordering::Relaxed);
+    h.set_playing(true);
     h.sync();
     assert_eq!(
         h.eval_all("(list rs.gain-display rs.pan-display rs.pan-locked rs.muted-display)"),
         h.eval_all("(list 0.5 -0.25 true false)")
     );
-    h.shared
-        .state
-        .transport
-        .playing
-        .store(false, Ordering::Relaxed);
+    h.set_playing(false);
     // Locks already holding the value are left alone; clearing is one
     // entry, and only steps holding a lock count.
     let before = h.app.history.undo_len();

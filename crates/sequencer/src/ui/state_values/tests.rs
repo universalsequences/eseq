@@ -2346,15 +2346,6 @@ use panel_kinds_seed::*;
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
                 ("track-instrument-types", test_list(vec![])),
-                // The real eseq.seq-core-state (imported by browser.lisp)
-                // gates seq-has-selected-bus? on the bus list length.
-                (
-                    "bus-names",
-                    test_list(vec![
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
                 // The kit save panel's scene checklist (rack-clips spec §7.2)
                 // reads the rack's per-scene clip pointers (the scenes are
                 // kinds: `seed_browser_kinds`).
@@ -2477,6 +2468,9 @@ use panel_kinds_seed::*;
             .eval_str(&src)
             .expect("load browser lisp");
         seed_browser_kinds(&mut editor, &["Intro", "Verse", "Chorus"]);
+        // The real eseq.seq-core-state (imported by browser.lisp) gates
+        // seq-has-selected-bus? on the bus list (`(buses)`).
+        seed_kind_buses(&mut editor, &[(1, "Bus A"), (2, "Bus B")]);
         set_browser_view_field(&mut editor, "browser-view", "tab", r#""instruments""#);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -8958,28 +8952,6 @@ use panel_kinds_seed::*;
         value
     }
 
-    fn assert_effective_color_reactives_match_builders(
-        runtime: &Runtime,
-        app: &app::App,
-        state: &Arc<SequencerState>,
-    ) {
-        for channel in 0..3 {
-            for (field, expected) in [
-                (
-                    track_color_channel_effective_field(channel),
-                    build_track_color_channel_effective(app, state, channel),
-                ),
-                (
-                    step_color_channel_effective_field(channel),
-                    build_step_color_channel_effective(app, state, channel),
-                ),
-            ] {
-                let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
-                assert_number_lists_close(&actual, &number_list_values(&expected));
-            }
-        }
-    }
-
     fn test_app_for_track_visual_state(state: Arc<SequencerState>) -> app::App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
@@ -9120,66 +9092,16 @@ use panel_kinds_seed::*;
         );
     }
 
-    fn playhead_row_active(runtime: &Runtime, track: usize, row: usize) -> Value {
-        reactive_field_value(runtime, "SEQ", &track_playhead_row_active_field(track, row))
-    }
-
-    /// The row-active field is what a label's float `active` prop binds to, so
-    /// it has to stay a clean 0/1 and follow the playhead across rows — the
-    /// column field it sits beside can't serve that role (column 0 is falsy).
+    /// The length-lane marker (`length!`): the expanded slot field is a 0/1
+    /// on the page that holds the step the lane set the length to, dark when
+    /// stopped. (The grid reads `track.length-step`.)
     #[test]
-    fn track_playhead_row_active_field_follows_the_playing_row() {
-        let state = Arc::new(SequencerState::new(1, vec![]));
-        state.pattern.track_params[0].set_num_steps(64);
-        let app = test_app_for_track_visual_state(state.clone());
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], false);
-
-        sync_all_track_playhead_fields(&mut runtime, &state, &app);
-        assert_eq!(playhead_row_active(&runtime, 0, 0), Value::Bool(true));
-        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
-        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 0)), Value::Bool(true));
-        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 1)), Value::Bool(false));
-        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_page_field(0)), Value::Number(0.0));
-
-        // Step 20 lives on row 1, so the delta path must hand the flag over.
-        let mut previous = vec![0u32];
-        state.transport.track_playheads[0].store(20, Ordering::Relaxed);
-        sync_track_playhead_field_delta(&mut runtime, &state, &app, &mut previous);
-        assert_eq!(playhead_row_active(&runtime, 0, 0), Value::Bool(false));
-        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(true));
-
-        // Moving within a row leaves the flag set.
-        state.transport.track_playheads[0].store(21, Ordering::Relaxed);
-        sync_track_playhead_field_delta(&mut runtime, &state, &app, &mut previous);
-        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(true));
-
-        clear_all_track_playhead_fields(&mut runtime, &app);
-        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
-        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 21)), Value::Bool(false));
-
-        // A full sync must clear stale steps, including after restart at zero.
-        state.transport.track_playheads[0].store(0, Ordering::Relaxed);
-        sync_all_track_playhead_fields(&mut runtime, &state, &app);
-        for step in 0..MAX_STEPS {
-            assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, step)),
-                Value::Bool(step == 0));
-        }
-    }
-
-    /// The length-lane marker (`length!`): the grid row field carries the
-    /// column of the step the lane set the length to, the expanded slot
-    /// field a 0/1 on the page that holds it, and both go dark when stopped.
-    #[test]
-    fn track_length_marker_fields_follow_the_process_length_while_playing() {
+    fn track_length_marker_slot_follows_the_process_length_while_playing() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         state.pattern.track_params[0].set_num_steps(32);
         let app = test_app_for_track_visual_state(state.clone());
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![], false);
-        let row = |runtime: &Runtime, row: usize| {
-            reactive_field_value(runtime, "SEQ", &track_length_row_field(0, row))
-        };
         let slot = |runtime: &Runtime, slot: usize| {
             reactive_field_value(runtime, "SEQ", &expanded_step_slot_length_field(7, slot))
         };
@@ -9187,14 +9109,10 @@ use panel_kinds_seed::*;
 
         // 19 steps: the marker is step 19 (index 18), row 1 column 2.
         state.transport.track_process_lengths[0].store(19, Ordering::Relaxed);
-        sync_track_length_row_fields(&mut runtime, &state, 0);
-        assert_eq!(row(&runtime, 1), Value::Number(-1.0), "stopped: no marker");
+        assert_eq!(track_process_lengths_snapshot(&state, &app), vec![None], "stopped: no marker");
 
         state.transport.playing.store(true, Ordering::Relaxed);
-        sync_track_length_row_fields(&mut runtime, &state, 0);
         sync_expanded_step_viewport_length(&mut runtime, &state, viewport);
-        assert_eq!(row(&runtime, 0), Value::Number(-1.0));
-        assert_eq!(row(&runtime, 1), Value::Number(2.0));
         assert_eq!(slot(&runtime, 2), Value::Bool(true));
         assert_eq!(slot(&runtime, 1), Value::Bool(false));
         assert_eq!(
@@ -9203,9 +9121,7 @@ use panel_kinds_seed::*;
         );
 
         state.transport.track_process_lengths[0].store(0, Ordering::Relaxed);
-        sync_track_length_row_fields(&mut runtime, &state, 0);
         sync_expanded_step_viewport_length(&mut runtime, &state, viewport);
-        assert_eq!(row(&runtime, 1), Value::Number(-1.0));
         assert_eq!(slot(&runtime, 2), Value::Bool(false));
     }
 
@@ -9246,20 +9162,8 @@ use panel_kinds_seed::*;
         editor.refresh_runtime_side_effects();
         let tint = eseqlisp::theme::TRACK_TINT();
         assert_eq!(tint.a, 1.0, "Phosphor fully replaces displayed track colors");
-        state.pattern.track_params[1].set_mute(true);
-        sync_track_color_state(editor.runtime_mut(), &app, &state);
+        sync_track_color_state(editor.runtime_mut(), &app);
         let runtime = editor.runtime_mut();
-        for (channel, raw) in [tint.r, tint.g, tint.b].into_iter().enumerate() {
-            let tracks = number_list_values(&reactive_field_value(
-                runtime, "SEQ", track_color_channel_effective_field(channel),
-            ));
-            let steps = number_list_values(&reactive_field_value(
-                runtime, "SEQ", step_color_channel_effective_field(channel),
-            ));
-            assert_number_lists_close(&steps, &[raw as f64, raw as f64]);
-            assert!((tracks[0] - raw as f64).abs() < 1e-6);
-            assert!(tracks[1] < tracks[0], "mute still dims the tinted color");
-        }
         assert_eq!(runtime.eval_str(
             "(and (= (nth SEQ.track-colors 0) (nth SEQ.track-colors 1))
                   (= (nth SEQ.track-colors 0) (get (nth SEQ.groups 0) :color)))"
@@ -9281,7 +9185,7 @@ use panel_kinds_seed::*;
             editor.refresh_runtime_side_effects();
             let loaded_tint = eseqlisp::theme::TRACK_TINT();
             assert_ne!(loaded_tint, tint, "{} must declare its own :track-tint", path.display());
-            sync_track_color_state(editor.runtime_mut(), &app, &state);
+            sync_track_color_state(editor.runtime_mut(), &app);
             let has_palette = eseqlisp::theme::track_palette().iter().any(|c| c.a > 0.0);
             if loaded_tint.a == 0.0 && !has_palette {
                 assert_eq!(build_track_colors(&app), original, "{}", path.display());
@@ -9319,7 +9223,7 @@ use panel_kinds_seed::*;
         let variant_tint = eseqlisp::theme::VARIANT_TINT();
         assert!(variant_tint.a < 0.25, "variant tint stays a faint wash over the palette snap");
 
-        sync_track_color_state(editor.runtime_mut(), &app, &state);
+        sync_track_color_state(editor.runtime_mut(), &app);
         let displayed = value_list_maps_as_rgb(&reactive_field_value(
             editor.runtime_mut(),
             "SEQ",
@@ -9383,7 +9287,7 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn track_mute_visual_binding_sync_updates_effective_mute_and_color_fields() {
+    fn track_mute_visual_binding_sync_updates_effective_mute_fields() {
         let state = Arc::new(SequencerState::new(2, vec![]));
         let app = test_app_for_track_visual_state(state.clone());
         let mut runtime = Runtime::new();
@@ -9392,30 +9296,6 @@ use panel_kinds_seed::*;
             vec![
                 ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
                 ("track-muted-effective", build_track_muted_effective(&app, &state)),
-                (
-                    "track-color-r-effective",
-                    build_track_color_channel_effective(&app, &state, 0),
-                ),
-                (
-                    "track-color-g-effective",
-                    build_track_color_channel_effective(&app, &state, 1),
-                ),
-                (
-                    "track-color-b-effective",
-                    build_track_color_channel_effective(&app, &state, 2),
-                ),
-                (
-                    "step-color-r-effective",
-                    build_step_color_channel_effective(&app, &state, 0),
-                ),
-                (
-                    "step-color-g-effective",
-                    build_step_color_channel_effective(&app, &state, 1),
-                ),
-                (
-                    "step-color-b-effective",
-                    build_step_color_channel_effective(&app, &state, 2),
-                ),
             ],
             true,
         );
@@ -9444,29 +9324,6 @@ use panel_kinds_seed::*;
             )),
             vec![false, false]
         );
-        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
-        for channel in 0..3 {
-            let track_colors = number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                track_color_channel_effective_field(channel),
-            ));
-            let step_colors = number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                step_color_channel_effective_field(channel),
-            ));
-            assert_eq!(
-                track_colors[1],
-                track_color_channel_effective_value(&app, 1, channel, true),
-                "muted row chrome should retain its existing dimmed track color"
-            );
-            assert_eq!(
-                step_colors[1],
-                track_color_channel_effective_value(&app, 1, channel, false),
-                "muted step shaders should receive the raw track color alongside :muted"
-            );
-        }
 
         state.pattern.track_params[0].set_solo(true);
         sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
@@ -9486,7 +9343,6 @@ use panel_kinds_seed::*;
             )),
             vec![0.0, 1.0]
         );
-        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
 
         state.pattern.track_params[0].set_solo(false);
         sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
@@ -9506,7 +9362,6 @@ use panel_kinds_seed::*;
             )),
             vec![0.0, 1.0]
         );
-        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
 
         state.pattern.track_params[1].set_mute(false);
         sync_track_mute_visual_binding_fields(
@@ -9524,7 +9379,6 @@ use panel_kinds_seed::*;
             )),
             vec![0.0, 0.0]
         );
-        assert_effective_color_reactives_match_builders(&runtime, &app, &state);
     }
 
     #[test]
@@ -15023,26 +14877,6 @@ use panel_kinds_seed::*;
         )
     }
 
-    fn test_multi_track_color_channel(track_count: usize, channel: usize) -> Value {
-        let palette = [
-            [0.96, 0.28, 0.52],
-            [0.98, 0.55, 0.25],
-            [0.95, 0.78, 0.28],
-            [0.32, 0.78, 0.48],
-            [0.24, 0.72, 0.78],
-            [0.48, 0.54, 0.94],
-            [0.82, 0.42, 0.92],
-            [0.72, 0.74, 0.78],
-            [0.92, 0.38, 0.34],
-            [0.38, 0.86, 0.68],
-        ];
-        test_list(
-            (0..track_count)
-                .map(|track| Value::Number(palette[track % palette.len()][channel]))
-                .collect(),
-        )
-    }
-
     fn sequencer_perf_steps(track: usize, generation: usize, step_count: usize) -> Value {
         test_list(
             (0..step_count)
@@ -15318,6 +15152,43 @@ use panel_kinds_seed::*;
             .unwrap_or_else(|| panic!("no track {index}"))
     }
 
+    /// Track `current` of the first `count` as the current track, as the
+    /// host kinds push it: `selection.track` and each track's `selected` and
+    /// `in-selection`.
+    fn select_kind_current_track(editor: &mut Editor, count: usize, current: usize) {
+        let rt = editor.runtime_mut();
+        for index in 0..count {
+            let id = kind_track(rt, index);
+            set_field(rt, id, "selected", Value::Bool(index == current));
+            set_field(rt, id, "in-selection", Value::Bool(index == current));
+        }
+        let selection = kind_singleton_rt(rt, "selection");
+        let track = Value::Instance(kind_track(rt, current));
+        set_field(rt, selection, "track", track);
+        rt.run_reactive_cycle();
+    }
+
+    /// Whether `node`'s `prop` binds `field` of instance `id` (`#'`).
+    fn binds_kind_field(
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        id: eseqlisp::vm::InstanceId,
+        field: &str,
+    ) -> bool {
+        let namespace = format!("%instance/{id}");
+        matches!(
+            node.props.get(prop),
+            Some(Value::ReactiveRef { namespace: actual, field: actual_field, .. })
+                if *actual == namespace && actual_field == field
+        )
+    }
+
+    /// Step `step` of track `track` ([`seed_kind_steps`]).
+    fn kind_step(rt: &Runtime, track: usize, step: usize) -> eseqlisp::vm::InstanceId {
+        rt.keyed_instance("eseq.kinds:step", &[kind_track(rt, track), step as u64])
+            .unwrap_or_else(|| panic!("no step {step} of track {track}"))
+    }
+
     /// Push an instance's field as the host-kinds tick does.
     fn set_field(rt: &mut Runtime, id: eseqlisp::vm::InstanceId, field: &str, value: Value) {
         rt.set_instance_field(id, field, value)
@@ -15538,7 +15409,8 @@ use panel_kinds_seed::*;
         set_kind_field(editor, "selection", "tracks", instance_list(ids));
     }
 
-    /// A track of [`seed_kind_tracks`]: what the mixer reads of it.
+    /// A track of [`seed_kind_tracks`]: what the mixer and the sequencer
+    /// grid read of it.
     #[derive(Clone)]
     struct KindTrack {
         name: String,
@@ -15547,6 +15419,8 @@ use panel_kinds_seed::*;
         collapsed: bool,
         /// The pattern cells: (pid, active, assigned).
         cells: Vec<(u64, bool, bool)>,
+        /// Each step's gate (`step.active`); the length is `num-steps`.
+        steps: Vec<bool>,
     }
 
     impl KindTrack {
@@ -15557,7 +15431,13 @@ use panel_kinds_seed::*;
                 instrument_type: "sampler",
                 collapsed: false,
                 cells: Vec::new(),
+                steps: (0..16).map(|step| step % 2 == 0).collect(),
             }
+        }
+
+        fn steps(mut self, steps: Vec<bool>) -> Self {
+            self.steps = steps;
+            self
         }
 
         fn cells(mut self, cells: &[(u64, bool, bool)]) -> Self {
@@ -15640,9 +15520,13 @@ use panel_kinds_seed::*;
                 ("collapsed", Value::Bool(track.collapsed)),
                 ("selected", Value::Bool(index == 0)),
                 ("in-selection", Value::Bool(index == 0)),
+                ("playhead", Value::Number(-1.0)),
+                ("playhead-page", Value::Number(-1.0)),
+                ("length-step", Value::Number(-1.0)),
             ] {
                 set_field(rt, id, field, value);
             }
+            seed_kind_steps(rt, id, &track.steps);
             let cells: Vec<_> = track
                 .cells
                 .iter()
@@ -15660,6 +15544,40 @@ use panel_kinds_seed::*;
         let selection = kind_singleton_rt(rt, "selection");
         set_field(rt, selection, "track", instance_or_nil(ids.first().copied()));
         seed_kind_sends(rt);
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish `track`'s steps as the host-kinds tick does
+    /// (host_kinds/steps.rs): step `i` keyed (track instance, i) with its
+    /// `index`, `track` and `active` (any later step dropped), and the
+    /// track's `steps` and `num-steps`.
+    fn seed_kind_steps(rt: &mut Runtime, track: eseqlisp::vm::InstanceId, active: &[bool]) {
+        let mut extra = active.len() as u64;
+        while rt.drop_keyed_instance("eseq.kinds:step", &[track, extra]) {
+            extra += 1;
+        }
+        let steps: Vec<_> = (active.iter().enumerate())
+            .map(|(index, &on)| {
+                let step = (rt.register_keyed_instance("eseq.kinds:step", &[track, index as u64]))
+                    .unwrap();
+                set_field(rt, step, "index", Value::Number(index as f64));
+                set_field(rt, step, "track", Value::Instance(track));
+                set_field(rt, step, "active", Value::Bool(on));
+                step
+            })
+            .collect();
+        set_field(rt, track, "num-steps", Value::Number(active.len() as f64));
+        set_field(rt, track, "steps", instance_list(steps));
+    }
+
+    /// [`seed_kind_steps`] of track `index`, then a reactive cycle.
+    fn set_kind_track_steps(editor: &mut Editor, index: usize, active: &[bool]) {
+        let rt = editor.runtime_mut();
+        if !has_host_kinds(rt) {
+            return;
+        }
+        let track = kind_track(rt, index);
+        seed_kind_steps(rt, track, active);
         rt.run_reactive_cycle();
     }
 
@@ -15796,6 +15714,7 @@ use panel_kinds_seed::*;
             .map(|i| {
                 KindTrack::new(&name(i), palette[i % palette.len()])
                     .cells(&[(i as u64 + 1, i == 0, true)])
+                    .steps((0..16).map(|step| (step + i) % 2 == 0).collect())
             })
             .collect();
         seed_kind_tracks(editor, &tracks);
@@ -16197,9 +16116,6 @@ use panel_kinds_seed::*;
                 ("track-solos", test_bool_list(&[false])),
                 ("track-muted-by-solo", test_bool_list(&[false])),
                 ("track-muted-effective", test_bool_list(&[false])),
-                ("track-color-r-effective", test_number_list(&[0.96])),
-                ("track-color-g-effective", test_number_list(&[0.28])),
-                ("track-color-b-effective", test_number_list(&[0.52])),
                 ("track-volumes", test_number_list(&[1.0])),
                 ("track-0-volume", Value::Number(1.0)),
                 ("tp-bus-0-send", Value::Number(0.0)),
@@ -16342,16 +16258,6 @@ use panel_kinds_seed::*;
             crate::presented::export_registration(),
             true,
         );
-        for step in 0..16 {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_active_field(0, step),
-                Value::Bool(step == 0),
-            );
-        }
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", &track_playhead_page_field(0), Value::Number(0.0));
         set_test_expanded_step_slot_projection(&mut editor, 0, 0, 0, 0, 16, 0, 0);
         register_test_delete_target_natives(&mut editor, 1);
         editor
@@ -17093,6 +16999,10 @@ use panel_kinds_seed::*;
                 .collect::<Vec<_>>()
         };
         seed_kind_test_tracks(editor, track_count, |track| format!("track-{track}"));
+        for track in 0..track_count {
+            let active: Vec<_> = (0..step_count).map(|step| (step + track) % 2 == 0).collect();
+            set_kind_track_steps(editor, track, &active);
+        }
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
@@ -17128,21 +17038,6 @@ use panel_kinds_seed::*;
             "SEQ",
             "track-muted-effective",
             test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-r-effective",
-            test_multi_track_color_channel(track_count, 0),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-g-effective",
-            test_multi_track_color_channel(track_count, 1),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-b-effective",
-            test_multi_track_color_channel(track_count, 2),
         );
         rt.set_reactive(
             "SEQ",
@@ -17301,21 +17196,7 @@ use panel_kinds_seed::*;
                     &track_step_selected_field(track, step),
                     Value::Bool(false),
                 );
-                rt.set_reactive(
-                    "SEQ",
-                    &track_playhead_active_field(track, step),
-                    Value::Bool(step == 0),
-                );
             }
-            let rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
-            for row in 0..rows {
-                rt.set_reactive(
-                    "SEQ",
-                    &track_playhead_row_field(track, row),
-                    Value::Number(if row == 0 { 0.0 } else { -1.0 }),
-                );
-            }
-            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
         }
         for track in 0..track_count {
             set_test_expanded_step_slot_projection(editor, track, track, 0, 0, step_count, 0, 0);
@@ -17511,6 +17392,12 @@ use panel_kinds_seed::*;
             .collect::<Vec<_>>();
 
         seed_kind_test_tracks(editor, track_count, |track| format!("perf-track-{track:02}"));
+        for track in 0..track_count {
+            let active: Vec<_> = (0..step_count)
+                .map(|step| (step + track + generation) % 3 == 0)
+                .collect();
+            set_kind_track_steps(editor, track, &active);
+        }
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
@@ -17555,21 +17442,6 @@ use panel_kinds_seed::*;
             "SEQ",
             "track-muted-effective",
             test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-r-effective",
-            test_multi_track_color_channel(track_count, 0),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-g-effective",
-            test_multi_track_color_channel(track_count, 1),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-color-b-effective",
-            test_multi_track_color_channel(track_count, 2),
         );
         rt.set_reactive(
             "SEQ",
@@ -17682,7 +17554,6 @@ use panel_kinds_seed::*;
         rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
         rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
 
-        let max_rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
         for track in 0..track_count {
             rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
             rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
@@ -17726,24 +17597,7 @@ use panel_kinds_seed::*;
                     &track_step_selected_field(track, step),
                     Value::Bool(false),
                 );
-                rt.set_reactive(
-                    "SEQ",
-                    &track_playhead_active_field(track, step),
-                    Value::Bool(step == (generation % PAGE_SIZE)),
-                );
             }
-            for row in 0..max_rows {
-                rt.set_reactive(
-                    "SEQ",
-                    &track_playhead_row_field(track, row),
-                    Value::Number(if row == 0 {
-                        generation as f64 % PAGE_SIZE as f64
-                    } else {
-                        -1.0
-                    }),
-                );
-            }
-            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
         }
     }
 
@@ -17774,6 +17628,11 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str("(def eseq.browser/show-loading! (name) nil)")
             .expect("stub the browser's loading-instrument mark");
+        // The grid reads its tracks as host kinds: load them to seed.
+        editor
+            .runtime_mut()
+            .eval_str("(import eseq.kinds)")
+            .expect("load the host kinds");
         apply_sequencer_perf_pattern(&mut editor, track_count, step_count, 0);
         editor
             .runtime_mut()
@@ -17898,18 +17757,6 @@ use panel_kinds_seed::*;
                     test_repeated_bool_list(false, track_count),
                 ),
                 (
-                    "track-color-r-effective",
-                    test_multi_track_color_channel(track_count, 0),
-                ),
-                (
-                    "track-color-g-effective",
-                    test_multi_track_color_channel(track_count, 1),
-                ),
-                (
-                    "track-color-b-effective",
-                    test_multi_track_color_channel(track_count, 2),
-                ),
-                (
                     "track-instrument-types",
                     test_list(
                         (0..track_count)
@@ -17930,11 +17777,6 @@ use panel_kinds_seed::*;
         );
 
         for track in 0..track_count {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_selected_field(track),
-                Value::Bool(track == 0),
-            );
             editor.runtime_mut().set_reactive(
                 "SEQ",
                 &format!("track-peak-{track}"),
@@ -21564,7 +21406,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/select-track-for-edit 0)")
+            .eval_str("(eseq.sequencer/select-track-for-edit (eseq.kinds/track 0))")
             .expect("select already-current track");
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
@@ -21574,7 +21416,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/select-track-for-edit 1)")
+            .eval_str("(eseq.sequencer/select-track-for-edit (eseq.kinds/track 1))")
             .expect("select a different track");
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
@@ -21609,7 +21451,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/select-track-for-edit 1)")
+            .eval_str("(eseq.sequencer/select-track-for-edit (eseq.kinds/track 1))")
             .expect("select a different track");
         editor.refresh_runtime_side_effects();
 
@@ -22405,22 +22247,29 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// Field `field` of the instance in `node`'s prop `prop` (a
+    /// `defwidget`'s instance state, `:step s` or `:track t`).
+    fn layout_instance_field(
+        editor: &Editor,
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        field: &str,
+    ) -> Value {
+        match node.props.get(prop) {
+            Some(Value::Instance(id)) => (editor.runtime().instance_field(*id, field))
+                .unwrap_or_else(|error| panic!("{prop}.{field}: {error:?}")),
+            other => panic!("{prop} holds no instance: {other:?}"),
+        }
+    }
+
+    /// The compact cells draw the step cursor through `seqv-step-cursor`,
+    /// which takes the cell's step and track and reads the track's selection
+    /// highlight and the grid's cursor in its shader: only the selected
+    /// tracks' cells show it, by repaint.
     #[test]
     fn metal_seq_collapsed_cursor_is_gated_to_current_track() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(1.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", &track_selected_field(0), Value::Bool(false));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", &track_selected_field(1), Value::Bool(true));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-
         let sequencer_id = editor
             .buffers
             .iter()
@@ -22432,33 +22281,29 @@ use panel_kinds_seed::*;
         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
 
         let layout = editor.widget_layout().expect("sequencer layout");
-        let inactive_track_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-0")
-            .expect("inactive track step cell");
-        let current_track_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-1-0")
-            .expect("current track step cell");
-
-        // Rows bind the *sel-sync* SEQV projection of the per-track selection
-        // (eseq-4jv), not the raw SEQ field: the projection gates the
-        // highlight off while a bus/group owns the fx panel without any row
-        // reading the `selected-bus` defstate in render.
-        assert!(
-            layout_tree_has_reactive_prop_field(
-                inactive_track_cell,
-                "selected",
-                "SEQV",
-                "sel-track-vis-0",
-            ),
-            "inactive track cursor wrapper should be gated by that track's selected binding"
-        );
-        assert!(
-            layout_tree_has_reactive_prop_field(
-                current_track_cell,
-                "selected",
-                "SEQV",
-                "sel-track-vis-1",
-            ),
-            "current track cursor wrapper should be gated by that track's selected binding"
-        );
+        for track in 0..2 {
+            let key = format!("/step-cell-{track}-3");
+            let cell = find_layout_node_by_stable_key_suffix(&layout, &key).expect("track step cell");
+            assert_eq!(
+                cell.props.get("background"),
+                Some(&Value::String("seqv-step-cursor".into()))
+            );
+            assert_eq!(
+                cell.props.get("track"),
+                Some(&Value::Instance(kind_track(editor.runtime(), track))),
+                "the cursor frame takes its row's track"
+            );
+            assert_eq!(layout_instance_field(&editor, cell, "step", "index"), Value::Number(3.0));
+        }
+        let cursor = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-cursor")
+            .expect("seqv-step-cursor is registered");
+        for uniform in ["track.in-selection", "cursor", "step.index", "track.num-steps"] {
+            assert!(
+                cursor.state_uniforms.iter().any(|name| name == uniform),
+                "the cursor frame reads {uniform}: {:?}",
+                cursor.state_uniforms
+            );
+        }
     }
 
     #[test]
@@ -22770,6 +22615,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "track-num-steps", test_number_list(&[16.0, 6.0]));
+        set_kind_track_steps(&mut editor, 1, &[false; 6]);
 
         editor
             .runtime_mut()
@@ -22782,7 +22628,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-cursor 0)")
+                .eval_str("(eseq.sequencer/track-cursor (eseq.kinds/track 0))")
                 .unwrap(),
             Some(Value::Number(8.0))
         );
@@ -22810,7 +22656,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-cursor 1)")
+                .eval_str("(eseq.sequencer/track-cursor (eseq.kinds/track 1))")
                 .unwrap(),
             Some(Value::Number(2.0)),
             "track 2 visual cursor should be global cursor modulo that track's pattern length"
@@ -22818,7 +22664,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/select-track-for-edit 0)")
+            .eval_str("(eseq.sequencer/select-track-for-edit (eseq.kinds/track 0))")
             .expect("return to track 1");
 
         assert_eq!(
@@ -22829,56 +22675,48 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-cursor 0)")
+                .eval_str("(eseq.sequencer/track-cursor (eseq.kinds/track 0))")
                 .unwrap(),
             Some(Value::Number(8.0)),
             "track 1 visual cursor should repaint from the global cursor when the track is selected"
         );
     }
 
+    /// The grid draws one step cursor (`grid-cursor`, compared in the
+    /// shader with each cell's step, wrapped to its track's length), so a
+    /// cursor move after the pattern shrank leaves no stale highlight behind.
     #[test]
     fn metal_seq_cursor_highlight_clears_even_after_pattern_length_change() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-num-steps", test_number_list(&[16.0, 16.0]));
+        let grid_cursor = |editor: &mut Editor| {
+            editor
+                .runtime_mut()
+                .eval_str("(let ((c eseq.sequencer/grid-cursor)) c.step)")
+                .unwrap()
+        };
 
         editor
             .runtime_mut()
             .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 12)")
             .expect("place cursor at step 12");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-12\")")
-                .unwrap(),
-            Some(Value::Bool(true))
-        );
+        assert_eq!(grid_cursor(&mut editor), Some(Value::Number(12.0)));
 
         editor
             .runtime_mut()
             .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0, 16.0]));
+        set_kind_track_steps(&mut editor, 0, &[false; 8]);
         editor
             .runtime_mut()
             .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 3)")
             .expect("move cursor after the pattern shrank");
-
+        assert_eq!(grid_cursor(&mut editor), Some(Value::Number(3.0)));
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-3\")")
+                .eval_str("(eseq.sequencer/track-cursor (eseq.kinds/track 0))")
                 .unwrap(),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-12\")")
-                .unwrap(),
-            Some(Value::Bool(false)),
-            "the old highlight cell must be cleared even though the projection changed, \
-             otherwise a ghost cursor stays lit at step 12"
+            Some(Value::Number(3.0))
         );
     }
 
@@ -28241,7 +28079,6 @@ use panel_kinds_seed::*;
         // which is how the model spells silence (lane spec 6.2).
         seed_kind_clips(&mut editor, 0, &[KindClip::pattern(0, 0.0, 8.0, 1)]);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "track-selected-0", Value::Bool(true));
         rt.run_reactive_cycle();
 
         editor
@@ -28485,6 +28322,12 @@ use panel_kinds_seed::*;
         );
         rt.run_reactive_cycle();
         seed_kind_test_tracks(&mut editor, tracks, |track| format!("track-{track}"));
+        let rt = editor.runtime_mut();
+        for &track in collapsed {
+            let id = kind_track(rt, track);
+            set_field(rt, id, "collapsed", Value::Bool(true));
+        }
+        rt.run_reactive_cycle();
         seed_kind_song(&mut editor, 64.0, 1, &[(0.0, 16.0, 0)]);
         // Clip `i` on track `i`; the LAST track stays bare, so tests have
         // empty lane background to click.
@@ -30053,16 +29896,9 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_sequencer_buffer_renders_step_cells() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-names",
-            test_string_list(&["BOOOOOOOO.WAV"]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
+        let rt = editor.runtime_mut();
+        let t0 = kind_track(rt, 0);
+        set_field(rt, t0, "name", Value::String("BOOOOOOOO.WAV".into()));
         set_kind_instrument_types(&mut editor, &["custom"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -30096,18 +29932,14 @@ use panel_kinds_seed::*;
         assert_finite_nonzero_rect(badge, "sequencer row color badge");
         assert_eq!(
             badge.props.get("background"),
-            Some(&Value::String("seqv-track-color-badge".to_string())),
+            Some(&Value::String("seqv-track-badge".to_string())),
             "sequencer row color badge should use the track-color SDF widget"
         );
-        assert!(matches!(
-            badge.props.get("track-r"),
-            Some(Value::ReactiveRef {
-                namespace,
-                field,
-                index: Some(0),
-                ..
-            }) if namespace == "SEQ" && field == "track-color-r-effective"
-        ));
+        assert_eq!(
+            badge.props.get("track"),
+            Some(&Value::Instance(t0)),
+            "the badge takes its track"
+        );
 
         let track_name = find_layout_node_by_stable_key_suffix(&layout, "/track-name-label-0")
             .unwrap_or_else(|| {
@@ -30136,22 +29968,8 @@ use panel_kinds_seed::*;
             Some(&Value::String("seqv-track-volume-meter".to_string())),
             "sequencer row volume control should use the horizontal meter/fader widget"
         );
-        assert!(matches!(
-            volume_control.props.get("volume"),
-            Some(Value::ReactiveRef {
-                namespace,
-                field,
-                ..
-            }) if namespace == "SEQ" && field == "track-0-volume"
-        ));
-        assert!(matches!(
-            volume_control.props.get("level"),
-            Some(Value::ReactiveRef {
-                namespace,
-                field,
-                ..
-            }) if namespace == "SEQ" && field == "track-peak-0"
-        ));
+        assert!(binds_kind_field(volume_control, "volume", t0, "volume"));
+        assert!(binds_kind_field(volume_control, "level", t0, "peak"));
 
         let expand =
             find_layout_node_by_stable_key_suffix(&layout, "/expand-0").unwrap_or_else(|| {
@@ -30212,13 +30030,14 @@ use panel_kinds_seed::*;
         );
     }
 
+    /// A short pattern keeps the fixed-width grid: cells for its steps,
+    /// plain spacers past its length (see
+    /// `metal_seq_short_track_empty_steps_hit_track_row`), each shell over
+    /// its step and track instances.
     #[test]
     fn metal_seq_sequencer_hides_step_shells_beyond_pattern_length() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0]));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_track_steps(&mut editor, 0, &[true; 8]);
         editor.refresh_runtime_side_effects();
 
         let sequencer_id = editor
@@ -30235,49 +30054,45 @@ use panel_kinds_seed::*;
 
         assert_eq!(
             count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
-            16,
-            "short patterns should preserve the fixed-width step grid"
+            8,
+            "a short pattern renders a cell per step of its length"
         );
-
-        for step in 0..16 {
+        // Eight spacers past the last cell keep the 16-column width.
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/track-step-grid-0")
+            .expect("track 0's step grid");
+        let last = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-7")
+            .expect("the last step cell");
+        let spacers = grid.rect.col + grid.rect.width - (last.rect.col + last.rect.width);
+        assert!(
+            spacers >= 8.0 * last.rect.width - 0.01,
+            "the grid keeps eight cells' width past its length: grid={:?} last={:?}",
+            grid.rect,
+            last.rect
+        );
+        let t0 = kind_track(editor.runtime(), 0);
+        for step in 0..8 {
             let cell = find_layout_node_by_stable_key_suffix(&layout, &format!("/step-cell-0-{step}"))
                 .unwrap_or_else(|| panic!("step cell {step} should exist"));
             assert_finite_nonzero_rect(cell, &format!("step cell {step}"));
-            let expected_hide = Value::Number(if step < 8 { 0.0 } else { 1.0 });
-            assert_eq!(
-                cell.props.get("hide"),
-                Some(&expected_hide),
-                "step cell highlight {step} should reflect the pattern-length visibility boundary"
-            );
-
             let shell = compact_step_shell(cell);
             assert_finite_nonzero_rect(shell, &format!("step shell {step}"));
+            assert_eq!(shell.props.get("track"), Some(&Value::Instance(t0)));
             assert_eq!(
-                shell.props.get("hide"),
-                Some(&expected_hide),
-                "step shell {step} should hide in the shader without becoming a UI diagnostic"
+                layout_instance_field(&editor, shell, "step", "index"),
+                Value::Number(step as f64)
             );
-            assert!(matches!(
-                shell.props.get("muted"),
-                Some(Value::ReactiveRef {
-                    namespace,
-                    field,
-                    index: Some(0),
-                    ..
-                }) if namespace == "SEQ" && field == "track-muted-effective"
-            ));
-            if step < 8 {
-                let expected_fill = if (4..8).contains(&step) {
-                    "sequencer-step-off-fill-alt"
-                } else {
-                    "sequencer-step-off-fill"
-                };
-                assert_eq!(
-                    shell.props.get("off-fill"),
-                    Some(&Value::Keyword(expected_fill.to_string())),
-                    "step shell {step} should preserve four-step rhythmic shading"
-                );
-            }
+            let step_id = kind_step(editor.runtime(), 0, step);
+            assert!(binds_kind_field(shell, "selected", step_id, "selected"));
+            let expected_fill = if (4..8).contains(&step) {
+                "sequencer-step-off-fill-alt"
+            } else {
+                "sequencer-step-off-fill"
+            };
+            assert_eq!(
+                shell.props.get("off-fill"),
+                Some(&Value::Keyword(expected_fill.to_string())),
+                "step shell {step} should preserve four-step rhythmic shading"
+            );
             assert_eq!(
                 shell.props.get("selected-color"),
                 Some(&Value::Keyword(
@@ -30289,8 +30104,9 @@ use panel_kinds_seed::*;
 
         let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
             .expect("seqv-step-shell should be registered");
-        assert!(shell_def.state_uniforms.iter().any(|name| name == "muted"));
-        assert!(shell_def.state_uniforms.iter().any(|name| name == "hide"));
+        for uniform in ["track.audible", "track.governed", "step.held", "step.lock-kind"] {
+            assert!(shell_def.state_uniforms.iter().any(|name| name == uniform), "{uniform}");
+        }
         assert!(
             shell_def.state_uniforms.len()
                 <= eseqlisp::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS,
@@ -30383,11 +30199,10 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_selected_step_uses_the_themed_sdf_input_color() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str(r#"(reactive-set "SEQ" "seq-track-step-selected-0-4" 1)"#)
-            .expect("select step through its production reactive field");
-        editor.runtime_mut().run_reactive_cycle();
+        let rt = editor.runtime_mut();
+        let step = kind_step(rt, 0, 4);
+        set_field(rt, step, "selected", Value::Bool(true));
+        rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
         let sequencer_id = editor
@@ -30533,10 +30348,7 @@ use panel_kinds_seed::*;
             selected_sink.lock().unwrap().push(args);
             Ok(Value::Bool(true))
         });
-        editor.runtime_mut().eval_str(
-            r#"(reactive-set "SEQ" "track-num-steps" (list 4))"#,
-        ).unwrap();
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_track_steps(&mut editor, 0, &[false; 4]);
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor.buffers.iter()
             .find(|buffer| buffer.name == "*sequencer*").unwrap().id;
@@ -31132,9 +30944,6 @@ use panel_kinds_seed::*;
             ("group-id", Value::Number(8.0)),
             ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
         ])]));
-        for (field, value) in [("rack-clip-active-8-1", 0.0), ("rack-clip-active-8-2", 1.0), ("rack-clip-index-8", 2.0)] {
-            editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
-        }
         editor.runtime_mut().run_reactive_cycle();
         // The mixer's view of the same rack: kinds.
         let mut kind_rack = rack_group_fixture(true);
@@ -31156,7 +30965,9 @@ use panel_kinds_seed::*;
         assert_layout_inside(cell, &layout, "rack clip");
         assert_layout_inside(picker, &layout, "rack clip index");
         assert!(matches!(cell.props.get("active"), Some(Value::ReactiveRef { .. })));
-        assert!(matches!(picker.props.get("value"), Some(Value::ReactiveRef { .. })));
+        // The picker shows the playing clip's number by value: a launch
+        // re-renders its own subtree, not the roster.
+        assert!(matches!(picker.props.get("value"), Some(Value::Number(_))));
         assert_eq!(layout_prop_number(cell, "active"), Some(1.0));
         assert_eq!(layout_prop_number(picker, "value"), Some(2.0));
 
@@ -31182,19 +30993,25 @@ use panel_kinds_seed::*;
         };
         assert_mixer_clip(&mut editor, 2);
 
-        // A retained binding must repaint without rebuilding the clip roster.
-        editor.runtime_mut().set_reactive("SEQ", "rack-clip-active-8-2", Value::Number(0.0));
-        editor.runtime_mut().set_reactive("SEQ", "rack-clip-active-8-1", Value::Number(1.0));
-        editor.runtime_mut().set_reactive("SEQ", "rack-clip-index-8", Value::Number(1.0));
+        // A retained binding must repaint without rebuilding the clip roster:
+        // a launch re-runs the number picker's subtree alone.
         editor.runtime_mut().set_reactive("SEQ", "rack-clips", test_list(vec![map_value([
             ("group-id", Value::Number(8.0)),
             ("active", Value::Number(1.0)),
             ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
         ])]));
         editor.runtime_mut().run_reactive_cycle();
+        let before = editor.runtime().ui_work_counters();
         seed_kind_rack_clips(&mut editor, 0, &[(1, "Intro"), (2, "Break")], Some(1));
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
+        let after = editor.runtime().ui_work_counters();
+        assert_eq!(after.full_buffer_reruns, before.full_buffer_reruns, "a launch");
+        assert_eq!(
+            after.subtree_reruns - before.subtree_reruns,
+            1,
+            "a launch re-runs the number picker alone: {before:?} -> {after:?}"
+        );
         let cell = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-8-2").unwrap();
         let picker = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-number-8").unwrap();
         assert_eq!(layout_prop_number(cell, "active"), Some(0.0));
@@ -31216,7 +31033,7 @@ use panel_kinds_seed::*;
         );
         // Both runs build (the collapsed sequencer row and the mixer strip).
         assert!(
-            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-grid 0 (eseq.drum-rack-v2/color 0))").unwrap().is_some(),
+            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-grid (first (eseq.kinds/groups)))").unwrap().is_some(),
             "the collapsed rack row renders its clip grid",
         );
         assert!(
@@ -31444,18 +31261,6 @@ use panel_kinds_seed::*;
                 ("track-muted-by-solo", test_repeated_bool_list(false, 4)),
                 ("track-muted-effective", test_repeated_bool_list(false, 4)),
                 (
-                    "track-color-r-effective",
-                    test_multi_track_color_channel(4, 0),
-                ),
-                (
-                    "track-color-g-effective",
-                    test_multi_track_color_channel(4, 1),
-                ),
-                (
-                    "track-color-b-effective",
-                    test_multi_track_color_channel(4, 2),
-                ),
-                (
                     "track-instrument-types",
                     test_string_list(&["sampler", "custom", "rack", "modulator"]),
                 ),
@@ -31487,16 +31292,6 @@ use panel_kinds_seed::*;
             for track in 0..4 {
                 rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
                 rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
-                rt.set_reactive(
-                    "SEQ",
-                    &format!("track-selected-{track}"),
-                    Value::Bool(track == 0),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    &track_playhead_row_field(track, 0),
-                    Value::Number(if track == 0 { 0.0 } else { -1.0 }),
-                );
                 for step in 0..16 {
                     rt.set_reactive(
                         "SEQ",
@@ -31755,7 +31550,7 @@ use panel_kinds_seed::*;
         let mut row_heights = Vec::new();
         for expanded in [false, true] {
             editor.runtime_mut().eval_str(&format!(
-                "(eseq.sequencer/set-track-expanded 0 {expanded})",
+                "(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) {expanded})",
             )).unwrap();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("keyed root must mount a full tree");
@@ -31811,10 +31606,7 @@ use panel_kinds_seed::*;
             .expect("sequencer row expand button on-click");
         editor
             .runtime_mut()
-            .invoke(
-                callback,
-                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
-            )
+            .invoke(callback, vec![map_value([("shift", Value::Bool(false))])])
             .expect("invoke sequencer row expand button");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -31826,10 +31618,10 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.sequencer/expanded-track-ids")
-                .expect("read expanded track ids"),
-            Some(test_number_list(&[0.0])),
-            "ellipsis click should add the stable track id to expansion state"
+                .eval_str("(eseq.sequencer/expanded-tracks)")
+                .expect("read expanded tracks"),
+            Some(instance_list([kind_track(editor.runtime(), 0)])),
+            "ellipsis click should add the track to the expanded tracks"
         );
 
         let expanded_layout = editor
@@ -31944,10 +31736,7 @@ use panel_kinds_seed::*;
             .expect("expanded sequencer row collapse callback");
         editor
             .runtime_mut()
-            .invoke(
-                collapse,
-                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
-            )
+            .invoke(collapse, vec![map_value([("shift", Value::Bool(false))])])
             .expect("invoke sequencer row collapse button");
         editor.refresh_runtime_side_effects();
         let collapsed_layout = editor
@@ -32211,8 +32000,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -32958,8 +32747,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track and select asymmetric process lane");
@@ -33027,7 +32816,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str(r#"(do (eseq.sequencer/select-process-lane-option 0 0 "3 pr/amount") (eseq.sequencer/track-param-mode 0))"#)
+                .eval_str(r#"(do (eseq.sequencer/select-process-lane-option 0 0 "3 pr/amount") (eseq.sequencer/track-param-mode (eseq.kinds/track 0)))"#)
                 .expect("select third process lane through selector"),
             Some(Value::Number((PROCESS_LANE_MODE_OFFSET + 2) as f64)),
             "third process selector option should select the third process-lane mode"
@@ -33036,7 +32825,7 @@ use panel_kinds_seed::*;
             editor
                 .runtime_mut()
                 .eval_str(
-                    r#"(do (eseq.sequencer/select-process-lane-option 0 0 "none") (eseq.sequencer/track-param-mode 0))"#
+                    r#"(do (eseq.sequencer/select-process-lane-option 0 0 "none") (eseq.sequencer/track-param-mode (eseq.kinds/track 0)))"#
                 )
                 .expect("clear process lane through selector"),
             Some(Value::Number(3.0)),
@@ -33046,8 +32835,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track and select first process lane");
@@ -33115,8 +32904,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track 0 and select its process lane after selecting track 1");
@@ -33178,8 +32967,8 @@ use panel_kinds_seed::*;
         let viewport = ExpandedStepViewport { track: 0, track_id: 0, page: 0,
             mode: PROCESS_LANE_MODE_OFFSET, cursor_step: 0 };
         editor.runtime_mut().eval_str(r#"
-            (eseq.sequencer/set-track-expanded 0 true)
-            (eseq.sequencer/set-track-param-mode 0 9)
+            (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+            (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
         "#).unwrap();
         let buffer = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
         editor.set_active_buffer(buffer);
@@ -33305,8 +33094,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -33380,8 +33169,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 (eseq.step-grid-interactions/set-track-cursor-step 3)
                 "#,
             )
@@ -33465,8 +33254,8 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"
-                (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 9)
+                (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 9)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -33609,7 +33398,7 @@ use panel_kinds_seed::*;
         editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0);
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 7)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 7))")
             .expect("expand selected bottom row");
         editor.refresh_runtime_side_effects();
         assert!(
@@ -33813,7 +33602,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(2.0));
-        editor.runtime_mut().run_reactive_cycle();
+        select_kind_current_track(&mut editor, 10, 2);
         editor.refresh_runtime_side_effects();
         let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
 
@@ -34265,7 +34054,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded 0 true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .expect("expand track through inactive sequencer effect");
         editor.refresh_runtime_side_effects();
         let expanded_tiled =
@@ -34297,7 +34086,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded 0 false)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) false)")
             .expect("collapse track through inactive sequencer effect");
         editor.refresh_runtime_side_effects();
         let collapsed_tiled =
@@ -34507,7 +34296,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded 0 true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .expect("expand tall track");
         editor.refresh_runtime_side_effects();
         let expanded = eseqlisp::frame::build_render_frame(
@@ -34528,7 +34317,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded 0 false)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) false)")
             .expect("collapse tall track");
         editor.refresh_runtime_side_effects();
         let collapsed = eseqlisp::frame::build_render_frame(
@@ -34775,7 +34564,7 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(220, 200);
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click (eseq.kinds/track 0)) (eseq.sequencer/track-menu-click (eseq.kinds/track 1)))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
 
@@ -34817,14 +34606,14 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-param-mode 0)")
+                .eval_str("(eseq.sequencer/track-param-mode (eseq.kinds/track 0))")
                 .unwrap(),
             Some(Value::Number(3.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-param-mode 1)")
+                .eval_str("(eseq.sequencer/track-param-mode (eseq.kinds/track 1))")
                 .unwrap(),
             Some(Value::Number(4.0))
         );
@@ -34926,7 +34715,7 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(220, 200);
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 0))")
             .expect("expand the sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -34991,7 +34780,7 @@ use panel_kinds_seed::*;
     fn metal_seq_sequencer_expanded_cursor_highlight_uses_bound_track_selection_and_cursor() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
-        set_current_track_reactive(editor.runtime_mut(), 2, 0);
+        set_current_track_reactive(editor.runtime_mut(), 0);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -35006,10 +34795,10 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 "(do
-                  (eseq.sequencer/track-menu-click 0)
-                  (eseq.sequencer/track-menu-click 1)
-                  (eseq.sequencer/set-track-cursor 0 6)
-                  (eseq.sequencer/set-track-cursor 1 3)
+                  (eseq.sequencer/track-menu-click (eseq.kinds/track 0))
+                  (eseq.sequencer/track-menu-click (eseq.kinds/track 1))
+                  (eseq.sequencer/set-track-cursor (eseq.kinds/track 0) 6)
+                  (eseq.sequencer/set-track-cursor (eseq.kinds/track 1) 3)
                   (set! cursor-step 3))",
             )
             .expect("expand rows and seed cursors");
@@ -35020,8 +34809,8 @@ use panel_kinds_seed::*;
         let _ = editor.take_dirty_widget_ids();
         let before_revision = editor.widget_layout_revision();
 
-        set_current_track_reactive(editor.runtime_mut(), 2, 1);
-        editor.runtime_mut().run_reactive_cycle();
+        set_current_track_reactive(editor.runtime_mut(), 1);
+        select_kind_current_track(&mut editor, 2, 1);
         let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
         let sequencer_updates = pending
             .iter()
@@ -35095,18 +34884,10 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-3\")")
+                .eval_str("(let ((c eseq.sequencer/grid-cursor)) c.step)")
                 .unwrap(),
-            Some(Value::Bool(false)),
-            "arrow movement should clear the previous cursor highlight",
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-4\")")
-                .unwrap(),
-            Some(Value::Bool(true)),
-            "arrow movement should activate the next cursor highlight",
+            Some(Value::Number(4.0)),
+            "arrow movement should move the grid's cursor highlight",
         );
     }
 
@@ -35127,16 +34908,18 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        let track = Value::Instance(kind_track(editor.runtime(), 1));
+        set_kind_field(&mut editor, "selection", "track", track);
         editor
             .runtime_mut()
             .eval_str(
                 r#"
                 (do
-                  (eseq.sequencer/set-track-param-mode 0 4)
-                  (eseq.sequencer/set-track-param-mode 1 0)
+                  (eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) 4)
+                  (eseq.sequencer/set-track-param-mode (eseq.kinds/track 1) 0)
                   (set! eseq.seq-core-state/selected-bus 1)
-                  (eseq.sequencer/set-track-expanded 0 true)
-                  (eseq.sequencer/set-track-expanded 1 true))
+                  (eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)
+                  (eseq.sequencer/set-track-expanded (eseq.kinds/track 1) true))
                 "#,
             )
             .expect("seed sequencer shortcut state");
@@ -35147,7 +34930,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-param-mode 0)")
+                .eval_str("(eseq.sequencer/track-param-mode (eseq.kinds/track 0))")
                 .unwrap(),
             Some(Value::Number(4.0)),
             "parameter shortcuts should not mutate inactive expanded rows"
@@ -35155,7 +34938,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/track-param-mode 1)")
+                .eval_str("(eseq.sequencer/track-param-mode (eseq.kinds/track 1))")
                 .unwrap(),
             Some(Value::Number(1.0)),
             "duration shortcut should select duration for the current track"
@@ -35244,7 +35027,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 1)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 1))")
             .expect("expand second sequencer row");
         editor.refresh_runtime_side_effects();
         calls.lock().unwrap().clear();
@@ -35320,9 +35103,10 @@ use panel_kinds_seed::*;
         group.members = vec![1, 6];
         group.rack_members.clear();
         apply_groups_bindings(&mut editor, &[group]);
-        editor.runtime_mut().set_reactive("SEQ", "track-collapsed",
-            test_bool_list(&[false, false, false, true, false, false, false, false]));
-        editor.runtime_mut().run_reactive_cycle();
+        let rt = editor.runtime_mut();
+        let t3 = kind_track(rt, 3);
+        set_field(rt, t3, "collapsed", Value::Bool(true));
+        rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
         editor.set_active_buffer(id);
@@ -35374,7 +35158,7 @@ use panel_kinds_seed::*;
             "seq-select-tracks:[(6 2 4), 6]",
         ]);
         // A hidden anchor is no longer a usable range endpoint.
-        editor.runtime_mut().eval_str("(do (set! eseq.sequencer/track-selection-anchor 3) (eseq.sequencer/track-click (dict :shift true) 4))").unwrap();
+        editor.runtime_mut().eval_str("(do (let ((s eseq.sequencer/grid-select)) (set! s.anchor (eseq.kinds/track 3))) (eseq.sequencer/track-click (dict :shift true) (eseq.kinds/track 4)))").unwrap();
         assert_eq!(calls.lock().unwrap().last().unwrap(), "seq-select-tracks:[(4), 4]");
     }
 
@@ -35397,7 +35181,7 @@ use panel_kinds_seed::*;
         for name in [
             "seq-clear-selection",
             "seq-set-track",
-            "seq-toggle-record-arm",
+            "seq-set-record-arm",
             "seq-set-track-volume",
         ] {
             let calls = Arc::clone(&calls);
@@ -35430,7 +35214,7 @@ use panel_kinds_seed::*;
             [
                 "seq-clear-selection:[]",
                 "seq-set-track:[1]",
-                "seq-toggle-record-arm:[1]",
+                "seq-set-record-arm:[1, true]",
             ],
             "sequencer header controls should select their row before mutating it"
         );
@@ -35501,7 +35285,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 0))")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -35543,7 +35327,7 @@ use panel_kinds_seed::*;
             .set_reactive("SEQ", "playing", Value::Bool(true));
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 0))")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -35608,7 +35392,7 @@ use panel_kinds_seed::*;
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click (eseq.kinds/track 0)) (eseq.sequencer/track-menu-click (eseq.kinds/track 1)))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         editor
@@ -35691,7 +35475,7 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(180, 30);
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 0))")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -35766,7 +35550,7 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(180, 30);
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click (eseq.kinds/track 0))")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -35874,7 +35658,7 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(220, 200);
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click (eseq.kinds/track 0)) (eseq.sequencer/track-menu-click (eseq.kinds/track 1)))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -35946,7 +35730,7 @@ use panel_kinds_seed::*;
         editor.runtime_mut().run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click (eseq.kinds/track 0)) (eseq.sequencer/track-menu-click (eseq.kinds/track 1)))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         let initial_layout = editor
@@ -36039,8 +35823,8 @@ use panel_kinds_seed::*;
         let initial_step = find_layout_node_by_stable_key_suffix(&initial_layout, "/step-cell-0-0")
             .expect("initial step cell should render");
         assert_eq!(
-            layout_prop_bool(compact_step_shell(initial_step), "active"),
-            Some(true),
+            layout_instance_field(&editor, compact_step_shell(initial_step), "step", "active"),
+            Value::Bool(true),
             "fixture generation 0 should render track 0 step 0 active"
         );
 
@@ -36062,9 +35846,9 @@ use panel_kinds_seed::*;
         let switched_step = find_layout_node_by_stable_key_suffix(&switched_layout, "/step-cell-0-0")
             .expect("existing keyed step cell should still render after switch");
         assert_eq!(
-            layout_prop_bool(compact_step_shell(switched_step), "active"),
-            Some(false),
-            "track 0 step 0 active binding should reflect the switched pattern"
+            layout_instance_field(&editor, compact_step_shell(switched_step), "step", "active"),
+            Value::Bool(false),
+            "track 0 step 0 should reflect the switched pattern"
         );
     }
 
@@ -52713,15 +52497,10 @@ use panel_kinds_seed::*;
 
         let mut editor = sequencer_perf_editor(14, 16);
         apply_groups_bindings(&mut editor, &[parent, child, collapsed_group]);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_bool_list(&[
-                false, false, false, false, false, false, false, false, true, false, false,
-                false, false, false,
-            ]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        let rt = editor.runtime_mut();
+        let t8 = kind_track(rt, 8);
+        set_field(rt, t8, "collapsed", Value::Bool(true));
+        rt.run_reactive_cycle();
 
         assert_eq!(
             editor
@@ -52766,12 +52545,12 @@ use panel_kinds_seed::*;
             );
         }
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_bool_list(&[true; 14]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        let rt = editor.runtime_mut();
+        for track in 0..14 {
+            let id = kind_track(rt, track);
+            set_field(rt, id, "collapsed", Value::Bool(true));
+        }
+        rt.run_reactive_cycle();
         assert_eq!(
             editor
                 .runtime_mut()
@@ -52965,8 +52744,8 @@ use panel_kinds_seed::*;
             "drum rack sequencer badges should reuse the Kits tab icon"
         );
 
-        // The rack subtree is the whole block: header row plus member rows.
-        // Track ids are 1000 + index in this fixture.
+        // The rack subtree is the whole block: header row plus member rows,
+        // keyed by their tracks' `tid` (the index in this fixture).
         let block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-rack-7")
             .expect("rack block should render");
         assert!(
@@ -52989,19 +52768,19 @@ use panel_kinds_seed::*;
         );
         for member in [1usize, 2] {
             assert_eq!(
-                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                count_stable_key_prefix(block, &format!("sequencer-track-{member}")),
                 1,
                 "member track {member} should render its standard row nested in the rack"
             );
         }
         for loose in [0usize, 3] {
             assert_eq!(
-                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + loose)),
+                count_stable_key_prefix(block, &format!("sequencer-track-{loose}")),
                 0,
                 "non-member track {loose} should stay outside the rack block"
             );
             assert_eq!(
-                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + loose)),
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{loose}")),
                 1,
                 "non-member track {loose} should still render as a loose row"
             );
@@ -53024,15 +52803,9 @@ use panel_kinds_seed::*;
             Some(&Value::String("seqv-track-volume-meter".to_string())),
             "the rack fader is the same meter/fader widget the track rows use"
         );
+        let bus = editor.runtime().keyed_instance("eseq.kinds:bus", &[2]).expect("bus 2");
         assert!(
-            matches!(
-                rack_meter.props.get("level"),
-                Some(Value::ReactiveRef {
-                    namespace,
-                    field,
-                    ..
-                }) if namespace == "SEQ" && field == "bus-peak-2"
-            ),
+            binds_kind_field(rack_meter, "level", bus, "peak"),
             "the rack meter level must bind the backing bus peak (bus 2), got {:?}",
             rack_meter.props.get("level")
         );
@@ -53072,7 +52845,7 @@ use panel_kinds_seed::*;
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/select-group 0)")
+            .eval_str("(eseq.sequencer/select-group (first (eseq.kinds/groups)))")
             .expect("select regular group container");
         let selected = editor
             .widget_layout()
@@ -53127,7 +52900,7 @@ use panel_kinds_seed::*;
         );
         for member in [1usize, 2] {
             assert_eq!(
-                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                count_stable_key_prefix(block, &format!("sequencer-track-{member}")),
                 1,
                 "regular group member track {member} should be nested in its block"
             );
@@ -53151,7 +52924,7 @@ use panel_kinds_seed::*;
         );
         for member in [1usize, 2] {
             assert_eq!(
-                count_stable_key_prefix(&collapsed, &format!("sequencer-track-{}", 1000 + member)),
+                count_stable_key_prefix(&collapsed, &format!("sequencer-track-{member}")),
                 0,
                 "collapsed regular group should hide member track {member}"
             );
@@ -53176,7 +52949,7 @@ use panel_kinds_seed::*;
             .expect("child drum rack should render inside its regular parent");
         for member in [1usize, 2] {
             assert_eq!(
-                count_stable_key_prefix(rack_block, &format!("sequencer-track-{}", 1000 + member)),
+                count_stable_key_prefix(rack_block, &format!("sequencer-track-{member}")),
                 1,
                 "rack member track {member} should remain nested in the child rack"
             );
@@ -54689,7 +54462,7 @@ use panel_kinds_seed::*;
         );
         for member in [1usize, 2] {
             assert_eq!(
-                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + member)),
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{member}")),
                 0,
                 "collapsing a rack folds member track {member} away"
             );
@@ -55031,12 +54804,12 @@ use panel_kinds_seed::*;
         }
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .unwrap();
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
+                "(eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
             ))
             .unwrap();
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
@@ -55431,12 +55204,12 @@ use panel_kinds_seed::*;
         }
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .unwrap();
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
+                "(eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
             ))
             .unwrap();
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
@@ -55637,12 +55410,12 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .unwrap();
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {prob_index}))"
+                "(eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {prob_index}))"
             ))
             .unwrap();
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
@@ -55867,12 +55640,12 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .unwrap();
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) eseq.seqv-track-params/seqv-process-lane-mode-offset)",
+                "(eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) eseq.seqv-track-params/seqv-process-lane-mode-offset)",
             )
             .unwrap();
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
@@ -56042,12 +55815,12 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .eval_str("(eseq.sequencer/set-track-expanded (eseq.kinds/track 0) true)")
             .unwrap();
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {grab_index}))"
+                "(eseq.sequencer/set-track-param-mode (eseq.kinds/track 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {grab_index}))"
             ))
             .unwrap();
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();

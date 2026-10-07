@@ -289,10 +289,6 @@ pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
     format!("seq-track-step-selected-{track}-{step}")
 }
 
-pub(crate) fn track_selected_field(track: usize) -> String {
-    format!("track-selected-{track}")
-}
-
 pub(crate) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String {
     format!("rack-slot-delete-target-{track}-{slot}")
 }
@@ -380,20 +376,6 @@ mod delete_target_binding_tests {
     }
 }
 
-pub(crate) fn sync_track_selection_binding_fields(
-    rt: &mut Runtime,
-    track_count: usize,
-    current_track_idx: usize,
-) {
-    for track in 0..track_count {
-        rt.set_reactive(
-            "SEQ",
-            &track_selected_field(track),
-            Value::Bool(track == current_track_idx),
-        );
-    }
-}
-
 /// Builds the `SEQ.selected-tracks` reactive list (sorted track indices).
 pub(crate) fn build_selected_tracks_value(selected: &HashSet<usize>) -> Value {
     let tracks = sorted_selected_tracks(selected);
@@ -408,18 +390,8 @@ pub(crate) fn sorted_selected_tracks(selected: &HashSet<usize>) -> Vec<usize> {
     tracks
 }
 
-/// Lights `track-selected-{i}` for every track in the multi-select set (union
-/// with the focused current track) and refreshes `SEQ.selected-tracks`.
-pub(crate) fn sync_selected_tracks_bindings(
-    rt: &mut Runtime,
-    track_count: usize,
-    current_track_idx: usize,
-    selected: &HashSet<usize>,
-) {
-    for track in 0..track_count {
-        let on = track == current_track_idx || selected.contains(&track);
-        rt.set_reactive("SEQ", &track_selected_field(track), Value::Bool(on));
-    }
+/// Refreshes `SEQ.selected-tracks` (the highlight is `track.in-selection`).
+pub(crate) fn sync_selected_tracks_bindings(rt: &mut Runtime, selected: &HashSet<usize>) {
     rt.set_reactive(
         "SEQ",
         "selected-tracks",
@@ -555,17 +527,12 @@ pub(crate) fn sync_groups_bindings(
     sync_rack_groove_state(rt, groups, grooves);
 }
 
-pub(crate) fn set_current_track_reactive(
-    rt: &mut Runtime,
-    track_count: usize,
-    current_track_idx: usize,
-) {
+pub(crate) fn set_current_track_reactive(rt: &mut Runtime, current_track_idx: usize) {
     rt.set_reactive(
         "SEQ",
         "current-track",
         Value::Number(current_track_idx as f64),
     );
-    sync_track_selection_binding_fields(rt, track_count, current_track_idx);
 }
 
 pub(crate) fn track_step_param_slider_field(track: usize, mode: usize, step: usize) -> String {

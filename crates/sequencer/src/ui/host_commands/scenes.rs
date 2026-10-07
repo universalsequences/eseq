@@ -744,7 +744,7 @@ pub(super) fn handle(
             sync_shared_track_collapsed(&track_collapsed, &app);
             sync_track_name_state(rt, &mut *ctx.track_names, &app);
             sync_pattern_state(rt, &state);
-            set_current_track_reactive(rt, app.tracks.len(), ct);
+            set_current_track_reactive(rt, ct);
             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
             sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
             if sequencer_visible {

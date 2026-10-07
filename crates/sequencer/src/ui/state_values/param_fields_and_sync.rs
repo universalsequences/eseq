@@ -1048,125 +1048,22 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
     needs_ui
 }
 
-pub(crate) fn sync_track_playhead_field_delta(
+/// Follow the track playheads: when any moved, republish the tracker
+/// grid's playhead rows. Returns whether a field with readers changed.
+pub(crate) fn sync_tracker_grid_playhead_delta(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &app::App,
     previous: &mut Vec<u32>,
 ) -> bool {
-    let track_count = app.tracks.len();
-    let mut current = Vec::with_capacity(track_count);
-    let mut effects_dirty = false;
-    let mut snapshot_changed = previous.len() != track_count;
-
-    for t in 0..track_count {
-        let playhead = state.transport.track_playheads[t].load(Ordering::Relaxed);
-        let active_step = track_active_playhead_step(state, t);
-        let active_row = active_step / PAGE_SIZE;
-        let active_col = active_step % PAGE_SIZE;
-        if let Some(prev_playhead) = previous.get(t).copied() {
-            if prev_playhead != playhead {
-                snapshot_changed = true;
-                let num_steps = state.pattern.track_params[t]
-                    .get_num_steps()
-                    .max(1)
-                    .min(MAX_STEPS);
-                let prev_active_step = (prev_playhead as usize).min(num_steps.saturating_sub(1));
-                let prev_active_row = prev_active_step / PAGE_SIZE;
-                if prev_active_row != active_row {
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_page_field(t),
-                            Value::Number(active_row as f64),
-                        )
-                        .effects_dirty;
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_row_field(t, prev_active_row),
-                            Value::Number(-1.0),
-                        )
-                        .effects_dirty;
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_row_active_field(t, prev_active_row),
-                            Value::Bool(false),
-                        )
-                        .effects_dirty;
-                }
-                if prev_active_step != active_step {
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_active_field(t, prev_active_step),
-                            Value::Bool(false),
-                        )
-                        .effects_dirty;
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_active_field(t, active_step),
-                            Value::Bool(true),
-                        )
-                        .effects_dirty;
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_row_field(t, active_row),
-                            Value::Number(active_col as f64),
-                        )
-                        .effects_dirty;
-                    effects_dirty |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_playhead_row_active_field(t, active_row),
-                            Value::Bool(true),
-                        )
-                        .effects_dirty;
-                }
-            }
-        } else {
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_playhead_page_field(t),
-                    Value::Number(active_row as f64),
-                )
-                .effects_dirty;
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_playhead_active_field(t, active_step),
-                    Value::Bool(true),
-                )
-                .effects_dirty;
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_playhead_row_field(t, active_row),
-                    Value::Number(active_col as f64),
-                )
-                .effects_dirty;
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_playhead_row_active_field(t, active_row),
-                    Value::Bool(true),
-                )
-                .effects_dirty;
-        }
-        current.push(playhead);
+    let current: Vec<u32> = (0..app.tracks.len())
+        .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
+        .collect();
+    if *previous == current {
+        return false;
     }
-
-    if snapshot_changed {
-        *previous = current;
-        effects_dirty |=
-            super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
-    }
-
-    effects_dirty
+    *previous = current;
+    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app)
 }
 
 pub(crate) fn sync_all_track_sequencer_state(
@@ -1394,7 +1291,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
     }
 
     let started = profile.as_ref().map(|_| Instant::now());
-    sync_all_track_playhead_fields(rt, state, app);
+    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.playhead_fields = started.expect("profile timer").elapsed();
         profile.elapsed = total_started.expect("profile timer").elapsed();

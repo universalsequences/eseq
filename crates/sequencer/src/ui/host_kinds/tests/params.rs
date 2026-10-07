@@ -273,7 +273,7 @@ fn param_value_follows_the_selected_or_playing_steps_lock() {
     // Playing with no selection: the playing step's.
     h.shared.selected_steps.lock().unwrap().clear();
     let transport = &h.shared.state.transport;
-    transport.playing.store(true, Ordering::Relaxed);
+    h.set_playing(true);
     transport.track_playheads[0].store(4, Ordering::Relaxed);
     h.sync();
     check(&mut h, 500.0, true, "playing step 4");
@@ -718,11 +718,7 @@ fn param_and_plock_render_fields_cost_nothing_while_unobserved() {
     ];
     let before: Vec<u64> = keys.iter().map(|key| h.computed(*key)).collect();
     let scans = h.plock_scans();
-    h.shared
-        .state
-        .transport
-        .playing
-        .store(true, Ordering::Relaxed);
+    h.set_playing(true);
     for step in 0..8 {
         h.shared.state.transport.track_playheads[0].store(step, Ordering::Relaxed);
         h.filter_slot(slot)
@@ -914,11 +910,7 @@ fn param_printing_follows_the_print_latch_while_recording() {
     );
     h.sync();
     assert_eq!(h.slot("printing"), 0.0, "only while playing and recording");
-    h.shared
-        .state
-        .transport
-        .playing
-        .store(true, Ordering::Relaxed);
+    h.set_playing(true);
     h.shared.recording.store(true, Ordering::Relaxed);
     h.sync();
     assert_eq!(h.slot("printing"), 1.0);
