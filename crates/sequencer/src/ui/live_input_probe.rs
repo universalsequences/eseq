@@ -61,7 +61,7 @@ pub(super) fn run(
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
+        last_visualization_poll_at: Instant::now(),
         visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };

@@ -190,22 +190,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         Value::Number(state.current_scene_index() as f64),
     );
     sync_rack_clip_state(rt, state);
-    rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
-    rt.set_reactive(
-        "SEQ",
-        "neural-energy-matrix",
-        build_neural_energy_matrix_value(state),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "neural-trigger-matrix",
-        build_neural_trigger_matrix_value(state),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "neural-dampening-matrix",
-        build_neural_dampening_matrix_value(state),
-    );
     rt.set_reactive(
         "SEQ",
         "graph-visualizations",
@@ -231,53 +215,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         sequencer::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
         |name| Value::String(scene_slots.epoch(name).to_string()),
     );
-}
-
-pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
-    Value::List(
-        state
-            .current_neural_networks()
-            .iter()
-            .map(neural_network_value)
-            .map(|network| Rc::new(RefCell::new(network)))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -> Value {
-    let snapshot = state.neural_visualization();
-    let size = neural_snapshot_size(&snapshot);
-    Value::List(
-        (0..size)
-            .map(|row| {
-                Rc::new(RefCell::new(Value::List(
-                    (0..size)
-                        .map(|col| {
-                            Rc::new(RefCell::new(Value::Number(neural_dampening_display_value(
-                                snapshot.dampening[row][col],
-                            ))))
-                        })
-                        .collect(),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> Value {
-    let snapshot = state.neural_visualization();
-    let size = neural_snapshot_size(&snapshot);
-    neural_column_matrix_value(
-        (0..size).map(|idx| neural_energy_display_value(snapshot.energy[idx])),
-    )
-}
-
-pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> Value {
-    let snapshot = state.neural_visualization();
-    let size = neural_snapshot_size(&snapshot);
-    neural_column_matrix_value(
-        (0..size).map(|idx| neural_trigger_display_value(snapshot.trigger_activity[idx])),
-    )
 }
 
 pub(crate) fn build_graph_visualizations_value(state: &Arc<SequencerState>) -> Value {
@@ -677,8 +614,8 @@ pub(super) fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> V
     )
 }
 
-/// The neurons the engine's visualization snapshot covers (the legacy
-/// `SEQ.neural-*-matrix` size, and the host kinds' `neuron` live values).
+/// The neurons the engine's visualization snapshot covers (the host kinds'
+/// `neuron` live values).
 pub(crate) fn neural_snapshot_size(
     snapshot: &sequencer::neural::NeuralVisualizationSnapshot,
 ) -> usize {
@@ -706,129 +643,6 @@ pub(crate) fn neural_trigger_display_value(value: f32) -> f64 {
 pub(crate) fn neural_dampening_display_value(value: f32) -> f64 {
     let value = value.clamp(0.0, 1.0) as f64;
     (value * 100.0).round() / 100.0
-}
-
-pub(super) fn neural_network_value(network: &sequencer::neural::ProjectNeuralNetwork) -> Value {
-    let mut map = HashMap::new();
-    map.insert(
-        "id".to_string(),
-        Rc::new(RefCell::new(Value::Number(network.id as f64))),
-    );
-    map.insert(
-        "name".to_string(),
-        Rc::new(RefCell::new(Value::String(network.name.clone()))),
-    );
-    map.insert(
-        "enabled".to_string(),
-        Rc::new(RefCell::new(Value::Bool(network.enabled))),
-    );
-    map.insert(
-        "num-neurons".to_string(),
-        Rc::new(RefCell::new(Value::Number(network.num_neurons as f64))),
-    );
-    map.insert(
-        "reset-bars".to_string(),
-        Rc::new(RefCell::new(Value::Number(
-            network.reset_interval_bars as f64,
-        ))),
-    );
-    map.insert(
-        "energy-decay".to_string(),
-        Rc::new(RefCell::new(Value::Number(network.energy_decay as f64))),
-    );
-    map.insert(
-        "max-poly".to_string(),
-        Rc::new(RefCell::new(Value::Number(network.max_poly as f64))),
-    );
-    map.insert(
-        "max-poly-selection".to_string(),
-        Rc::new(RefCell::new(Value::String(
-            network.max_poly_selection.as_str().to_string(),
-        ))),
-    );
-    map.insert(
-        "weights".to_string(),
-        Rc::new(RefCell::new(Value::List(
-            network
-                .weights
-                .iter()
-                .map(|row| {
-                    Rc::new(RefCell::new(Value::List(
-                        row.iter()
-                            .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
-                            .collect(),
-                    )))
-                })
-                .collect(),
-        ))),
-    );
-    map.insert(
-        "neurons".to_string(),
-        Rc::new(RefCell::new(Value::List(
-            network
-                .neurons
-                .iter()
-                .enumerate()
-                .map(|(idx, neuron)| Rc::new(RefCell::new(neural_neuron_value(idx, neuron))))
-                .collect(),
-        ))),
-    );
-    Value::Map(map)
-}
-
-pub(super) fn neural_neuron_value(idx: usize, neuron: &sequencer::neural::ProjectNeuron) -> Value {
-    let mut map = HashMap::new();
-    map.insert(
-        "index".to_string(),
-        Rc::new(RefCell::new(Value::Number(idx as f64))),
-    );
-    map.insert(
-        "route".to_string(),
-        Rc::new(RefCell::new(
-            neuron
-                .route
-                .map(|route| Value::Number(route as f64))
-                .unwrap_or(Value::Nil),
-        )),
-    );
-    map.insert(
-        "resolution".to_string(),
-        Rc::new(RefCell::new(Value::Keyword(
-            neuron.resolution_timebase().label().to_string(),
-        ))),
-    );
-    map.insert(
-        "delay".to_string(),
-        Rc::new(RefCell::new(Value::Number(neuron.delay_steps as f64))),
-    );
-    map.insert(
-        "threshold".to_string(),
-        Rc::new(RefCell::new(Value::Number(neuron.threshold as f64))),
-    );
-    map.insert(
-        "transpose".to_string(),
-        Rc::new(RefCell::new(Value::Number(neuron.transpose as f64))),
-    );
-    map.insert(
-        "quantize".to_string(),
-        Rc::new(RefCell::new(
-            neuron
-                .quantize_timebase()
-                .map(|timebase| Value::Keyword(timebase.label().to_string()))
-                .unwrap_or(Value::Nil),
-        )),
-    );
-    map.insert(
-        "dampening".to_string(),
-        Rc::new(RefCell::new(Value::Number(neuron.dampening_amount as f64))),
-    );
-    map.insert(
-        "dampening-recovery".to_string(),
-        Rc::new(RefCell::new(Value::Number(
-            neuron.dampening_recovery as f64,
-        ))),
-    );
-    Value::Map(map)
 }
 
 pub(crate) fn build_sync_labels() -> Value {

@@ -21,10 +21,9 @@
 //! an owner names), compared without allocating; the published generators
 //! are re-read only when the published version moved, the mark keys only
 //! when their revision did. Live (observed only, compared with the last
-//! push, so an idle tick reads nothing): a mark's `value`, the legacy
-//! `SEQ.generator-mark-<id>[-<key>]` read
-//! (`SequencerState::with_shown_generator_marks`, shared with
-//! `sync_generator_mark_fields`), every observed mark under one lock.
+//! push, so an idle tick reads nothing): a mark's `value`
+//! (`SequencerState::with_shown_generator_marks`), every observed mark
+//! under one lock.
 
 use super::*;
 

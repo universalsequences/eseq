@@ -457,8 +457,8 @@ being applied to the hit sounding on that row: an `(on SEL …)` whose selector
   onset, cleared at its end. `gen-mark` stamps the boundary's audio sample
   plus `at` beats; a mark earlier than the newest drops the newer ones, so the
   next hit's onset replaces a pending clear.
-- The host publishes the latest sounded mark as
-  `SEQ.generator-mark-<id>-<route>`; the row's sexp-slot binds it as `:lit`
+- The latest sounded mark is the generator's `<route>` mark (`generator-mark`,
+  kind-bindings spec §14.2t); the row's sexp-slot binds its value as `:lit`
   (a render binding: a hit repaints the slot, never re-runs the view).
 
 ## 7.5 Rules: `(rule TRIGGER STAGE… ACTION…)`

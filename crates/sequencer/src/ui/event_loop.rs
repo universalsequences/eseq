@@ -463,7 +463,7 @@ pub(crate) fn run_event_loop(
         cached_cpu_load_bits: 0.0f32.to_bits(),
         last_meter_poll_at: Instant::now() - METER_POLL_INTERVAL,
         last_cpu_ui_poll_at: Instant::now() - CPU_UI_POLL_INTERVAL,
-        last_neural_visualization_poll_at: Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL,
+        last_visualization_poll_at: Instant::now() - VISUALIZATION_POLL_INTERVAL,
         visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now() - VOICE_COUNT_LOG_INTERVAL,
     };
@@ -1081,11 +1081,6 @@ pub(crate) fn run_event_loop(
                         };
                         if cleared_neural_selection {
                             let selection = shared.selected_neural_neurons.lock().unwrap().clone();
-                            sync_selected_neural_neuron_bindings(
-                                editor.runtime_mut(),
-                                &shared.state,
-                                &selection,
-                            );
                             let track = shared.current_track.load(Ordering::Relaxed);
                             sync_fx_param_binding_fields_with_neural_selection(
                                 editor.runtime_mut(),

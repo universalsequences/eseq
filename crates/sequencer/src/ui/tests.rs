@@ -5745,7 +5745,7 @@
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
-                last_neural_visualization_poll_at: Instant::now(),
+                last_visualization_poll_at: Instant::now(),
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };
@@ -7793,7 +7793,7 @@
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
-                last_neural_visualization_poll_at: Instant::now(),
+                last_visualization_poll_at: Instant::now(),
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };
@@ -8420,7 +8420,7 @@
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
-                last_neural_visualization_poll_at: Instant::now(),
+                last_visualization_poll_at: Instant::now(),
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };
@@ -9458,7 +9458,7 @@
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
-                last_neural_visualization_poll_at: Instant::now(),
+                last_visualization_poll_at: Instant::now(),
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };
@@ -9687,7 +9687,6 @@
                     sync_shared_track_collapsed(&track_collapsed, app);
                     sync_track_name_state(rt, &mut track_names, app);
                     sync_pattern_state(rt, &state);
-                    sync_selected_neural_neuron_bindings(rt, &state, &neural);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_all_track_sequencer_state(rt, &state, app, ct, &selected_steps);
                     let _ = sync_all_expanded_step_viewports(
@@ -10801,7 +10800,7 @@
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
-                last_neural_visualization_poll_at: Instant::now(),
+                last_visualization_poll_at: Instant::now(),
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };

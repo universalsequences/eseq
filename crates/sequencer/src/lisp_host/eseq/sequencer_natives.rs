@@ -1316,15 +1316,15 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     );
 
     // UI telemetry: the tick stamps a number at the audio sample it plays at
-    // (the boundary, plus `at` beats); the UI publishes the latest one sounded
-    // as SEQ.generator-mark-<id>, or SEQ.generator-mark-<id>-<key> for a keyed
-    // mark (the jaki kind's playhead and lit row items).
+    // (the boundary, plus `at` beats); the UI shows the latest one sounded as
+    // the generator's mark of that key (`generator-mark.value`: the jaki
+    // kind's playhead and lit row items).
     let generator_tick_for_mark = Arc::clone(&generator_tick);
     let state_for_mark = Arc::clone(&state);
     runtime.register_native_with_docs(
         "gen-mark",
         "(gen-mark value [key] [at-beats])",
-        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as SEQ.generator-mark-<id>[-<key>].",
+        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as (generator-mark-named g key).value (key \"\" unkeyed).",
         move |args, _ctx| {
             let Some(EValue::Number(value)) = args.first() else {
                 return Err("gen-mark expects a number".to_string());

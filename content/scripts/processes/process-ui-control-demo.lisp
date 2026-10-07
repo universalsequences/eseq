@@ -10,7 +10,10 @@
 ;;
 ;; Current v1 limitation: the UI can write process inlets, but process outlets and
 ;; channels are not yet reactive UI bindings. The event-view below visualizes the
-;; marker notes the process emits through the normal track-event telemetry.
+;; marker notes the process emits through the normal track-event telemetry
+;; (`transport.track-events`, kind-bindings spec §14.2s).
+
+(import eseq.kinds :refer (tracks transport))
 
 (def process-ui-value
   (defchan process-ui-value 0))
@@ -61,13 +64,16 @@
            (out :value x)
            (send :process-ui-value x))))
 
-(defstate process-ui-step 1)
-(defstate process-ui-range 7)
-(defstate process-ui-period 1)
-(defstate process-ui-marker-every 4)
-(defstate process-ui-enabled true)
-(defstate process-ui-markers true)
-(defstate process-ui-track-label "Track 1")
+;; What the panel last set the process's inlets to.
+(def-kind process-ui
+  :key ()
+  :state ((step 1)
+          (range 7)
+          (period 1)
+          (marker-every 4)
+          (enabled true)
+          (markers true)
+          (track-label "Track 1")))
 
 (def process-ui-track-options
   (list "Track 1" "Track 2" "Track 3" "Track 4"
@@ -83,49 +89,42 @@
   (process-ui-index-of process-ui-track-options label))
 
 (def process-ui-set-step (v)
-  (do
-    (set! process-ui-step v)
-    (process-ui-wander :step v)))
+  (set! process-ui.step v)
+  (process-ui-wander :step v))
 
 (def process-ui-set-range (v)
-  (do
-    (set! process-ui-range v)
-    (process-ui-wander :range v)))
+  (set! process-ui.range v)
+  (process-ui-wander :range v))
 
 (def process-ui-set-period (v)
-  (do
-    (set! process-ui-period v)
-    (process-ui-wander :period v)))
+  (set! process-ui.period v)
+  (process-ui-wander :period v))
 
 (def process-ui-set-marker-every (v)
-  (do
-    (set! process-ui-marker-every v)
-    (process-ui-wander :marker-every v)))
+  (set! process-ui.marker-every v)
+  (process-ui-wander :marker-every v))
 
 (def process-ui-set-track (label)
-  (do
-    (set! process-ui-track-label label)
-    (process-ui-wander :track (process-ui-track-index label))))
+  (set! process-ui.track-label label)
+  (process-ui-wander :track (process-ui-track-index label)))
 
 (def process-ui-set-enabled (v)
-  (do
-    (set! process-ui-enabled v)
-    (process-ui-wander :enabled v)))
+  (set! process-ui.enabled v)
+  (process-ui-wander :enabled v))
 
 (def process-ui-set-markers (v)
-  (do
-    (set! process-ui-markers v)
-    (process-ui-wander :markers v)))
+  (set! process-ui.markers v)
+  (process-ui-wander :markers v))
 
 (def process-ui-wander
   (process-ui-bounce
-    :step process-ui-step
-    :range process-ui-range
-    :period process-ui-period
-    :track (process-ui-track-index process-ui-track-label)
-    :marker-every process-ui-marker-every
-    :enabled process-ui-enabled
-    :markers process-ui-markers))
+    :step process-ui.step
+    :range process-ui.range
+    :period process-ui.period
+    :track (process-ui-track-index process-ui.track-label)
+    :marker-every process-ui.marker-every
+    :enabled process-ui.enabled
+    :markers process-ui.markers))
 
 (start process-ui-wander)
 
@@ -175,7 +174,7 @@
     (label text :width process-ui-label-width :height process-ui-row-height :font-size 9 :h-align :right :color :dim :bg :transparent)
     control))
 
-(def process-ui-panel (track-events track-event-current-beat track-colors)
+(def process-ui-panel ()
   (box
     :padding 0.85
     :gap 0.6
@@ -186,32 +185,28 @@
         (v-stack :gap 0.45
           (label "process wander" :width 16 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
           (process-ui-row "step"
-            (process-ui-num "process-ui-step" process-ui-step 0 12 0.25 2
-              (lambda (v) (process-ui-set-step v))))
+            (process-ui-num "process-ui-step" process-ui.step 0 12 0.25 2 process-ui-set-step))
           (process-ui-row "range"
-            (process-ui-num "process-ui-range" process-ui-range 0 24 1 0
-              (lambda (v) (process-ui-set-range v))))
+            (process-ui-num "process-ui-range" process-ui.range 0 24 1 0 process-ui-set-range))
           (process-ui-row "period"
-            (process-ui-num "process-ui-period" process-ui-period 0.25 8 0.25 2
-              (lambda (v) (process-ui-set-period v))))
+            (process-ui-num "process-ui-period" process-ui.period 0.25 8 0.25 2
+              process-ui-set-period))
           (process-ui-row "marker"
-            (process-ui-num "process-ui-marker-every" process-ui-marker-every 1 16 1 0
-              (lambda (v) (process-ui-set-marker-every v))))
+            (process-ui-num "process-ui-marker-every" process-ui.marker-every 1 16 1 0
+              process-ui-set-marker-every))
           (process-ui-row "track"
             (dropdown
               :key "process-ui-track"
-              :value process-ui-track-label
+              :value process-ui.track-label
               :options process-ui-track-options
               :width process-ui-control-width
               :height process-ui-row-height
               :font-size 8
-              :on-change (lambda (v) (process-ui-set-track v))))
+              :on-change process-ui-set-track))
           (process-ui-row "run"
-            (process-ui-toggle "process-ui-enabled" process-ui-enabled
-              (lambda (v) (process-ui-set-enabled v))))
+            (process-ui-toggle "process-ui-enabled" process-ui.enabled process-ui-set-enabled))
           (process-ui-row "emit"
-            (process-ui-toggle "process-ui-markers" process-ui-markers
-              (lambda (v) (process-ui-set-markers v))))
+            (process-ui-toggle "process-ui-markers" process-ui.markers process-ui-set-markers))
           (h-stack :gap 0.5 :align :center
             (button "start" :key "process-ui-start" :width 5.0 :height 1.2 :font-size 9
               :on-click (lambda (event) (start process-ui-wander)))
@@ -221,34 +216,39 @@
       (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.75 :corner-radius 16
         (v-stack :gap 0.45
           (label "track events" :width 30 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-          (event-view
-            :key "process-ui-track-event-view"
-            :events track-events
-            :current-beat track-event-current-beat
-            :renderer :heatmap
-            :x :beat-phase
-            :x-min 0
-            :x-max 16
-            :y :transpose
-            :y-min -24
-            :y-max 24
-            :phase-beats 16
-            :window-beats 16
-            :brightness :velocity
-            :color-by :track
-            :color-mode :categorical
-            :color-palette track-colors
-            :color-min 0
-            :color-max 15
-            :color-count 16
-            :x-bins 64
-            :y-bins 48
-            :background (rgba 0.1 0.1 0.1 0.5)
-            :width 30
-            :height 12))))))
+          (subtree :key "process-ui-track-event-view"
+            (process-ui-event-view)))))))
 
-(effect-buffer "*process-ui*"
-  (process-ui-panel SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors))
+;; The tracks' output notes, in their own subtree (whose key it takes): a new
+;; event re-runs only this view. Its beat is bound, so the playhead only
+;; repaints.
+(def process-ui-event-view ()
+  (event-view
+    :events transport.track-events
+    :current-beat #'transport.track-events-beat
+    :renderer :heatmap
+    :x :beat-phase
+    :x-min 0
+    :x-max 16
+    :y :transpose
+    :y-min -24
+    :y-max 24
+    :phase-beats 16
+    :window-beats 16
+    :brightness :velocity
+    :color-by :track
+    :color-mode :categorical
+    :color-palette (map (lambda (t) t.color) (tracks))
+    :color-min 0
+    :color-max 15
+    :color-count 16
+    :x-bins 64
+    :y-bins 48
+    :background (rgba 0.1 0.1 0.1 0.5)
+    :width 30
+    :height 12))
+
+(effect-buffer "*process-ui*" (process-ui-panel))
 
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
 

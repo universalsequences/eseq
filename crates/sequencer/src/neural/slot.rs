@@ -1,8 +1,8 @@
 //! The addressable fields of a native neural network (kind-bindings spec
 //! §14.2q): what a host kind setter edits and its history records
 //! (`NeuralNetworkPatch`). Each slot is one field of one network (a
-//! network setting, one weight cell or the whole matrix, or one field of one
-//! neuron), so undo and redo restore exactly the edited field and leave
+//! network setting, one weight cell or the whole matrix, one field of one
+//! neuron, or every neuron's threshold at once), so undo and redo restore exactly the edited field and leave
 //! every other edit of the network alone (an unrecorded legacy `neural-*`
 //! write included).
 
@@ -100,6 +100,9 @@ pub enum NeuralSlot {
         index: usize,
         field: NeuronField,
     },
+    /// Every neuron's threshold, by neuron: one edit, so a control that sets
+    /// them all records one entry and undo restores each as it was.
+    Thresholds(Vec<f32>),
 }
 
 impl NeuralSlot {
@@ -115,6 +118,7 @@ impl NeuralSlot {
             Self::Weights(_) => "weights".to_string(),
             Self::Weight { from, to, .. } => format!("weight:{from}:{to}"),
             Self::Neuron { index, field } => format!("neuron:{index}:{}", field.name()),
+            Self::Thresholds(_) => "thresholds".to_string(),
         }
     }
 
@@ -141,6 +145,16 @@ impl NeuralSlot {
                 index: *index,
                 field: field.read(&network.neurons.get(*index).cloned().unwrap_or_default()),
             },
+            Self::Thresholds(_) => Self::Thresholds(
+                (0..network.num_neurons)
+                    .map(|index| {
+                        (network.neurons.get(index))
+                            .map_or(ProjectNeuron::default().threshold, |neuron| {
+                                neuron.threshold
+                            })
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -180,6 +194,15 @@ impl NeuralSlot {
                 network.normalize_shape();
                 field.write(&mut network.neurons[*index]);
             }
+            Self::Thresholds(thresholds) => {
+                if thresholds.len() != size {
+                    return Err(format!("the thresholds are not {size}"));
+                }
+                network.normalize_shape();
+                for (neuron, threshold) in network.neurons.iter_mut().zip(thresholds) {
+                    neuron.threshold = *threshold;
+                }
+            }
         }
         Ok(())
     }
@@ -191,6 +214,7 @@ impl NeuralSlot {
                 .iter()
                 .map(|row| row.capacity() * std::mem::size_of::<f32>())
                 .sum(),
+            Self::Thresholds(thresholds) => thresholds.capacity() * std::mem::size_of::<f32>(),
             _ => 0,
         }
     }
@@ -225,6 +249,9 @@ mod tests {
         };
         assert!(neuron.write(&mut net).is_err());
         assert!(NeuralSlot::Weights(vec![vec![1.0; 3]; 3])
+            .write(&mut net)
+            .is_err());
+        assert!(NeuralSlot::Thresholds(vec![0.5; 3])
             .write(&mut net)
             .is_err());
         assert_eq!(net, before);

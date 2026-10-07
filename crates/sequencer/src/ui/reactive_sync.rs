@@ -1213,49 +1213,6 @@ pub(super) fn sync_step_selection_bindings(
     dirty
 }
 
-pub(super) fn neural_neuron_selected_field(
-    pattern_idx: usize,
-    network_id: u64,
-    neuron_idx: usize,
-) -> String {
-    format!("neural-neuron-selected-{pattern_idx}-{network_id}-{neuron_idx}")
-}
-
-// Mirrors step selection: row widgets bind to targeted fields so selection dirties only those rows.
-pub(super) fn sync_selected_neural_neuron_bindings(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-) -> bool {
-    let mut dirty = rt
-        .set_reactive(
-            "SEQ",
-            "selected-neural-neurons",
-            sequencer::lisp_host::selected_neural_neurons_to_value(selection),
-        )
-        .effects_dirty;
-    let pattern_idx = state.current_scene_index();
-    for network in state.current_neural_networks() {
-        let neuron_count = network.num_neurons.min(sequencer::neural::NUM_NEURONS);
-        for neuron_idx in 0..neuron_count {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &neural_neuron_selected_field(pattern_idx, network.id, neuron_idx),
-                    Value::Bool(
-                        selection.contains(&sequencer::lisp_host::SelectedNeuralNeuron {
-                            pattern_idx,
-                            network_id: network.id,
-                            neuron_idx,
-                        }),
-                    ),
-                )
-                .effects_dirty;
-        }
-    }
-    dirty
-}
-
 pub(super) fn sync_track_plocks_for_neural_selection(
     rt: &mut Runtime,
     app: &app::App,

@@ -44,7 +44,7 @@ Goal: surface generator state to visualizations (the inverse of param).
   with fixed-shape vectors/matrices/rings.
 - **lisp_host.rs**: extend `state-set!` to support non-scalar shapes (`(state-set! name idx
   v)` for vectors); add `(seq-state name var)` reactive UI read (generalize the existing
-  `SEQ.neural-energy-matrix` reference).
+  neural visualization read, now `neuron.energy` in eseq.kinds).
 - **generator.rs**: on the once-per-block publish path (mirror the `set_neural_visualization`
   call site in scheduler.rs) apply `:hold` (mirror `trigger_visual_until_beats` +
   `TRIGGER_VISUAL_HOLD_BEATS`) and `:decay` (mirror `apply_energy_decay`) smoothing; append

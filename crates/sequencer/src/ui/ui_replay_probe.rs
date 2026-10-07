@@ -54,7 +54,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
+        last_visualization_poll_at: Instant::now(),
         visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
@@ -209,7 +209,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             // than their wall-clock cadence. The previous probe left these
             // mostly idle, hiding work paid by actual scratch-only playback.
             meters.last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
-            meters.last_neural_visualization_poll_at = Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL;
+            meters.last_visualization_poll_at = Instant::now() - VISUALIZATION_POLL_INTERVAL;
             shared.state.transport.playhead.store(index, Ordering::Relaxed);
             shared.state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
                 track: 0, sample_time: index as u64 * 512, beat: index as f64 / 6.0,

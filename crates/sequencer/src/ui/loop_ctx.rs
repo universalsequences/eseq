@@ -112,7 +112,7 @@ pub(crate) struct MeterCache {
     pub(crate) cached_cpu_load_bits: u32,
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
-    pub(crate) last_neural_visualization_poll_at: Instant,
+    pub(crate) last_visualization_poll_at: Instant,
     pub(crate) visualization_liveness: VisualizationLiveness,
     pub(crate) last_voice_count_log_at: Instant,
 }

@@ -1,5 +1,6 @@
-//! Stage 7g-5: generators (tick-mode sequencers) and their marks, the
-//! legacy `SEQ.generator-mark-*` fields as kinds.
+//! Stage 7g-5: generators (tick-mode sequencers) and their marks (the
+//! legacy `SEQ.generator-mark-*` fields, removed with the jaki panel's port,
+//! eseq-0l17.20).
 
 use super::*;
 
@@ -49,19 +50,6 @@ impl Harness {
             .store(sample.is_some(), Ordering::Relaxed);
         state.set_audio_rendered_sample(sample.unwrap_or(0));
     }
-
-    /// The legacy `SEQ.<field>` as the legacy publisher leaves it, with a
-    /// view reading it so it publishes.
-    fn legacy_mark(&mut self, field: &str) -> Value {
-        let buffer = format!("*legacy-{field}*");
-        self.eval(&format!(
-            r#"(effect-buffer "{buffer}" (label (str (reactive-value (bind-seq "{field}")))))"#
-        ));
-        self.editor.runtime_mut().run_reactive_cycle();
-        let state = self.shared.state.clone();
-        sync_generator_mark_fields(self.editor.runtime_mut(), &state, &mut HashMap::new());
-        self.eval(&format!(r#"(reactive-value (bind-seq "{field}"))"#))
-    }
 }
 
 fn instance_command(h: &mut Harness, name: &str, entries: Vec<(&str, Value)>) {
@@ -73,7 +61,7 @@ fn instance_command(h: &mut Harness, name: &str, entries: Vec<(&str, Value)>) {
 }
 
 #[test]
-fn generator_marks_read_like_the_legacy_fields_and_follow_the_audio_clock() {
+fn generator_marks_follow_the_audio_clock() {
     let mut h = Harness::new();
     let gid = h.script_generator("gen");
     assert_eq!(h.eval_gen("(len gen.marks)"), number(0.0));
@@ -93,12 +81,7 @@ fn generator_marks_read_like_the_legacy_fields_and_follow_the_audio_clock() {
     let (m, k) = (h.gen_instance("m"), h.gen_instance("k"));
     assert_eq!(h.eval_gen("m.generator"), h.eval_gen("gen"));
     assert_eq!(h.eval_gen(r#"(generator-mark-named gen "x")"#), Value::Nil);
-    // Legacy parity (cold reads): stopped, before the first hit, at it, past
-    // the second.
-    let legacy = [
-        format!("generator-mark-{gid}"),
-        format!("generator-mark-{gid}-0.1"),
-    ];
+    // Cold reads: stopped, before the first hit, at it, past the second.
     for (sample, expected) in [
         (None, [0.0, 0.0]),
         (Some(999), [0.0, 0.0]),
@@ -108,9 +91,6 @@ fn generator_marks_read_like_the_legacy_fields_and_follow_the_audio_clock() {
         h.play_at(sample);
         let kinds = [h.eval_gen("m.value"), h.eval_gen("k.value")];
         assert_eq!(kinds, expected.map(number), "{sample:?}");
-        for (field, kinds) in legacy.iter().zip(kinds) {
-            assert_eq!(h.legacy_mark(field), kinds, "{field} at {sample:?}");
-        }
     }
 
     // Nothing is computed while unobserved, and an idle tick syncs no
@@ -241,8 +221,12 @@ fn a_redefined_script_generator_starts_without_its_old_marks() {
     // Defined again (the same id): no old mark shows.
     assert_eq!(h.script_generator("again"), gid);
     assert_eq!(h.eval_gen("(len again.marks)"), number(0.0));
+    // Its first stamp lies ahead of the audio clock: the dropped one (3, at
+    // sample 0) would show.
     h.play_at(Some(10));
-    let legacy = h.legacy_mark(&format!("generator-mark-{gid}-chord"));
-    assert_eq!(legacy, number(0.0), "the legacy field shows no old mark");
+    state.push_generator_mark(gid, "chord", 20, 5.0);
+    h.sync();
+    h.eval_gen(r#"(def m (generator-mark-named again "chord"))"#);
+    assert_eq!(h.eval_gen("m.value"), number(0.0), "no old mark shows");
     h.play_at(None);
 }

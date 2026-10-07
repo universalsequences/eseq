@@ -55,6 +55,11 @@
 ;;   (band-attach)
 ;;   (ps)
 
+;; The panel reads each track's band processes back through the kinds
+;; (kind-bindings spec §14.2h: `t.processes`, their `inlets`) and its events
+;; from `transport.track-events` (§14.2s).
+(import eseq.kinds :refer (tracks transport))
+
 ;; ── processes ──────────────────────────────────────────────────────────────
 
 (def-process band-voice
@@ -165,30 +170,30 @@
       (if (= n 2) (band-voice-2-h key v)
         (band-voice-3-h key v)))))
 
-;; ── UI state mirrors (inlets have no reactive read-back yet, so the panel
-;;    owns the values and pushes every edit through the handles) ─────────────
+;; ── UI state mirrors (the panel's own edits: a scene whose chains lack the
+;;    band processes shows these; every edit goes through the handles) ──────
 
-(defstate band-cells (list (list 0 0 0 0) (list 0 0 0 0) (list 0 0 0 0) (list 0 0 0 0)))
-(defstate band-weights (list 1 1 1 1))
-(defstate band-lags (list 0 0 0 0))
-(defstate band-memories (list 3 3 3 3))
-(defstate band-coupling 1)
-(defstate band-grace 0)
+(def-kind band-ui
+  :key ()
+  :state ((cells (list (list 0 0 0 0) (list 0 0 0 0) (list 0 0 0 0) (list 0 0 0 0)))
+          (weights (list 1 1 1 1))
+          (lags (list 0 0 0 0))
+          (memories (list 3 3 3 3))
+          (coupling 1)
+          (grace 0)))
 
 (def band-set-cell (r c v)
-  (do
-    (set! band-cells (set-nth band-cells r (set-nth (nth band-cells r) c v)))
-    (band-ear-set c (band-amount-key r) v)))
+  (set! band-ui.cells (set-nth band-ui.cells r (set-nth (nth band-ui.cells r) c v)))
+  (band-ear-set c (band-amount-key r) v))
 
 (def band-apply-matrix (m)
-  (do
-    (set! band-cells m)
-    (for-each
-      (lambda (r)
-        (for-each
-          (lambda (c) (band-ear-set c (band-amount-key r) (nth (nth m r) c)))
-          (range 0 4)))
-      (range 0 4))))
+  (set! band-ui.cells m)
+  (for-each
+    (lambda (r)
+      (for-each
+        (lambda (c) (band-ear-set c (band-amount-key r) (nth (nth m r) c)))
+        (range 0 4)))
+    (range 0 4)))
 
 (def band-zero-matrix ()
   (map (lambda (r) (list 0 0 0 0)) (range 0 4)))
@@ -209,78 +214,58 @@
        (range 0 4)))
 
 (def band-set-weight (n v)
-  (do
-    (set! band-weights (set-nth band-weights n v))
-    (band-voice-set n :weight v)))
+  (set! band-ui.weights (set-nth band-ui.weights n v))
+  (band-voice-set n :weight v))
 
 (def band-set-lag (n v)
-  (do
-    (set! band-lags (set-nth band-lags n v))
-    (band-voice-set n :lag v)))
+  (set! band-ui.lags (set-nth band-ui.lags n v))
+  (band-voice-set n :lag v))
 
 (def band-set-memory (n v)
-  (do
-    (set! band-memories (set-nth band-memories n v))
-    (band-voice-set n :memory v)))
+  (set! band-ui.memories (set-nth band-ui.memories n v))
+  (band-voice-set n :memory v))
 
 (def band-set-coupling (v)
-  (do
-    (set! band-coupling v)
-    (for-each (lambda (j) (band-ear-set j :coupling v)) (range 0 4))))
+  (set! band-ui.coupling v)
+  (for-each (lambda (j) (band-ear-set j :coupling v)) (range 0 4)))
 
 (def band-set-grace (v)
-  (do
-    (set! band-grace v)
-    (for-each (lambda (j) (band-ear-set j :grace v)) (range 0 4))))
+  (set! band-ui.grace v)
+  (for-each (lambda (j) (band-ear-set j :grace v)) (range 0 4)))
 
 ;; ── scene/pattern sync ─────────────────────────────────────────────────────
 ;; Process chains live on the PATTERN, so a scene switch swaps every inlet
-;; value under the panel. Each render re-derives the mirrored values from the
-;; SEQ.track-process-slots reactive (the same composed-chain view the fx
-;; panel reads); the defstates above are only edit echoes and fallbacks for
-;; scenes whose chains lack the band slots.
+;; value under the panel. The panel shows each track's inlets as its chain
+;; holds them (the composed chain the fx panel reads), and the edits above
+;; where a scene's chain lacks the band processes.
 
-(def band-track-slots (all-slots track)
-  (if (> (len all-slots) track) (nth all-slots track) (list)))
+;; Track t's `class` process, or nil.
+(def band-track-process (t class)
+  (first (filter (lambda (p) (= p.class-name class)) t.processes)))
 
-(def band-slot-inlet (slots class name fallback)
-  (let ((hits (filter (lambda (slot) (= (get slot :class) class)) slots)))
-    (if (> (len hits) 0)
-      (let ((inlets (filter (lambda (inlet) (= (get inlet :name) name))
-                            (get (nth hits 0) :inlets))))
-        (if (> (len inlets) 0) (get (nth inlets 0) :value) fallback))
-      fallback)))
+;; Track n's `class` process, or nil.
+(def band-process (n class)
+  (let ((ts (tracks)))
+    (if (< n (len ts)) (band-track-process (nth ts n) class) nil)))
 
-(def band-sync-from-slots (all-slots)
-  (do
-    (set! band-cells
-      (map (lambda (r)
-             (map (lambda (c)
-                    (band-slot-inlet (band-track-slots all-slots c) "band-ear"
-                      (str "a" r) (nth (nth band-cells r) c)))
-                  (range 0 4)))
-           (range 0 4)))
-    (set! band-weights
-      (map (lambda (n)
-             (band-slot-inlet (band-track-slots all-slots n) "band-voice"
-               "weight" (nth band-weights n)))
-           (range 0 4)))
-    (set! band-lags
-      (map (lambda (n)
-             (band-slot-inlet (band-track-slots all-slots n) "band-voice"
-               "lag" (nth band-lags n)))
-           (range 0 4)))
-    (set! band-memories
-      (map (lambda (n)
-             (band-slot-inlet (band-track-slots all-slots n) "band-voice"
-               "memory" (nth band-memories n)))
-           (range 0 4)))
-    (set! band-coupling
-      (band-slot-inlet (band-track-slots all-slots 0) "band-ear"
-        "coupling" band-coupling))
-    (set! band-grace
-      (band-slot-inlet (band-track-slots all-slots 0) "band-ear"
-        "grace" band-grace))))
+;; Tracks 0-3's `class` processes, nil where a track lacks one: the panel
+;; takes them once a render.
+(def band-processes (class)
+  (let ((ts (tracks)))
+    (map (lambda (n) (if (< n (len ts)) (band-track-process (nth ts n) class) nil))
+         (range 0 4))))
+
+;; Inlet `name` of process p (or nil), else `echo`.
+(def band-inlet (p name echo)
+  (let ((i (if p (first (filter (lambda (i) (= i.name name)) p.inlets)) nil)))
+    (if i i.value echo)))
+
+;; `ears`: (band-processes "band-ear")
+(def band-cells-shown (ears)
+  (map (lambda (r)
+         (map (lambda (c) (band-inlet (nth ears c) (str "a" r) (nth (nth band-ui.cells r) c)))
+              (range 0 4)))
+       (range 0 4)))
 
 ;; ── UI ─────────────────────────────────────────────────────────────────────
 
@@ -316,7 +301,7 @@
 (def band-matrix-height
   (+ (* 4 band-row-height) (* 3 band-row-gap)))
 
-(def band-matrix-block ()
+(def band-matrix-block (ears)
   (v-stack :gap 0.3
     (h-stack :gap 0.3 :align :center
       (label "" :width band-label-width :height 0.9 :font-size 1 :bg :transparent)
@@ -335,100 +320,104 @@
         :min 0
         :max 1
         :color :blue
-        :value band-cells
-        :on-cell-change (lambda (r c v) (band-set-cell r c v))))))
+        :value (band-cells-shown ears)
+        :on-cell-change band-set-cell))))
 
-(def band-voice-row (n)
+;; `voice`: track n's band-voice process, or nil
+(def band-voice-row (n voice)
   (h-stack :gap 0.4 :align :center
     (label (str "trk " (+ n 1)) :width band-label-width :height band-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
-    (band-num (str "band-weight-" n) (nth band-weights n) 0 2 0.05 2
-      (lambda (v) (band-set-weight n v)))
-    (band-num (str "band-lag-" n) (nth band-lags n) 0 32 1 0
-      (lambda (v) (band-set-lag n v)))
-    (band-num (str "band-memory-" n) (nth band-memories n) 1 4 1 0
-      (lambda (v) (band-set-memory n v)))))
+    (band-num (str "band-weight-" n) (band-inlet voice "weight" (nth band-ui.weights n))
+      0 2 0.05 2 (lambda (v) (band-set-weight n v)))
+    (band-num (str "band-lag-" n) (band-inlet voice "lag" (nth band-ui.lags n))
+      0 32 1 0 (lambda (v) (band-set-lag n v)))
+    (band-num (str "band-memory-" n) (band-inlet voice "memory" (nth band-ui.memories n))
+      1 4 1 0 (lambda (v) (band-set-memory n v)))))
 
-(def band-voice-block ()
+;; `voices`: (band-processes "band-voice")
+(def band-voice-block (voices)
   (v-stack :gap band-row-gap
     (h-stack :gap 0.4 :align :center
       (label "" :width band-label-width :height band-row-height :font-size 1 :bg :transparent)
       (band-dim-label "weight" band-control-width)
       (band-dim-label "lag" band-control-width)
       (band-dim-label "memory" band-control-width))
-    (each (range 0 4) |n| (band-voice-row n))))
+    (each (range 0 4) |n| (band-voice-row n (nth voices n)))))
 
-(def band-panel (track-events track-event-current-beat track-colors process-slots)
-  (do
-    (band-sync-from-slots process-slots)
+(def band-panel ()
+  (let ((ears (band-processes "band-ear")) (voices (band-processes "band-voice")))
     (box
       :padding 0.85
       :gap 0.6
       (h-stack :gap 0.8 :align :top
-      (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
-        (v-stack :gap 0.5
-          (label "band coupling" :width 12 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-          (h-stack :gap 0.5 :align :center
-            (label "coupling" :width 5 :height band-row-height :font-size 9 :h-align :right :color :dim :bg :transparent)
-            (band-num "band-coupling" band-coupling 0 2 0.05 2
-              (lambda (v) (band-set-coupling v))))
-          (h-stack :gap 0.5 :align :center
-            (label "grace" :width 5 :height band-row-height :font-size 9 :h-align :right :color :dim :bg :transparent)
-            (band-num "band-grace" band-grace 0 3 1 0
-              (lambda (v) (band-set-grace v))))
-          (h-stack :gap 0.4 :align :center
-            (band-preset-button "band-preset-clear" "clear" (band-zero-matrix))
-            (band-preset-button "band-preset-ring" "ring" (band-ring-matrix)))
-          (h-stack :gap 0.4 :align :center
-            (band-preset-button "band-preset-hub" "hub" (band-hub-matrix))
-            (band-preset-button "band-preset-mesh" "mesh" (band-mesh-matrix)))
-          (h-stack :gap 0.4 :align :center
-            (button "attach" :key "band-attach-button" :width 4.6 :height 1.1 :font-size 8
-              :on-click (lambda (event) (band-attach)))
-            (button "detach" :key "band-detach-button" :width 4.6 :height 1.1 :font-size 8
-              :on-click (lambda (event) (band-detach))))))
+        (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
+          (v-stack :gap 0.5
+            (label "band coupling" :width 12 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+            (h-stack :gap 0.5 :align :center
+              (label "coupling" :width 5 :height band-row-height :font-size 9 :h-align :right :color :dim :bg :transparent)
+              (band-num "band-coupling" (band-inlet (first ears) "coupling" band-ui.coupling) 0 2 0.05 2
+                band-set-coupling))
+            (h-stack :gap 0.5 :align :center
+              (label "grace" :width 5 :height band-row-height :font-size 9 :h-align :right :color :dim :bg :transparent)
+              (band-num "band-grace" (band-inlet (first ears) "grace" band-ui.grace) 0 3 1 0
+                band-set-grace))
+            (h-stack :gap 0.4 :align :center
+              (band-preset-button "band-preset-clear" "clear" (band-zero-matrix))
+              (band-preset-button "band-preset-ring" "ring" (band-ring-matrix)))
+            (h-stack :gap 0.4 :align :center
+              (band-preset-button "band-preset-hub" "hub" (band-hub-matrix))
+              (band-preset-button "band-preset-mesh" "mesh" (band-mesh-matrix)))
+            (h-stack :gap 0.4 :align :center
+              (button "attach" :key "band-attach-button" :width 4.6 :height 1.1 :font-size 8
+                :on-click (lambda (event) (band-attach)))
+              (button "detach" :key "band-detach-button" :width 4.6 :height 1.1 :font-size 8
+                :on-click (lambda (event) (band-detach))))))
 
-      (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
-        (v-stack :gap 0.5
-          (label "who follows whom" :width 17 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-          (band-matrix-block)))
+        (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
+          (v-stack :gap 0.5
+            (label "who follows whom" :width 17 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+            (band-matrix-block ears)))
 
-      (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
-        (v-stack :gap 0.5
-          (label "voices" :width 17 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-          (band-voice-block)))
+        (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
+          (v-stack :gap 0.5
+            (label "voices" :width 17 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+            (band-voice-block voices)))
 
-      (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
-        (v-stack :gap 0.5
-          (label "track events" :width 26 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-          (event-view
-            :key "band-track-event-view"
-            :events track-events
-            :current-beat track-event-current-beat
-            :renderer :heatmap
-            :x :beat-phase
-            :x-min 0
-            :x-max 16
-            :y :transpose
-            :y-min -24
-            :y-max 24
-            :phase-beats 16
-            :window-beats 16
-            :brightness :velocity
-            :color-by :track
-            :color-mode :categorical
-            :color-palette track-colors
-            :color-min 0
-            :color-max 15
-            :color-count 16
-            :x-bins 64
-            :y-bins 48
-            :background (rgba 0.1 0.1 0.1 0.5)
-            :width 26
-            :height 10)))))))
+        (box :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 0.85 :corner-radius 16
+          (v-stack :gap 0.5
+            (label "track events" :width 26 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+            (subtree :key "band-track-event-view" (band-event-view))))))))
 
-(effect-buffer "*band-matrix*"
-  (band-panel SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors
-              SEQ.track-process-slots))
+;; The tracks' output notes, in their own subtree (whose key it takes): a new
+;; event re-runs only this view. Its beat is bound, so the playhead only
+;; repaints.
+(def band-event-view ()
+  (event-view
+    :events transport.track-events
+    :current-beat #'transport.track-events-beat
+    :renderer :heatmap
+    :x :beat-phase
+    :x-min 0
+    :x-max 16
+    :y :transpose
+    :y-min -24
+    :y-max 24
+    :phase-beats 16
+    :window-beats 16
+    :brightness :velocity
+    :color-by :track
+    :color-mode :categorical
+    :color-palette (map (lambda (t) t.color) (tracks))
+    :color-min 0
+    :color-max 15
+    :color-count 16
+    :x-bins 64
+    :y-bins 48
+    :background (rgba 0.1 0.1 0.1 0.5)
+    :width 26
+    :height 10))
+
+(effect-buffer "*band-matrix*" (band-panel))
 
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
 

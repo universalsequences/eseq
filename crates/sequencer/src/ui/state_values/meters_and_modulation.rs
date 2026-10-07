@@ -1466,16 +1466,11 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct VisualizationLiveness {
-    neural_energy: Option<bool>,
-    neural_trigger: Option<bool>,
-    neural_dampening: Option<bool>,
     graph: Option<bool>,
     track_output: Option<bool>,
     track_beat: Option<bool>,
     /// Last published `graph-node-notes-<id>` list per graph.
     pub(crate) graph_node_notes: HashMap<u64, Vec<f64>>,
-    /// Last published `generator-mark-<id>[-<key>]` per generator and key.
-    pub(crate) generator_marks: HashMap<(u64, String), f64>,
 }
 
 /// Hidden displays do not pull or convert scheduler histories. Forget their
@@ -1500,18 +1495,12 @@ fn sync_visualization_field(
     rt.set_reactive("SEQ", field, value()).effects_dirty
 }
 
-pub(crate) fn sync_neural_visualization_fields(
+pub(crate) fn sync_visualization_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     previous: &mut VisualizationLiveness,
 ) -> bool {
     let mut dirty = false;
-    dirty |= sync_visualization_field(rt, "neural-energy-matrix", &mut previous.neural_energy,
-        || state.has_neural_visualization(), || build_neural_energy_matrix_value(state));
-    dirty |= sync_visualization_field(rt, "neural-trigger-matrix", &mut previous.neural_trigger,
-        || state.has_neural_visualization(), || build_neural_trigger_matrix_value(state));
-    dirty |= sync_visualization_field(rt, "neural-dampening-matrix", &mut previous.neural_dampening,
-        || state.has_neural_visualization(), || build_neural_dampening_matrix_value(state));
     dirty |= sync_visualization_field(rt, "graph-visualizations", &mut previous.graph,
         || state.has_graph_visualizations(), || build_graph_visualizations_value(state));
     dirty |= sync_visualization_field(rt, "track-events", &mut previous.track_output,
@@ -1561,49 +1550,6 @@ pub(crate) fn sync_graph_node_notes_fields(
         let value = Value::List(flat.iter().map(|n| value_cell(Value::Number(*n))).collect());
         dirty |= rt.set_reactive("SEQ", &field, value).effects_dirty;
         previous.insert(graph_id, flat);
-    }
-    dirty
-}
-
-/// Publish `SEQ.generator-mark-<id>` (and `…-<id>-<key>` for keyed marks)
-/// for every generator mark a view reads: the latest `(gen-mark v)` its ticks
-/// stamped at or before the audio clock, or 0 while stopped. Polled every
-/// tick against the audio clock, so a mark changes when its hit sounds, not
-/// when the lookahead ran it.
-pub(crate) fn sync_generator_mark_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    previous: &mut HashMap<(u64, String), f64>,
-) -> bool {
-    let mut consumed = Vec::new();
-    for (id, key) in state.generator_mark_keys() {
-        let field = if key.is_empty() {
-            format!("generator-mark-{id}")
-        } else {
-            format!("generator-mark-{id}-{key}")
-        };
-        let slot = (id, key);
-        if !rt.has_live_reactive_consumers("SEQ", &field) {
-            previous.remove(&slot);
-            continue;
-        }
-        consumed.push((slot, field));
-    }
-    if consumed.is_empty() {
-        return false;
-    }
-    // One clock read and one lock per pass.
-    let marks: Vec<f64> = state
-        .with_shown_generator_marks(|shown| consumed.iter().map(|(slot, _)| shown(slot)).collect());
-    let mut dirty = false;
-    for ((slot, field), mark) in consumed.into_iter().zip(marks) {
-        if previous.get(&slot) == Some(&mark) {
-            continue;
-        }
-        dirty |= rt
-            .set_reactive("SEQ", &field, Value::Number(mark))
-            .effects_dirty;
-        previous.insert(slot, mark);
     }
     dirty
 }

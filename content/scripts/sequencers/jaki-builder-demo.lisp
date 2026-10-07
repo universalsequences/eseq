@@ -7,6 +7,7 @@
 ;; targeted repaint, scheduler publication, and undo.
 
 (import alez.jaki.surface)
+(import eseq.kinds :refer (transport))
 
 (def jb-name "jaki-builder")
 (def script-buffer-name "*jaki-builder*")
@@ -102,13 +103,21 @@
         '(-> 0)))
     nil))
 
-(defstate jb-baked-code "")
+;; The panel's own state: the last bake.
+(def-kind jaki-builder
+  :key ()
+  :state ((baked "")))
 
 (def jb-code ()
   (source (append (list 'jak jb-name :16) jb-figures)))
 
 (def jb-bake ()
-  (set! jb-baked-code (jb-code)))
+  (set! jaki-builder.baked (jb-code)))
+
+;; The playing scene, as the panel's header names it.
+(def jb-scene-label ()
+  (let ((s transport.scene))
+    (if s (str "scene " (+ s.index 1)) "scene")))
 
 (def jb-figure-row (index figure)
   (h-stack :key (str "jaki-builder-row-" index) :gap 0.5 :align :center
@@ -128,14 +137,14 @@
       :width 2 :height 1.2 :font-size 9
       :on-click (lambda (event) (jb-remove-figure index)))))
 
-(def jb-panel (figures pattern)
+(def jb-panel (figures)
   (box :key "jaki-builder-panel" :width 31
     :height (+ 5 (* (- (len figures) 2) 1.7)) :padding 0.8
     :background-color :mixer-strip-bg :border-color :mixer-strip-border
     :corner-radius 12
     (v-stack :width :fill :gap 0.55
       (h-stack :width :fill :gap 0.5 :align :center
-        (label (str "scene " (+ pattern 1)) :width 8 :height 1.2
+        (label (jb-scene-label) :width 8 :height 1.2
           :font-size 9 :color :dim :bg :transparent)
         (button "+ figure" :key "jaki-builder-add"
           :width 7 :height 1.2 :font-size 9
@@ -147,13 +156,13 @@
         (jb-figure-row index (nth figures index)))
       (box :key "jaki-builder-code" :width 29.4 :height 1.4 :padding 0.2
         :background-color :bg :corner-radius 4
-        (label (if (= jb-baked-code "")
+        (label (if (= jaki-builder.baked "")
                  "Bake the current scene to a (jak ...) form"
-                 jb-baked-code)
+                 jaki-builder.baked)
           :width 29 :height 1 :font-size 8 :color :dim :bg :transparent)))))
 
 (effect-buffer "*jaki-builder*"
   (box :width 32 :height (+ 6 (* (- (len jb-figures) 2) 1.7))
-    (jb-panel jb-figures SEQ.current-pattern)))
+    (jb-panel jb-figures)))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
   script-tab-label script-buffer-name script-sequencer-name "")

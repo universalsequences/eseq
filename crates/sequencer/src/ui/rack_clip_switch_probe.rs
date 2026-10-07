@@ -140,7 +140,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         mod_display_poll_fx_epoch: usize::MAX, mod_display_poll_track: None,
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(), last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
+        last_visualization_poll_at: Instant::now(),
         visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };

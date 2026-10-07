@@ -18,10 +18,11 @@
 //! (observed only, compared in place with the last push, so an idle tick
 //! allocates nothing): `network.active` and a neuron's `energy`, `trigger`
 //! and `dampening`, read from the engine's visualization snapshot (one read
-//! per tick) with the legacy `SEQ.neural-*-matrix` display transforms
-//! (zeros unless the network is the one the engine runs), and a neuron's
-//! `selected` (the step-editing selection, `SharedSelectedNeuralNeurons`, as
-//! the legacy `neural-neuron-selected-{pattern}-{network}-{neuron}` fields).
+//! per tick) and shaped for display (energy clamped to 0-4 and dampening to
+//! 0-1, both rounded to 0.01, dampening by target neuron, triggers clamped to
+//! 0-1; zeros unless the network is the one the engine runs), and a neuron's
+//! `selected` (the step-editing selection, `SharedSelectedNeuralNeurons`, of
+//! the current pattern).
 
 use super::*;
 use sequencer::lisp_host::SelectedNeuralNeuron;
@@ -103,8 +104,8 @@ fn runs(snapshot: &NeuralVisualizationSnapshot, nid: u64) -> bool {
 }
 
 /// Neuron `index` of network `nid` (of `count` neurons): its playback from
-/// `snapshot` while the engine runs the network (the legacy matrices'
-/// transforms; zeros otherwise) and whether `selection` holds it.
+/// `snapshot` while the engine runs the network (shaped for display;
+/// zeros otherwise) and whether `selection` holds it.
 fn neuron_live(
     snapshot: &NeuralVisualizationSnapshot,
     selection: Option<&BTreeSet<SelectedNeuralNeuron>>,
@@ -247,8 +248,8 @@ fn push_network(
     pusher.push(id, f::NETWORK_NEURONS, instance_list(neurons));
 }
 
-/// One neuron's model fields (the legacy `SEQ.neural-networks` neuron map's,
-/// the route a track instance, the clocks labels).
+/// One neuron's model fields (the route a track instance, the clocks
+/// labels).
 fn push_neuron(
     pusher: &mut Pusher<'_>,
     tracks: &[Option<InstanceId>],

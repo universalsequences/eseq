@@ -66,8 +66,8 @@
         table-editor table-editor-open! table-editor-close! table-editor-band!
         table-editor-op! table-editor-add-node! table-editor-frame! table-editor-undo!
         table-editor-redo! table-editor-save!
-        network networks set-neural-weight!
-        generator generators generator-of generator-mark-named)
+        network networks set-neural-weight! set-neural-thresholds!
+        generator generators generator-of generator-mark-named generator-mark-of)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -1789,6 +1789,10 @@
 ;; Set cell (from to) of network nw's weight matrix (neuron indices; any
 ;; finite number).
 (def set-neural-weight! (nw from to v) (neural-edit nw "weight" v :from from :to to))
+;; Set every neuron of network nw to fire at energy v (0 or more): one edit
+;; of the network, so undo restores each neuron's threshold and a drag's
+;; set!s join one entry.
+(def set-neural-thresholds! (nw v) (neural-edit nw "thresholds" v))
 ;; Generators (spec §14.2t). The generator of a created instance (self) or
 ;; of a sequencer id, or nil.
 (def generator-of (x)
@@ -1798,6 +1802,11 @@
 ;; gen-mark), or nil before its first stamp.
 (def generator-mark-named (g key)
   (first (filter (lambda (m) (= m.name key)) g.marks)))
+;; The mark named key of x's generator (x as generator-of takes it), or nil
+;; when x has no generator or before the key's first stamp.
+(def generator-mark-of (x key)
+  (let ((g (generator-of x)))
+    (if g (generator-mark-named g key) nil)))
 ;; graph-node.resolution / quantize labels (the host checks they match its
 ;; own), graph.max-poly-selection's.
 (def graph-timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))

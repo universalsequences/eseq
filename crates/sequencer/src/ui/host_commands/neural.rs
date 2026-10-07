@@ -1,6 +1,7 @@
 //! The native neural network kinds' setters (kind-bindings spec §14.2q):
 //! `set-neural` (`:network-id`, `:field`, `:value`; `:neuron` for a neuron's
-//! field, `:track-id` for its route; `:from` and `:to` for one weight cell).
+//! field, `:track-id` for its route; `:from` and `:to` for one weight cell;
+//! `"thresholds"` sets every neuron's threshold to `:value` as one edit).
 //!
 //! A network is named by its id among the current scene's networks, a
 //! neuron by its index below the network's neuron count, a track by its
@@ -141,6 +142,13 @@ fn neural_request(
             NeuralSlot::Weights(matrix(&value, network.num_neurons)?),
             true,
         ),
+        "thresholds" => {
+            let threshold = value.number(0.0, F32_MAX)? as f32;
+            (
+                NeuralSlot::Thresholds(vec![threshold; network.num_neurons]),
+                true,
+            )
+        }
         "weight" => {
             let from = neuron_index(network, map, "from")?;
             let to = neuron_index(network, map, "to")?;

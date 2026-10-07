@@ -28,10 +28,6 @@ impl SequencerState {
         self.neural_visualization.lock().unwrap().clone()
     }
 
-    pub fn has_neural_visualization(&self) -> bool {
-        self.neural_visualization.lock().unwrap().num_neurons > 0
-    }
-
     pub fn set_graph_visualizations(&self, snapshots: Vec<GraphVisualizationSnapshot>) {
         *self.graph_visualizations.lock().unwrap() = snapshots;
     }

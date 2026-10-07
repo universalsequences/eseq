@@ -35,7 +35,7 @@ The scheduler-thread VM already runs user lisp per event:
 - **Emission in musical coordinates already exists:** `fx-emit` / `acc-emit` take a musical offset (timebase keyword like `:16`, or numeric source-step-relative), `:vel`, `:note`, etc., and the engine resolves to samples. Arp helpers (`fx-arp-emit`, `acc-arp-emit`) are duration-aware.
 - **Persistent state already exists:** `fx-state-get` / `fx-state-set` over a `HashMap<String, EValue>` keyed per-track/per-FX (lisp_host.rs:~3099/3181).
 - **P-locks by identity already exist:** `ParamNodeId { logical_id, node_param_idx }` (neural.rs:30), with `acc-plock-effect`, `acc-set-instrument-param`, etc. baking values validated against param identity.
-- **Runtime→UI telemetry already exists** as a hand-wired special case: `state.set_neural_visualization(...)` publishes a snapshot the UI reads via `SEQ.neural-energy-matrix`, `SEQ.neural-trigger-matrix`, `SEQ.neural-dampening-matrix`.
+- **Runtime→UI telemetry already exists** as a hand-wired special case: `state.set_neural_visualization(...)` publishes a snapshot the UI reads as each `neuron`'s `energy`, `trigger` and `dampening` (eseq.kinds; formerly `SEQ.neural-*-matrix`).
 
 ### The crucial gap
 
@@ -172,7 +172,7 @@ Types: `:float`, `:int`, `:enum` (with `:options`), `:string`, `:track`, `:timeb
 (state fire   :type :vector :len 16 :visible true :hold :8)      ; viz only
 ```
 
-Written in `:tick` via `(state-set! name ...)` / `(state-get name)`; read in the UI via `(seq-state name var)` reactive binding (generalizes `SEQ.neural-energy-matrix`).
+Written in `:tick` via `(state-set! name ...)` / `(state-get name)`; read in the UI via `(seq-state name var)` reactive binding (generalizes the neural visualization read, now `neuron.energy`).
 
 ### Telemetry transport semantics (what makes `state` *not* a param)
 

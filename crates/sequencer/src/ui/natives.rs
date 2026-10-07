@@ -3199,25 +3199,6 @@ pub(crate) fn init_runtime(
                     "current-pattern",
                     Value::Number(state.current_scene_index() as f64),
                 ),
-                ("neural-networks", build_neural_networks_value(&state)),
-                (
-                    "selected-neural-neurons",
-                    sequencer::lisp_host::selected_neural_neurons_to_value(
-                        &selected_neural_neurons.lock().unwrap(),
-                    ),
-                ),
-                (
-                    "neural-energy-matrix",
-                    build_neural_energy_matrix_value(&state),
-                ),
-                (
-                    "neural-trigger-matrix",
-                    build_neural_trigger_matrix_value(&state),
-                ),
-                (
-                    "neural-dampening-matrix",
-                    build_neural_dampening_matrix_value(&state),
-                ),
                 (
                     "graph-visualizations",
                     build_graph_visualizations_value(&state),

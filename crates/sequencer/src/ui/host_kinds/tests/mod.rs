@@ -52,7 +52,7 @@ fn meter_cache() -> MeterCache {
         cached_cpu_load_bits: 0.0f32.to_bits(),
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
+        last_visualization_poll_at: Instant::now(),
         visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     }
@@ -463,6 +463,7 @@ mod lanes;
 mod mixer;
 mod mixer_view;
 mod neural;
+mod packages_view;
 mod panel;
 mod panel_extras;
 mod panels_view;

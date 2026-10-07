@@ -6,7 +6,7 @@ use super::*;
 use sequencer::neural::NeuralVisualizationSnapshot;
 
 const REFER_NEURAL: &str = "(import eseq.kinds :refer (track tracks project network \
-                            networks set-neural-weight!))";
+                            networks set-neural-weight! set-neural-thresholds!))";
 
 impl Harness {
     fn eval_neural(&mut self, code: &str) -> Value {
@@ -61,24 +61,6 @@ impl Harness {
     }
 }
 
-/// The legacy `SEQ.neural-networks` entry of network `id`.
-fn legacy_network(h: &Harness, id: u64) -> Value {
-    let networks = build_neural_networks_value(&h.shared.state);
-    let entry = items(&networks)
-        .into_iter()
-        .find(|network| num(get(network, "id")) as u64 == id);
-    entry.expect("the legacy publisher lists the network")
-}
-
-/// A label the legacy publisher shows as a keyword.
-fn keyword_label(value: Value) -> Value {
-    match value {
-        Value::Keyword(label) => Value::String(label),
-        other => other,
-    }
-}
-
-/// A visualization snapshot of network `id` (four neurons) running.
 fn snapshot(id: u64, energy: f32) -> NeuralVisualizationSnapshot {
     let mut snapshot = NeuralVisualizationSnapshot {
         active: true,
@@ -95,7 +77,7 @@ fn snapshot(id: u64, energy: f32) -> NeuralVisualizationSnapshot {
 }
 
 #[test]
-fn network_fields_read_like_the_legacy_neural_networks() {
+fn network_fields_read_the_engines_networks() {
     let mut h = Harness::new();
     let id = h.network("router");
     h.eval_neural(&format!(
@@ -105,51 +87,53 @@ fn network_fields_read_like_the_legacy_neural_networks() {
          (neural-weight {id} :from 0 :to 2 :value 0.75)"
     ));
     h.sync();
-    let legacy = legacy_network(&h, id);
+    let network = h.shared.state.current_neural_networks()[0].clone();
+    let neuron = &network.neurons[2];
     assert_eq!(h.eval_neural("(len (networks))"), number(1.0));
     assert_eq!(h.eval_neural("nw.index"), number(0.0));
     let network_fields = [
-        ("nw.nid", "id"),
-        ("nw.name", "name"),
-        ("nw.enabled", "enabled"),
-        ("nw.neuron-count", "num-neurons"),
-        ("nw.reset-bars", "reset-bars"),
-        ("nw.energy-decay", "energy-decay"),
-        ("nw.max-poly", "max-poly"),
-        ("nw.max-poly-selection", "max-poly-selection"),
-        ("nw.weights", "weights"),
+        ("nw.nid", number(id as f64)),
+        ("nw.name", s("router")),
+        ("nw.enabled", Value::Bool(network.enabled)),
+        ("nw.neuron-count", number(4.0)),
+        ("nw.reset-bars", number(2.0)),
+        ("nw.energy-decay", number(f64::from(network.energy_decay))),
+        ("nw.max-poly", number(3.0)),
+        ("nw.max-poly-selection", s("random")),
     ];
-    for (kinds, key) in network_fields {
-        assert_eq!(h.eval_neural(kinds), get(&legacy, key), "{kinds}");
+    for (kinds, expected) in network_fields {
+        assert_eq!(h.eval_neural(kinds), expected, "{kinds}");
     }
     assert_eq!(
         h.eval_neural("(nth nw.weights 0)"),
         h.eval_neural("(list 0 0 0.75 0)")
     );
-    let neuron = items(&get(&legacy, "neurons"))[2].clone();
+    assert_eq!(
+        h.eval_neural("(len nw.weights)"),
+        number(4.0),
+        "neuron-count square"
+    );
     let neuron_fields = [
-        ("n2.index", "index"),
-        ("n2.delay", "delay"),
-        ("n2.threshold", "threshold"),
-        ("n2.transpose", "transpose"),
-        ("n2.dampening-amount", "dampening"),
-        ("n2.dampening-recovery", "dampening-recovery"),
+        ("n2.index", number(2.0)),
+        ("n2.delay", number(2.0)),
+        ("n2.threshold", number(f64::from(neuron.threshold))),
+        ("n2.transpose", number(7.0)),
+        (
+            "n2.dampening-amount",
+            number(f64::from(neuron.dampening_amount)),
+        ),
+        (
+            "n2.dampening-recovery",
+            number(f64::from(neuron.dampening_recovery)),
+        ),
     ];
-    for (kinds, key) in neuron_fields {
-        assert_eq!(h.eval_neural(kinds), get(&neuron, key), "{kinds}");
+    for (kinds, expected) in neuron_fields {
+        assert_eq!(h.eval_neural(kinds), expected, "{kinds}");
     }
-    // Clocks are labels (the legacy keywords), the route a track.
-    assert_eq!(
-        h.eval_neural("n2.resolution"),
-        keyword_label(get(&neuron, "resolution"))
-    );
-    assert_eq!(
-        h.eval_neural("n2.quantize"),
-        keyword_label(get(&neuron, "quantize"))
-    );
+    // Clocks are labels, the route a track.
+    assert_eq!(h.eval_neural("n2.resolution"), s("8"));
     assert_eq!(h.eval_neural("n2.quantize"), s("4"));
     assert_eq!(h.eval_neural("n1.quantize"), s("off"), "no quantize");
-    assert_eq!(get(&neuron, "route"), number(1.0));
     assert_eq!(h.eval_neural("(= n2.route (track 1))"), Value::Bool(true));
     assert_eq!(h.eval_neural("n1.route"), Value::Nil);
     assert_eq!(h.eval_neural("(= n2.network nw)"), Value::Bool(true));
@@ -288,6 +272,48 @@ fn network_setters_go_through_history_follow_the_value_rule_and_undo() {
 }
 
 #[test]
+fn set_neural_thresholds_is_one_edit_a_drag_one_entry_and_undo_restores_each() {
+    let mut h = Harness::new();
+    let id = h.network("router");
+    h.eval_neural(&format!(
+        "(neural-neuron {id} 1 :threshold 0.25) (neural-neuron {id} 3 :threshold 2)"
+    ));
+    h.sync();
+    let thresholds = "(map (lambda (nr) nr.threshold) nw.neurons)";
+    let before = h.eval_neural(thresholds);
+    assert_eq!(before, h.eval_neural("(list 1 0.25 1 2)"));
+    let entries = h.app.history.undo_len();
+    // A drag: every frame sets all four, one entry in all.
+    h.gesture.pointer_down = true;
+    for v in [0.5, 0.75, 1.5] {
+        h.neural_set(&format!("(set-neural-thresholds! nw {v})"));
+    }
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), entries + 1, "one drag entry");
+    assert_eq!(
+        h.eval_neural(thresholds),
+        h.eval_neural("(list 1.5 1.5 1.5 1.5)")
+    );
+    // The current value is no edit; the value rule rejects as a neuron's.
+    h.neural_set("(set-neural-thresholds! nw 1.5)");
+    assert_eq!(h.app.history.undo_len(), entries + 1);
+    h.neural_rejects(
+        "(set-neural-thresholds! nw -1)",
+        "thresholds takes a number from 0",
+    );
+    // Undo restores each neuron's own threshold from before the drag.
+    h.neural_undo();
+    assert_eq!(h.eval_neural(thresholds), before);
+    app::edit::redo(&mut h.app);
+    h.sync();
+    assert_eq!(
+        h.eval_neural(thresholds),
+        h.eval_neural("(list 1.5 1.5 1.5 1.5)")
+    );
+}
+
+#[test]
 fn network_undo_restores_only_the_edited_field_in_its_scene() {
     let mut h = Harness::new();
     let id = h.network("router");
@@ -411,15 +437,6 @@ fn network_syncs_follow_their_key_and_live_fields_are_observed_gated() {
         h.eval_neural("n0.dampening"),
         h.eval_neural("(list 0 0.25 0 0)")
     );
-    let legacy_energy = items(&build_neural_energy_matrix_value(&h.shared.state));
-    let legacy_dampening = items(&build_neural_dampening_matrix_value(&h.shared.state));
-    for neuron in 0..4 {
-        let read = |h: &mut Harness, field: &str| {
-            h.eval_neural(&format!("(let ((n (nth nw.neurons {neuron}))) n.{field})"))
-        };
-        assert_eq!(read(&mut h, "energy"), items(&legacy_energy[neuron])[0]);
-        assert_eq!(read(&mut h, "dampening"), legacy_dampening[neuron]);
-    }
     assert_eq!(
         h.eval_neural("(list nw.active idle.active i0.energy (len i0.dampening))"),
         h.eval_neural("(list true false 0 4)"),

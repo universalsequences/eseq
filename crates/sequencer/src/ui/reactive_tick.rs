@@ -564,11 +564,6 @@ pub(crate) fn sync_reactive_tick(
             }
         }
         if selected_neural_snapshot != ctx.frame.prev_selected_neural_neurons {
-            needs_reactive_cycle |= sync_selected_neural_neuron_bindings(
-                editor.runtime_mut(),
-                &ctx.shared.state,
-                &selected_neural_snapshot,
-            );
             let revision =
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             needs_reactive_cycle |= sync_fx_param_bindings_delta(
@@ -933,9 +928,9 @@ pub(crate) fn sync_reactive_tick(
             }
             ctx.frame.prev_bus_peak_levels = ctx.meters.cached_bus_peak_levels.clone();
         }
-        if ctx.meters.last_neural_visualization_poll_at.elapsed() >= NEURAL_VISUALIZATION_POLL_INTERVAL {
-            ctx.meters.last_neural_visualization_poll_at = Instant::now();
-            needs_reactive_cycle |= sync_neural_visualization_fields(
+        if ctx.meters.last_visualization_poll_at.elapsed() >= VISUALIZATION_POLL_INTERVAL {
+            ctx.meters.last_visualization_poll_at = Instant::now();
+            needs_reactive_cycle |= sync_visualization_fields(
                 editor.runtime_mut(),
                 &ctx.shared.state,
                 &mut ctx.meters.visualization_liveness,
@@ -945,11 +940,6 @@ pub(crate) fn sync_reactive_tick(
             editor.runtime_mut(),
             &ctx.shared.state,
             &mut ctx.meters.visualization_liveness.graph_node_notes,
-        );
-        needs_reactive_cycle |= sync_generator_mark_fields(
-            editor.runtime_mut(),
-            &ctx.shared.state,
-            &mut ctx.meters.visualization_liveness.generator_marks,
         );
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
@@ -1324,7 +1314,6 @@ pub(crate) fn sync_reactive_tick(
             sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
             sync_track_name_state(rt, &mut *ctx.track_names, &app);
             sync_pattern_state(rt, &ctx.shared.state);
-            sync_selected_neural_neuron_bindings(rt, &ctx.shared.state, &selected_neural_snapshot);
             sync_names_pattern_elapsed = started.elapsed();
             if current_track_playhead_visible {
                 let started = Instant::now();

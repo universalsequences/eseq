@@ -332,163 +332,10 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn neural_networks_reactive_value_reflects_current_pattern_model() {
-        let state = Arc::new(SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
-        ));
-        state
-            .edit_current_neural_networks(|networks| {
-                let mut network = sequencer::neural::ProjectNeuralNetwork {
-                    id: 11,
-                    name: "router".to_string(),
-                    num_neurons: 2,
-                    weights: vec![vec![0.0, 0.75], vec![0.0, 0.0]],
-                    ..sequencer::neural::ProjectNeuralNetwork::default()
-                };
-                network.reset_interval_bars = 3.0;
-                network.energy_decay = 0.5;
-                network.max_poly = 5;
-                network.max_poly_selection = sequencer::neural::NeuralMaxPolySelection::Random;
-                network.neurons[1].route = Some(1);
-                network.neurons[1].delay_steps = 4;
-                network.neurons[1].quantize = Some(Timebase::Eighth as u8);
-                networks.push(network);
-                Ok(())
-            })
-            .unwrap();
-
-        let Value::List(networks) = build_neural_networks_value(&state) else {
-            panic!("expected neural network list");
-        };
-        assert_eq!(networks.len(), 1);
-        let Value::Map(network) = &*networks[0].borrow() else {
-            panic!("expected neural network map");
-        };
-        assert_eq!(
-            network.get("name").map(|value| value.borrow().clone()),
-            Some(Value::String("router".to_string()))
-        );
-        assert_eq!(
-            network
-                .get("reset-bars")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(3.0))
-        );
-        assert_eq!(
-            network
-                .get("energy-decay")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(0.5))
-        );
-        assert_eq!(
-            network.get("max-poly").map(|value| value.borrow().clone()),
-            Some(Value::Number(5.0))
-        );
-        assert_eq!(
-            network
-                .get("max-poly-selection")
-                .map(|value| value.borrow().clone()),
-            Some(Value::String("random".to_string()))
-        );
-        let Some(neurons) = network.get("neurons") else {
-            panic!("expected neurons");
-        };
-        let Value::List(neurons) = &*neurons.borrow() else {
-            panic!("expected neuron list");
-        };
-        let Value::Map(neuron) = &*neurons[1].borrow() else {
-            panic!("expected neuron map");
-        };
-        assert_eq!(
-            neuron.get("route").map(|value| value.borrow().clone()),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            neuron.get("delay").map(|value| value.borrow().clone()),
-            Some(Value::Number(4.0))
-        );
-        assert_eq!(
-            neuron.get("quantize").map(|value| value.borrow().clone()),
-            Some(Value::Keyword("8".to_string()))
-        );
-    }
-
-    #[test]
-    fn neural_dampening_matrix_value_reflects_runtime_snapshot() {
-        let state = Arc::new(SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
-        ));
-        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
-        snapshot.active = true;
-        snapshot.network_id = 7;
-        snapshot.num_neurons = 2;
-        snapshot.dampening[0][1] = 0.625;
-        state.set_neural_visualization(snapshot);
-
-        let Value::List(rows) = build_neural_dampening_matrix_value(&state) else {
-            panic!("expected dampening matrix rows");
-        };
-        assert_eq!(rows.len(), 2);
-        let Value::List(first_row) = &*rows[0].borrow() else {
-            panic!("expected first dampening row");
-        };
-        assert_eq!(first_row.len(), 2);
-        assert_eq!(*first_row[1].borrow(), Value::Number(0.63));
-    }
-
-    #[test]
-    fn neural_energy_and_trigger_matrix_values_reflect_runtime_snapshot() {
-        let state = Arc::new(SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
-        ));
-        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
-        snapshot.active = true;
-        snapshot.network_id = 7;
-        snapshot.num_neurons = 2;
-        snapshot.energy[0] = 0.625;
-        snapshot.energy[1] = 8.0;
-        snapshot.trigger_activity[1] = 1.0;
-        state.set_neural_visualization(snapshot);
-
-        let Value::List(energy_rows) = build_neural_energy_matrix_value(&state) else {
-            panic!("expected energy matrix rows");
-        };
-        assert_eq!(energy_rows.len(), 2);
-        let Value::List(first_energy_row) = &*energy_rows[0].borrow() else {
-            panic!("expected first energy row");
-        };
-        assert_eq!(first_energy_row.len(), 1);
-        assert_eq!(*first_energy_row[0].borrow(), Value::Number(0.63));
-        let Value::List(second_energy_row) = &*energy_rows[1].borrow() else {
-            panic!("expected second energy row");
-        };
-        assert_eq!(*second_energy_row[0].borrow(), Value::Number(4.0));
-
-        let Value::List(trigger_rows) = build_neural_trigger_matrix_value(&state) else {
-            panic!("expected trigger matrix rows");
-        };
-        assert_eq!(trigger_rows.len(), 2);
-        let Value::List(first_trigger_row) = &*trigger_rows[0].borrow() else {
-            panic!("expected first trigger row");
-        };
-        let Value::List(second_trigger_row) = &*trigger_rows[1].borrow() else {
-            panic!("expected second trigger row");
-        };
-        assert_eq!(*first_trigger_row[0].borrow(), Value::Number(0.0));
-        assert_eq!(*second_trigger_row[0].borrow(), Value::Number(1.0));
-    }
-
-    #[test]
     fn visualization_sync_requires_live_consumers_and_refreshes_reopened_panels() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![
-            ("neural-energy-matrix", Value::Number(-1.0)),
-            ("neural-trigger-matrix", Value::Number(-1.0)),
-            ("neural-dampening-matrix", Value::Number(-1.0)),
             ("graph-visualizations", Value::Number(-1.0)),
             ("track-events", Value::Number(-1.0)),
             ("track-event-current-beat", Value::Number(-1.0)),
@@ -498,45 +345,38 @@ use panel_kinds_seed::*;
             ..Default::default()
         }]);
         state.set_track_output_current_beat(2.0);
-        let mut neural = sequencer::neural::NeuralVisualizationSnapshot::default();
-        neural.num_neurons = 1;
-        neural.energy[0] = 0.5;
-        state.set_neural_visualization(neural);
         let mut liveness = VisualizationLiveness::default();
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
         assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-1.0)),
             "unobserved histories must not be converted or published");
 
         runtime.eval_str(r#"(effect-buffer "*events*" (label :text (str SEQ.track-events)))"#).unwrap();
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
         runtime.run_reactive_cycle();
         let published = runtime.reactive_field_value("SEQ", "track-events").unwrap().clone();
         assert!(matches!(&published, Value::List(events) if events.len() == 1));
         assert_eq!(runtime.reactive_field_value("SEQ", "track-event-current-beat"), Some(&Value::Number(-1.0)),
             "a reader of one visualization does not demand the others");
-        assert_eq!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(&Value::Number(-1.0)));
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-1.0)));
 
         runtime.set_hidden_effect_buffer_names(HashSet::from(["*events*".to_string()]));
         state.clear_track_output_events();
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
         assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&published));
         runtime.set_hidden_effect_buffer_names(HashSet::new());
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
         assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::List(vec![])),
             "reopening clears data whose source stopped while hidden");
         runtime.run_reactive_cycle();
         runtime.set_reactive("SEQ", "track-events", Value::Number(-2.0));
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
         assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-2.0)),
             "a dead source clears once, not on every poll");
 
         // Nonvisual observers still run in scratch-only mode.
-        runtime.eval_str("(observe SEQ.neural-energy-matrix)").unwrap();
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert!(matches!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(Value::List(_))));
-        state.set_neural_visualization(Default::default());
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(&Value::List(vec![])));
+        runtime.eval_str("(observe SEQ.graph-visualizations)").unwrap();
+        sync_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::List(vec![])));
     }
 
     #[test]
@@ -16465,7 +16305,6 @@ use panel_kinds_seed::*;
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
-                ("selected-neural-neurons", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
                 ("durations", test_number_list(&[1.0; 16])),
