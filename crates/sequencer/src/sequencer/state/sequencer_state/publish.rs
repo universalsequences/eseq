@@ -48,32 +48,6 @@ impl SequencerState {
         read(snapshots.iter().find(|snapshot| snapshot.id == id))
     }
 
-    /// Per published graph: its id and, per node, the `(note, velocity)`
-    /// pairs whose gate is open at audio-clock `sample`, oldest first. Reads only the sounding
-    /// windows, so it is cheap enough to poll every UI tick.
-    pub fn graph_node_sounding_at(&self, sample: u64) -> Vec<(u64, Vec<Vec<(f32, f32)>>)> {
-        self.graph_visualizations
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|snapshot| {
-                let nodes = (0..snapshot.num_nodes)
-                    .map(|node| {
-                        snapshot
-                            .node_sounding
-                            .get(node)
-                            .into_iter()
-                            .flatten()
-                            .filter(|note| note.is_sounding_at(sample))
-                            .map(|note| (note.note, note.velocity))
-                            .collect()
-                    })
-                    .collect();
-                (snapshot.id, nodes)
-            })
-            .collect()
-    }
-
     /// A generator tick's `(gen-mark v [key])`: `v` stamped at the audio
     /// sample it plays at. Ticks run ahead of the audio (lookahead), so
     /// readers take the latest mark at or before the audio clock. A mark
@@ -146,10 +120,6 @@ impl SequencerState {
             self.generator_mark_keys_revision
                 .fetch_add(1, Ordering::AcqRel);
         }
-    }
-
-    pub fn has_graph_visualizations(&self) -> bool {
-        !self.graph_visualizations.lock().unwrap().is_empty()
     }
 
     pub fn push_graph_control_command(&self, command: crate::graph::GraphControlCommand) {

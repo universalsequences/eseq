@@ -469,26 +469,14 @@ pub(crate) fn sync_reactive_tick(
         let mut needs_reactive_cycle = false;
         let mut refresh_visible_step_after_cycle = false;
         let selected_neural_snapshot = ctx.shared.selected_neural_neurons.lock().unwrap().clone();
-        let track_notes_wanted = editor.runtime().has_live_reactive_consumers("SEQ", "track-active-notes");
         // Rack trigger latches must still be consumed while hidden. Other
-        // tracks need no 128-note scan unless a display consumes their activity.
-        let active_notes_wanted = track_notes_wanted || fx_visible
-            || app.groups.iter().any(|group| group.is_rack());
+        // tracks need no 128-note scan unless a display consumes their activity
+        // (`track.active-notes` reads its own, host_kinds/graphs.rs).
+        let active_notes_wanted = fx_visible || app.groups.iter().any(|group| group.is_rack());
         let track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> =
             (0..if active_notes_wanted { app.tracks.len() } else { 0 })
             .map(|track| ctx.shared.state.active_note_activity(track))
             .collect();
-        if track_notes_wanted && track_active_notes != ctx.frame.prev_track_active_notes {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "track-active-notes",
-                    build_track_active_notes_snapshot_value(&track_active_notes),
-                )
-                .effects_dirty;
-            ctx.frame.prev_track_active_notes = track_active_notes.clone();
-        }
         if fx_visible {
             let active_notes: Vec<u8> = track_active_notes
                 .get(ct)
@@ -873,19 +861,6 @@ pub(crate) fn sync_reactive_tick(
             }
             ctx.frame.prev_bus_peak_levels = ctx.meters.cached_bus_peak_levels.clone();
         }
-        if ctx.meters.last_visualization_poll_at.elapsed() >= VISUALIZATION_POLL_INTERVAL {
-            ctx.meters.last_visualization_poll_at = Instant::now();
-            needs_reactive_cycle |= sync_visualization_fields(
-                editor.runtime_mut(),
-                &ctx.shared.state,
-                &mut ctx.meters.visualization_liveness,
-            );
-        }
-        needs_reactive_cycle |= sync_graph_node_notes_fields(
-            editor.runtime_mut(),
-            &ctx.shared.state,
-            &mut ctx.meters.visualization_liveness.graph_node_notes,
-        );
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
         // not be skipped. Host kinds read them as `pad.triggered`, gated by

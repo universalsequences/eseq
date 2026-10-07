@@ -112,8 +112,6 @@ pub(crate) struct MeterCache {
     pub(crate) cached_cpu_load_bits: u32,
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
-    pub(crate) last_visualization_poll_at: Instant,
-    pub(crate) visualization_liveness: VisualizationLiveness,
     pub(crate) last_voice_count_log_at: Instant,
 }
 
@@ -220,7 +218,6 @@ pub(crate) struct FrameDiffState {
     /// which can move while the resolved write focus stays put, so the focus
     /// spec alone is not enough to decide whether they need republishing.
     pub(crate) prev_instrument_active_notes: Vec<u8>,
-    pub(crate) prev_track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:
         BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,

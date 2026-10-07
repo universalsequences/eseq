@@ -8,10 +8,11 @@
 
 (module eseq.graph-kit)
 
-(import eseq.kinds :refer (tracks groups graph-param-named graph-edge-to graph-quantize-options))
+(import eseq.kinds :refer (tracks groups graph-param-named graph-edge-to graph-quantize-options
+                           set-graph-params!))
 (import eseq.view-kit :refer (index-of))
 
-(export route-tracks route-options node-route-label set-route-label!
+(export route-tracks route-track route-label route-options node-route-label set-route-label!
         weight-rows set-weight! column cycle-text cycle-labels rack-name
         res-options factor-options set-param-on-nodes! scale-delays! shift-timebases!)
 
@@ -118,10 +119,10 @@
       (string-split text " "))))
 
 ;; ── batch edits ───────────────────────────────────────────────────────────
-;; An edit of every node (a param on each, every delay scaled) writes through
-;; the graph-* natives, unrecorded, as the legacy panels did: a kind setter
-;; per node would record an undo entry per node. The kinds show it at the
-;; host's next sync.
+;; A param on every node is one recorded edit (set-graph-params!). Scaling
+;; every delay or moving every timebase writes through the graph-* natives,
+;; unrecorded, as the legacy panels did: a kind setter per node would record
+;; an undo entry per node. The kinds show those at the host's next sync.
 
 ;; The step resolutions the panels offer (graph-timebase-options' straight
 ;; ones).
@@ -146,10 +147,10 @@
     "4" 2
     _ 0))
 
-;; Set param `name` of nodes 0 to count - 1 of graph g; count
-;; may pass the active nodes, up to g.max-nodes.
+;; Set param `name` of nodes 0 to count - 1 of graph g (one undo entry);
+;; count may pass the active nodes, up to g.max-nodes.
 (def set-param-on-nodes! (g count name v)
-  (for-each (lambda (i) (graph-param g.gid i name v)) (range 0 count)))
+  (set-graph-params! g count name v))
 
 ;; Scale every node's delay by the factor `label` names (a delay above 0
 ;; stays at least 1).

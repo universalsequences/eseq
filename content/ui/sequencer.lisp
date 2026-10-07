@@ -48,10 +48,9 @@
                            remove-fanout! graph-of))
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
-        harmony-snap-meter process-scope-cells-for
-        lane-patch-run-error lane-patch-expr-error lane-patch-hidden-in-port-count
-        lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
-        lane-patch-node-select lane-patch-node-host?
+        harmony-snap-meter lane-patch-expr-error lane-patch-hidden-in-port-count
+        lane-patch-node-selected-id lane-patch-node-select lane-patch-node-host? node-of
+        process-of
         grid-cursor
         grid-select
         seq-view
@@ -192,8 +191,8 @@
 ;; as the port shader compares it (`pending-bay`, `pending-slot`: see
 ;; `port-bay`), the selected cable (a dict, nil for none), the graph node
 ;; bays registered by the views that expand a node (`(ns graph node)` lists,
-;; newest first), a counter their node-process edits bump for readers outside
-;; the kinds, and a node bay's selected process (its proc-id; -1 for none).
+;; newest first) and a node bay's selected process (its proc-id; -1 for
+;; none).
 (def-kind patch-view
   :key ()
   :state ((show true)
@@ -202,7 +201,6 @@
           (pending-slot -1)
           (cable :any :default nil)
           (node-targets '())
-          (node-version 0)
           (node-selected -1)))
 
 ;; A patchbay card's menu: where it opened, the bay's namespace and the
@@ -1477,7 +1475,7 @@
     8 "rate"
     _ ""))
 
-;; The process of track t whose proc-id is `id`, or nil.
+;; The process of track or graph node t whose proc-id is `id`, or nil.
 (def process-of (t id)
   (first (filter (lambda (p) (= p.proc-id id)) t.processes)))
 
@@ -1600,10 +1598,8 @@
 ;; graph node's processes are their owner's alone. Per pattern, undoable,
 ;; like every other slot edit.
 (def lane-toggle-enabled (ns id enabled)
-  (if (lane-patch-node? ns)
-    (node-edit! ns (lambda (graph node) (graph-node-process-enable graph node id (not enabled))))
-    (let ((p (bay-process ns id)))
-      (when p (set-process-enabled! p (not enabled) :all (edit-all? p))))))
+  (let ((p (bay-process ns id)))
+    (when p (set-process-enabled! p (not enabled) :all (edit-all? p)))))
 
 (def lane-strip-enable-button (p)
   (button (if p.enabled "on" "off")
@@ -2051,9 +2047,9 @@
 ;; cables, the drag and the cable click are the generic patch-port machinery
 ;; the mixer's mod ports use. A bay is addressed by its cable namespace `ns`:
 ;; a track's position, or a registered graph node's namespace (from
-;; `lane-patch-node-base` up). Its cards are patch entries: a track's derived
-;; from its processes (`track-bay-entries`), a node's from the
-;; `graph-node-lane-patch` native. Cable ids: an out port is
+;; `lane-patch-node-base` up). Its cards are patch entries derived from its
+;; owner's processes (`bay-entries`: `t.processes`, a node's `n.processes`),
+;; edited through the process setters. Cable ids: an out port is
 ;; `(ns * 4096 + process index) * 16 + ordinal` (its place among the
 ;; process's connectable ports), an in port (process index, ordinal among
 ;; `p.in-ports`). The namespace is folded in because every expanded track's
@@ -2072,8 +2068,6 @@
 (def lane-patch-node? (ns) (>= ns lane-patch-node-base))
 (def lane-patch-node-namespace (graph node) (graph-node-patch-namespace graph node))
 
-(def lane-patch-node-touch () (set! patch-view.node-version (+ patch-view.node-version 1)))
-(def lane-patch-node-version-value () patch-view.node-version)
 (def lane-patch-node-selected-id () patch-view.node-selected)
 (def lane-patch-node-select (id) (set! patch-view.node-selected id))
 
@@ -2100,37 +2094,24 @@
 (def node-bay-graph (ns) (let ((target (node-target ns))) (when target (nth target 1))))
 (def node-bay-index (ns) (let ((target (node-target ns))) (if target (nth target 2) 0)))
 
-;; Edit node bay ns's chain with `edit` (called with the instance and the
-;; node index). COMPAT(eseq-0l17.20): a node bay reads and edits its chain
-;; through the graph-node-process-* natives (applied at once) and bumps
-;; `patch-view.node-version`, as the *processes* dock and alez.neural's node
-;; inspector read the chain through them too.
-(def node-edit! (ns edit)
-  (edit (node-bay-graph ns) (node-bay-index ns))
-  (lane-patch-node-touch))
-
-;; The graph node instance behind node bay ns, or nil.
+;; The graph node instance behind node bay ns, or nil (its graph not
+;; published yet, or the node past the active count).
 (def node-of (ns)
   (let ((target (node-target ns))
         (g (when target (graph-of (nth target 1)))))
     (when g (nth g.nodes (nth target 2)))))
 
-;; The node process with proc-id `id` among the registered node bays, or nil.
-(def node-process (id)
-  (first (reduce |found target|
-           (if (empty? found)
-             (let ((n (node-of (nth target 0))))
-               (if n (filter (lambda (p) (= p.proc-id id)) n.processes) found))
-             found)
-           '()
-           patch-view.node-targets)))
+;; Bay ns's processes in fire order: its track's chain or its node's patch
+;; (none while its owner is gone).
+(def bay-processes (ns)
+  (if (lane-patch-node? ns)
+    (let ((n (node-of ns))) (if n n.processes '()))
+    (let ((t (track-at ns))) (if t t.processes '()))))
 
-;; Process `id` of track bay ns, or nil (a node bay's processes are edited
-;; through the natives).
+;; Process `id` of bay ns, or nil.
 (def bay-process (ns id)
-  (unless (lane-patch-node? ns)
-    (let ((t (track-at ns)))
-      (when t (process-of t id)))))
+  (let ((owner (if (lane-patch-node? ns) (node-of ns) (track-at ns))))
+    (when owner (process-of owner id))))
 
 (def port-id (ns slot ordinal) (+ (* (+ (* ns 4096) slot) 16) ordinal))
 (def lane-patch-port-ns (port-id) (floor (/ port-id (* 16 4096))))
@@ -2181,13 +2162,13 @@
                    :readers (port-readers pt))))
       (range 0 (len ports)))))
 
-;; Track t's bay entries: its processes in fire order, in the patch entry
-;; shape a node bay's `graph-node-lane-patch` gives (the cards draw both).
-;; The cables are listed once, `(reader slot, inlet, out port id)` in out
-;; port order, and each in port takes the out ports of its own.
-(def track-bay-entries (t)
-  (let ((ns t.index)
-        (processes t.processes)
+;; Bay ns's entries: its processes in fire order as patch entries (the
+;; cards' shape: a process's name, flags, in ports with their writers and out
+;; ports with their readers, and the process itself). The cables are listed
+;; once, `(reader slot, inlet, out port id)` in out port order, and each in
+;; port takes the out ports of its own.
+(def bay-entries (ns)
+  (let ((processes (bay-processes ns))
         (outs (map (lambda (p) (process-out-ports ns p)) processes))
         (cables (reduce |acc ports|
                   (reduce |acc port|
@@ -2201,7 +2182,7 @@
                         (filter (lambda (c) (and (= (nth c 0) index) (= (nth c 1) inlet)))
                           cables)))))
     (map (lambda (p)
-           (dict :slot-index p.index :instance-id p.proc-id :name p.name
+           (dict :process p :slot-index p.index :instance-id p.proc-id :name p.name
                  :class p.class-name :project p.project :enabled p.enabled
                  :expr p.expr :expr-line p.expr-line
                  :compile-error (if (= p.compile-error "") nil p.compile-error)
@@ -2212,16 +2193,6 @@
                              (range 0 (len p.in-ports)))
                  :out-ports (nth outs p.index)))
       processes)))
-
-;; Bay ns's entries (none while its owner is gone).
-(def bay-entries (ns)
-  (if (lane-patch-node? ns)
-    (let ((graph (node-bay-graph ns)))
-      (if graph
-        (do patch-view.node-version (graph-node-lane-patch graph (node-bay-index ns)))
-        '()))
-    (let ((t (track-at ns)))
-      (if t (track-bay-entries t) '()))))
 
 (def lane-patch-list (entry key)
   (or (and entry (get entry key)) '()))
@@ -2333,18 +2304,12 @@
                   (p (bay-process ns writer-id))
                   (r (bay-process ns reader-id))
                   (all (and p (edit-all? p))))
-              (if (lane-patch-node? ns)
-                (node-edit! ns (lambda (graph node)
-                                 (if primary
-                                   (graph-node-process-wire graph node writer-id port reader-id inlet)
-                                   (graph-node-process-fanout-add graph node writer-id port
-                                     reader-id inlet))))
-                (let ((pt (when p (named p.ports port)))
-                      (target (when r (wire-target r inlet))))
-                  (when (and pt target)
-                    (if primary
-                      (bind-port! pt target :all all)
-                      (add-fanout! pt target :all all)))))
+              (let ((pt (when p (named p.ports port)))
+                    (target (when r (wire-target r inlet))))
+                (when (and pt target)
+                  (if primary
+                    (bind-port! pt target :all all)
+                    (add-fanout! pt target :all all))))
               (status (str "Wired " (get writer :name) " → " (get reader :name) " " inlet
                            (if (< reader-slot writer-slot) " (next fire)" "")
                            (if all " (all tracks)" ""))))))))))
@@ -2399,18 +2364,13 @@
           (port (get cable :port))
           (index (get cable :fanout-index))
           (fanout (= (get cable :source) "fanout")))
-      (if (lane-patch-node? ns)
-        (node-edit! ns (lambda (graph node)
-                         (if fanout
-                           (graph-node-process-fanout-remove graph node id port index)
-                           (graph-node-process-unwire graph node id port))))
-        (let ((p (bay-process ns id))
-              (pt (when p (named p.ports port))))
-          (when pt
-            (if fanout
-              (let ((fo (nth pt.fanout index)))
-                (when fo (remove-fanout! fo :all (edit-all? p))))
-              (clear-port! pt :all (edit-all? p)))))))))
+      (let ((p (bay-process ns id))
+            (pt (when p (named p.ports port))))
+        (when pt
+          (if fanout
+            (let ((fo (nth pt.fanout index)))
+              (when fo (remove-fanout! fo :all (edit-all? p))))
+            (clear-port! pt :all (edit-all? p))))))))
 
 (def lane-patch-cable-selected? () (if patch-view.cable true false))
 (def lane-patch-pending-port () patch-view.pending)
@@ -2503,28 +2463,21 @@
 ;; out-port row, and the title row gains the error dot and an edit button
 ;; that opens the body's text buffer (eseq.expr-buffer).
 
-;; COMPAT(eseq-0l17.20): alez.neural's node inspector addresses a node's
-;; process by its id. The node process whose proc-id is `id`, for
-;; `harmony-snap-meter` (its scope cells), or nil.
-(def process-scope-cells-for (id) (node-process id))
-
-;; The latest run error of the node process with proc-id `id` (a node slot
-;; runs under its own id: `p.error`), or nil.
-(def lane-patch-run-error (id)
-  (let ((p (node-process id)))
-    (when (and p (not (= p.error ""))) p.error)))
-
 ;; Why an expr card shows its error dot, or nil: a body with no compiled
-;; class, a failed commit from its edit buffer, or a failed run. Commit and
-;; run errors are node-bay only until track expr cards (eseq-waa9.18).
+;; class, a failed commit from its edit buffer, or a failed run (its
+;; process's `error`, a node slot's under its own id). Commit and run errors
+;; are node-bay only until track expr cards (eseq-waa9.18).
 (def lane-patch-expr-error (ns entry)
   (let ((id (get entry :instance-id))
+        (p (get entry :process))
         (compile-error (get entry :compile-error)))
     (if compile-error
       compile-error
       (when (lane-patch-node? ns)
         (let ((committed (eseq.expr-buffer/commit-error (node-bay-graph ns) (node-bay-index ns) id)))
-          (if committed committed (lane-patch-run-error id)))))))
+          (if committed
+            committed
+            (when (and p (not (= p.error ""))) p.error)))))))
 
 ;; Red, where the enable dot is orange and ports are orange/blue.
 (defwidget lane-patch-error-dot-shape
@@ -2605,7 +2558,7 @@
   (open-menu! card-menu event))
 
 (def lane-patch-entry-ids (ns)
-  (map (lambda (entry) (get entry :instance-id)) (bay-entries ns)))
+  (map (lambda (p) p.proc-id) (bay-processes ns)))
 
 ;; A track's lane selector is a position in t.lanes, so a reorder or delete
 ;; would leave it on whichever lane slides into its place. Point it at the
@@ -2628,15 +2581,13 @@
 
 (def lane-patch-remove-card (ns id)
   (patch-idle!)
-  (if (lane-patch-node? ns)
-    (do
-      (when (= patch-view.node-selected id) (set! patch-view.node-selected -1))
-      (node-edit! ns (lambda (graph node) (graph-node-process-remove graph node id))))
-    (let ((p (bay-process ns id)))
-      (when p
+  (let ((p (bay-process ns id)))
+    (when p
+      (if p.track
         (lane-patch-reselect-lane p.track
           (filter (lambda (other) (not (= other id))) (lane-patch-entry-ids ns)))
-        (remove-process! p)))))
+        (when (= patch-view.node-selected id) (set! patch-view.node-selected -1)))
+      (remove-process! p))))
 
 ;; Move process `id` of bay ns to the place of process `target-id`.
 ;; (No core take / drop: the new order is spliced by index.)
@@ -2646,18 +2597,16 @@
         (to (index-of ids target-id)))
     (unless (or (< from 0) (< to 0) (= from to))
       (patch-idle!)
-      (if (lane-patch-node? ns)
-        (node-edit! ns (lambda (graph node) (graph-node-process-move graph node id (- to from))))
-        (let ((p (bay-process ns id))
-              (rest (filter (lambda (other) (not (= other id))) ids))
-              (moved (append (map (lambda (i) (nth rest i)) (range 0 to))
-                             (list id)
-                             (map (lambda (i) (nth rest i)) (range to (len rest))))))
-          (when p
-            (lane-patch-reselect-lane p.track moved)
-            ;; Before the process now after it, or last.
-            (move-process! p
-              (when (< (+ to 1) (len moved)) (bay-process ns (nth moved (+ to 1)))))))))))
+      (let ((p (bay-process ns id))
+            (rest (filter (lambda (other) (not (= other id))) ids))
+            (moved (append (map (lambda (i) (nth rest i)) (range 0 to))
+                           (list id)
+                           (map (lambda (i) (nth rest i)) (range to (len rest))))))
+        (when p
+          (when p.track (lane-patch-reselect-lane p.track moved))
+          ;; Before the process now after it, or last.
+          (move-process! p
+            (when (< (+ to 1) (len moved)) (bay-process ns (nth moved (+ to 1))))))))))
 
 (def lane-patch-card-drop (ns event)
   (lane-patch-move-card ns

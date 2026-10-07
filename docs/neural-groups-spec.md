@@ -80,7 +80,7 @@ One new per-node intrinsic, alongside `:route` / `:delay` / `:resolution`:
 
 `GROUP_MAX = 4` in v1. Stored as a sparse per-node override exactly like
 `:delay`, set via `graph-node`, read via `graph-node-value`, bound in the UI
-via `bind-graph`.
+via `bind-graph` (since eseq-0l17.67, the graph kinds' `graph-node.group`).
 
 > **Naming collision — read before implementing.** `group` is already taken in
 > the override structs: `ProjectGraphNodeIntrinsicOverride.group`
@@ -392,7 +392,8 @@ on another node's decision within the same boundary.
 
 Additions to the demo panel (`graph-neural-variable-reset-demo.lisp`), all
 following the existing `bind-graph` / `graph-key` / `reactive-set` pattern —
-no shadow `defstate` per node:
+no shadow `defstate` per node (the panels now bind the graph kinds' fields,
+kind-bindings spec §14.2k; the `GRAPH` namespace is gone since eseq-0l17.67):
 
 - **`grp` column** in the per-node row: a 4-option dropdown (A–D), tinted with
   the group color. Slots next to `route`, and reuses the route-color-strip

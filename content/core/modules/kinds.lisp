@@ -61,7 +61,8 @@
         piano-roll add-note! delete-notes! pitch-min pitch-max
         focus-step-params focus-step-value set-focus-step!
         graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
-        set-group-coupling! gate-generator! graph-timebase-options graph-quantize-options
+        set-group-coupling! set-graph-params! gate-generator! graph-timebase-options
+        graph-quantize-options
         graph-max-poly-selection-options
         table-editor table-editor-open! table-editor-close! table-editor-band!
         table-editor-op! table-editor-add-node! table-editor-frame! table-editor-undo!
@@ -709,7 +710,9 @@
          (source-path :string :doc "The file defining it; empty when none")
          (target      :string :doc "Where its ports write, as the library lists them")
          (lane-count  :int    :doc "Its lane inlets (per-step values)")
-         (ports       (list-of :string) :doc "Its port names")))
+         (ports       (list-of :string) :doc "Its port names")
+         (node-label  :string :doc "Its name on a graph node's patch (the node picker's row): lane- dropped, transpose for neural-transpose")
+         (node-hidden :bool   :doc "Does nothing on a node fire (a roll, a length, a painted-step reader): the node picker leaves it out")))
 
 ;; The process library.
 (def-kind process-library
@@ -1798,6 +1801,11 @@
 ;; cell is (nth g.group-gain (+ (* row 4) col)).
 (def set-group-gain! (g row col v) (graph-edit g "group-gain" v :row row :col col))
 (def set-group-coupling! (g row col v) (graph-edit g "group-coupling" v :row row :col col))
+;; Set param `name` of graph g's nodes 0 to count - 1 to v at once: one undo
+;; entry (a drag's set!s join it). count may pass the active nodes, up to
+;; g.max-nodes: a dormant node keeps the value for when it becomes active.
+(def set-graph-params! (g count name v)
+  (graph-edit g "node-params" v :count count :param name))
 ;; Make node n's fires gate generator id (a generator instance, such as a
 ;; jaki, of the graph's owner, never the graph's own instance) instead of
 ;; playing a note; :restart true restarts it each fire.

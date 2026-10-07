@@ -2,14 +2,6 @@
 mod sample_search_tests;
 #[path = "chorus_ui_tests.rs"]
 mod chorus_ui_tests;
-#[path = "graph_visualization_ui_tests.rs"]
-mod graph_visualization_ui_tests;
-#[path = "processes_buffer_ui_tests.rs"]
-mod processes_buffer_ui_tests;
-#[path = "expr_card_ui_tests.rs"]
-mod expr_card_ui_tests;
-#[path = "graph_node_notes_ui_tests.rs"]
-mod graph_node_notes_ui_tests;
 #[path = "instance_views_ui_tests.rs"]
 mod instance_views_ui_tests;
 #[path = "custom_ui_scope_tests.rs"]
@@ -330,48 +322,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn visualization_sync_requires_live_consumers_and_refreshes_reopened_panels() {
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("graph-visualizations", Value::Number(-1.0))], true);
-        state.set_graph_visualizations(vec![sequencer::graph::GraphVisualizationSnapshot {
-            id: 7, name: "g".to_string(), active: true, current_beat: 2.0, num_nodes: 1,
-            ..Default::default()
-        }]);
-        let mut liveness = VisualizationLiveness::default();
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-1.0)),
-            "unobserved snapshots must not be converted or published");
-
-        runtime.eval_str(r#"(effect-buffer "*viz*" (label :text (str SEQ.graph-visualizations)))"#).unwrap();
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        runtime.run_reactive_cycle();
-        let published = runtime.reactive_field_value("SEQ", "graph-visualizations").unwrap().clone();
-        assert!(matches!(&published, Value::List(graphs) if graphs.len() == 1));
-
-        runtime.set_hidden_effect_buffer_names(HashSet::from(["*viz*".to_string()]));
-        state.set_graph_visualizations(Vec::new());
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&published));
-        runtime.set_hidden_effect_buffer_names(HashSet::new());
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::List(vec![])),
-            "reopening clears data whose source stopped while hidden");
-        runtime.run_reactive_cycle();
-        runtime.set_reactive("SEQ", "graph-visualizations", Value::Number(-2.0));
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-2.0)),
-            "a dead source clears once, not on every poll");
-
-        // Nonvisual observers still run in scratch-only mode.
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("graph-visualizations", Value::Number(-1.0))], true);
-        runtime.eval_str("(observe SEQ.graph-visualizations)").unwrap();
-        sync_visualization_fields(&mut runtime, &state, &mut VisualizationLiveness::default());
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::List(vec![])));
-    }
-
-    #[test]
     fn sequencer_visibility_reads_live_registry_without_invoking_lisp() {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let calls = Rc::new(RefCell::new(0));
@@ -401,203 +351,6 @@ use panel_kinds_seed::*;
         editor.runtime_mut().eval_str("(set! eseq.seq-step-tabs/seq-registered-step-tabs '())").unwrap();
         assert!(!visible(&editor), "unregistered views stop receiving sequencer publishes");
         assert_eq!(*calls.borrow(), 0, "visibility must never invoke or flush the Lisp runtime");
-    }
-
-    #[test]
-    fn graph_visualizations_value_reflects_runtime_snapshot() {
-        let state = Arc::new(SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
-        ));
-        state.set_graph_visualizations(vec![sequencer::graph::GraphVisualizationSnapshot {
-            id: 9,
-            name: "graph".to_string(),
-            active: true,
-            current_beat: 2.5,
-            num_nodes: 2,
-            energy: vec![0.125, 8.0],
-            trigger_activity: vec![0.0, 1.0],
-            node_events: vec![
-                None,
-                Some(sequencer::graph::GraphVisualizationEvent {
-                    node_index: 1,
-                    track: Some(3),
-                    sample_time: 12_345,
-                    beat: 1.5,
-                    transpose: -7.25,
-                    velocity: 0.625,
-                }),
-            ],
-            event_history: vec![sequencer::graph::GraphVisualizationEvent {
-                node_index: 1,
-                track: Some(3),
-                sample_time: 12_345,
-                beat: 1.5,
-                transpose: -7.25,
-                velocity: 0.625,
-            }],
-            history_stamp: 1,
-            node_events_stamp: 1,
-            node_sounding: Vec::new(),
-            edges: vec![sequencer::graph::GraphVisualizationEdge {
-                from: 0,
-                to: 1,
-                weight: 0.333,
-                dampening: 0.625,
-                delay_steps: 3,
-                distribution: sequencer::graph::EdgeDistribution::WeightedChoice,
-            }],
-            deltas: vec![
-                sequencer::graph::GraphDeltaEntry {
-                    key: sequencer::graph::GraphDeltaKey::EdgeParam {
-                        from: 0,
-                        to: 1,
-                        param: "weight".to_string(),
-                    },
-                    delta: -0.25,
-                },
-                sequencer::graph::GraphDeltaEntry {
-                    key: sequencer::graph::GraphDeltaKey::NodeParam {
-                        node: 1,
-                        param: "transpose".to_string(),
-                    },
-                    delta: 2.0,
-                },
-            ],
-            delta_leak_per_beat: 0.9946,
-            group_activity: vec![0.75, 0.0, 0.0, 0.0],
-            group_suppression: vec![0.0, -0.375, 0.0, 0.0],
-        }]);
-
-        let Value::List(graphs) = build_graph_visualizations_value(&state) else {
-            panic!("expected graph visualization list");
-        };
-        assert_eq!(graphs.len(), 1);
-        let Value::Map(graph) = &*graphs[0].borrow() else {
-            panic!("expected graph map");
-        };
-        assert_eq!(
-            graph.get("name").map(|value| value.borrow().clone()),
-            Some(Value::String("graph".to_string()))
-        );
-        assert_eq!(
-            graph
-                .get("current-beat")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(2.5))
-        );
-
-        let Value::List(weight_rows) = &*graph.get("weight-matrix").unwrap().borrow() else {
-            panic!("expected weight matrix");
-        };
-        let Value::List(weight_row_0) = &*weight_rows[0].borrow() else {
-            panic!("expected weight matrix row");
-        };
-        assert_eq!(*weight_row_0[0].borrow(), Value::Number(0.0));
-        assert_eq!(*weight_row_0[1].borrow(), Value::Number(0.33));
-
-        let Value::List(dampening_rows) = &*graph.get("dampening-matrix").unwrap().borrow() else {
-            panic!("expected dampening matrix");
-        };
-        let Value::List(dampening_row_0) = &*dampening_rows[0].borrow() else {
-            panic!("expected dampening matrix row");
-        };
-        assert_eq!(*dampening_row_0[1].borrow(), Value::Number(0.63));
-
-        let Value::List(delta_rows) = &*graph.get("delta-matrix").unwrap().borrow() else {
-            panic!("expected delta matrix");
-        };
-        let Value::List(delta_row_0) = &*delta_rows[0].borrow() else {
-            panic!("expected delta matrix row");
-        };
-        assert_eq!(*delta_row_0[1].borrow(), Value::Number(-0.25));
-
-        let Value::List(node_delta_rows) =
-            &*graph.get("node-delta-column").unwrap().borrow()
-        else {
-            panic!("expected node delta column");
-        };
-        let Value::List(node_delta_row_1) = &*node_delta_rows[1].borrow() else {
-            panic!("expected node delta row");
-        };
-        assert_eq!(*node_delta_row_1[0].borrow(), Value::Number(2.0));
-
-        let Value::List(energy_rows) = &*graph.get("energy-matrix").unwrap().borrow() else {
-            panic!("expected energy matrix");
-        };
-        let Value::List(energy_row_1) = &*energy_rows[1].borrow() else {
-            panic!("expected energy matrix row");
-        };
-        assert_eq!(*energy_row_1[0].borrow(), Value::Number(4.0));
-
-        let Value::List(trigger_rows) = &*graph.get("trigger-matrix").unwrap().borrow() else {
-            panic!("expected trigger matrix");
-        };
-        let Value::List(trigger_row_1) = &*trigger_rows[1].borrow() else {
-            panic!("expected trigger matrix row");
-        };
-        assert_eq!(*trigger_row_1[0].borrow(), Value::Number(1.0));
-
-        let Value::List(activity_rows) =
-            &*graph.get("group-activity-matrix").unwrap().borrow()
-        else {
-            panic!("expected group activity matrix");
-        };
-        assert_eq!(activity_rows.len(), 4);
-        let Value::List(activity_row_0) = &*activity_rows[0].borrow() else {
-            panic!("expected group activity row");
-        };
-        assert_eq!(*activity_row_0[0].borrow(), Value::Number(0.75));
-
-        let Value::List(suppression_rows) =
-            &*graph.get("group-suppression-matrix").unwrap().borrow()
-        else {
-            panic!("expected group suppression matrix");
-        };
-        assert_eq!(suppression_rows.len(), 4);
-        let Value::List(suppression_row_1) = &*suppression_rows[1].borrow() else {
-            panic!("expected group suppression row");
-        };
-        assert_eq!(*suppression_row_1[0].borrow(), Value::Number(-0.375));
-
-        let Value::List(node_events) = &*graph.get("node-events").unwrap().borrow() else {
-            panic!("expected node events");
-        };
-        assert_eq!(*node_events[0].borrow(), Value::Nil);
-        let Value::Map(event) = &*node_events[1].borrow() else {
-            panic!("expected event map");
-        };
-        assert_eq!(
-            event.get("track").map(|value| value.borrow().clone()),
-            Some(Value::Number(3.0))
-        );
-        assert_eq!(
-            event.get("transpose").map(|value| value.borrow().clone()),
-            Some(Value::Number(-7.25))
-        );
-        assert_eq!(
-            event.get("velocity").map(|value| value.borrow().clone()),
-            Some(Value::Number(0.625))
-        );
-
-        let Value::List(event_history) = &*graph.get("event-history").unwrap().borrow() else {
-            panic!("expected event history");
-        };
-        let Value::Map(history_event) = &*event_history[0].borrow() else {
-            panic!("expected event history map");
-        };
-        assert_eq!(
-            history_event
-                .get("transpose")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(-7.25))
-        );
-        assert_eq!(
-            history_event
-                .get("velocity")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(0.625))
-        );
     }
 
     #[test]
@@ -6840,53 +6593,6 @@ use panel_kinds_seed::*;
         names
     }
 
-    #[test]
-    fn track_active_notes_value_preserves_source_track_boundaries() {
-        let value = build_track_active_notes_snapshot_value(&[
-            vec![
-                sequencer::sequencer::ActiveNoteActivity {
-                    note: 36,
-                    velocity: 0.25,
-                    trigger_id: 101,
-                },
-                sequencer::sequencer::ActiveNoteActivity {
-                    note: 60,
-                    velocity: 0.75,
-                    trigger_id: 102,
-                },
-            ],
-            vec![],
-            vec![sequencer::sequencer::ActiveNoteActivity {
-                note: 64,
-                velocity: 1.0,
-                trigger_id: 103,
-            }],
-        ]);
-        assert_eq!(
-            value,
-            test_list(vec![
-                test_list(vec![
-                    map_value([
-                        ("note", Value::Number(36.0)),
-                        ("velocity", Value::Number(0.25)),
-                        ("trigger-id", Value::Number(101.0)),
-                    ]),
-                    map_value([
-                        ("note", Value::Number(60.0)),
-                        ("velocity", Value::Number(0.75)),
-                        ("trigger-id", Value::Number(102.0)),
-                    ]),
-                ]),
-                test_list(vec![]),
-                test_list(vec![map_value([
-                    ("note", Value::Number(64.0)),
-                    ("velocity", Value::Number(1.0)),
-                    ("trigger-id", Value::Number(103.0)),
-                ])]),
-            ])
-        );
-    }
-
     fn tile_tabs_for_buffer(editor: &eseqlisp::Editor, buffer_name: &str) -> Vec<(String, String)> {
         let buffer_idx = editor
             .buffers
@@ -7967,6 +7673,11 @@ use panel_kinds_seed::*;
         );
         let mut inst = test_instrument_map();
         inst.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        // Note 69 sounds on the track (`track.active-notes`).
+        inst.insert(
+            "active-notes".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Number(69.0)]))),
+        );
         inst.insert(
             "synth".to_string(),
             Rc::new(RefCell::new(test_list(vec![Value::Map(cutoff)]))),
@@ -8033,10 +7744,6 @@ use panel_kinds_seed::*;
                 ("effects", test_list(vec![])),
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", test_list(vec![Value::Map(inst)])),
-                (
-                    "track-active-notes",
-                    test_list(vec![test_list(vec![Value::Number(69.0)])]),
-                ),
                 ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),

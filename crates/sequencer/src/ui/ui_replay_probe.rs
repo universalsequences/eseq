@@ -54,8 +54,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_visualization_poll_at: Instant::now(),
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
 
@@ -147,9 +145,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             assert!(editor.switch_active_tile_to_buffer_named(if phase == "scroll" { "*sequencer*" } else { "*fx*" }));
         }
         editor.mark_needs_redraw();
-        let hidden_fields = ["track-active-notes"];
-        let hidden_snapshot = (phase == "scratch").then(|| hidden_fields.map(|field|
-            editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone)));
         let compressor_keys = editor.visible_widget_layouts().iter().flat_map(|layout|
             eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(layout)
                 .into_iter().map(|request| request.data_key)).collect::<std::collections::HashSet<_>>();
@@ -209,7 +204,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             // than their wall-clock cadence. The previous probe left these
             // mostly idle, hiding work paid by actual scratch-only playback.
             meters.last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
-            meters.last_visualization_poll_at = Instant::now() - VISUALIZATION_POLL_INTERVAL;
             shared.state.transport.playhead.store(index, Ordering::Relaxed);
             shared.state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
                 track: 0, sample_time: index as u64 * 512, beat: index as f64 / 6.0,
@@ -231,9 +225,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                 assert!(!redraw, "hidden playback displays must not request scratch frames");
                 assert!(meters.watched_display_modulators.is_empty());
                 assert!(frame.watched_sampler_voice_ids.is_empty());
-                let current = hidden_fields.map(|field|
-                    editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone));
-                assert_eq!(hidden_snapshot.as_ref(), Some(&current), "hidden display fields must not be rebuilt");
             }
             let mut build_ms = 0.0;
             let mut render = None;

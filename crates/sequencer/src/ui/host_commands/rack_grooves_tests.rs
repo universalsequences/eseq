@@ -250,8 +250,6 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         cached_cpu_load_bits: 0.0f32.to_bits(),
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_visualization_poll_at: Instant::now(),
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
     let mut track_names = app.tracks.clone();

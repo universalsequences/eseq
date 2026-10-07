@@ -75,9 +75,13 @@ Add a sequencer-level graph config field:
 ```lisp
 (graph-config "neural-variable-demo" :node-count 12)
 (graph-config-value "neural-variable-demo" :node-count)
-(bind-graph-config "neural-variable-demo" :node-count)
-(graph-config-key "neural-variable-demo" :node-count)
+;; A view binds and edits the graph kind's field (kind-bindings spec §14.2k):
+(let ((g (graph-of "neural-variable-demo")))
+  #'g.node-count            ; bound: re-renders when the count changes
+  (set! g.node-count 12))   ; one undo entry
 ```
+
+(`bind-graph-config` and `graph-config-key` were removed in eseq-0l17.67.)
 
 Rules:
 
@@ -167,13 +171,14 @@ A variable-count graph demo must expose a top-level node count control.
 Recommended control:
 
 ```lisp
-(number-picker
-  :value (bind-graph-config graph-name :node-count)
-  :min 1
-  :max 16
-  :step 1
-  :decimals 0
-  :on-change (lambda (v) (graph-config graph-name :node-count v)))
+(let ((g (graph-of graph-name)))
+  (number-picker
+    :value #'g.node-count
+    :min 1
+    :max 16
+    :step 1
+    :decimals 0
+    :on-change (lambda (v) (set! g.node-count v))))
 ```
 
 The row table and matrices must use the resolved count. They must not depend on a
@@ -246,7 +251,7 @@ Required behavior:
 ### Authoring config
 
 - `graph-config :node-count 12` writes `ProjectGraphOverrides.node_count = Some(12)`.
-- `bind-graph-config :node-count` seeds a finite nonzero reactive value.
+- `#'g.node-count` (the graph kind's field) binds a finite nonzero value.
 - Fixed line shapes reject or ignore `:node-count` consistently; prefer a diagnostic
   on write.
 

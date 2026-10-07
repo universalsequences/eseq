@@ -5,7 +5,6 @@
 //! `transport.track-events`).
 
 use super::*;
-use eseqlisp::widget_render::event_view::ROW_FIELDS;
 use sequencer::graph::{
     GraphDeltaEntry, GraphDeltaKey, GraphSoundingNote, GraphVisualizationEdge,
     GraphVisualizationEvent, GraphVisualizationSnapshot,
@@ -958,7 +957,7 @@ fn node_processes_read_like_the_legacy_node_patch() {
         h.eval_graph(r#"(list "roll" "lo" "hi" "whole" "hold")"#)
     );
     // The wiring: the primary wire and the fan-out cable resolve to the
-    // node's processes; the in ports are the legacy lane patch's.
+    // node's processes.
     assert_eq!(
         h.eval_graph(
             "(let ((fo (first wire.fanout)))
@@ -967,19 +966,11 @@ fn node_processes_read_like_the_legacy_node_patch() {
         ),
         h.eval_graph(r#"(list true "a" true true 1 true "prob")"#)
     );
-    let in_ports = items(&h.eval_graph("(graph-node-lane-patch nn 2)"))
-        .iter()
-        .map(|entry| {
-            list_value(
-                items(&get(entry, "in-ports"))
-                    .iter()
-                    .map(|p| get(p, "name")),
-            )
-        })
-        .collect::<Vec<_>>();
+    // The in ports: lanes, gates and the inlets a cable lands on (rnd's
+    // roll gate, cmp's a on the primary wire, mask's prob on the fan-out).
     assert_eq!(
         h.eval_graph("(map (lambda (p) p.in-ports) n2.processes)"),
-        list_value(in_ports)
+        h.eval_graph(r#"(list (list "roll") (list "a") (list "prob"))"#)
     );
     assert_eq!(
         h.eval_graph("(map (lambda (c) c.name) rnd.cells)"),
@@ -1300,24 +1291,6 @@ fn node_process_errors_and_scopes_are_live_observed_gated_and_drop_with_their_sl
     assert!(!h.rt().instance_is_live(hit));
 }
 
-/// A legacy event map (`event-history`, `node-events`)
-/// as the kinds' positional row: [`ROW_FIELDS`] in order, nil as -1.
-fn legacy_event_row(event: &Value) -> Value {
-    list_value(ROW_FIELDS.iter().map(|field| match get(event, field) {
-        Value::Nil => number(-1.0),
-        value => value,
-    }))
-}
-
-fn legacy_event_rows(events: &Value) -> Value {
-    list_value(items(events).iter().map(legacy_event_row))
-}
-
-/// A legacy column matrix (`((a) (b) …)`) as a flat list.
-fn legacy_column(column: &Value) -> Value {
-    list_value(items(column).iter().map(|row| items(row)[0].clone()))
-}
-
 /// The first row of `id`'s list `field` as pushed (its identity shows
 /// whether a tick pushed the list again).
 fn first_row(h: &Harness, id: InstanceId, field: &str) -> Rc<RefCell<Value>> {
@@ -1341,7 +1314,7 @@ fn graph_event(node: usize, beat: f64) -> GraphVisualizationEvent {
 }
 
 #[test]
-fn graph_event_streams_read_like_the_legacy_visualization_and_skip_an_unchanged_stamp() {
+fn graph_event_streams_read_as_rows_and_skip_an_unchanged_stamp() {
     let mut h = Harness::new();
     h.neural("nn");
     h.eval_graph("(def g (graph-of nn))");
@@ -1399,38 +1372,38 @@ fn graph_event_streams_read_like_the_legacy_visualization_and_skip_an_unchanged_
         assert_eq!(h.computed(key), 0, "{key:?} unobserved");
     }
 
-    // Cold reads: the legacy `SEQ.graph-visualizations` entry, as rows.
-    let legacy = items(&build_graph_visualizations_value(&state))[0].clone();
+    // Cold reads, as rows: the history raw, a node's latest event with the
+    // display transforms (transpose to 0.01, velocity clamped); no track is
+    // -1.
+    let row = |cells: [f64; 5]| list_value(cells.map(number));
+    let raw = |node: f64, track: f64, beat: f64| row([node, track, beat, -7.256_f32 as f64, 1.5]);
     assert_eq!(
         h.eval_graph("g.events"),
-        legacy_event_rows(&get(&legacy, "event-history"))
+        list_value([raw(0.0, -1.0, 1.0), raw(1.0, 3.0, 2.0)])
     );
-    let node_events = items(&get(&legacy, "node-events"));
-    let node_rows = list_value(node_events.iter().map(|event| match event {
-        Value::Nil => list_value(std::iter::empty()),
-        event => legacy_event_row(event),
-    }));
-    assert_eq!(h.eval_graph("g.node-events"), node_rows);
-    // The legacy `events` are the nodes' that show one.
+    let latest = row([1.0, 3.0, 2.0, -7.26, 1.0]);
+    assert_eq!(
+        h.eval_graph("g.node-events"),
+        list_value([list_value(std::iter::empty()), latest.clone()])
+    );
     assert_eq!(
         h.eval_graph("(filter (lambda (row) (> (len row) 0)) g.node-events)"),
-        legacy_event_rows(&get(&legacy, "events"))
+        list_value([latest])
     );
-    assert_eq!(h.eval_graph("g.deltas"), get(&legacy, "delta-matrix"));
+    let numbers = |cells: &[f64]| list_value(cells.iter().copied().map(number));
     assert_eq!(
-        h.eval_graph("g.node-deltas"),
-        legacy_column(&get(&legacy, "node-delta-column"))
+        h.eval_graph("g.deltas"),
+        list_value([numbers(&[0.0, -0.25]), numbers(&[0.0, 0.0])])
     );
+    assert_eq!(h.eval_graph("g.node-deltas"), numbers(&[0.0, 2.5]));
     assert_eq!(
         h.eval_graph("g.group-activity"),
-        legacy_column(&get(&legacy, "group-activity-matrix"))
+        numbers(&[0.75, 0.0, 0.0, 0.0])
     );
     assert_eq!(
         h.eval_graph("g.group-suppression"),
-        legacy_column(&get(&legacy, "group-suppression-matrix"))
+        numbers(&[0.0, -0.375, 0.0, 0.0])
     );
-    // Rows: no track is -1; a node's latest shows the display transforms.
-    let row = |cells: [f64; 5]| list_value(cells.map(number));
     assert_eq!(
         h.eval_graph("(list (first g.events) (nth g.node-events 1))"),
         list_value([
@@ -1468,10 +1441,9 @@ fn graph_event_streams_read_like_the_legacy_visualization_and_skip_an_unchanged_
     ];
     state.set_graph_visualizations(vec![snapshot(8, &played)]);
     h.sync();
-    let legacy = items(&build_graph_visualizations_value(&state))[0].clone();
     assert_eq!(
         h.eval_graph("g.events"),
-        legacy_event_rows(&get(&legacy, "event-history"))
+        list_value([raw(0.0, -1.0, 1.0), raw(1.0, 3.0, 2.0), raw(0.0, -1.0, 3.0)])
     );
     assert_eq!(
         h.eval_graph("(first (nth g.node-events 1))"),

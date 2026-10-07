@@ -654,6 +654,8 @@ pub(crate) mod f {
     pub(crate) const CLASS_TARGET: FieldKey = (PROCESS_CLASS, "target");
     pub(crate) const CLASS_LANE_COUNT: FieldKey = (PROCESS_CLASS, "lane-count");
     pub(crate) const CLASS_PORTS: FieldKey = (PROCESS_CLASS, "ports");
+    pub(crate) const CLASS_NODE_LABEL: FieldKey = (PROCESS_CLASS, "node-label");
+    pub(crate) const CLASS_NODE_HIDDEN: FieldKey = (PROCESS_CLASS, "node-hidden");
     pub(crate) const LIBRARY_CLASSES: FieldKey = (PROCESS_LIBRARY, "classes");
 
     pub(crate) const PROCESS_TRACK: FieldKey = (PROCESS, "track");
@@ -1780,6 +1782,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::CLASS_TARGET, ":string", Model),
     (f::CLASS_LANE_COUNT, ":int", Model),
     (f::CLASS_PORTS, "(list-of :string)", Model),
+    (f::CLASS_NODE_LABEL, ":string", Model),
+    (f::CLASS_NODE_HIDDEN, ":bool", Model),
     (f::LIBRARY_CLASSES, "(list-of process-class)", Model),
     (f::PROCESS_TRACK, "track", Model),
     (f::PROCESS_NODE, "graph-node", Model),

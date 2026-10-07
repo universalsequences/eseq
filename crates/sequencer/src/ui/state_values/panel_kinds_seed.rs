@@ -808,7 +808,8 @@ fn seed_rack_locks(
 
 /// An instrument dict's key locks (`:key-locks` per param, the locked
 /// notes, the key-lock variants and the notes stamped with them) as the
-/// instrument device's and its params' fields.
+/// instrument device's and its params' fields, and its track's sounding
+/// notes (`:active-notes`).
 pub(super) fn seed_panel_key_locks(
     rt: &mut Runtime,
     inst: &Value,
@@ -873,20 +874,13 @@ pub(super) fn seed_panel_key_locks(
         })
         .collect();
     set_field(rt, device, "variants", instance_list(variants));
-    let active = match rt.reactive_field_value("SEQ", "track-active-notes") {
-        Some(Value::List(tracks)) => tracks.first().map(|notes| notes.borrow().clone()),
-        _ => None,
-    };
-    if let Some(Value::List(notes)) = active {
-        let rows = notes
-            .iter()
-            .map(|note| {
-                test_list(vec![
-                    note.borrow().clone(),
-                    Value::Number(1.0),
-                    Value::Number(0.0),
-                ])
-            })
+    // The notes sounding on the track (`:active-notes`, a harness key of
+    // the dict) as `track.active-notes` rows.
+    let active = dict_items(dict_value(inst, "active-notes"));
+    if !active.is_empty() {
+        let rows = active
+            .into_iter()
+            .map(|note| test_list(vec![note, Value::Number(1.0), Value::Number(0.0)]))
             .collect();
         set_field(rt, track, "active-notes", test_list(rows));
     }

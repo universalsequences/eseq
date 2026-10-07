@@ -328,7 +328,7 @@ pub(super) fn handle(
                     // it in the published owner map, but a `(load …)` scratch
                     // script has no module and would otherwise republish a
                     // second, project-owned instance under the same name,
-                    // making every `bind-graph` by name ambiguous and the
+                    // making every graph read by name ambiguous and the
                     // tab's node rows disappear.
                     if !source.is_empty() {
                         let rerun = sequencer::lisp_host::with_graph_owner_rack(Some(group_id), || {

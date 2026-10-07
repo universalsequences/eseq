@@ -1,12 +1,9 @@
 /*!
 Registers the authoring/UI-side natives for graph-mode sequencers.
 
-`register_graph_authoring_natives` installs the GRAPH reactive namespace (a
-writable mirror of resolved graph values that `reactive-set` dirties) plus the
-natives a graph-editing UI script uses: reactive bindings (`bind-graph`,
-`bind-graph-edge`, `bind-graph-config`, `graph-key`/`graph-edge-key`/
-`graph-config-key`), inspection (`graph-list`, `graph-describe`, `graph-node`,
-`graph-param`, `graph-edge`, `graph-config`), and the duration/swing spec
+`register_graph_authoring_natives` installs the natives a graph-editing
+script uses: inspection and edits (`graph-list`, `graph-describe`,
+`graph-node`, `graph-param`, `graph-edge`, `graph-config`), and the duration/swing spec
 forms (`steps`, `beats`, `swing`, `delay`, `seed`). The value reads
 (`graph-node-value`, `graph-edge-value`, `graph-config-value`, the node
 process-chain reads, ...) are tracked per graph field through the host-owned
@@ -23,9 +20,6 @@ pub fn register_graph_authoring_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
 ) {
-    // Writable mirror of resolved graph values; `bind-graph` reads it, `reactive-set`
-    // dirties it. Dynamic-field namespace (no declared fields), like SEQV.
-    runtime.register_reactive(GRAPH_REACTIVE_NS, vec![], true);
     register_graph_node_process_natives(runtime, Arc::clone(&state));
     // `def-kind` (instance-kinds spec §3) lives beside the graph natives
     // because its `:sequencer` slot is a graph body.
@@ -244,7 +238,6 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_graph_node = Arc::clone(&state);
-    let bindings_for_graph_node = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-node",
         "(graph-node sequencer node-index :delay 2 :route 0 :seed-from 1)",
@@ -272,21 +265,12 @@ pub fn register_graph_authoring_natives(
                 &manifest,
                 GraphReadScope::Node(instance),
             );
-            for field in GRAPH_NODE_NUMERIC_FIELDS {
-                echo_graph_binding(
-                    ctx,
-                    &bindings_for_graph_node,
-                    graph_node_reactive_field(manifest.id, instance, field),
-                    graph_node_numeric_value(&state_for_graph_node, &manifest, instance, field),
-                );
-            }
             ctx.set_status(format!("updated graph '{sequencer_name}' node {instance}"));
             Ok(EValue::Bool(true))
         },
     );
 
     let state_for_graph_param = Arc::clone(&state);
-    let bindings_for_graph_param = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-param",
         "(graph-param sequencer node-index :threshold 0.75)",
@@ -319,12 +303,6 @@ pub fn register_graph_authoring_natives(
                 &manifest,
                 GraphReadScope::Node(instance),
             );
-            echo_graph_binding(
-                ctx,
-                &bindings_for_graph_param,
-                graph_node_reactive_field(manifest.id, instance, &param),
-                graph_node_numeric_value(&state_for_graph_param, &manifest, instance, &param),
-            );
             ctx.set_status(format!(
                 "updated graph '{sequencer_name}' node {instance} param {param}"
             ));
@@ -333,7 +311,6 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_graph_edge = Arc::clone(&state);
-    let bindings_for_graph_edge = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-edge",
         "(graph-edge sequencer :from 0 :to 1 :weight 0.5)",
@@ -346,7 +323,7 @@ pub fn register_graph_authoring_natives(
             let edit = parse_graph_edge_edit(&manifest, &args[1..])?;
             let sequencer_name = manifest.name.clone();
             let param_name = edit.param.clone();
-            let (from, to, group) = (edit.from, edit.to, edit.group.clone());
+            let (from, to) = (edit.from, edit.to);
             state_for_graph_edge.edit_current_graph_overrides(|graphs| {
                 let graph = ensure_graph_overrides(graphs, &manifest);
                 graph.set_slot(&crate::graph::GraphOverrideSlot::EdgeParam {
@@ -364,221 +341,10 @@ pub fn register_graph_authoring_natives(
                 &manifest,
                 GraphReadScope::Edge { from, to },
             );
-            let resolved = resolved_graph_edge_value(
-                &state_for_graph_edge,
-                &manifest,
-                GraphEdgeQuery {
-                    group,
-                    from,
-                    to,
-                    param: param_name.clone(),
-                },
-            )
-            .and_then(|value| {
-                graph_number(&value).ok_or_else(|| "edge param is not numeric".to_string())
-            });
-            echo_graph_binding(
-                ctx,
-                &bindings_for_graph_edge,
-                graph_edge_reactive_field(manifest.id, from, to, &param_name),
-                resolved,
-            );
             ctx.set_status(format!(
                 "updated graph '{sequencer_name}' edge {param_name}"
             ));
             Ok(EValue::Bool(true))
-        },
-    );
-
-    let state_for_bind_graph = Arc::clone(&state);
-    let bindings_for_bind_graph = runtime.reactive_binding_store();
-    runtime.register_native_with_docs(
-        "bind-graph",
-        "(bind-graph sequencer node-index :delay [options])",
-        "Reactive handle to a graph node param/intrinsic, seeded with the resolved \
-         current-pattern value. Numeric fields bind directly; pass an options list to \
-         bind an enum field (route/resolution/quantize) as a dropdown index.",
-        move |args, _ctx| {
-            if args.len() < 3 {
-                return Err("bind-graph expects graph, node index, and field".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_bind_graph, &args[0])?;
-            let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= graph_active_node_count(&state_for_bind_graph, &manifest) {
-                return Err("bind-graph node index out of range".to_string());
-            }
-            let field = graph_key_string(&args[2])
-                .ok_or_else(|| "bind-graph expects a field name".to_string())?;
-            if args.get(3).is_some() {
-                note_option_bound_graph_field(&graph_node_reactive_field(
-                    manifest.id,
-                    instance,
-                    &field,
-                ));
-            }
-            let value = match args.get(3) {
-                // A route is already an index into the route option list
-                // (track n / rack member n at position n), with "Off" as the
-                // list's last entry; label matching would tie the binding to
-                // the "Track n" spelling, which rack-owned instances do not use.
-                Some(options) if field == "route" => {
-                    let option_count = match options {
-                        EValue::List(items) => items.len(),
-                        _ => 0,
-                    };
-                    match resolved_graph_node_value(&state_for_bind_graph, &manifest, instance, &field)? {
-                        EValue::Number(route) if (route as usize) < option_count => route,
-                        _ => option_count.saturating_sub(1) as f64,
-                    }
-                }
-                Some(options) => {
-                    let display = graph_node_display_value(
-                        &state_for_bind_graph,
-                        &manifest,
-                        instance,
-                        &field,
-                    )?;
-                    graph_option_index(options, &display)
-                }
-                None => {
-                    graph_node_numeric_value(&state_for_bind_graph, &manifest, instance, &field)?
-                }
-            };
-            Ok(graph_seeded_reactive_ref(
-                &bindings_for_bind_graph,
-                graph_node_reactive_field(manifest.id, instance, &field),
-                value,
-            ))
-        },
-    );
-
-    let state_for_node_notes = Arc::clone(&state);
-    let bindings_for_node_notes = runtime.reactive_binding_store();
-    runtime.register_native_with_docs(
-        "bind-graph-node-notes",
-        "(bind-graph-node-notes sequencer node-index)",
-        "Bindings to the notes a graph node is sounding right now: a map with \
-         :count, :values and :levels (velocities; NODE_SOUNDING_DISPLAY element \
-         bindings each), shaped for \
-         `number-list`. The host republishes them from the audio clock, so a bound \
-         widget repaints without re-running Lisp.",
-        move |args, _ctx| {
-            if args.len() != 2 {
-                return Err("bind-graph-node-notes expects graph and node index".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_node_notes, &args[0])?;
-            let node = parse_nonnegative_usize(&args[1], "node index")?;
-            let field = crate::graph::node_sounding_field(manifest.id);
-            let base = node * crate::graph::NODE_SOUNDING_STRIDE;
-            let display = crate::graph::NODE_SOUNDING_DISPLAY;
-            let refs = |first: usize| -> EValue {
-                EValue::List(
-                    (first..first + display)
-                        .map(|index| {
-                            lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), index))
-                        })
-                        .collect(),
-                )
-            };
-            let values = refs(base + 1);
-            let levels = refs(base + 1 + display);
-            let mut map = HashMap::new();
-            map.insert(
-                "count".to_string(),
-                lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), base)),
-            );
-            map.insert("values".to_string(), lisp_value(values));
-            map.insert("levels".to_string(), lisp_value(levels));
-            Ok(EValue::Map(map))
-        },
-    );
-
-    let state_for_graph_key = Arc::clone(&state);
-    runtime.register_native_with_docs(
-        "graph-key",
-        "(graph-key sequencer node-index :delay)",
-        "Canonical GRAPH reactive field name for a node field. Use with \
-         `(reactive-set \"GRAPH\" (graph-key ...) value)` to dirty a `bind-graph` handle.",
-        move |args, _ctx| {
-            if args.len() != 3 {
-                return Err("graph-key expects graph, node index, and field".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_graph_key, &args[0])?;
-            let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            let field = graph_key_string(&args[2])
-                .ok_or_else(|| "graph-key expects a field name".to_string())?;
-            Ok(EValue::String(graph_node_reactive_field(
-                manifest.id,
-                instance,
-                &field,
-            )))
-        },
-    );
-
-    let state_for_bind_graph_edge = Arc::clone(&state);
-    let bindings_for_bind_graph_edge = runtime.reactive_binding_store();
-    runtime.register_native_with_docs(
-        "bind-graph-edge",
-        "(bind-graph-edge sequencer from to :weight)",
-        "Reactive handle to a graph edge param (weight/dampening/delay), seeded with \
-         the resolved current-pattern value.",
-        move |args, _ctx| {
-            if args.len() != 4 {
-                return Err("bind-graph-edge expects graph, from, to, and a param".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_bind_graph_edge, &args[0])?;
-            let from = parse_nonnegative_usize(&args[1], "from")?;
-            let to = parse_nonnegative_usize(&args[2], "to")?;
-            let param = graph_key_string(&args[3])
-                .ok_or_else(|| "bind-graph-edge expects a param name".to_string())?;
-            let edge_set = manifest
-                .edge_sets
-                .first()
-                .ok_or_else(|| "bind-graph-edge requires an edge set".to_string())?;
-            let active_nodes = graph_active_node_count(&state_for_bind_graph_edge, &manifest);
-            if from >= active_nodes || to >= active_nodes {
-                return Err("bind-graph-edge from/to index out of range".to_string());
-            }
-            let query = GraphEdgeQuery {
-                group: crate::graph::edge_set_group_id(edge_set),
-                from,
-                to,
-                param: param.clone(),
-            };
-            let value = graph_number(&resolved_graph_edge_value(
-                &state_for_bind_graph_edge,
-                &manifest,
-                query,
-            )?)
-            .ok_or_else(|| format!("bind-graph-edge param :{param} is not numeric"))?;
-            Ok(graph_seeded_reactive_ref(
-                &bindings_for_bind_graph_edge,
-                graph_edge_reactive_field(manifest.id, from, to, &param),
-                value,
-            ))
-        },
-    );
-
-    let state_for_graph_edge_key = Arc::clone(&state);
-    runtime.register_native_with_docs(
-        "graph-edge-key",
-        "(graph-edge-key sequencer from to :weight)",
-        "Canonical GRAPH reactive field name for an edge param.",
-        move |args, _ctx| {
-            if args.len() != 4 {
-                return Err("graph-edge-key expects graph, from, to, and a param".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_graph_edge_key, &args[0])?;
-            let from = parse_nonnegative_usize(&args[1], "from")?;
-            let to = parse_nonnegative_usize(&args[2], "to")?;
-            let param = graph_key_string(&args[3])
-                .ok_or_else(|| "graph-edge-key expects a param name".to_string())?;
-            Ok(EValue::String(graph_edge_reactive_field(
-                manifest.id,
-                from,
-                to,
-                &param,
-            )))
         },
     );
 
@@ -602,7 +368,6 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_graph_config = Arc::clone(&state);
-    let bindings_for_graph_config = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
@@ -619,70 +384,8 @@ pub fn register_graph_authoring_natives(
             // Config can move anything (`:node-count` changes which nodes and
             // edges exist), so every tracked read of this graph re-resolves.
             invalidate_graph_reads(ctx, &state_for_graph_config, &manifest, GraphReadScope::All);
-            echo_graph_binding(
-                ctx,
-                &bindings_for_graph_config,
-                graph_config_reactive_field(manifest.id, &field),
-                graph_config_numeric_value(&state_for_graph_config, &manifest, &field),
-            );
             ctx.set_status(format!("updated graph '{sequencer_name}' config {field}"));
             Ok(EValue::Bool(true))
-        },
-    );
-
-    let state_for_graph_config_key = Arc::clone(&state);
-    runtime.register_native_with_docs(
-        "graph-config-key",
-        "(graph-config-key sequencer :reset-bars)",
-        "Canonical GRAPH reactive field name for a sequencer-level config field.",
-        move |args, _ctx| {
-            if args.len() != 2 {
-                return Err("graph-config-key expects graph and field".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_graph_config_key, &args[0])?;
-            let field = graph_key_string(&args[1])
-                .ok_or_else(|| "graph-config-key expects a field name".to_string())?;
-            Ok(EValue::String(graph_config_reactive_field(
-                manifest.id,
-                &field,
-            )))
-        },
-    );
-
-    let state_for_bind_graph_config = Arc::clone(&state);
-    let bindings_for_bind_graph_config = runtime.reactive_binding_store();
-    runtime.register_native_with_docs(
-        "bind-graph-config",
-        "(bind-graph-config sequencer :reset-bars [options])",
-        "Reactive handle to a sequencer-level config field (see graph-config for the field list, including the :group-gain-<row>-<col> / :group-coupling-<row>-<col> matrix cells), seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
-        move |args, _ctx| {
-            if args.len() < 2 {
-                return Err("bind-graph-config expects graph and field".to_string());
-            }
-            let manifest = resolve_graph_manifest(&state_for_bind_graph_config, &args[0])?;
-            let field = graph_key_string(&args[1])
-                .ok_or_else(|| "bind-graph-config expects a field name".to_string())?;
-            if args.get(2).is_some() {
-                note_option_bound_graph_field(&graph_config_reactive_field(manifest.id, &field));
-            }
-            let value = match args.get(2) {
-                Some(options) => {
-                    let display = graph_config_display_value(
-                        &state_for_bind_graph_config,
-                        &manifest,
-                        &field,
-                    )?;
-                    graph_option_index(options, &display)
-                }
-                None => {
-                    graph_config_numeric_value(&state_for_bind_graph_config, &manifest, &field)?
-                }
-            };
-            Ok(graph_seeded_reactive_ref(
-                &bindings_for_bind_graph_config,
-                graph_config_reactive_field(manifest.id, &field),
-                value,
-            ))
         },
     );
 }
@@ -769,15 +472,10 @@ fn graph_capacity_node_count(manifest: &crate::graph::GraphManifest) -> usize {
     manifest.shape.capacity_num_nodes()
 }
 
-/// Reactive namespace that mirrors resolved graph node/edge values so the UI can
-/// bind widgets directly (`bind-graph`) instead of shadowing every knob in a
-/// per-node `defstate`. Writes flow back via `reactive-set` + `graph-*` setters.
-const GRAPH_REACTIVE_NS: &str = "GRAPH";
-
 /// Host-owned reactive namespace behind the tracked graph reads
 /// (docs/instance-kinds-spec.md §6). `graph-node-value`, `graph-param-value`,
-/// `graph-edge-value`, `graph-config-value`, `graph-node-process-chain` and
-/// `graph-node-lane-patch` each inject one dependency per (graph instance,
+/// `graph-edge-value`, `graph-config-value` and `graph-node-process-chain`
+/// each inject one dependency per (graph instance,
 /// node/edge/config field) read, so a rendering effect re-runs when exactly
 /// what it read changes. The generation a source carries is the resolved
 /// value itself (a fingerprint for lists), so an invalidation that resolves
@@ -994,56 +692,6 @@ fn invalidate_graph_reads(
     });
 }
 
-/// Keep a `bind-graph*` handle in step with a write made through a `graph-*`
-/// native, so Lisp no longer echoes it with `reactive-set "GRAPH"`. Only
-/// fields someone bound are echoed, and only numeric ones: an enum binding
-/// holds an index into the caller's own options list, which the write
-/// cannot know.
-fn echo_graph_binding(
-    ctx: &mut eseqlisp::NativeContext,
-    bindings: &eseqlisp::reactive::ReactiveBindingStore,
-    field: String,
-    value: Result<f64, String>,
-) {
-    let Ok(value) = value else {
-        return;
-    };
-    if OPTION_BOUND_GRAPH_FIELDS.with(|fields| fields.borrow().contains(&field)) {
-        return;
-    }
-    if bindings.has_field(GRAPH_REACTIVE_NS, &field) {
-        ctx.reactive_set(GRAPH_REACTIVE_NS, field, EValue::Number(value));
-    }
-}
-
-thread_local! {
-    // GRAPH fields some `bind-graph*` call bound through an options list:
-    // their slot holds a dropdown index, not the value, so writes never echo
-    // a number into them.
-    static OPTION_BOUND_GRAPH_FIELDS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
-
-fn note_option_bound_graph_field(field: &str) {
-    OPTION_BOUND_GRAPH_FIELDS.with(|fields| {
-        if !fields.borrow().contains(field) {
-            fields.borrow_mut().insert(field.to_string());
-        }
-    });
-}
-
-/// Node fields `bind-graph` serves as plain numbers (see
-/// `graph_node_numeric_value`); a `graph-node` write echoes the bound ones.
-const GRAPH_NODE_NUMERIC_FIELDS: &[&str] = &[
-    "delay",
-    "delay-steps",
-    "seed-on-reset",
-    "reset-seed",
-    "seed-route",
-    "seed-from-route",
-    "group",
-    "grp",
-];
-
 /// Re-resolve every subscribed graph read against current state and queue
 /// the changed ones for the next reactive cycle. The UI tick calls this
 /// whenever the pattern, the published scheduler snapshot or the published
@@ -1146,107 +794,9 @@ fn cached_graph_runtime_config(
     })
 }
 
-fn graph_node_reactive_field(manifest_id: u64, instance: usize, field: &str) -> String {
-    format!("{manifest_id}|n{instance}|{field}")
-}
-
-fn graph_edge_reactive_field(manifest_id: u64, from: usize, to: usize, param: &str) -> String {
-    format!("{manifest_id}|e{from}_{to}|{param}")
-}
-
-/// Seed the GRAPH reactive slot with `value` (a plain float write that does NOT
-/// dirty bound widgets — safe to call during render) and return a reactive handle
-/// pointing at the same slot. Re-running the producing lisp on a pattern switch
-/// re-seeds the slot; live edits keep it current via `reactive-set`.
-fn graph_seeded_reactive_ref(
-    bindings: &eseqlisp::reactive::ReactiveBindingStore,
-    field: String,
-    value: f64,
-) -> EValue {
-    bindings.seeded_float_ref(GRAPH_REACTIVE_NS, field, value)
-}
-
-/// Resolve a node field to a single float for `bind-graph`. `delay` is an
-/// intrinsic; everything else falls through to behavioral params. Enum intrinsics
-/// (route/resolution/quantize) are not scalars — callers must pass an options list
-/// and go through the index path instead.
-fn graph_node_numeric_value(
-    state: &crate::sequencer::SequencerState,
-    manifest: &crate::graph::GraphManifest,
-    instance: usize,
-    field: &str,
-) -> Result<f64, String> {
-    match field {
-        "delay" | "delay-steps" | "seed-on-reset" | "reset-seed" | "seed-route"
-        | "seed-from-route" | "group" | "grp" => {
-            let value = resolved_graph_node_value(state, manifest, instance, field)?;
-            graph_number(&value).ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
-        }
-        "resolution" | "res" | "quantize" | "q" | "route" | "seed-from" => Err(format!(
-            "bind-graph field :{field} is an enum; pass an options list to bind its index"
-        )),
-        _ => {
-            let value = resolved_graph_param_value(state, manifest, instance, field)?;
-            graph_number(&value).ok_or_else(|| format!("bind-graph param :{field} is not numeric"))
-        }
-    }
-}
-
-/// Render an enum node field to the label a dropdown would display, so it can be
-/// matched against the author's options list. Centralizes the route/timebase
-/// formatting that the lisp demo used to spell out as nested `if` ladders.
-fn graph_node_display_value(
-    state: &crate::sequencer::SequencerState,
-    manifest: &crate::graph::GraphManifest,
-    instance: usize,
-    field: &str,
-) -> Result<String, String> {
-    let value = resolved_graph_node_value(state, manifest, instance, field)?;
-    Ok(match field {
-        "route" => match value {
-            EValue::Number(track) => format!("Track {}", track as usize + 1),
-            _ => "Off".to_string(),
-        },
-        _ => match value {
-            EValue::String(label) => label,
-            EValue::Nil => "off".to_string(),
-            EValue::Number(number) => graph_format_number(number),
-            other => eseqlisp::vm::format_lisp_value(&other),
-        },
-    })
-}
-
-fn graph_format_number(number: f64) -> String {
-    if number.fract() == 0.0 {
-        format!("{}", number as i64)
-    } else {
-        format!("{number}")
-    }
-}
-
-fn graph_option_index(options: &EValue, display: &str) -> f64 {
-    if let EValue::List(items) = options {
-        for (index, item) in items.iter().enumerate() {
-            let item = item.borrow();
-            let matches = match &*item {
-                EValue::String(label) => label == display,
-                other => eseqlisp::vm::format_lisp_value(other) == display,
-            };
-            if matches {
-                return index as f64;
-            }
-        }
-    }
-    0.0
-}
-
 /// Beats per bar for the demo's 4/4 reset clock, matching `graph_bars_or_beats`'s
 /// `(bars n) -> n * 4` parse.
 const GRAPH_BEATS_PER_BAR: f64 = 4.0;
-
-fn graph_config_reactive_field(manifest_id: u64, field: &str) -> String {
-    format!("{manifest_id}|cfg|{field}")
-}
 
 /// Parse a `<prefix>-<row>-<col>` group-matrix cell field (e.g. `group-gain-1-2`)
 /// into a flat row-major cell index. One cell per field keeps the config lockstep
@@ -1273,12 +823,9 @@ fn resolved_graph_config_value(
     field: &str,
 ) -> Result<EValue, String> {
     let overrides = resolved_graph_overrides_for_manifest(state, manifest);
-    // Read the count off the same memoized runtime config that `bind-graph`
-    // range-checks node indices against, so one render can never loop over
-    // more rows than it can bind: a panel that sized itself from a fresh
-    // override read while the memo lagged behind an unpublished edit failed
-    // every row past the memo's node list, and the error flood stalled the
-    // tab.
+    // Read the count off the same memoized runtime config the other value
+    // reads resolve nodes against, so one render never loops over more rows
+    // than the node reads answer for.
     let active = || graph_active_node_count(state, manifest);
     graph_config_field_value(manifest, overrides.as_ref(), active, field)
 }
@@ -1353,30 +900,6 @@ pub fn graph_config_field_value(
             Err(format!("graph config unknown field :{other}"))
         }
     }
-}
-
-fn graph_config_numeric_value(
-    state: &crate::sequencer::SequencerState,
-    manifest: &crate::graph::GraphManifest,
-    field: &str,
-) -> Result<f64, String> {
-    let value = resolved_graph_config_value(state, manifest, field)?;
-    graph_number(&value)
-        .ok_or_else(|| format!("bind-graph-config field :{field} is an enum; pass an options list"))
-}
-
-fn graph_config_display_value(
-    state: &crate::sequencer::SequencerState,
-    manifest: &crate::graph::GraphManifest,
-    field: &str,
-) -> Result<String, String> {
-    let value = resolved_graph_config_value(state, manifest, field)?;
-    Ok(match value {
-        EValue::String(label) => label,
-        EValue::Number(number) => graph_format_number(number),
-        EValue::Nil => "off".to_string(),
-        other => eseqlisp::vm::format_lisp_value(&other),
-    })
 }
 
 fn clamp_graph_node_count(
@@ -2592,7 +2115,7 @@ fn graph_node_process_id_arg(value: Option<&EValue>, native: &str) -> Result<cra
 
 /// Edit one node's chain in place; `edit` returns `Err` to reject. A
 /// successful edit re-runs the effects that read this node's chain
-/// (`graph-node-process-chain` / `graph-node-lane-patch`).
+/// (`graph-node-process-chain`).
 fn edit_graph_node_process_chain<R>(
     ctx: &mut eseqlisp::NativeContext,
     state: &Arc<crate::sequencer::SequencerState>,
@@ -2772,11 +2295,9 @@ pub fn restore_graph_override(
 }
 
 /// Cable ids for node patches live above every track: the lane patchbay
-/// folds a namespace into each port id (`(ns * 4096 + slot) * 16 + ordinal`,
-/// mirroring `lane_patch_port_id` on the UI side) and tracks use their index.
+/// (ui/sequencer.lisp `port-id`) folds a namespace into each port id
+/// (`(ns * 4096 + slot) * 16 + ordinal`) and tracks use their index.
 pub const GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE: usize = 1024;
-const LANE_PATCH_PORT_STRIDE: usize = 16;
-const LANE_PATCH_TRACK_STRIDE: usize = 4096;
 /// Node namespaces one graph spans (`graph_node_lane_patch_namespace`).
 pub const GRAPH_NODE_LANE_PATCH_NODE_STRIDE: usize = 4096;
 /// Graph slots below this are graph ids used as-is (kind instance ids count
@@ -2801,183 +2322,6 @@ pub fn graph_node_lane_patch_namespace(graph_id: u64, node: usize) -> usize {
     GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE
         + slot as usize * GRAPH_NODE_LANE_PATCH_NODE_STRIDE
         + node.min(GRAPH_NODE_LANE_PATCH_NODE_STRIDE - 1)
-}
-
-fn lane_patch_port_id(namespace: usize, slot_index: usize, ordinal: usize) -> usize {
-    (namespace * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
-}
-
-/// The node patch as the lane patchbay draws it: the same entry shape the
-/// UI builds for `SEQ.track-lane-patch` (cable-level out/in ports), minus the
-/// track-only `param-ports`. Keep the two in step.
-fn graph_node_lane_patch_value(
-    state: &crate::sequencer::SequencerState,
-    chain: &crate::process::TrackProcessChain,
-    namespace: usize,
-) -> EValue {
-    use crate::process::{ParamTarget, ProcessInletKind};
-    let published = state.published_process_authoring();
-    let def_for = |slot: &crate::process::TrackProcessSlot| {
-        published.defs.iter().find(|def| def.name == slot.class_name)
-    };
-    let resolve = |target: &ParamTarget| -> Option<(usize, String)> {
-        let ParamTarget::ProcessInlet { process, inlet, instance_id } = target else {
-            return None;
-        };
-        let index = chain.slots.iter().position(|slot| {
-            slot.class_name == *process && instance_id.is_none_or(|id| slot.instance_id == id)
-        })?;
-        Some((index, inlet.clone()))
-    };
-    struct Reader {
-        slot_index: usize,
-        inlet: String,
-        source: &'static str,
-        fanout_index: Option<usize>,
-    }
-    let mut out_ports: Vec<Vec<(String, usize, bool, Vec<Reader>)>> = Vec::new();
-    let mut in_writers: std::collections::BTreeMap<(usize, String), Vec<usize>> = Default::default();
-    for (slot_index, slot) in chain.slots.iter().enumerate() {
-        let mut entries = Vec::new();
-        let connectable = def_for(slot)
-            .map(|def| def.ports.iter().filter(|port| port.is_connectable()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        for (ordinal, port) in connectable.iter().enumerate() {
-            let port_id = lane_patch_port_id(namespace, slot_index, ordinal);
-            let mut readers = Vec::new();
-            let primary_free = slot.unbound_ports.contains(&port.name)
-                || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
-            if !slot.unbound_ports.contains(&port.name) {
-                if let Some(Some(target)) = slot.bindings.get(&port.name) {
-                    if let Some((index, inlet)) = resolve(target) {
-                        readers.push(Reader { slot_index: index, inlet, source: "primary", fanout_index: None });
-                    }
-                }
-            }
-            let fanout = slot.fanout.get(&port.name).map(Vec::as_slice).unwrap_or(&[]);
-            for (fanout_index, entry) in fanout.iter().enumerate() {
-                if let Some((index, inlet)) = resolve(&entry.target) {
-                    readers.push(Reader { slot_index: index, inlet, source: "fanout", fanout_index: Some(fanout_index) });
-                }
-            }
-            for reader in &readers {
-                in_writers.entry((reader.slot_index, reader.inlet.clone())).or_default().push(port_id);
-            }
-            entries.push((port.name.clone(), port_id, primary_free, readers));
-        }
-        out_ports.push(entries);
-    }
-    let kind_name = |kind: &ProcessInletKind| -> &'static str {
-        match kind {
-            ProcessInletKind::Float => "float",
-            ProcessInletKind::Int => "int",
-            ProcessInletKind::Gate => "gate",
-            ProcessInletKind::Track => "track",
-            ProcessInletKind::Field => "field",
-            ProcessInletKind::Any => "any",
-            ProcessInletKind::Enum(_) => "enum",
-        }
-    };
-    let map = |entries: Vec<(&str, EValue)>| -> EValue {
-        let mut m = HashMap::new();
-        for (key, value) in entries {
-            m.insert(key.to_string(), lisp_value(value));
-        }
-        EValue::Map(m)
-    };
-    lisp_list(
-        chain
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(slot_index, slot)| {
-                let def = def_for(slot);
-                let in_ports = def
-                    .map(|def| {
-                        def.inlets
-                            .iter()
-                            .filter(|inlet| {
-                                inlet.lane
-                                    || matches!(inlet.kind, ProcessInletKind::Gate)
-                                    || in_writers.contains_key(&(slot_index, inlet.name.clone()))
-                            })
-                            .enumerate()
-                            .map(|(ordinal, inlet)| {
-                                let writers = in_writers
-                                    .get(&(slot_index, inlet.name.clone()))
-                                    .map(Vec::as_slice)
-                                    .unwrap_or(&[]);
-                                map(vec![
-                                    ("name", EValue::String(inlet.name.clone())),
-                                    ("ordinal", EValue::Number(ordinal as f64)),
-                                    ("lane", EValue::Bool(inlet.lane)),
-                                    ("kind", EValue::String(kind_name(&inlet.kind).to_string())),
-                                    ("writers", lisp_list(writers.iter().map(|id| EValue::Number(*id as f64)).collect())),
-                                ])
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let outs = out_ports[slot_index]
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, (name, port_id, primary_free, readers))| {
-                        map(vec![
-                            ("name", EValue::String(name.clone())),
-                            ("ordinal", EValue::Number(ordinal as f64)),
-                            ("port-id", EValue::Number(*port_id as f64)),
-                            ("primary-free", EValue::Bool(*primary_free)),
-                            (
-                                "readers",
-                                lisp_list(
-                                    readers
-                                        .iter()
-                                        .map(|reader| {
-                                            map(vec![
-                                                ("slot-index", EValue::Number(reader.slot_index as f64)),
-                                                (
-                                                    "instance-id",
-                                                    EValue::Number(chain.slots[reader.slot_index].instance_id.0 as f64),
-                                                ),
-                                                ("inlet", EValue::String(reader.inlet.clone())),
-                                                ("source", EValue::String(reader.source.to_string())),
-                                                (
-                                                    "fanout-index",
-                                                    reader.fanout_index.map(|i| EValue::Number(i as f64)).unwrap_or(EValue::Nil),
-                                                ),
-                                            ])
-                                        })
-                                        .collect(),
-                                ),
-                            ),
-                        ])
-                    })
-                    .collect::<Vec<_>>();
-                let display_name = slot
-                    .instance_name
-                    .clone()
-                    .unwrap_or_else(|| graph_node_process_label(&slot.class_name));
-                map(vec![
-                    ("slot-index", EValue::Number(slot_index as f64)),
-                    ("instance-id", EValue::Number(slot.instance_id.0 as f64)),
-                    ("name", EValue::String(display_name)),
-                    ("class", EValue::String(slot.class_name.clone())),
-                    ("project", EValue::Bool(false)),
-                    ("enabled", EValue::Bool(slot.enabled)),
-                    ("default-lane", EValue::Bool(false)),
-                    ("out-ports", lisp_list(outs)),
-                    ("in-ports", lisp_list(in_ports)),
-                    ("param-ports", lisp_list(Vec::new())),
-                    ("expr", EValue::Bool(slot.is_expr_card())),
-                    ("expr-line", slot.expr_preview_line().map(EValue::String).unwrap_or(EValue::Nil)),
-                    (
-                        "compile-error",
-                        slot.expr_compile_error(def.is_some()).map(EValue::String).unwrap_or(EValue::Nil),
-                    ),
-                ])
-            })
-            .collect(),
-    )
 }
 
 fn register_graph_node_process_natives(
@@ -3750,25 +3094,9 @@ fn register_graph_node_process_natives(
 
     let st = Arc::clone(&state);
     runtime.register_native_with_docs(
-        "graph-node-lane-patch",
-        "(graph-node-lane-patch sequencer node-index)",
-        "The node's patch in the shape of one SEQ.track-lane-patch entry list (slot-index instance-id name class enabled out-ports{name ordinal port-id primary-free readers} in-ports{name ordinal lane kind writers}), with cable ids in the node's own namespace (graph-node-patch-namespace) so it can share the lane patchbay renderer with tracks.",
-        move |args, ctx| {
-            let (manifest, instance) = graph_node_process_args(&st, "graph-node-lane-patch", &args)?;
-            let chain = graph_node_process_chain(&st, &manifest, instance);
-            ensure_graph_node_expr_classes(&st, &chain);
-            let key = GraphReadKey::Process { node: instance };
-            track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
-            let namespace = graph_node_lane_patch_namespace(manifest.id, instance);
-            Ok(graph_node_lane_patch_value(&st, &chain, namespace))
-        },
-    );
-
-    let st = Arc::clone(&state);
-    runtime.register_native_with_docs(
         "graph-node-patch-namespace",
         "(graph-node-patch-namespace sequencer node-index)",
-        "The lane patch-bay namespace of a graph node: the cable-id band graph-node-lane-patch mints this node's port ids in. Derived from the graph (instance) id and the node, so node k of two graphs never shares one.",
+        "The lane patch-bay namespace of a graph node: the cable-id band the node bay mints this node's port ids in. Derived from the graph (instance) id and the node, so node k of two graphs never shares one.",
         move |args, _ctx| {
             let (manifest, instance) =
                 graph_node_process_args(&st, "graph-node-patch-namespace", &args)?;

@@ -1,8 +1,9 @@
 //! The graph kinds' setters (kind-bindings spec §14, stage 7g): `set-graph`
 //! (`:graph-id`, `:field`, `:value`; `:node` for a node's field, with
-//! `:param` for its param or `:to` and `:param` for an edge's; `:row` and
-//! `:col` for a group matrix cell; `:track-id` for a route; `:restart` for a
-//! generator).
+//! `:param` for its param or `:to` and `:param` for an edge's; `:param` and
+//! `:count` for one param of the first nodes at once (`node-params`); `:row`
+//! and `:col` for a group matrix cell; `:track-id` for a route; `:restart`
+//! for a generator).
 //!
 //! A graph is named by its sequencer id (matched as the number Lisp holds,
 //! so a legacy hashed id past 2^53 still resolves), a node by its index
@@ -152,16 +153,13 @@ fn labels_for(field: &str, single: bool, value: &SetValue<'_>) -> Result<Vec<Str
     }
 }
 
-/// A node or edge param's request: `:param` names one of `specs` (the
-/// `owner`'s), whose value `current` reads; `slot` builds the override. The
-/// value is finite and in the param's range (an int param's whole).
-fn param_request(
+/// The param `:param` names among `specs` (the `owner`'s) and the value to
+/// set it to: finite and in the param's range (an int param's whole).
+fn param_value(
     value: &SetValue<'_>,
     map: &Payload,
     (owner, specs): (&str, &[ParamSpec]),
-    current: impl FnOnce(&str) -> Option<f64>,
-    slot: impl FnOnce(String, f64) -> GraphOverrideSlot,
-) -> Request {
+) -> Result<(String, f64), String> {
     let name = map_string(map, "param").ok_or("needs a :param")?;
     let spec = (specs.iter())
         .find(|spec| spec.name == name)
@@ -172,10 +170,55 @@ fn param_request(
     } else {
         value.number(spec.min, spec.max)
     }?;
+    Ok((name, v))
+}
+
+/// A node or edge param's request (see [`param_value`]), whose value
+/// `current` reads; `slot` builds the override.
+fn param_request(
+    value: &SetValue<'_>,
+    map: &Payload,
+    owner: (&str, &[ParamSpec]),
+    current: impl FnOnce(&str) -> Option<f64>,
+    slot: impl FnOnce(String, f64) -> GraphOverrideSlot,
+) -> Request {
+    let (name, v) = param_value(value, map, owner)?;
     if current(&name) == Some(v) {
         return Ok(None);
     }
     Ok(Some((slot(name, v), true)))
+}
+
+/// One param of nodes 0 to `:count` - 1 set to one value (a batch: one
+/// undo entry), up to the graph's capacity: a dormant node, past the
+/// active count, keeps it for when it becomes active.
+fn node_params_request(graph: &Graph, value: &SetValue<'_>, map: &Payload) -> Request {
+    let manifest = &graph.manifest;
+    let capacity = manifest.shape.capacity_num_nodes();
+    let count = SetValue::of(map, "count", "count").integer(1, capacity.max(1))?;
+    let (param, v) = param_value(value, map, ("node", &manifest.node.params))?;
+    let group = manifest.node.name.clone();
+    let current = |node: usize| match graph.config.nodes.get(node) {
+        Some(_) => {
+            sequencer::lisp_host::graph_node_param_value(manifest, &graph.config, node, &param)
+        }
+        // A dormant node resolves its override, else the prototype default.
+        None => (graph.overrides.iter())
+            .flat_map(|overrides| &overrides.node_params)
+            .find(|entry| entry.group == group && entry.instance == node && entry.param == param)
+            .map(|entry| entry.value)
+            .or_else(|| manifest.node.param_default(&param)),
+    };
+    if (0..count).all(|node| current(node) == Some(v)) {
+        return Ok(None);
+    }
+    let values = vec![Some(v); count];
+    let slot = GraphOverrideSlot::NodeParams {
+        group,
+        param,
+        values,
+    };
+    Ok(Some((slot, true)))
 }
 
 /// What `set-graph` asks for.
@@ -351,6 +394,7 @@ fn graph_request(app: &app::App, graph: &Graph, map: &Payload) -> Request {
                 },
             )
         }
+        "node-params" => node_params_request(graph, &value, map),
         field => config_request(graph, field, &value, map),
     }
 }

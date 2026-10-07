@@ -325,17 +325,9 @@ fn next_events_stamp() -> u64 {
 pub const NEURON_RECENT_NOTES: usize = 8;
 /// How many overlapping notes per node the sounding readout tracks.
 pub const NODE_SOUNDING_CAP: usize = 16;
-/// How many sounding notes per node the UI readout publishes.
+/// How many sounding notes per node the UI readout shows
+/// (`graph-node.sounding`).
 pub const NODE_SOUNDING_DISPLAY: usize = 8;
-/// Per-node block width in the `SEQ.graph-node-notes-<id>` flat list:
-/// `[count, note_0 .. note_{DISPLAY-1}, velocity_0 .. velocity_{DISPLAY-1}]`,
-/// so one node's change touches only that node's indices (and so only the
-/// widget bound to them).
-pub const NODE_SOUNDING_STRIDE: usize = 1 + 2 * NODE_SOUNDING_DISPLAY;
-
-pub fn node_sounding_field(graph_id: u64) -> String {
-    format!("graph-node-notes-{graph_id}")
-}
 
 impl GraphEdge {
     pub fn new(from: usize, to: usize, weight: f64) -> Self {

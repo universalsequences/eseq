@@ -694,8 +694,9 @@ fn the_pad_map_mirrors_the_grid_and_the_rack_panel_reaches_both() {
     assert!(widget_keyed(&map, &format!("rack-pad-map-{group}")).is_some());
 }
 
-/// A node bay's run error and scope read the node process (`p.error`,
-/// `p.cells`) by its id.
+/// A node bay reads its node's processes (`n.processes`): an expr card's
+/// error dot falls back to the process's run error (`p.error`, under the
+/// slot's own id), and the harmony meter reads its scope cells.
 #[test]
 fn a_node_bays_errors_and_scopes_read_the_node_processes() {
     let mut h = editor_harness();
@@ -713,10 +714,9 @@ fn a_node_bays_errors_and_scopes_read_the_node_processes() {
     h.drain();
     h.sync();
     let rid = num(h.eval_editor("rid")) as u64;
-    assert_eq!(
-        h.eval_editor("(eseq.sequencer/lane-patch-run-error rid)"),
-        Value::Nil
-    );
+    let error = "(let ((n (eseq.sequencer/node-of ns)) (p (first n.processes)))
+                   (eseq.sequencer/lane-patch-expr-error ns (dict :instance-id rid :process p)))";
+    assert_eq!(h.eval_editor(error), Value::Nil);
     h.shared
         .state
         .publish_process_run_errors(std::collections::BTreeMap::from([(
@@ -724,12 +724,9 @@ fn a_node_bays_errors_and_scopes_read_the_node_processes() {
             "boom".to_string(),
         )]));
     h.sync();
+    assert_eq!(h.eval_editor(error), s("boom"));
     assert_eq!(
-        h.eval_editor("(eseq.sequencer/lane-patch-run-error rid)"),
-        s("boom")
-    );
-    assert_eq!(
-        h.eval_editor("(let ((p (eseq.sequencer/process-scope-cells-for rid))) p.proc-id)"),
+        h.eval_editor("(let ((n (eseq.sequencer/node-of ns)) (p (first n.processes))) p.proc-id)"),
         Value::Number(rid as f64)
     );
 }

@@ -67,8 +67,9 @@ node slot-id)` reads the stored body. The node chain read
 nil) and `:error` (string or nil: the scheduler's last run error for the slot,
 cleared by its next clean run, or "not compiled" when the body's class is
 missing); `:label` is `expr`. The shared lane-patch shape
-(`graph-node-lane-patch` / `SEQ.track-lane-patch`; the track one removed in
-eseq-0l17.66, where the track patchbay reads the kinds) is unchanged. The removed
+(`graph-node-lane-patch` / `SEQ.track-lane-patch`) is unchanged. (Both are
+gone since: the track one in eseq-0l17.66, the node one in eseq-0l17.67; the
+patchbays read the kinds' `process` fields.) The removed
 inlets also go to the status line (the toast hook for .11). The body's value
 is sent by the internal native `__expr-send!`: a number goes out as is, a bool
 as 1/0, nil sends nothing, anything else is a run error (bypass). Nodes only:

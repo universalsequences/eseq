@@ -1,9 +1,10 @@
 //! The addressable parts of a graph's overrides (kind-bindings spec §14.2k):
 //! what a host kind setter edits and its history records
 //! (`GraphOverridePatch`). Each slot is one field: a node intrinsic, a node
-//! or edge param, a sequencer-level config field or one group matrix cell,
-//! so undo and redo restore exactly the edited field and leave every other
-//! edit of the graph alone (an unrecorded legacy `graph-*` write included).
+//! or edge param, one param of the first nodes at once (a batch), a
+//! sequencer-level config field or one group matrix cell, so undo and redo
+//! restore exactly the edited field and leave every other edit of the graph
+//! alone (an unrecorded legacy `graph-*` write included).
 //! A slot's value is `None` for "no override" (the manifest default).
 
 use super::{
@@ -203,6 +204,14 @@ pub enum GraphOverrideSlot {
         param: String,
         value: Option<f64>,
     },
+    /// One param of nodes 0 to `values.len() - 1` at once (a batch edit:
+    /// every node's threshold), dormant nodes past the active count
+    /// included; each value `None` for no override.
+    NodeParams {
+        group: String,
+        param: String,
+        values: Vec<Option<f64>>,
+    },
     EdgeParam {
         group: String,
         from: usize,
@@ -235,6 +244,11 @@ impl GraphOverrideSlot {
                 param,
                 ..
             } => format!("param:{group}:{instance}:{param}"),
+            Self::NodeParams {
+                group,
+                param,
+                values,
+            } => format!("params:{group}:{}:{param}", values.len()),
             Self::EdgeParam {
                 group,
                 from,
@@ -254,6 +268,11 @@ impl GraphOverrideSlot {
                 Self::NodeParam { group, param, .. } | Self::EdgeParam { group, param, .. } => {
                     group.len() + param.len()
                 }
+                Self::NodeParams {
+                    group,
+                    param,
+                    values,
+                } => group.len() + param.len() + std::mem::size_of_val(values.as_slice()),
                 Self::ConfigField(_) | Self::GroupCell { .. } => 0,
             }
     }
@@ -338,6 +357,20 @@ impl ProjectGraphOverrides {
                 value: (self.node_param_at(group, *instance, param))
                     .map(|at| self.node_params[at].value),
             },
+            GraphOverrideSlot::NodeParams {
+                group,
+                param,
+                values,
+            } => GraphOverrideSlot::NodeParams {
+                group: group.clone(),
+                param: param.clone(),
+                values: (0..values.len())
+                    .map(|instance| {
+                        (self.node_param_at(group, instance, param))
+                            .map(|at| self.node_params[at].value)
+                    })
+                    .collect(),
+            },
             GraphOverrideSlot::EdgeParam {
                 group,
                 from,
@@ -407,6 +440,20 @@ impl ProjectGraphOverrides {
                 }),
                 (None, None) => {}
             },
+            GraphOverrideSlot::NodeParams {
+                group,
+                param,
+                values,
+            } => {
+                for (instance, value) in values.iter().enumerate() {
+                    self.set_slot(&GraphOverrideSlot::NodeParam {
+                        group: group.clone(),
+                        instance,
+                        param: param.clone(),
+                        value: *value,
+                    });
+                }
+            }
             GraphOverrideSlot::EdgeParam {
                 group,
                 from,

@@ -3,7 +3,7 @@
 //! `SEQ.process-slots`), its lanes (`lane`, `t.lanes`; legacy
 //! `SEQ.track-process-lanes`, `SEQ.track-process-lane-values`,
 //! `SEQ.process-lanes`), a graph node's process patch (`process`,
-//! `graph-node.processes`; legacy `graph-node-process-chain`,
+//! `graph-node.processes`; legacy `graph-node-process-chain` and the removed
 //! `graph-node-lane-patch`), each process's numeric inlets (`inlet`), ports and
 //! their fan-out entries (`port`, `fanout`; with `process.in-ports` the
 //! patchbay, legacy `SEQ.track-lane-patch`), its state cells and their
@@ -1188,6 +1188,11 @@ impl HostKinds {
             pusher.push(id, f::CLASS_LANE_COUNT, number(lanes as f64));
             let ports = def.ports.iter().map(|port| &port.name);
             pusher.push(id, f::CLASS_PORTS, strings(ports));
+            let node_label = sequencer::lisp_host::graph_node_process_label(&def.name);
+            pusher.push(id, f::CLASS_NODE_LABEL, Value::String(node_label));
+            let hidden = sequencer::lisp_host::GRAPH_NODE_HIDDEN_PROCESS_CLASSES
+                .contains(&def.name.as_str());
+            pusher.push(id, f::CLASS_NODE_HIDDEN, flag(hidden));
         }
         if let Some(library) = pusher.singleton(PROCESS_LIBRARY) {
             let classes = listed_instances(&ids);
