@@ -526,8 +526,8 @@
 ;; swing with the rack's groove (docs/rack-groove-spec.md, "UI"), so the
 ;; swing control shows disabled with a hint naming the groove instead of a
 ;; value that would do nothing.
-(def groove-swing-hint (track)
-  (let ((groove (eseq.drum-rack-v2/groove-of-track track)))
+(def groove-swing-hint (gr)
+  (let ((pg gr.pool-groove))
     (v-stack :gap 0.15 :align :center
       (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
       (box :key "track-swing-groove-hint"
@@ -538,7 +538,7 @@
         :corner-radius 3
         (label (str "groove")
           :font-size 8 :color :blue :bg :transparent :v-align :center))
-      (label (substring (if groove (get groove :active-label) "") 0 12)
+      (label (substring (eseq.drum-rack-v2/pool-groove-label pg) 0 12)
         :font-size 6.5 :color :dim :bg :transparent :v-align :center))))
 
 ;; The lockable settings: each shows its lock at the displayed step (the
@@ -657,9 +657,8 @@
       (h-stack :gap 1.05 :align :center
         (swing-resolution-control t)
         (v-stack :align :center :gap 0.22
-          (if (eseq.drum-rack-v2/groove-active-for-track? t.index)
-            (groove-swing-hint t.index)
-            (swing-control t)))
+          (let ((gr (eseq.drum-rack-v2/groove-of-track t)))
+            (if gr (groove-swing-hint gr) (swing-control t))))
         (timebase-control t)
         
         (v-stack :align :center :gap 0.15

@@ -133,11 +133,7 @@
         open-pad-menu
         choose-pad-role
         pad-selected?
-        selected-pad
-        open-pad-member-fx
-        rack-pad-grid
-        rack-pad-context-menu
-        rack-pad-map)
+        rack-pad-context-menu)
 
 ;; ── View state ──
 
@@ -311,7 +307,8 @@
       (set! eseq.seq-core-state/selected-bus -1)
       (seq-select-tracks
         (map (lambda (m) m.index)
-          (eseq.seq-core-state/track-range-in-order (visible-tracks) anchor t))
+          (eseq.seq-core-state/track-range-in-order
+            (eseq.drum-rack-v2/visible-track-order) anchor t))
         t.index))
     (if event.additive-selection
       (do
@@ -460,7 +457,7 @@
 ;; A selected drum rack keeps its bus selection: Cmd+A then spans its members
 ;; (step-grid-interactions/select-all-steps).
 (def select-all-current-track-steps ()
-  (when (< (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0)
+  (unless (eseq.drum-rack-v2/selected-bus-rack)
     (set! eseq.seq-core-state/selected-bus -1))
   (sgi/select-all-steps))
 
@@ -3572,7 +3569,7 @@
         (if g.collapsed
           (nothing)
           (v-stack :width :fill :gap 0.0
-            (each (shown-members g) |m|
+            (each (eseq.drum-rack-v2/shown-members g) |m|
               (subtree :key (str "sequencer-track-" m.tid)
                 (group-member-row g m)))
             (each g.racks |child|
@@ -3580,67 +3577,10 @@
                 (group-block child)))))))))
 
 ;; ── Grid render order ───────────────────────────────────────────────────
-;; Loose tracks stay in track order. Every top-level group collapses its member
-;; run into one item anchored at its lowest member, so regular groups and drum
-;; racks use the same nested block model. Unanchored groups (an empty, lazy
-;; drum rack) follow the tracks. A group drawn inside another's block (a rack
-;; in a plain group) is its parent's to draw.
-
-;; The lowest position among tracks, or -1 for none.
-(def lowest-index (ts)
-  (reduce |acc t| (if (or (< acc 0) (< t.index acc)) t.index acc) -1 ts))
-
-;; Where a group sits in track order: its lowest member, or that of a rack
-;; drawn inside it; -1 before it claims a track.
-(def group-anchor (g)
-  (reduce |acc child|
-    (let ((a (lowest-index child.tracks)))
-      (if (< acc 0) a (if (< a 0) acc (min a acc))))
-    (lowest-index g.tracks)
-    g.racks))
-
-;; The grid's rows in order: `(dict :kind "track" :track t)` for a loose
-;; track the grid shows (not collapsed), `(dict :kind "group" :group g)` for
-;; a top-level group.
-(def grid-items ()
-  (let ((top (filter (lambda (g) (not g.parent)) (groups)))
-        (anchored (map (lambda (g) (list g (group-anchor g))) top)))
-    (append
-      (reduce |acc t|
-        (let ((hit (first (filter (lambda (ga) (= (nth ga 1) t.index)) anchored))))
-          (if hit
-            (append acc (list (dict :kind "group" :group (nth hit 0))))
-            (if (or t.group t.collapsed)
-              acc
-              (append acc (list (dict :kind "track" :track t))))))
-        (list)
-        (tracks))
-      (map (lambda (ga) (dict :kind "group" :group (nth ga 0)))
-        (filter (lambda (ga) (< (nth ga 1) 0)) anchored)))))
-
-;; Group g's member tracks the grid shows: collapsed ones hide exactly as
-;; loose ones do.
-(def shown-members (g)
-  (filter (lambda (m) (not m.collapsed)) g.tracks))
-
-;; Group g's track rows in the order `group-block` draws them: its shown
-;; members, then each rack drawn inside it; none while it is collapsed.
-(def group-track-order (g)
-  (if g.collapsed
-    (list)
-    (reduce |acc child| (append acc (group-track-order child))
-      (shown-members g)
-      g.racks)))
-
-;; The grid's track rows in render order (the shift-click range).
-(def visible-tracks ()
-  (reduce |acc item|
-    (append acc
-      (if (= (get item :kind) "group")
-        (group-track-order (get item :group))
-        (list (get item :track))))
-    (list)
-    (grid-items)))
+;; The grid's rows (eseq.drum-rack-v2's group topology): `(dict :kind "track"
+;; :track t)` for a loose track the grid shows (not collapsed), `(dict :kind
+;; "group" :group g)` for a top-level group.
+(def grid-items () (eseq.drum-rack-v2/render-items false))
 
 (def grid-render-item (item)
   (if (= (get item :kind) "group")
@@ -4015,21 +3955,6 @@
       (v-stack :gap 0.05 :align :center
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
           (pad-map-row g pads row page))))))
-
-;; COMPAT(eseq-0l17.14): ui/effects/buffers.lisp addresses the rack panel by
-;; group position (`gidx`) and reads the focused pad as a dict; these take
-;; that address and hand its group to the pad grid.
-(def rack-pad-grid (gidx) (pad-grid (nth (groups) gidx)))
-(def rack-pad-map (gidx) (pad-map (nth (groups) gidx)))
-
-(def selected-pad (gidx)
-  (let ((p (focused-pad (nth (groups) gidx))))
-    (when p (dict :label p.label :track p.track.index))))
-
-(def open-pad-member-fx (gidx pad)
-  (let ((t (track-at (get pad :track))))
-    (when t (select-track-for-edit t))))
-
 
 (effect-buffer "*sequencer*"
   (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0

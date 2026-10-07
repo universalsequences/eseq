@@ -424,11 +424,6 @@ fn the_pad_grid_draws_and_edits_a_racks_pads() {
         h.eval_editor("(eseq.sequencer/focused-pad g)"),
         Value::Instance(pad)
     );
-    // The rack panel's address (ui/effects/buffers.lisp): by group position.
-    assert_eq!(
-        h.eval_editor("(get (eseq.sequencer/selected-pad 0) :track)"),
-        Value::Number(0.0)
-    );
 }
 
 /// The lane selector lists every lane of the track's chain under one
@@ -660,8 +655,8 @@ fn the_pad_grid_is_note_positional_and_empty_cells_take_new_members() {
 }
 
 /// The octave map draws every note, occupied ones filled and lit by their
-/// pad's trigger, and highlights the grid's page; the *fx* rack panel
-/// reaches the map and the grid by the rack's group position.
+/// pad's trigger, and highlights the grid's page; the *fx* buffer draws the
+/// map and the grid while the rack's bus is selected.
 #[test]
 fn the_pad_map_mirrors_the_grid_and_the_rack_panel_reaches_both() {
     let mut h = editor_harness();
@@ -686,12 +681,11 @@ fn the_pad_map_mirrors_the_grid_and_the_rack_panel_reaches_both() {
         row["border-color"],
         Value::Keyword("mixer-strip-selected-border".into())
     );
-    // The *fx* rack panel (ui/effects/buffers.lisp) addresses them by the
-    // group's position.
-    let grid = h.eval_editor("(eseq.sequencer/rack-pad-grid 0)");
-    assert!(widget_keyed(&grid, &format!("rack-pad-grid-{group}")).is_some());
-    let map = h.eval_editor("(eseq.sequencer/rack-pad-map 0)");
-    assert!(widget_keyed(&map, &format!("rack-pad-map-{group}")).is_some());
+    // The *fx* rack panel (ui/effects/buffers.lisp) takes the rack itself.
+    h.run_editor("(set! eseq.seq-core-state/selected-bus g.bus.index)");
+    let (fx, _) = h.buffer_tree("*fx*");
+    assert!(widget_keyed(&fx, &format!("rack-pad-grid-{group}")).is_some());
+    assert!(widget_keyed(&fx, &format!("rack-pad-map-{group}")).is_some());
 }
 
 /// A node bay reads its node's processes (`n.processes`): an expr card's

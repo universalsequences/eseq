@@ -616,14 +616,9 @@
 (def toggle-auto-preview ()
   (status (if (toggle-preview! sample-preview) "Sample preview on" "Sample preview off")))
 
-(def selected-drum-rack ()
-  (if (eseq.seq-core-state/seq-has-selected-bus?)
-    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
-    -1))
-
 (def selected-drum-rack-id ()
-  (let ((gidx (selected-drum-rack)))
-    (if (>= gidx 0) (eseq.drum-rack-v2/group-id gidx) -1)))
+  (let ((g (eseq.drum-rack-v2/selected-bus-rack)))
+    (if g g.gid -1)))
 
 (def activate-sample (item)
   (let ((path (get item :path)))
@@ -1243,17 +1238,17 @@
       (host-command "load-kit" (dict :path (get item :path) :group-id rack-id))
       (host-command "load-kit" (dict :path (get item :path))))))
 
-(def enter-kit-save (group-id name)
+(def enter-kit-save (g)
   (set! browser-view.search "")
   (set! browser-view.mode "audition")
   (set! preset-save.open false)
-  (set! kit-save.group-id group-id)
-  (set! kit-save.name name)
+  (set! kit-save.group-id g.gid)
+  (set! kit-save.name g.name)
   ;; Default: every scene this rack actually plays. A LEGACY rack (no bank)
   ;; answers true for every scene and the export drops the empty ones itself.
   (set! kit-save.scenes
-    (filter (lambda (i) (eseq.drum-rack-v2/scene-plays-clip? group-id i))
-      (range 0 (len (scenes)))))
+    (map (lambda (s) s.index)
+      (filter (lambda (s) (eseq.drum-rack-v2/scene-plays-clip? g s)) (scenes))))
   (set! kit-save.open true)
   (select-tab "kits"))
 

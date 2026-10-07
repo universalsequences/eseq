@@ -502,36 +502,32 @@ pub(super) fn handle(
     }
 }
 
-/// Republish what an applied groove edit changed (shared with the kinds'
-/// setters, `set-groove` and `set-rack-clip`): an amount only its scalar
-/// fields, so the knob being dragged is not rebuilt; anything else the
-/// groups and the groove section (and, after a quantizing extract, the
-/// members' patterns).
+/// Land an applied groove edit (shared with the kinds' setters, `set-groove`
+/// and `set-rack-clip`): an edit that changed something shares the groups,
+/// which the host kinds publish on their next sync. An amount does nothing
+/// more, so the knob being dragged is not rebuilt; anything else also runs a
+/// reactive cycle and bumps the UI epoch (and, after a quantizing extract,
+/// repaints the members' patterns).
 pub(super) fn groove_edit_landed(
     app: &app::App,
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
     edit: RackGrooveEdit,
 ) {
+    if edit == RackGrooveEdit::Amount(false) {
+        return;
+    }
+    ctx.shared
+        .track_groups
+        .lock()
+        .unwrap()
+        .clone_from(&app.groups);
+    // Already shared: the next tick's groups reconcile has nothing to pull.
+    ctx.frame.prev_groups.clone_from(&app.groups);
     match edit {
-        RackGrooveEdit::Amount(false) => {}
-        RackGrooveEdit::Amount(true) => {
-            // Scalar fields only: the knob being dragged is not rebuilt.
-            *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
-            // Already published: keep the next tick's groups reconcile from
-            // rerunning the full `sync_groups_bindings` for an amount, which
-            // no structural field carries.
-            ctx.frame.prev_groups = app.groups.clone();
-            let rt = editor.runtime_mut();
-            sync_rack_groove_amount_fields(rt, &app.groups);
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-        }
+        RackGrooveEdit::Amount(_) => {}
         edit => {
-            *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
-            let rt = editor.runtime_mut();
-            sync_groups_bindings(rt, &app.groups, &app.grooves);
-            rt.run_reactive_cycle();
+            editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             if edit == RackGrooveEdit::StructureAndPatterns {
                 // Quantize source rewrote the members' patterns (delays and

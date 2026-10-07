@@ -20,6 +20,10 @@
 //! Gestures as [`super::ScriptEdit`]: a groove amount or pad share set while
 //! the pointer is down joins the script's drag (one entry, as a knob drag:
 //! `apply_rack_groove_amount_drag`); anything else is its own entry.
+//! `set-groove` on a clip that follows the rack's groove gives it its own (a
+//! copy of the rack's, `groove_target_mut`) in that same entry, landing as
+//! a structure edit (the clip gains a groove instance). Capture applies the
+//! setters too ([`apply_command`]).
 
 use super::rack_grooves::{groove_edit_landed, Amount, RackGrooveEdit};
 use super::track_settings::{command_track, SetValue};
@@ -87,6 +91,8 @@ enum RackEdit {
         clip: Option<u64>,
         amount: Amount,
         value: f32,
+        /// The clip follows the rack's groove: the edit gives it its own.
+        forks: bool,
     },
     PadEnabled {
         group: u64,
@@ -107,14 +113,16 @@ impl RackEdit {
         matches!(self, Self::Amount { .. })
     }
 
-    /// How the edit lands: the pad map's republish, or a groove edit's.
+    /// How the edit lands: the pad map's republish, or a groove edit's (an
+    /// amount that gives a clip its own groove adds a groove instance, so
+    /// it lands as a structure edit).
     fn landing(&self) -> Option<RackGrooveEdit> {
         match self {
             Self::PadNote { .. }
             | Self::PadChoke { .. }
             | Self::PadRole { .. }
             | Self::ClipName { .. } => None,
-            Self::Amount { .. } => Some(RackGrooveEdit::Amount(true)),
+            Self::Amount { forks: false, .. } => Some(RackGrooveEdit::Amount(true)),
             _ => Some(RackGrooveEdit::Structure),
         }
     }
@@ -161,6 +169,7 @@ impl RackEdit {
                 clip,
                 amount,
                 value,
+                ..
             } => {
                 let mutate = |settings: &mut _| amount.set(settings, value);
                 return if drags {
@@ -273,17 +282,16 @@ fn rack_clip_request(app: &app::App, map: &Payload) -> Result<Option<RackEdit>, 
 /// What `set-groove` asks for; `Ok(None)` when the groove already is so.
 fn groove_request(app: &app::App, map: &Payload) -> Result<Option<RackEdit>, String> {
     let (group, rack_group, rack) = command_rack(app, map)?;
-    // 0 is the rack's own groove; a clip's must still be its own (a clip
-    // that follows the rack again has no groove instance).
+    // 0 is the rack's own groove. A clip is compared with the groove it
+    // plays; one that follows the rack's gets its own (a copy) as the edit
+    // applies (`groove_target_mut`), in the edit's entry.
     let clip = SetValue::of(map, "clip-id", "clip-id").id("a clip id")?;
     let clip = (clip != 0).then_some(clip);
-    let settings = match clip {
-        None => &rack.groove,
-        Some(clip) => {
-            require_clip(app, group, clip)?;
-            (rack.clip_groove(clip)).ok_or("the clip follows the rack's groove")?
-        }
-    };
+    if let Some(clip) = clip {
+        require_clip(app, group, clip)?;
+    }
+    let settings = rack.groove_for_clip(clip);
+    let forks = clip.is_some_and(|clip| rack.clip_groove(clip).is_none());
     let (field, value) = SetValue::field(map)?;
     let amount = |amount: Amount, current: f32, max: f32| -> Result<Option<RackEdit>, String> {
         let value = value.number(0.0, max.into())? as f32;
@@ -292,6 +300,7 @@ fn groove_request(app: &app::App, map: &Payload) -> Result<Option<RackEdit>, Str
             clip,
             amount,
             value,
+            forks,
         }))
     };
     match field.as_str() {
@@ -403,6 +412,37 @@ fn apply_edit(
     outcome.map(|_| ())
 }
 
+/// What setter `name` asks for (`Ok(None)` when the model already is so,
+/// or for a command that is not a setter's).
+fn request(name: &str, payload: &Value, app: &app::App) -> Result<Option<RackEdit>, String> {
+    let Value::Map(map) = payload else {
+        return Err("the payload is not a dict".to_string());
+    };
+    match name {
+        "set-pad" => pad_request(app, map),
+        "set-rack-clip" => rack_clip_request(app, map),
+        "set-groove" => groove_request(app, map),
+        "set-pool-groove" => pool_groove_request(app, map),
+        _ => Ok(None),
+    }
+}
+
+/// Apply setter `name` to the model as its recorded edit, unlanded: the
+/// capture harness's route, so a fixture lays a rack out with the kind
+/// setters. `None` for a command that is not one of [`COMMANDS`].
+pub(crate) fn apply_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    COMMANDS
+        .contains(&name)
+        .then(|| match request(name, payload, app)? {
+            Some(edit) => edit.apply(app, false).map(|_| ()),
+            None => Ok(()),
+        })
+}
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -410,20 +450,7 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let Value::Map(map) = &payload else {
-        editor.handle_host_event(HostEvent::Error(format!(
-            "{name}: the payload is not a dict"
-        )));
-        return;
-    };
-    let request = match name {
-        "set-pad" => pad_request(app, map),
-        "set-rack-clip" => rack_clip_request(app, map),
-        "set-groove" => groove_request(app, map),
-        "set-pool-groove" => pool_groove_request(app, map),
-        _ => Ok(None),
-    };
-    let result = request.and_then(|edit| match edit {
+    let result = request(name, &payload, app).and_then(|edit| match edit {
         Some(edit) => apply_edit(app, editor, ctx, edit),
         None => Ok(()),
     });

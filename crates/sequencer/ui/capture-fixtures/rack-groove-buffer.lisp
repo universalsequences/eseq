@@ -20,7 +20,6 @@
   (drum-rack 0 1 2))
 
 (def capture-after-sync ()
-  (do
-    (eseq.drum-rack-v2/extract-groove (eseq.drum-rack-v2/group-id 0)
-      "Dilla take" 1 "1/16" true)
-    (set! eseq.seq-core-state/selected-bus (eseq.drum-rack-v2/bus-index 0))))
+  (let ((g (first (eseq.kinds/groups))))
+    (eseq.kinds/extract-groove! g "Dilla take" 1 "1/16" true)
+    (set! eseq.seq-core-state/selected-bus g.bus.index)))

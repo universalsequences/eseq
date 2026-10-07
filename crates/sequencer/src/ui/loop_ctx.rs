@@ -175,7 +175,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_roll_windows: Vec<(u64, u64)>,
     pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
-    pub(crate) prev_armed_rack: Option<u64>,
     pub(crate) prev_track_peak_levels: Vec<f64>,
     pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) prev_bus_peak_levels: Vec<f64>,

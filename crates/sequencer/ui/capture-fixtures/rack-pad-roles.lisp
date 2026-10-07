@@ -16,11 +16,12 @@
   (drum-rack 0 1 2 3 4))
 
 (def capture-after-sync ()
-  (let ((gidx 0))
-    (do
-      ;; Default pads: Kick C1, Rim C#1, Snare D1, Hat D#1, Clap E1.
-      (eseq.drum-rack-v2/move-pad-to-note gidx -33 -30)
-      (eseq.drum-rack-v2/move-pad-to-note gidx -32 -31)
-      (host-command "set-rack-pad-role"
-        (dict :group-id (eseq.drum-rack-v2/group-id gidx) :pad-note -31 :role "clap"))
-      (set! eseq.seq-core-state/selected-bus (eseq.drum-rack-v2/bus-index gidx)))))
+  (let ((g (first (eseq.kinds/groups)))
+        (pad (lambda (name) (first (filter (lambda (p) (= p.track.name name)) g.pads))))
+        (hat (pad "Hat"))
+        (clap (pad "Clap")))
+    ;; Default pads: Kick C1, Rim C#1, Snare D1, Hat D#1, Clap E1.
+    (set! hat.note -30)
+    (set! clap.note -31)
+    (set! clap.role "clap")
+    (set! eseq.seq-core-state/selected-bus g.bus.index)))

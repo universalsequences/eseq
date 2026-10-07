@@ -74,8 +74,8 @@ use super::state_values::{
     build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
     build_track_names, load_instrument_preset_into_track, push_solo_mutes,
     set_current_track_reactive, sync_all_track_sequencer_state, sync_fx_param_binding_fields,
-    sync_groups_bindings, sync_sidebar_browser, sync_step_param_lists,
-    sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
+    sync_sidebar_browser, sync_step_param_lists, sync_track_mixer_state, sync_track_name_state,
+    sync_track_params, sync_track_peak_fields,
 };
 use super::{map_number, map_string, map_u32, map_usize};
 
@@ -512,7 +512,6 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
     sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
     sync_track_peak_fields(rt, cached_track_peak_levels);
     rt.set_reactive(
         "SEQ",

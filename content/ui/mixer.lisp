@@ -310,10 +310,12 @@
   (seq-toggle-track-selected t.index)
   (reveal-track t))
 
-;; Track indices from `anchor` to `target` in the mixer's visible order.
+;; Track indices from `anchor` to `target` (tracks) in the mixer's visible
+;; order.
 (def visual-track-range (anchor target)
-  (eseq.seq-core-state/track-range-in-order
-    (eseq.drum-rack-v2/mixer-visible-track-order) anchor target))
+  (map (lambda (t) t.index)
+    (eseq.seq-core-state/track-range-in-order
+      (eseq.drum-rack-v2/mixer-visible-track-order) anchor target)))
 
 ;; A held anchor whose track is gone falls back to the current track.
 (def range-track-select (t)
@@ -321,7 +323,7 @@
         (anchor (if (listed? held (tracks)) held (or selection.track t))))
     (set! strip-select.anchor anchor)
     (set! eseq.seq-core-state/selected-bus -1)
-    (seq-select-tracks (visual-track-range anchor.index t.index) t.index)
+    (seq-select-tracks (visual-track-range anchor t) t.index)
     (reveal-track t)))
 
 ;; Shift-click = replace with the anchored range; cmd-click = toggle
@@ -1121,7 +1123,7 @@
       :group (group-selected)
       :ungroup-track (host-command "remove-track-from-group" (dict :track t.index))
       :ungroup (host-command "ungroup-tracks" (dict :group-id g.gid))
-      :export-kit (eseq.browser/enter-kit-save g.gid g.name)
+      :export-kit (eseq.browser/enter-kit-save g)
       :new-rack-instance
       (host-command "packages-new-instance"
         (dict :module (get action :module) :kind (get action :kind-id) :group-id g.gid))
@@ -1372,25 +1374,6 @@
 
 ;; --- Track groups -------------------------------------------------------
 
-;; A group drawn inside another group's block (a rack in a plain group,
-;; docs/drum-rack-v2-spec.md) is not a top-level render item: its parent
-;; draws it.
-(def group-nested? (g)
-  (not (= g.parent nil)))
-
-;; The lowest position among tracks, or -1 for none.
-(def lowest-index (ts)
-  (reduce |acc t| (if (or (< acc 0) (< t.index acc)) t.index acc) -1 ts))
-
-;; Where a group sits in the flat track order: the lowest member track of the
-;; group itself or of any rack nested inside it. -1 when nothing is claimed yet.
-(def group-anchor (g)
-  (reduce |acc child|
-    (let ((a (lowest-index child.tracks)))
-      (if (< acc 0) a (if (< a 0) acc (min a acc))))
-    (lowest-index g.tracks)
-    g.racks))
-
 (def has-clips? (g)
   (> (len g.clips) 0))
 
@@ -1398,26 +1381,13 @@
 (def group-bus? (b)
   (> (len (filter (lambda (g) (= g.bus b)) (groups))) 0))
 
-;; The flat mixer render-item list: loose tracks and group containers, each
-;; group anchored at its lowest member position (visual contiguity without
-;; reindexing the track list). Top-level groups that have claimed no track
-;; yet (an empty rack: its pads are lazy) have no anchor, so they follow the
-;; tracks — the grid does the same.
-(def render-order ()
-  (let ((top (filter (lambda (g) (not (group-nested? g))) (groups)))
-        (anchored (map (lambda (g) (list g (group-anchor g))) top)))
-    (append
-      (reduce |acc t|
-        (let ((hit (first (filter (lambda (ga) (= (nth ga 1) t.index)) anchored))))
-          (if hit
-            (append acc (list (dict :kind "group" :group (nth hit 0))))
-            (if t.group
-              acc
-              (append acc (list (dict :kind "loose" :track t))))))
-        (list)
-        (tracks))
-      (map (lambda (ga) (dict :kind "group" :group (nth ga 0)))
-        (filter (lambda (ga) (< (nth ga 1) 0)) anchored)))))
+;; The flat mixer render-item list (eseq.drum-rack-v2's group topology):
+;; loose tracks, collapsed ones included (as narrow badges), and top-level
+;; group containers, each anchored at its lowest member position (visual
+;; contiguity without reindexing the track list). A group that has claimed no
+;; track yet (an empty rack: its pads are lazy) follows the tracks — the grid
+;; does the same; a rack drawn inside a plain group is its container's.
+(def render-order () (eseq.drum-rack-v2/render-items true))
 
 (def select-group (g)
   (when g.bus (select-bus g.bus)))

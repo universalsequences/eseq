@@ -1009,8 +1009,15 @@ fn apply_capture_macro_host_commands(
             }
             continue;
         }
-        // Pad map edits (note, choke, role), so a fixture can lay a rack out
-        // on the standard layout and tag pads.
+        // The rack kinds' setters (`set-pad`, `set-rack-clip`, `set-groove`,
+        // `set-pool-groove`), so a fixture lays a rack out and tags pads as
+        // the views do (`(set! p.note …)`, `(set! p.role …)`).
+        if let Some(result) = crate::host_commands::rack_kinds::apply_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
+        // The legacy pad map edits (note, choke, role).
         if let Some(result) = crate::host_commands::apply_rack_pad_map_command(&name, &payload, app) {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;
@@ -1434,7 +1441,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     // rows carry the theme's variant tint baked into their RGB.
     editor.refresh_runtime_side_effects();
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
-        sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
         sync_song_state(editor.runtime_mut(), &app, &mut SongFrameState::default());
     }
     // Selection gestures in the hook mutate the same shared state as live UI

@@ -182,7 +182,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "current-pattern",
         Value::Number(state.current_scene_index() as f64),
     );
-    sync_rack_clip_state(rt, state);
 
     // `defscene` values are not ordinary SEQ fields: each reader injects a
     // qualified host-owned dependency. Queue every currently subscribed slot
@@ -279,66 +278,5 @@ pub(crate) fn sync_labels() -> impl Iterator<Item = String> {
         let mut compact = label.replace(' ', "");
         compact.truncate(4);
         compact
-    })
-}
-
-/// Per-rack clip bank (rack-clips spec §6), read by drum-rack-v2's lookups:
-/// `{group-id, active, clips: [{id name}]}`. `active` is
-/// the clip the CURRENT scene points at, or -1 for silence. A rack with no
-/// bank (legacy) contributes no entry, which is how the UI tells the two
-/// apart and offers "Convert to clips".
-pub(crate) fn sync_rack_clip_state(rt: &mut Runtime, state: &Arc<SequencerState>) -> bool {
-    let mut changed = false;
-    let banks = state.with_scenes(|scenes| {
-        list_value(scenes.rack_banks().iter().map(|bank| {
-            map_value([
-                ("group-id", Value::Number(bank.group_id as f64)),
-                ("clips", list_value(bank.clips.iter().map(|clip| map_value([
-                    ("id", Value::Number(clip.id as f64)),
-                    ("name", Value::String(clip.name.clone().into())),
-                ])))),
-            ])
-        }))
-    });
-    changed |= rt.set_reactive("SEQ", "rack-clip-banks", banks).changed;
-    changed |= rt.set_reactive("SEQ", "rack-clips", build_rack_clips_value(state)).changed;
-    changed
-}
-
-pub(crate) fn build_rack_clips_value(state: &Arc<SequencerState>) -> Value {
-    state.with_scenes(|scenes| {
-        list_value(scenes.rack_banks().iter().map(|bank| {
-            let active = scenes
-                .current_rack_clip(bank.group_id)
-                .map(|id| id as f64)
-                .unwrap_or(-1.0);
-            map_value([
-                ("group-id", Value::Number(bank.group_id as f64)),
-                ("active", Value::Number(active)),
-                // One entry per project scene: the clip that scene points at,
-                // or -1 for silence. The "Export as kit..." checklist defaults
-                // to the scenes this rack actually plays (spec 7.2).
-                (
-                    "scene-clips",
-                    list_value((0..scenes.scenes.len()).map(|scene| {
-                        Value::Number(
-                            scenes
-                                .scene_rack_clip(scene, bank.group_id)
-                                .map(|id| id as f64)
-                                .unwrap_or(-1.0),
-                        )
-                    })),
-                ),
-                (
-                    "clips",
-                    list_value(bank.clips.iter().map(|clip| {
-                        map_value([
-                            ("id", Value::Number(clip.id as f64)),
-                            ("name", Value::String(clip.name.clone().into())),
-                        ])
-                    })),
-                ),
-            ])
-        }))
     })
 }

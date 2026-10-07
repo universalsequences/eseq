@@ -612,31 +612,12 @@ pub(crate) fn sync_reactive_tick(
         }
 
         // Track-groups reconcile: pull native-mutated groups (collapse toggle,
-        // group create) into app.groups and rebuild the SEQ.groups reactive.
+        // group create) into app.groups; the host kinds publish them.
         {
-            let groups_snapshot = ctx.shared.track_groups.lock().unwrap().clone();
-            if groups_snapshot != ctx.frame.prev_groups {
-                app.groups = groups_snapshot.clone();
-                let rt = editor.runtime_mut();
-                sync_groups_bindings(rt, &app.groups, &app.grooves);
-                ctx.frame.prev_groups = groups_snapshot;
-                needs_reactive_cycle = true;
-            }
-        }
-
-        // Rack pad-arm reconcile: the arm native mutates the shared handle;
-        // the grid header reads SEQ.armed-rack-id (-1 = no rack armed).
-        {
-            let armed_rack = *ctx.shared.armed_rack.lock().unwrap();
-            if armed_rack != ctx.frame.prev_armed_rack {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "armed-rack-id",
-                    Value::Number(armed_rack.map(|id| id as f64).unwrap_or(-1.0)),
-                );
-                ctx.frame.prev_armed_rack = armed_rack;
-                needs_reactive_cycle = true;
+            let groups = ctx.shared.track_groups.lock().unwrap();
+            if *groups != ctx.frame.prev_groups {
+                app.groups.clone_from(&groups);
+                ctx.frame.prev_groups.clone_from(&groups);
             }
         }
 

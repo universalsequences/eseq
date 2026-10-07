@@ -778,7 +778,7 @@ pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
 
 fn metal_selected_drum_rack_bus(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str(
-        "(if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0) \
+        "(if (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) \
            eseq.seq-core-state/selected-bus -1)",
     ) {
         Ok(Some(Value::Number(bus))) if bus >= 0.0 => Some(bus as usize),
@@ -3368,7 +3368,7 @@ mod live_keyboard_tests {
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
                 (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
-                (def eseq.drum-rack-v2/track-relative (track delta) nil)
+                (def eseq.drum-rack-v2/track-relative (t delta) nil)
                 (def eseq.sequencer/select-track-for-edit (t)
                   (do
                     (set! eseq.seq-core-state/selected-bus -1)
@@ -3575,11 +3575,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (def eseq.drum-rack-v2/track-relative (track delta)
-                  (if (= track 7)
-                    (if (> delta 0) 10 1)
-                    (if (= track 10)
-                      (if (< delta 0) 7 11)
+                (def eseq.drum-rack-v2/track-relative (t delta)
+                  (if (= t.index 7)
+                    (eseq.kinds/track (if (> delta 0) 10 1))
+                    (if (= t.index 10)
+                      (eseq.kinds/track (if (< delta 0) 7 11))
                       nil)))
                 "#,
             )

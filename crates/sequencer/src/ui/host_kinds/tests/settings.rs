@@ -163,19 +163,6 @@ impl Harness {
     }
 }
 
-fn strings(value: Value) -> Vec<String> {
-    let Value::List(items) = value else {
-        panic!("not a list: {value:?}");
-    };
-    items
-        .iter()
-        .map(|item| match &*item.borrow() {
-            Value::String(text) => text.clone(),
-            other => panic!("not a string: {other:?}"),
-        })
-        .collect()
-}
-
 #[test]
 fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     let mut h = Harness::new();
@@ -231,7 +218,7 @@ fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     // The output choices: every bus, the main mix first (nil is sends only).
     let outputs = h.eval_7i("(map (lambda (b) b.name) project.output-options)");
     let names: Vec<String> = h.app.buses.iter().map(|bus| bus.name.clone()).collect();
-    assert_eq!(strings(outputs)[1..], names[1..]);
+    assert_eq!(strings(&outputs)[1..], names[1..]);
     let available = Value::Bool(h.app.graph.track_exposes_mod_output(1));
     assert_eq!(available, h.eval_7i("t1.mod-output"));
     // Transport, engine and selection extras.
@@ -297,7 +284,7 @@ fn project_option_lists_follow_the_buses_and_scripts() {
     let fx = h.add_bus("FX");
     h.sync();
     let names = h.eval_7i("(map (lambda (b) b.name) project.output-options)");
-    assert!(strings(names).contains(&"FX".to_string()));
+    assert!(strings(&names).contains(&"FX".to_string()));
     assert_eq!(
         h.eval_7i("project.output-options"),
         h.eval_7i("project.buses")
@@ -307,7 +294,7 @@ fn project_option_lists_follow_the_buses_and_scripts() {
         .expect("rename");
     h.share_buses_and_groups();
     h.sync();
-    let names = strings(h.eval_7i("(map (lambda (b) b.name) project.output-options)"));
+    let names = strings(&h.eval_7i("(map (lambda (b) b.name) project.output-options)"));
     assert!(names.contains(&"Verb".to_string()) && !names.contains(&"FX".to_string()));
 }
 

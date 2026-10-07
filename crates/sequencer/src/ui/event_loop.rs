@@ -398,7 +398,6 @@ pub(crate) fn run_event_loop(
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
-        prev_armed_rack: None,
         prev_track_peak_levels: Vec::new(),
         prev_rack_slot_peak_levels: Vec::new(),
         prev_bus_peak_levels: Vec::new(),
@@ -960,7 +959,6 @@ pub(crate) fn run_event_loop(
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
                                 sync_bus_mixer_state(rt, &app);
-                                sync_groups_bindings(rt, &app.groups, &app.grooves);
                                 rt.set_reactive(
                                     "SEQ",
                                     "track-names",
@@ -1538,7 +1536,7 @@ pub(crate) fn run_event_loop(
                         // mismatch) and drops the group's backing bus from the UI.
                         *shared.bus_state.lock().unwrap() = app.buses.clone();
                         // Push loaded groups into the shared runtime store; the
-                        // per-frame groups diff rebuilds the SEQ.groups reactive.
+                        // host kinds publish them.
                         *shared.track_groups.lock().unwrap() = app.groups.clone();
                         {
                             let mut sel = shared.selected_tracks.lock().unwrap();
@@ -1583,10 +1581,7 @@ pub(crate) fn run_event_loop(
 
                         sync_project_replacement(rt, &shared.state);
                         record_preset_listings();
-                        // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
-                        // loaded group headers can resolve their backing bus index.
                         sync_bus_mixer_state(rt, &app);
-                        sync_groups_bindings(rt, &app.groups, &app.grooves);
                         rt.set_reactive("SEQ", "playing", Value::Bool(playing));
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
                         sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);

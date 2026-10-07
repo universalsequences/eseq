@@ -512,8 +512,10 @@ audition) carries explicit roles. `App::set_rack_pad_role_recorded` is one
 undo step through the bus/group funnel, which republishes the groove table;
 host command `set-rack-pad-role {group-id pad-note role}` takes a role key or
 `standard`, and shares `apply_rack_pad_map_command` with the capture harness.
-`SEQ.groups` pads carry `:role` (explicit key, "" = Standard), `:role-tag`,
-`:role-label` and `:standard-role-label`. The pad cell's right-click opens
+`SEQ.groups` pads carried `:role` (explicit key, "" = Standard), `:role-tag`,
+`:role-label` and `:standard-role-label`; since eseq-0l17.19 the `pad` kind
+does (`p.role`, set with `(set! p.role …)` through `set-pad`, which capture
+applies too: `rack_kinds::apply_command`). The pad cell's right-click opens
 the pad menu (Role ▸ Standard (<inferred>), then every role), mounted in the
 *fx* rack panel; the tag (BD, SD, CH, ...) sits top-right, bright when
 explicit, dim when inferred. Capture fixture:
@@ -609,7 +611,9 @@ with this rack's groove selected. The heatmap and rename/delete move to the tab.
 14-column controls column. `SEQ.rack-grooves` entries gain
 `:picker-headers` (option indices) and lose `:heatmap` (the map is the
 tab's, on `SEQ.groove-pool`); the Library header is a picker label with key
-"" that `eseq.drum-rack-v2/set-groove` ignores. The dropdown widget gained
+"" that `eseq.drum-rack-v2/set-groove` ignores (both gone since
+eseq-0l17.19: the *groove* buffer builds its picker rows from the kinds and
+a header row picks nothing). The dropdown widget gained
 an opt-in `:headers` prop (`crates/eseqlisp/src/widget_render/dropdown.rs`):
 header rows render dimmed with no check mark, keys step over them, and a
 click or Enter on one picks nothing. The link calls
@@ -619,6 +623,18 @@ the tab) and selects the rack's groove on its In use row
 (`in-use/pool:<id>`); a rack playing straight just opens the tab. The
 rack panel's Rename/Delete (and `eseq.drum-rack-v2/rename-groove` /
 `delete-groove`) are gone, so the unconfirmed panel delete path is closed.
+
+*Ported to the kinds (eseq-0l17.19):* the *groove* buffer
+(`content/ui/rack-groove-buffer.lisp`) reads the playing groove
+(`eseq.drum-rack-v2/playing-groove`: the playing clip's own, else the rack's)
+through the `groove`, `pad-groove`, `pool-groove` and `library-groove` kinds
+(kind-bindings spec §14.2e) and builds its picker from `project.groove-pool`
+and `project.groove-library`; every edit is a kind setter or a groove action
+(`eseq.kinds/set-clip-groove!` addresses the playing clip, so a clip that
+follows the rack is given its own groove, a copy, and the edit in one undo
+entry). The legacy `SEQ.rack-grooves`, `SEQ.groove-pool`,
+`SEQ.groove-library` and `SEQ.rack-groove-*` amount fields described above
+are gone.
 
 *Pad role* is set from the rack pad's context menu (Role ▸ …, with
 "Standard (<inferred>)" as the default entry), and shown as a short tag on

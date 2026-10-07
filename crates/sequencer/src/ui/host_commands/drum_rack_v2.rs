@@ -395,13 +395,6 @@ pub(super) fn handle(
                 .collect(),
             );
             super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
-            // Only the scene's clip pointer changed. An immediate launch
-            // already publishes this via sync_pattern_state; a quantized one
-            // still needs its selected clip shown while waiting for the beat.
-            if sync_rack_clip_state(editor.runtime_mut(), &app.state) {
-                editor.runtime_mut().run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-            }
         }
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
@@ -464,10 +457,10 @@ pub(super) fn handle(
             if let Some(group_id) = selected_rack {
                 match app.load_kit_onto_rack(group_id, Path::new(&path)) {
                     Ok(name) => {
-                        // Publish the rebuilt rack to the UI runtime BEFORE
-                        // running its scripts: a rack-owned script reads
-                        // `SEQ.groups` (its tab wears the rack's name) and
-                        // must see the members it now has.
+                        // Share the rebuilt rack and publish the track
+                        // topology BEFORE running its scripts: a rack-owned
+                        // script reads its rack's group (its tab wears the
+                        // rack's name) and must see the members it now has.
                         sync_after_rack_structure_change(app, editor, ctx, None);
                         let mut failures = attach_rack_instance_packages(editor, app, group_id);
                         failures.extend(evaluate_rack_sequencers(editor, app, group_id));
@@ -493,8 +486,8 @@ pub(super) fn handle(
                         // that is not installed is reported and its entry stays
                         // recorded, so a later re-import brings it back.
                         //
-                        // The new rack is published to the UI runtime FIRST:
-                        // a rack-owned script reads `SEQ.groups` on evaluation
+                        // The new rack is shared with the UI runtime FIRST: a
+                        // rack-owned script reads its rack's group on evaluation
                         // (its tab is named after the rack), and a group the
                         // runtime has not heard of yet fails that eval, which
                         // rolls the script's panel and tab back while the
@@ -735,12 +728,7 @@ pub(super) fn sync_rack_pad_map(
     ui_epoch: &Arc<AtomicUsize>,
 ) {
     *track_groups.lock().unwrap() = app.groups.clone();
-    let rt = editor.runtime_mut();
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
-    // Clip bank edits (create/rename/delete/convert/launch) do not bump the
-    // pattern epoch, so the clip run's source is republished here explicitly.
-    sync_rack_clip_state(rt, &app.state);
-    rt.run_reactive_cycle();
+    editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
@@ -795,7 +783,6 @@ pub(super) fn sync_after_rack_structure_change(
         &ctx.shared.record_armed,
         &ctx.meters.cached_track_peak_levels,
     );
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
     sync_bus_mixer_state(rt, app);
     sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
     rt.clear_subtree_effects_for_named_target("*sequencer*");

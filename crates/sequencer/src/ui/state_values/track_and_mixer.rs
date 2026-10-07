@@ -116,7 +116,6 @@ fn hsl([r, g, b]: [f32; 3]) -> (f32, f32, f32) {
 /// Republish the color projections together on a theme switch.
 pub(crate) fn sync_track_color_state(rt: &mut Runtime, app: &app::App) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
-    rt.set_reactive("SEQ", "groups", build_groups_value(&app.groups));
 }
 
 pub(crate) fn build_track_colors(app: &app::App) -> Value {
@@ -400,12 +399,6 @@ pub(crate) fn bus_output_destination(bus: &app::BusChannelState) -> sequencer::s
 
 pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
     let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
-    let ids: Vec<Rc<RefCell<Value>>> = app
-        .buses
-        .iter()
-        .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
-        .collect();
-    rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
     rt.set_reactive("SEQ", "bus-names", build_name_list(&names));
 }
 

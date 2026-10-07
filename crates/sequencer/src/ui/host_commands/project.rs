@@ -292,7 +292,6 @@ pub(super) fn handle(
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
             sync_bus_mixer_state(rt, &app);
-            sync_groups_bindings(rt, &app.groups, &app.grooves);
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             // New projects have default tracks; publish their real topology,
             // rather than leaving live input and the UI with empty mirrors.

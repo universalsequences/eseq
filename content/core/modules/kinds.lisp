@@ -48,7 +48,7 @@
         voice-priority-options mono-trigger-options swing-resolution-options
         roll-rate-options launch-quantize-options record-quantize-options
         launch-cell! select-region! clear-region! take-none take-governed take-latched
-        pad-role-options groove-scale-options
+        pad-role-options groove-scale-options set-clip-groove!
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
         duplicate-groove! delete-groove! save-groove-to-library!
@@ -279,17 +279,30 @@
     (host-command "set-rack-clip"
       (dict :group-id rc.group.gid :clip-id rc.cid :field field :value v))))
 (def groove-clip-id (gr) (if gr.clip gr.clip.cid 0))
+;; `set-groove` on rack gid's clip cid (0: the rack's own), with pad p for a
+;; pad share's field.
+(def send-groove-field (gid cid field v p)
+  (host-command "set-groove"
+    (if p
+      (dict :group-id gid :clip-id cid :track-id p.track.tid :field field :value v)
+      (dict :group-id gid :clip-id cid :field field :value v))))
 (def groove-setter (field)
-  (lambda (gr v)
-    (host-command "set-groove"
-      (dict :group-id gr.group.gid :clip-id (groove-clip-id gr) :field field :value v))))
+  (lambda (gr v) (send-groove-field gr.group.gid (groove-clip-id gr) field v nil)))
 (def set-groove-pool-groove (gr pg)
   ((groove-setter "pool-groove") gr (if pg pg.groove-id nil)))
 (def pad-groove-setter (field)
   (lambda (pq v)
-    (host-command "set-groove"
-      (dict :group-id pq.groove.group.gid :clip-id (groove-clip-id pq.groove)
-            :track-id pq.pad.track.tid :field field :value v))))
+    (send-groove-field pq.groove.group.gid (groove-clip-id pq.groove) field v pq.pad)))
+;; Set `field` of the groove rack g's clip rc plays (rc nil: the rack's own)
+;; to v, as a set! on that groove would: "pool-groove" (a pool groove or
+;; nil), "enabled", "timing", "velocity", "random", "scale", and with :pad p
+;; that pad's share, "pad-amount" or "pad-enabled". Addressed by the clip, a
+;; clip that still follows the rack's groove (rc.groove nil) gets its own, a
+;; copy of the rack's, and the edit in one undo entry.
+(def set-clip-groove! (g rc field v &key (pad nil))
+  (send-groove-field g.gid (if rc rc.cid 0) field
+    (if (= field "pool-groove") (when v v.groove-id) v)
+    pad))
 (def set-pool-groove-name (pg v)
   (host-command "set-pool-groove" (dict :groove-id pg.groove-id :field "name" :value v)))
 
@@ -2064,10 +2077,13 @@
   (host-command "convert-rack-to-clips" (dict :group-id g.gid)))
 
 ;; Copy library groove lg into the pool (reusing a pool groove of the same
-;; feel) and make it groove gr's.
-(def use-library-groove! (gr lg)
+;; feel) and make it groove gr's. With :clip rc (a clip of gr's rack), rc's
+;; groove instead: a clip that follows the rack's gets its own, as with
+;; set-clip-groove!, in the same undo entry.
+(def use-library-groove! (gr lg &key (clip nil))
   (host-command "set-rack-groove"
-    (dict :group-id gr.group.gid :clip-id (groove-clip-id gr) :key lg.choice)))
+    (dict :group-id gr.group.gid :clip-id (if clip clip.cid (groove-clip-id gr))
+          :key lg.choice)))
 
 ;; Make groove gr the rack's own, and every clip follow it.
 (def apply-groove-to-all-clips! (gr)

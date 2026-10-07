@@ -265,11 +265,7 @@ fn count(layout: &LayoutNode, widget: &str) -> usize {
 /// Widget `key` of `layout`, laid out with a finite, non-empty rect.
 fn measured<'a>(layout: &'a LayoutNode, key: &str) -> &'a LayoutNode {
     let node = by_key(layout, key).unwrap_or_else(|| panic!("{key} shows"));
-    let rect = node.rect;
-    assert!(
-        rect.row.is_finite() && rect.col.is_finite() && rect.width > 0.0 && rect.height > 0.0,
-        "{key}: {rect:?}"
-    );
+    assert_laid_out(node, key);
     node
 }
 

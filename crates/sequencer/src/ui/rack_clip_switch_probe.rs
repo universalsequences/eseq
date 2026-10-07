@@ -90,11 +90,10 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     let selected_track = app.ui.cursor_track;
     shared.current_track.store(selected_track, Ordering::Relaxed);
 
-    // Match project-load ordering: publish topology before evaluating rack
-    // scripts, whose tab labels and owner bindings read SEQ.groups.
+    // Match project-load ordering: share the topology before evaluating
+    // rack scripts.
     *shared.bus_state.lock().unwrap() = app.buses.clone();
     *shared.track_groups.lock().unwrap() = app.groups.clone();
-    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     let paths = sequencer::app_paths::app_paths();
     let (roots, errors) = paths.module_load_roots();
     assert!(errors.is_empty(), "{errors:?}");

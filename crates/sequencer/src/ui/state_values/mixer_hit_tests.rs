@@ -88,17 +88,6 @@ fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     let mut group = rack_group_fixture(true);
     group.members = vec![9, 10];
     apply_group_bindings(&mut editor, group);
-    let clips = test_list((1..=20).map(|id| map_value([
-        ("id", Value::Number(id as f64)),
-        ("name", Value::String(format!("Clip {id}"))),
-    ])).collect());
-    for field in ["rack-clips", "rack-clip-banks"] {
-        editor.runtime_mut().set_reactive("SEQ", field, test_list(vec![map_value([
-            ("group-id", Value::Number(7.0)),
-            ("active", Value::Number(1.0)),
-            ("clips", clips.clone()),
-        ])]));
-    }
     let names: Vec<String> = (1..=20).map(|id| format!("Clip {id}")).collect();
     let bank: Vec<(u64, &str)> = names.iter().enumerate().map(|(i, n)| (i as u64 + 1, n.as_str())).collect();
     seed_kind_rack_clips(&mut editor, 0, &bank, Some(1));

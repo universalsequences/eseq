@@ -10355,7 +10355,6 @@
             // 14-track topology are all live before the first click.
             {
                 let rt = editor.runtime_mut();
-                sync_groups_bindings(rt, &app.groups, &app.grooves);
                 sync_all_track_sequencer_state(rt, &state, &app);
                 sync_step_param_lists(rt, &state, 0);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, 0));
@@ -10690,7 +10689,6 @@
                     let groups_snapshot = track_groups.lock().unwrap().clone();
                     if groups_snapshot != frame.prev_groups {
                         app.groups = groups_snapshot.clone();
-                        sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
                         frame.prev_groups = groups_snapshot;
                     }
                 }

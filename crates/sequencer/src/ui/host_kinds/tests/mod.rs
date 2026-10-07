@@ -417,6 +417,38 @@ pub(crate) fn items(value: &Value) -> Vec<Value> {
     }
 }
 
+/// The strings of list `value`.
+pub(super) fn strings(value: &Value) -> Vec<String> {
+    items(value)
+        .iter()
+        .map(|item| match item {
+            Value::String(text) => text.to_string(),
+            other => panic!("not a string: {other:?}"),
+        })
+        .collect()
+}
+
+/// The first widget of `node`'s tree (`node` included) with debug name
+/// `name`.
+pub(super) fn find_debug<'a>(
+    node: &'a eseqlisp::layout::LayoutNode,
+    name: &str,
+) -> Option<&'a eseqlisp::layout::LayoutNode> {
+    if matches!(node.props.get("debug-name"), Some(Value::String(value)) if value == name) {
+        return Some(node);
+    }
+    (node.children.iter()).find_map(|child| find_debug(child, name))
+}
+
+/// `node` (`label` in the failure) laid out with a finite, non-empty rect.
+pub(super) fn assert_laid_out(node: &eseqlisp::layout::LayoutNode, label: &str) {
+    let rect = node.rect;
+    assert!(
+        rect.row.is_finite() && rect.col.is_finite() && rect.width > 0.0 && rect.height > 0.0,
+        "{label}: {rect:?}"
+    );
+}
+
 impl Harness {
     /// Undo the last entry, with the resync the undo command's epoch bump
     /// brings.
@@ -525,6 +557,7 @@ mod params;
 mod pending;
 mod piano_roll;
 mod piano_roll_view;
+mod rack_view;
 mod racks;
 mod scenes;
 mod schema;

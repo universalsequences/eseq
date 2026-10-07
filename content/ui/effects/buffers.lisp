@@ -124,47 +124,15 @@
 ;; them.
 ;; They only run inside the rack branch, which cannot be reached without the
 ;; sequencer loaded. eseq.drum-rack-v2 IS imported (at the top of this file):
-;; selected-rack asks it about every bus selection, and it is a pure lookups
-;; module over SEQ.groups — no view, no top-level registrations — that answers
-;; -1 when no groups state exists.
+;; the buffer asks it about every bus selection (`selected-bus-rack`), and it
+;; is a pure lookups module over the group kinds — no view, no top-level
+;; registrations — that answers nil when no rack is selected.
 
-(def selected-rack ()
-  (if (pw/has-selected-bus?)
-    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
-    -1))
-
-(def rack-pad-member-name (gidx pad)
-  (let ((t (if (= pad nil) nil (dv/track-at (get pad :track)))))
-    (if t t.name "")))
-
-;; Pad focus controls stay beside the grid; rack identity and persistence live
-;; in the instrument-style header above it.
-(def rack-panel-controls (gidx)
-  (let ((pad (eseq.sequencer/selected-pad gidx)))
-    (v-stack :debug-name "rack-fx-panel-controls"
-      :width 8.8 :height :fill :gap 0.3 :align :start :padding 0.1
-      (label (if (= pad nil) "No pad selected" (str "Pad " (get pad :label)))
-        :font-size 8 :color :dim :bg :transparent)
-      (label (substring (rack-pad-member-name gidx pad) 0 14)
-        :font-size 8 :color :white :bg :transparent)
-      (button "OPEN PAD TRACK"
-        :key (str "rack-fx-open-pad-" (eseq.drum-rack-v2/group-id gidx))
-        :width 8.4 :height 1.1 :padding 0 :font-size 8
-        :background-color (if (= pad nil)
-          '(rgba 0.1 0.1 0.1 1.0)
-          '(rgba 0.18 0.22 0.23 1.0))
-        :border-color :transparent
-        :color (if (= pad nil) :dim :white)
-        :on-click |x y r| (if (= pad nil) nil (eseq.sequencer/open-pad-member-fx gidx pad)))
-      (box :flex 1 :width 0 :height 0 :bg :transparent)
-      (label "Drop a sample or instrument on a pad"
-        :width 8.4 :font-size 6.8 :color :dim :bg :transparent))))
-
-(def rack-selection-panel (gidx)
+(def rack-selection-panel (g)
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
-        :key (str "rack-fx-pads-panel-" (eseq.drum-rack-v2/group-id gidx))
+        :key (str "rack-fx-pads-panel-" g.gid)
         :background "fx-panel-bg"
         :color :instrument-panel-bg
         :header :fx-panel-header-bg
@@ -177,7 +145,7 @@
             :width :fill :height 1 :padding 0 :v-align :center :h-align :start
             (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
               (pf/fx-panel-header-leading-spacer)
-              (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
+              (label (substring g.name 0 12)
                 :v-align :center
                 :font-size 11 :color :white :bg :transparent)
               (box :flex 1 :height 0.15)
@@ -185,11 +153,8 @@
                 (v-stack
                   (box :width 1.65 :height 0.85
                     (fx-mini-save-icon
-                      :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
-                      :on-click |x y r|
-                      (eseq.browser/enter-kit-save
-                        (eseq.drum-rack-v2/group-id gidx)
-                        (eseq.drum-rack-v2/group-name gidx))
+                      :key (str "rack-fx-save-kit-" g.gid)
+                      :on-click |x y r| (eseq.browser/enter-kit-save g)
                       :active 0))))
               (box :width 0.5)))
           (pf/fx-panel-body "rack-fx-pads-body"
@@ -197,8 +162,8 @@
             ;; reads: the whole note range at a glance, the enlarged window
             ;; highlighted inside it (eseq-4b5.15).
             (h-stack :gap 0.2 :align :start
-              (eseq.sequencer/rack-pad-map gidx)
-              (eseq.sequencer/rack-pad-grid gidx)
+              (eseq.sequencer/pad-map g)
+              (eseq.sequencer/pad-grid g)
               ))))
       ;; The pad grid's right-click menu (Role ▸ …), overlaying the grid.
       (eseq.sequencer/rack-pad-context-menu)
@@ -268,9 +233,9 @@
 (effect-buffer "*fx*"
   (h-stack :debug-name "fx-buffer-root" :gap 0 :width :fill :height :fill
   (if (pw/has-selected-bus?)
-    (let ((gidx (selected-rack)))
-      (if (>= gidx 0)
-        (rack-selection-panel gidx)
+    (let ((g (eseq.drum-rack-v2/selected-bus-rack)))
+      (if g
+        (rack-selection-panel g)
         (bus-selection-panel)))
     (if (no-tracks?)
     (empty-track-fallback)

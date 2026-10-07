@@ -3174,12 +3174,6 @@ pub(crate) fn init_runtime(
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
                 ("selected-tracks", Value::List(vec![])),
-                ("groups", Value::List(vec![])),
-                ("rack-clips", Value::List(vec![])),
-                ("rack-clip-banks", Value::List(vec![])),
-                ("group-collapsed", Value::List(vec![])),
-                // Group id of the pad-armed drum rack; -1 = none.
-                ("armed-rack-id", Value::Number(-1.0)),
                 (
                     "current-pattern",
                     Value::Number(state.current_scene_index() as f64),
@@ -3337,15 +3331,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
                 (
-                    "bus-ids",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
-                            .collect(),
-                    ),
-                ),
-                (
                     "bus-names",
                     build_name_list(
                         &app.buses
@@ -3452,7 +3437,6 @@ pub(crate) fn init_runtime(
                     build_record_armed_value(&record_armed.lock().unwrap()),
                 ),
                 ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
-                ("rack-clips", Value::List(vec![])),
             ];
             for idx in 0..track_count {
                 fields.push((
@@ -4910,8 +4894,8 @@ pub(crate) fn init_runtime(
     });
 
     // seq-toggle-group-collapsed — (seq-toggle-group-collapsed group-id)
-    // Flips the collapsed flag on the in-memory group; the main loop rebuilds the
-    // SEQ.group-collapsed / SEQ.groups reactive surfaces from the project groups.
+    // Flips the collapsed flag on the shared groups; the main loop's groups
+    // reconcile pulls them into the project and the host kinds publish them.
     let groups_state = track_groups.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-group-collapsed", move |args, _ctx| {

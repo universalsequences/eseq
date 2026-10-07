@@ -23,15 +23,14 @@
 //!   scene instances.
 //! - The pads, grooves and pool ([`RackKey`]): the groups' generation (a
 //!   pad-map or groove edit; moved by the model sync), the pool, the track
-//!   and group instances and the rack clip instances. A groove's lanes (`slots`, `cells`, `measured`, the
-//!   pad shares' lanes: `groove_lanes`, shared with `SEQ.rack-grooves`) are
-//!   rebuilt only when the groove it plays or the pads moved
+//!   and group instances and the rack clip instances. A groove's lanes
+//!   (`slots`, `cells`, `measured`, the pad shares' lanes: `groove_lanes`)
+//!   are rebuilt only when the groove it plays or the pads moved
 //!   ([`LaneKey`]), so an amount drag pushes the amounts alone.
-//! - The library: re-listed (`listed_groove_library`, shared with
-//!   `SEQ.groove-library`) when the UI epoch, the library generation (a
-//!   library save, rename or delete moves both) or whether the project has
-//!   a rack or a pool groove moved, so an amount drag lists nothing; pushed
-//!   when it changed.
+//! - The library: re-listed (`listed_groove_library`) when the UI epoch,
+//!   the library generation (a library save, rename or delete moves both)
+//!   or whether the project has a rack or a pool groove moved, so an amount
+//!   drag lists nothing; pushed when it changed.
 //! - Live: `pad.triggered` (the tick's pad lights,
 //!   `read_rack_pad_trigger_flags`), kept in an [`ObservedList`];
 //!   `group.armed` is the group sync's (`mixer.rs`).

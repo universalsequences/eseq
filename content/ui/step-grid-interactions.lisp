@@ -413,9 +413,9 @@
 ;; drum rack (the rack header/bus is selected), else the multi-track selection
 ;; when it has two or more tracks. Empty means the plain single-track select.
 (def select-all-tracks ()
-  (let ((rack (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)))
-    (if (>= rack 0)
-      (eseq.drum-rack-v2/members rack)
+  (let ((rack (eseq.drum-rack-v2/selected-bus-rack)))
+    (if rack
+      (map (lambda (t) t.index) rack.tracks)
       (let ((tracks (map (lambda (t) t.index) selection.tracks)))
         (if (>= (len tracks) 2) tracks '())))))
 

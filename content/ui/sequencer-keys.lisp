@@ -15,7 +15,7 @@
 ;; mode-bind-key from user lisp; `M-x describe-key` shows the winner.
 (module eseq.sequencer-keys)
 
-(import eseq.kinds :refer (track tracks selection))
+(import eseq.kinds :refer (tracks selection))
 
 (export mode-name
         cursor-left
@@ -50,21 +50,18 @@
       false)))
 
 ;; UP / DOWN: select the previous / next track in visual order. The drum
-;; rack owns the visual order (group members are not contiguous); a nil or
-;; out-of-range answer falls back to plain wrap-around.
-(def track-relative (current delta count)
-  (let ((next (eseq.drum-rack-v2/track-relative current delta)))
-    (if (and (number? next) (>= next 0) (< next count))
-      next
-      (if (< delta 0)
-        (if (= current 0) (- count 1) (- current 1))
-        (mod (+ current delta) count)))))
+;; rack owns the visual order (group members are not contiguous); with no
+;; answer (no row visible) fall back to plain wrap-around.
+(def track-relative (current delta)
+  (or (eseq.drum-rack-v2/track-relative current delta)
+      (let ((all (tracks))
+            (n (len all)))
+        (nth all (mod (+ current.index delta n) n)))))
 
 (def select-track-delta (delta)
   (let ((current selection.track))
     (when current
-      (eseq.sequencer/select-track-for-edit
-        (track (track-relative current.index delta (len (tracks))))))))
+      (eseq.sequencer/select-track-for-edit (track-relative current delta)))))
 
 (def track-up () (do (select-track-delta -1) true))
 (def track-down () (do (select-track-delta 1) true))

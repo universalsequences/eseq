@@ -2079,25 +2079,6 @@ use panel_kinds_seed::*;
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
                 ("track-instrument-types", test_list(vec![])),
-                // The kit save panel's scene checklist (rack-clips spec §7.2)
-                // reads the rack's per-scene clip pointers (the scenes are
-                // kinds: `seed_browser_kinds`).
-                (
-                    "rack-clips",
-                    test_list(vec![map_value([
-                        ("group-id", Value::Number(8.0)),
-                        ("active", Value::Number(-1.0)),
-                        (
-                            "scene-clips",
-                            test_list(vec![
-                                Value::Number(-1.0),
-                                Value::Number(4.0),
-                                Value::Number(7.0),
-                            ]),
-                        ),
-                        ("clips", test_list(vec![])),
-                    ])]),
-                ),
             ],
             true,
         );
@@ -2219,6 +2200,25 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(samples_id);
         editor
+    }
+
+    /// Rack 8 (`(first (groups))`), whose clip bank plays clip 4 in scene 1
+    /// and clip 7 in scene 2 (scene 0 plays nothing): what the kit save
+    /// panel's scene checklist (rack-clips spec §7.2) reads.
+    fn seed_kit_rack(editor: &mut eseqlisp::Editor) {
+        let mut rack = rack_group_fixture(false);
+        rack.id = 8;
+        rack.name = "Break".to_string();
+        seed_kind_groups(editor, &[rack]);
+        seed_kind_rack_clips(editor, 0, &[(4, "Verse"), (7, "Chorus")], None);
+        let rt = editor.runtime_mut();
+        let group = rt.keyed_instance("eseq.kinds:group", &[0]).expect("rack");
+        for (cid, scene) in [(4, 1), (7, 2)] {
+            let clip = rt.keyed_instance("eseq.kinds:rack-clip", &[group, cid]).expect("clip");
+            let scene = rt.keyed_instance("eseq.kinds:scene", &[scene]).expect("scene");
+            set_field(rt, clip, "scenes", instance_list([scene]));
+        }
+        rt.run_reactive_cycle();
     }
 
     fn browser_id(editor: &eseqlisp::Editor) -> eseqlisp::host::BufferId {
@@ -2353,9 +2353,10 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_browser_kits_tab_saves_a_named_rack() {
         let mut editor = browser_editor_on_instrument_tab();
+        seed_kind_groups(&mut editor, &[rack_group_fixture(false)]);
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.browser/enter-kit-save 7 "Kit")"#)
+            .eval_str("(eseq.browser/enter-kit-save (first (eseq.kinds/groups)))")
             .expect("enter kit save mode");
         editor.refresh_runtime_side_effects();
 
@@ -3810,9 +3811,10 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_kit_save_panel_checklist_defaults_to_the_scenes_a_rack_plays() {
         let mut editor = browser_editor_on_instrument_tab();
+        seed_kit_rack(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
+            .eval_str("(eseq.browser/enter-kit-save (first (eseq.kinds/groups)))")
             .expect("enter kit save mode");
         // Scene 0 has no clip for rack 8, scenes 1 and 2 do.
         assert_eq!(
@@ -3878,9 +3880,10 @@ use panel_kinds_seed::*;
         let names: Vec<String> = (1..=14).map(|i| format!("Scene {i}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         seed_kind_scene_names(&mut editor, &names);
+        seed_kit_rack(&mut editor);
         editor
             .runtime_mut()
-            .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
+            .eval_str("(eseq.browser/enter-kit-save (first (eseq.kinds/groups)))")
             .expect("enter kit save mode");
         editor.refresh_runtime_side_effects();
         let id = browser_id(&editor);
@@ -8767,7 +8770,6 @@ use panel_kinds_seed::*;
         ).expect("load theme registry");
         editor.refresh_runtime_side_effects();
         let original = build_track_colors(&app);
-        let original_groups = build_groups_value(&app.groups);
         editor.runtime_mut().eval_str("(seq-theme-phosphor)")
             .expect("apply Phosphor through public command");
         editor.refresh_runtime_side_effects();
@@ -8776,8 +8778,7 @@ use panel_kinds_seed::*;
         sync_track_color_state(editor.runtime_mut(), &app);
         let runtime = editor.runtime_mut();
         assert_eq!(runtime.eval_str(
-            "(and (= (nth SEQ.track-colors 0) (nth SEQ.track-colors 1))
-                  (= (nth SEQ.track-colors 0) (get (nth SEQ.groups 0) :color)))"
+            "(= (nth SEQ.track-colors 0) (nth SEQ.track-colors 1))"
         ).unwrap(), Some(Value::Bool(true)));
         // Every selectable theme must set its own tint (never inherit
         // Phosphor's), even when loaded directly (not just through the
@@ -8800,7 +8801,6 @@ use panel_kinds_seed::*;
             let has_palette = eseqlisp::theme::track_palette().iter().any(|c| c.a > 0.0);
             if loaded_tint.a == 0.0 && !has_palette {
                 assert_eq!(build_track_colors(&app), original, "{}", path.display());
-                assert_eq!(build_groups_value(&app.groups), original_groups);
             }
         }
         assert_eq!(app.track_colors, authored, "theme switching must not edit project colors");
@@ -29092,43 +29092,6 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_rack_clip_run_renders_launches_and_swaps_the_rack_menu() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let rack = map_value([
-            ("id", Value::Number(8.0)),
-            ("rack", Value::Bool(true)),
-            ("name", Value::String("Break".into())),
-            ("collapsed", Value::Bool(true)),
-            ("members", test_list(vec![Value::Number(0.0)])),
-            ("bus-id", Value::Number(1.0)),
-            ("anchor", Value::Number(0.0)),
-            ("rack-members", test_list(vec![])),
-            ("parent", Value::Number(-1.0)),
-            ("pads", test_list(vec![])),
-            ("color", test_list(vec![Value::Number(0.4), Value::Number(0.4), Value::Number(0.4)])),
-        ]);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "groups", test_list(vec![rack]));
-        let clip = |id: f64, name: &str| {
-            map_value([
-                ("id", Value::Number(id)),
-                ("name", Value::String(name.into())),
-            ])
-        };
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "rack-clips",
-            test_list(vec![map_value([
-                ("group-id", Value::Number(8.0)),
-                ("active", Value::Number(2.0)),
-                ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
-            ])]),
-        );
-        editor.runtime_mut().set_reactive("SEQ", "rack-clip-banks", test_list(vec![map_value([
-            ("group-id", Value::Number(8.0)),
-            ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
-        ])]));
-        editor.runtime_mut().run_reactive_cycle();
-        // The mixer's view of the same rack: kinds.
         let mut kind_rack = rack_group_fixture(true);
         kind_rack.id = 8;
         kind_rack.name = "Break".to_string();
@@ -29178,12 +29141,6 @@ use panel_kinds_seed::*;
 
         // A retained binding must repaint without rebuilding the clip roster:
         // a launch re-runs the number picker's subtree alone.
-        editor.runtime_mut().set_reactive("SEQ", "rack-clips", test_list(vec![map_value([
-            ("group-id", Value::Number(8.0)),
-            ("active", Value::Number(1.0)),
-            ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
-        ])]));
-        editor.runtime_mut().run_reactive_cycle();
         let before = editor.runtime().ui_work_counters();
         seed_kind_rack_clips(&mut editor, 0, &[(1, "Intro"), (2, "Break")], Some(1));
         editor.refresh_runtime_side_effects();
@@ -29201,19 +29158,6 @@ use panel_kinds_seed::*;
         assert_eq!(layout_prop_number(picker, "value"), Some(1.0));
         assert_mixer_clip(&mut editor, 1);
 
-        // The bank reads through, including which clip the current scene plays.
-        assert_eq!(
-            editor.runtime_mut().eval_str("(len (eseq.drum-rack-v2/clips 8))").unwrap(),
-            Some(Value::Number(2.0)),
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/active-clip 8)").unwrap(),
-            Some(Value::Number(1.0)),
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/has-clips? 8)").unwrap(),
-            Some(Value::Bool(true)),
-        );
         // Both runs build (the collapsed sequencer row and the mixer strip).
         assert!(
             editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-grid (first (eseq.kinds/groups)))").unwrap().is_some(),
@@ -29226,9 +29170,12 @@ use panel_kinds_seed::*;
 
         // Clicking a cell is a quantized clip launch.
         editor.drain_host_commands();
+        let on_click = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-8-1")
+            .and_then(|cell| cell.props.get("on-click").cloned())
+            .expect("the clip cell's on-click");
         editor
             .runtime_mut()
-            .eval_str("(eseq.drum-rack-v2/launch-clip 8 1)")
+            .invoke(on_click, vec![map_value([("shift", Value::Bool(false))])])
             .expect("launch clip");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -45846,23 +45793,36 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
 
+        {
+            // Tracks 2, 7, 10 and 11 for the order below (the project shows
+            // the first two only).
+            let rt = editor.runtime_mut();
+            for index in [2u64, 7, 10, 11] {
+                let id = rt.register_keyed_instance("eseq.kinds:track", &[index]).unwrap();
+                set_field(rt, id, "index", Value::Number(index as f64));
+            }
+        }
         editor
             .runtime_mut()
             .eval_str(
-                "(def eseq.drum-rack-v2/mixer-visible-track-order () (list 1 7 10 11 2))",
+                "(def eseq.drum-rack-v2/mixer-visible-track-order ()
+                   (map eseq.kinds/track (list 1 7 10 11 2)))",
             )
             .expect("install non-contiguous mixer order fixture");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.mixer/visual-track-range 7 11)")
+                .eval_str("(eseq.mixer/visual-track-range (eseq.kinds/track 7) (eseq.kinds/track 11))")
                 .expect("build visual mixer range"),
             Some(test_number_list(&[7.0, 10.0, 11.0])),
             "shift ranges must contain the badges between their visual endpoints",
         );
         editor
             .runtime_mut()
-            .eval_str("(def eseq.drum-rack-v2/mixer-visible-track-order () (list 0 1))")
+            .eval_str(
+                "(def eseq.drum-rack-v2/mixer-visible-track-order ()
+                   (map eseq.kinds/track (list 0 1)))",
+            )
             .expect("restore the two-track mixer fixture order");
 
         calls.lock().unwrap().clear();
@@ -48687,18 +48647,11 @@ use panel_kinds_seed::*;
                 Ok(Value::Nil)
             });
         }
+        set_full_grid_track_count(&mut editor, 4, 16);
         let mut rack = rack_group_fixture(false);
         rack.members = vec![1, 2, 3];
         apply_groups_bindings(&mut editor, &[rack]);
-        {
-            let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "bus-ids", test_list(vec![Value::Number(1.0), Value::Number(2.0)]));
-            rt.set_reactive("SEQ", "bus-names", test_list(vec![
-                Value::String("Bus".to_string()),
-                Value::String("Kit".to_string()),
-            ]));
-            rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
-        }
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
         let run = |editor: &mut eseqlisp::Editor, calls: &Rc<RefCell<Vec<String>>>, setup: &str| {
             calls.borrow_mut().clear();
             editor.runtime_mut().eval_str(setup).expect("setup");
@@ -48709,15 +48662,16 @@ use panel_kinds_seed::*;
             calls.borrow().clone()
         };
 
-        // Rack header selected (its bus is bus index 1), current track outside it.
-        let calls_seen = run(&mut editor, &calls, "(set! eseq.seq-core-state/selected-bus 1)");
+        // Rack header selected (its bus, "Group", is bus index 2), current
+        // track outside it.
+        let calls_seen = run(&mut editor, &calls, "(set! eseq.seq-core-state/selected-bus 2)");
         assert_eq!(
             calls_seen,
             vec!["seq-set-track 1".to_string(), "seq-select-all-steps-on-tracks (1 2 3)".to_string()],
         );
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
-            Some(Value::Number(1.0)),
+            Some(Value::Number(2.0)),
             "a rack selection survives select-all"
         );
 
@@ -48745,11 +48699,6 @@ use panel_kinds_seed::*;
         seed_kind_buses(editor, &[(0, "Mix"), (1, "Bus A"), (2, "Group")]);
         seed_kind_groups(editor, groups);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "groups", build_groups_value(groups));
-        rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(groups));
-        // Pad-arm state is read only by a drum-rack header; -1 = no rack armed.
-        rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
-        rt.set_reactive("SEQ", "bus-ids", test_number_list(&[0.0, 1.0, 2.0]));
         rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Group"]));
         rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
         rt.set_reactive("SEQ", "bus-mutes", test_bool_list(&[false, false, false]));
@@ -48797,7 +48746,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/visible-track-order)")
+                .eval_str("(map (lambda (t) t.index) (eseq.drum-rack-v2/visible-track-order))")
                 .expect("visible track order should evaluate"),
             Some(test_number_list(&[
                 0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 9.0, 12.0, 13.0,
@@ -48807,7 +48756,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/mixer-visible-track-order)")
+                .eval_str("(map (lambda (t) t.index) (eseq.drum-rack-v2/mixer-visible-track-order))")
                 .expect("mixer track order should evaluate"),
             Some(test_number_list(&[
                 0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 8.0, 9.0, 12.0, 13.0,
@@ -48829,7 +48778,8 @@ use panel_kinds_seed::*;
                 editor
                     .runtime_mut()
                     .eval_str(&format!(
-                        "(eseq.drum-rack-v2/track-relative {track} {delta})"
+                        "(let ((t (eseq.drum-rack-v2/track-relative (eseq.kinds/track {track}) {delta})))
+                           (if t t.index nil))"
                     ))
                     .expect("relative navigation should evaluate"),
                 Some(Value::Number(expected as f64)),
@@ -48846,84 +48796,10 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/track-relative 7 1)")
+                .eval_str("(eseq.drum-rack-v2/track-relative (eseq.kinds/track 7) 1)")
                 .expect("empty visual order should be safe"),
             Some(Value::Nil),
         );
-    }
-
-    #[test]
-    fn metal_seq_groups_value_carries_rack_pad_map() {
-        let groups = [rack_group_fixture(false)];
-        let Value::List(items) = build_groups_value(&groups) else {
-            panic!("groups value should be a list");
-        };
-        let Some(Value::Map(group)) = items.first().map(|cell| cell.borrow().clone()) else {
-            panic!("groups value should hold one group map");
-        };
-        assert_eq!(
-            group.get("rack").map(|cell| cell.borrow().clone()),
-            Some(Value::Bool(true)),
-            "a group carrying a pad map is a rack"
-        );
-        let Some(Value::List(pads)) = group.get("pads").map(|cell| cell.borrow().clone()) else {
-            panic!("rack group should expose its pads");
-        };
-        assert_eq!(pads.len(), 2, "both pads should be exposed");
-        let Value::Map(second) = pads[1].borrow().clone() else {
-            panic!("pad should be a map");
-        };
-        for (field, expected) in [
-            ("pad-note", 38.0),
-            // member position 1 resolves to member track 2 …
-            ("member", 1.0),
-            ("track", 2.0),
-            ("choke", 1.0),
-        ] {
-            assert_eq!(
-                second.get(field).map(|cell| cell.borrow().clone()),
-                Some(Value::Number(expected)),
-                "pad field {field} should resolve"
-            );
-        }
-    }
-
-    /// Pad roles (eseq-groove.10): each pad publishes its explicit role key
-    /// ("" = Standard), the effective role's tag and name, and the standard
-    /// layout's own name for the menu's "Standard (...)" entry.
-    #[test]
-    fn metal_seq_groups_value_carries_pad_roles() {
-        use sequencer::project::PadRole;
-        let mut group = rack_group_fixture(false);
-        {
-            let rack = group.rack.as_mut().unwrap();
-            let c1 = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
-            rack.pads[0].pad_note = c1 + 2; // D1, Standard: the layout's snare
-            rack.pads[1].pad_note = c1 + 5; // F1, the layout's low tom, tagged Clap
-            rack.pads[1].role = Some(PadRole::Clap);
-        }
-        let Value::List(items) = build_groups_value(&[group]) else {
-            panic!("groups value should be a list");
-        };
-        let Some(Value::Map(group)) = items.first().map(|cell| cell.borrow().clone()) else {
-            panic!("one group map");
-        };
-        let Some(Value::List(pads)) = group.get("pads").map(|cell| cell.borrow().clone()) else {
-            panic!("rack pads");
-        };
-        let field = |pad: usize, name: &str| {
-            let Value::Map(pad) = pads[pad].borrow().clone() else { panic!("pad map") };
-            pad.get(name).map(|cell| cell.borrow().clone())
-        };
-        let string = |value: &str| Some(Value::String(value.to_string()));
-        assert_eq!(field(0, "role"), string(""));
-        assert_eq!(field(0, "role-tag"), string("SD"));
-        assert_eq!(field(0, "role-label"), string("Snare"));
-        assert_eq!(field(0, "standard-role-label"), string("Snare"));
-        assert_eq!(field(1, "role"), string("clap"));
-        assert_eq!(field(1, "role-tag"), string("CP"));
-        assert_eq!(field(1, "role-label"), string("Clap"));
-        assert_eq!(field(1, "standard-role-label"), string("Low Tom"));
     }
 
     /// The pad menu's role list (drum-rack-v2.lisp) mirrors `PadRole::ALL`:
@@ -48953,48 +48829,6 @@ use panel_kinds_seed::*;
             .map(|role| format!("{}={}", role.key(), role.label()))
             .collect::<Vec<_>>();
         assert_eq!(lisp, rust);
-    }
-
-    /// Slice 5 of docs/drum-rack-v2-spec.md: the mixer draws a nested rack
-    /// inside its parent's block, which it can only do if the bindings carry
-    /// the nesting in both directions.
-    #[test]
-    fn metal_seq_groups_value_carries_rack_nesting_in_both_directions() {
-        let mut parent = rack_group_fixture(false);
-        parent.id = 3;
-        parent.rack = None;
-        parent.members = vec![0, 3];
-        parent.rack_members = vec![7];
-        let groups = [parent, rack_group_fixture(false)];
-        let Value::List(items) = build_groups_value(&groups) else {
-            panic!("groups value should be a list");
-        };
-        let field = |index: usize, key: &str| {
-            let Some(Value::Map(group)) = items.get(index).map(|cell| cell.borrow().clone()) else {
-                panic!("group {index} should be a map");
-            };
-            group.get(key).map(|cell| cell.borrow().clone())
-        };
-        assert_eq!(
-            field(0, "rack-members"),
-            Some(test_list(vec![Value::Number(7.0)])),
-            "the parent lists the rack it contains",
-        );
-        assert_eq!(
-            field(0, "parent"),
-            Some(Value::Number(-1.0)),
-            "a top-level group has no parent",
-        );
-        assert_eq!(
-            field(1, "parent"),
-            Some(Value::Number(3.0)),
-            "the nested rack points back at the group drawing it",
-        );
-        assert_eq!(
-            field(1, "rack-members"),
-            Some(test_list(vec![])),
-            "racks contain only member tracks",
-        );
     }
 
     #[test]
@@ -49253,37 +49087,6 @@ use panel_kinds_seed::*;
         );
     }
 
-    /// Drum rack v2 slice 3: the header's arm dot is a read of the host's
-    /// pad-arm state, not UI-local state, so the grid and the live keyboard
-    /// can never disagree about which kit answers the keys.
-    #[test]
-    fn metal_seq_rack_header_arm_follows_host_armed_rack_id() {
-        let mut editor = sequencer_perf_editor(4, 16);
-        apply_rack_group_bindings(&mut editor, false);
-
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/armed? 0)")
-                .expect("armed? should evaluate"),
-            Some(Value::Bool(false)),
-            "no rack is armed while SEQ.armed-rack-id is -1"
-        );
-
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/armed? 0)")
-                .expect("armed? should evaluate"),
-            Some(Value::Bool(true)),
-            "the header reads the armed rack by group id"
-        );
-    }
-
     #[test]
     fn metal_seq_occupied_pad_replacements_preserve_track_selection_in_host_payloads() {
         fn assert_preserves_selection(editor: &mut eseqlisp::Editor, command_name: &str) {
@@ -49350,12 +49153,12 @@ use panel_kinds_seed::*;
         }
     }
 
-    /// A nudge clamps to the note-positional grid's range, not to raw MIDI 0.
-    /// `pad_note` is a transpose where 0 = C4, so the domain runs negative and
-    /// a `(max 0 ...)` lower bound would teleport every pad in the bottom three
-    /// octaves up to C4 instead of holding it still.
+    /// The pad grid clamps notes to its note-positional range, not to raw
+    /// MIDI 0. `pad_note` is a transpose where 0 = C4, so the domain runs
+    /// negative and a `(max 0 ...)` lower bound would teleport every pad in
+    /// the bottom three octaves up to C4.
     #[test]
-    fn metal_seq_rack_pad_note_nudge_clamps_to_the_grid_floor() {
+    fn metal_seq_rack_pad_notes_clamp_to_the_grid_floor() {
         let mut editor = sequencer_perf_editor(4, 16);
         apply_rack_group_bindings(&mut editor, false);
 
@@ -49373,17 +49176,6 @@ use panel_kinds_seed::*;
             eval(&mut editor, "(eseq.drum-rack-v2/clamp-pad-note -37)"),
             Some(Value::Number(-36.0)),
             "below the floor clamps to the floor, not to 0"
-        );
-
-        // Nudging a pad that already sits on the floor is a no-op: the clamped
-        // note equals the current one, so no host command is issued.
-        assert_eq!(
-            eval(
-                &mut editor,
-                "(eseq.drum-rack-v2/nudge-pad-note 0 (dict :pad-note -36) -1)"
-            ),
-            Some(Value::Nil),
-            "a pad on the grid floor must not move when nudged down"
         );
     }
 

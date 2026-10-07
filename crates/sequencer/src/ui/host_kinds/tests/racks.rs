@@ -112,22 +112,6 @@ impl Harness {
     fn library_listings(&self) -> u64 {
         self.frame.host_kinds.racks.library_listings
     }
-
-    fn seq_7h(&self, field: &str) -> Value {
-        self.rt()
-            .reactive_field_value("SEQ", field)
-            .unwrap_or_else(|| panic!("SEQ.{field}"))
-            .clone()
-    }
-
-    /// Publish the legacy group, groove and rack clip fields as the tick
-    /// does.
-    fn publish_legacy_racks(&mut self) {
-        let state = self.shared.state.clone();
-        let rt = self.editor.runtime_mut();
-        sync_groups_bindings(rt, &self.app.groups, &self.app.grooves);
-        sync_rack_clip_state(rt, &state);
-    }
 }
 
 fn list(value: Value) -> Vec<Value> {
@@ -138,7 +122,7 @@ fn list(value: Value) -> Vec<Value> {
 }
 
 #[test]
-fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
+fn rack_fields_read_after_sync_and_match_the_model() {
     let mut h = Harness::new();
     let gid = h.drum_rack();
     assert_eq!(h.eval_7h("g.rack"), Value::Bool(true));
@@ -162,30 +146,35 @@ fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
         h.eval_7h("p0.track.steps"),
         h.eval_7h("(let ((t (track 0))) t.steps)")
     );
-    // Legacy parity: SEQ.groups' :pads.
-    h.publish_legacy_racks();
-    let groups = list(h.seq_7h("groups"));
-    let pads = list(get(&groups[0], "pads"));
-    for (index, pad) in pads.iter().enumerate() {
+    // Every pad, in pad order, as the model has it.
+    let group = h.app.groups.iter().find(|g| g.id == gid).unwrap().clone();
+    let rack = group.rack.as_ref().unwrap();
+    for (index, pad) in rack.pads.iter().enumerate() {
         h.eval_7h(&format!("(def px (nth g.pads {index}))"));
+        let role =
+            |role: Option<PadRole>, read: fn(PadRole) -> &'static str| s(role.map_or("", read));
+        let effective = pad.effective_role();
+        let standard = PadRole::standard(pad.pad_note);
         let fields = [
-            ("pad-note", "note"),
-            ("label", "label"),
-            ("role", "role"),
-            ("role-tag", "role-tag"),
-            ("role-label", "role-label"),
-            ("standard-role-label", "standard-role-label"),
+            ("note", Value::Number(pad.pad_note as f64)),
+            (
+                "label",
+                s(&crate::state_values::drum_rack_pad_label(pad.pad_note)),
+            ),
+            ("role", role(pad.role, PadRole::key)),
+            ("role-tag", role(effective, PadRole::tag)),
+            ("role-label", role(effective, PadRole::label)),
+            ("standard-role-label", role(standard, PadRole::label)),
+            (
+                "track.index",
+                Value::Number(group.members[pad.member] as f64),
+            ),
         ];
-        for (legacy, field) in fields {
-            assert_eq!(
-                get(pad, legacy),
-                h.eval_7h(&format!("px.{field}")),
-                "{field}"
-            );
+        for (field, value) in fields {
+            assert_eq!(h.eval_7h(&format!("px.{field}")), value, "{field}");
         }
-        assert_eq!(get(pad, "track"), h.eval_7h("px.track.index"));
-        let choke = num(get(pad, "choke")).max(0.0);
-        assert_eq!(Value::Number(choke), h.eval_7h("px.choke"));
+        let choke = rack.choke_groups.get(index).copied().flatten().unwrap_or(0);
+        assert_eq!(h.eval_7h("px.choke"), Value::Number(choke as f64));
     }
     // The rack's own groove, straight, and the pool.
     assert_eq!(h.eval_7h("gr.group"), h.eval_7h("g"));
@@ -202,52 +191,67 @@ fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
     assert_eq!(h.eval_7h("pg.groove-id"), Value::Number(7.0));
     assert_eq!(h.eval_7h("pg.name"), s("Swing"));
     assert_eq!(h.eval_7h("pg.racks"), list_value(Vec::new()));
-    let pool = list(h.seq_7h("groove-pool"));
-    assert_eq!(get(&pool[0], "grid"), h.eval_7h("pg.grid"));
+    assert_eq!(
+        h.eval_7h("pg.grid"),
+        s(&groove_grid_label(&h.app.grooves[0]))
+    );
     // The library listing is the pickers'.
-    let library = list(h.seq_7h("groove-library"));
+    let library = listed_groove_library(&h.app.groups, &h.app.grooves);
     assert_eq!(
         h.eval_7h("(len project.groove-library)"),
         Value::Number(library.len() as f64)
     );
     for (index, entry) in library.iter().enumerate() {
         h.eval_7h(&format!("(def lx (nth project.groove-library {index}))"));
-        assert_eq!(get(entry, "key"), h.eval_7h("lx.choice"));
-        assert_eq!(get(entry, "name"), h.eval_7h("lx.name"));
-        assert_eq!(get(entry, "tier"), h.eval_7h("lx.tier"));
+        assert_eq!(h.eval_7h("lx.choice"), s(&entry.choice().picker_key()));
+        assert_eq!(h.eval_7h("lx.name"), s(&entry.name));
+        assert_eq!(h.eval_7h("lx.tier"), s(entry.tier.key()));
     }
-    // Play the pool groove: the lanes and amounts match SEQ.rack-grooves.
+    // Play the pool groove: the lanes and amounts are the model's.
     h.run_7h("(set! gr.pool-groove pg) (set! gr.timing 0.75)");
     assert_eq!(h.eval_7h("gr.pool-groove"), h.eval_7h("pg"));
     assert_eq!(h.eval_7h("pg.racks"), h.eval_7h("(list g)"));
-    h.publish_legacy_racks();
-    let entry = list(h.seq_7h("rack-grooves")).remove(0);
-    assert_eq!(get(&entry, "active-groove-id"), Value::Number(7.0));
-    assert_eq!(get(&entry, "enabled"), h.eval_7h("gr.enabled"));
-    assert_eq!(get(&entry, "scale"), h.eval_7h("gr.scale"));
-    assert_eq!(get(&entry, "active-grid"), h.eval_7h("gr.grid"));
-    let lanes = get(&entry, "lanes");
-    assert_eq!(get(&lanes, "slots"), h.eval_7h("gr.slots"));
-    assert_eq!(get(&lanes, "all-cells"), h.eval_7h("gr.cells"));
-    assert_eq!(get(&lanes, "all-measured"), h.eval_7h("gr.measured"));
-    for (index, pad) in list(get(&lanes, "pads")).iter().enumerate() {
+    let rack = h.rack(gid).clone();
+    let settings = &rack.groove;
+    assert_eq!(settings.active, Some(7));
+    assert_eq!(h.eval_7h("gr.enabled"), Value::Bool(settings.enabled));
+    assert_eq!(h.eval_7h("gr.scale"), Value::Number(settings.scale as f64));
+    let groove = h.app.grooves[0].clone();
+    assert_eq!(
+        h.eval_7h("gr.grid"),
+        s(&scaled_grid_label(&groove, settings.scale))
+    );
+    let lanes = groove_lanes(&rack, Some(&groove));
+    let (cells, measured) = lanes.all.values();
+    assert_eq!(h.eval_7h("gr.slots"), Value::Number(lanes.slots as f64));
+    assert_eq!(h.eval_7h("gr.cells"), cells);
+    assert_eq!(h.eval_7h("gr.measured"), measured);
+    for (index, (pad, lane)) in lanes.pads.iter().enumerate() {
         h.eval_7h(&format!("(def sx (nth gr.pads {index}))"));
-        assert_eq!(get(pad, "pad-note"), h.eval_7h("sx.pad.note"));
-        assert_eq!(get(pad, "cells"), h.eval_7h("sx.cells"));
-        assert_eq!(get(pad, "measured"), h.eval_7h("sx.measured"));
-        assert_eq!(get(pad, "enabled"), h.eval_7h("sx.enabled"));
-        let field = rack_groove_pad_amount_field(gid, num(get(pad, "pad-note")) as i32);
-        assert_eq!(h.seq_7h(&field), h.eval_7h("sx.amount"));
+        let (cells, measured) = lane.values();
+        let share = settings.pad(pad.pad_note);
+        assert_eq!(h.eval_7h("sx.pad.note"), Value::Number(pad.pad_note as f64));
+        assert_eq!(h.eval_7h("sx.cells"), cells);
+        assert_eq!(h.eval_7h("sx.measured"), measured);
+        assert_eq!(h.eval_7h("sx.enabled"), Value::Bool(share.enabled));
+        assert_eq!(h.eval_7h("sx.amount"), Value::Number(share.amount as f64));
     }
-    for amount in ["timing", "velocity", "random"] {
-        let field = rack_groove_amount_field(amount, gid);
-        assert_eq!(h.seq_7h(&field), h.eval_7h(&format!("gr.{amount}")));
+    for (amount, value) in [
+        ("timing", settings.timing_amount),
+        ("velocity", settings.velocity_amount),
+        ("random", settings.random_amount),
+    ] {
+        assert_eq!(
+            h.eval_7h(&format!("gr.{amount}")),
+            Value::Number(value as f64)
+        );
     }
     // A legacy rack: no clips, no bank.
     assert_eq!(h.eval_7h("g.legacy"), Value::Bool(true));
     assert_eq!(h.eval_7h("g.clips"), list_value(Vec::new()));
     assert_eq!(h.eval_7h("g.rack-clip"), Value::Nil);
-    assert_eq!(h.seq_7h("rack-clips"), list_value(Vec::new()));
+    let state = h.shared.state.clone();
+    assert!(state.with_scenes(|scenes| scenes.rack_bank(gid).is_none()));
     // Convert: a clip per scene, the current scene playing its own.
     h.run_7h("(convert-rack-to-clips! g)");
     assert_eq!(h.eval_7h("g.legacy"), Value::Bool(false));
@@ -258,31 +262,39 @@ fn rack_fields_read_after_sync_and_match_the_legacy_fields() {
     assert_eq!(h.eval_7h("rc.index"), Value::Number(0.0));
     assert_eq!(h.eval_7h("rc.groove"), Value::Nil);
     assert_eq!(h.eval_7h("rc.own-groove"), Value::Bool(false));
-    h.publish_legacy_racks();
-    let banks = list(h.seq_7h("rack-clips"));
-    assert_eq!(get(&banks[0], "active"), h.eval_7h("rc.cid"));
-    let clips = list(get(&banks[0], "clips"));
+    // The bank, the playing clip and each clip's scenes, as the model has
+    // them.
+    let (clips, active, pointers) = state.with_scenes(|scenes| {
+        let bank = scenes.rack_bank(gid).expect("a bank");
+        let clips: Vec<(u64, String)> = bank
+            .clips
+            .iter()
+            .map(|clip| (clip.id, clip.name.clone()))
+            .collect();
+        let pointers: Vec<Option<u64>> = (0..scenes.scenes.len())
+            .map(|scene| scenes.scene_rack_clip(scene, gid))
+            .collect();
+        (clips, scenes.current_rack_clip(gid), pointers)
+    });
+    assert_eq!(
+        h.eval_7h("rc.cid"),
+        Value::Number(active.expect("playing") as f64)
+    );
     assert_eq!(
         h.eval_7h("(len g.clips)"),
         Value::Number(clips.len() as f64)
     );
-    for (index, clip) in clips.iter().enumerate() {
+    for (index, (cid, name)) in clips.iter().enumerate() {
         h.eval_7h(&format!("(def cx (nth g.clips {index}))"));
-        assert_eq!(get(clip, "id"), h.eval_7h("cx.cid"));
-        assert_eq!(get(clip, "name"), h.eval_7h("cx.name"));
-        let active = Value::Bool(get(clip, "id") == get(&banks[0], "active"));
-        assert_eq!(active, h.eval_7h("cx.active"));
-    }
-    let scene_clips = list(get(&banks[0], "scene-clips"));
-    for (index, clip) in clips.iter().enumerate() {
-        let cid = get(clip, "id");
-        let legacy: Vec<Value> = (scene_clips.iter().enumerate())
-            .filter(|(_, pointer)| **pointer == cid)
+        assert_eq!(h.eval_7h("cx.cid"), Value::Number(*cid as f64));
+        assert_eq!(h.eval_7h("cx.name"), s(name));
+        assert_eq!(h.eval_7h("cx.active"), Value::Bool(active == Some(*cid)));
+        let played: Vec<Value> = (pointers.iter().enumerate())
+            .filter(|(_, pointer)| **pointer == Some(*cid))
             .map(|(scene, _)| Value::Number(scene as f64))
             .collect();
-        h.eval_7h(&format!("(def cx (nth g.clips {index}))"));
         let scenes = h.eval_7h("(map (lambda (sc) sc.index) cx.scenes)");
-        assert_eq!(list(scenes), legacy, "clip {index}'s scenes");
+        assert_eq!(list(scenes), played, "clip {index}'s scenes");
     }
     // Silence: no clip plays.
     h.run_7h("(silence-rack! g)");
