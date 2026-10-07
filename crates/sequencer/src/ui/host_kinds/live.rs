@@ -1029,7 +1029,7 @@ fn current_track<S: KindStore>(store: &S, sources: &KindsHandles) -> Option<(Ins
 
 /// Step `step` of a track (instance `track`, `num_steps` long), registering
 /// the track's steps when it has none yet (spec D2).
-fn step_of<S: KindStore>(
+pub(super) fn step_of<S: KindStore>(
     store: &mut S,
     track: InstanceId,
     num_steps: usize,

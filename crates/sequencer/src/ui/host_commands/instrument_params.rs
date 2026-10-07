@@ -92,17 +92,10 @@ pub(super) fn handle(
                             // target, so clear or republish its engine-only
                             // override at the same latch transition.
                             print.publish_engine_override(&state);
+                            // The base write is skipped: the knob shows the
+                            // latch through `param.value` (visual only — the
+                            // sound stays step-quantized).
                             drop(print);
-                            // The base write is skipped, so the knob's own
-                            // display binding has to follow the latch here or
-                            // it only moves when the playhead crosses a step.
-                            // Visual only — the sound stays step-quantized.
-                            sync_print_latch_display(
-                                &mut editor,
-                                &app,
-                                track,
-                                &[(PrintTarget::Instrument { param_idx }, stored)],
-                            );
                         } else {
                             if wrote_neural_plock {
                                 super::rebuild_panel_if_needed(ctx.shared, &desc);
@@ -130,7 +123,6 @@ pub(super) fn handle(
                                     current_track_idx: track,
                                     param_idx,
                                     display_step: None,
-                                    sync_plock_list: wrote_neural_plock,
                                     sync_plock_presence: false,
                                     sync_sampler_times: true,
                                 },
@@ -453,7 +445,6 @@ pub(super) fn handle(
                                     current_track_idx: track,
                                     param_idx,
                                     display_step: None,
-                                    sync_plock_list: true,
                                     sync_plock_presence: false,
                                     sync_sampler_times: false,
                                 },
@@ -502,7 +493,6 @@ pub(super) fn handle(
                                     current_track_idx: track,
                                     param_idx,
                                     display_step,
-                                    sync_plock_list: false,
                                     sync_plock_presence: true,
                                     sync_sampler_times: false,
                                 },
@@ -574,7 +564,6 @@ pub(super) fn handle(
                                     current_track_idx: track,
                                     param_idx,
                                     display_step: None,
-                                    sync_plock_list: wrote_neural_plock,
                                     sync_plock_presence: false,
                                     sync_sampler_times: false,
                                 },
@@ -622,29 +611,6 @@ pub(super) fn handle(
                                 "Edit neural override",
                             );
                         }
-                        // Whether the *step* panel already lists a row for this
-                        // p-lock. If it does, the row's LOCK readout is bound
-                        // to the per-param SEQV field (see plocks.rs) and the
-                        // targeted value sync below repaints it — so the row
-                        // list itself does not need republishing, which would
-                        // rerun the whole plock panel on every drag event.
-                        let plock_row_existed = displayed_plock_step(
-                            &state,
-                            track,
-                            selected_plock_step(&selected_steps),
-                        )
-                        .and_then(|step| {
-                            state
-                                .pattern
-                                .instrument_slots
-                                .get(track)
-                                .and_then(|slot| slot.plocks.get(step, param_idx))
-                        })
-                        .is_some()
-                            && matches!(
-                                desc.kind,
-                                sequencer::effects::ParamKind::Continuous { .. }
-                            );
                         if !wrote_neural_plock {
                             let steps: Vec<usize> = selected_steps
                                 .lock()
@@ -682,7 +648,6 @@ pub(super) fn handle(
                                 // have changed (first write of this lock, or a
                                 // neural override). Later drag events repaint
                                 // through the bound value field.
-                                sync_plock_list: wrote_neural_plock || !plock_row_existed,
                                 sync_plock_presence: !wrote_neural_plock,
                                 sync_sampler_times: true,
                             },
@@ -837,7 +802,6 @@ pub(super) fn handle(
                                     current_track_idx: track,
                                     param_idx,
                                     display_step,
-                                    sync_plock_list: wrote_neural_plock,
                                     sync_plock_presence: !wrote_neural_plock,
                                     sync_sampler_times: false,
                                 },
@@ -1364,25 +1328,20 @@ mod tests {
             default_before,
             "printing must never write the instrument base value"
         );
-        // The print branch skips the base write, so it owes the touched
-        // control's own display binding the LATCHED value right now — before
-        // any playhead crossing runs `sync_fx_param_bindings_delta`. Without
-        // this the knob only moves once per step (very visible at slow BPM).
-        {
-            let param_name = descriptor.params[PARAM].name.clone();
-            let expected = descriptor.params[PARAM].stored_to_user(0.74) as f64;
-            for field in [
-                instrument_param_value_field(TRACK, PARAM, &param_name),
-                fx_instrument_param_value_field(PARAM, &param_name),
-            ] {
-                assert_eq!(
-                    reactive_number(&editor, &field),
-                    expected,
-                    "the knob's bound display field must follow the print latch \
-                     before any step crossing"
-                );
-            }
-        }
+        // The print branch skips the base write: the latch holds the latest
+        // value right now, before any playhead crossing, and the knob shows
+        // it through `param.value` (host_kinds::tests::panel::
+        // a_param_held_by_the_print_latch_shows_the_latched_value). Without
+        // it the knob only moves once per step (very visible at slow BPM).
+        assert_eq!(
+            shared
+                .step_print
+                .lock()
+                .unwrap()
+                .latched(TRACK, PrintTarget::Instrument { param_idx: PARAM }),
+            Some(0.74),
+            "the print latch must hold the latest value before any step crossing"
+        );
         assert_eq!(
             (
                 fx_epoch.load(Ordering::Relaxed),
@@ -1456,22 +1415,16 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(effect_slot.defaults.get(2), effect_default_before);
-        // Same contract for a track effect knob: its bound field follows the
-        // latch immediately, in stored units (matching
-        // `sync_track_effect_param_value_field`), with no epoch bump.
+        // Same contract for a track effect knob: the latch holds the value
+        // at once (its `param.value` shows it), with no epoch bump.
+        let target = PrintTarget::Effect {
+            slot_idx: EFFECT_SLOT,
+            param_idx: 2,
+        };
         assert_eq!(
-            reactive_number(
-                &editor,
-                &track_effect_param_value_field(
-                    TRACK,
-                    EFFECT_SLOT,
-                    2,
-                    &descriptor.params[2].name,
-                ),
-            ),
-            1_800.0,
-            "the effect knob's bound display field must follow the print latch \
-             before any step crossing"
+            shared.step_print.lock().unwrap().latched(TRACK, target),
+            Some(1_800.0),
+            "the effect knob's latch must hold the value before any step crossing"
         );
         assert_eq!(
             (

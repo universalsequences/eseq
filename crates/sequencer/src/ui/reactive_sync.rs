@@ -110,7 +110,7 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
         build_instrument_panel_value(app, selected_track, selected_steps),
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, selected_track, selected_steps);
+    sync_track_params(rt, state, selected_track, selected_steps);
     sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
     rt.set_reactive(
         "SEQ",
@@ -285,7 +285,8 @@ pub(super) fn refresh_rack_macro_value_reactive(
 /// `refresh_rack_direct_param_reactive`: the macro knob and its mapped
 /// targets repaint through bound value fields, so only a write that moves
 /// the shown step's p-lock rows (`RowSetChanged`: a first lock there, or a
-/// clear) republishes them and runs the epoch-driven resync. A macro is
+/// clear) runs the epoch-driven resync (the host kinds rebuild the step
+/// panel's rows, `selection.plock-rows`, from the lock's invalidation). A macro is
 /// always continuous, so the *fx* tree never needs a structural
 /// (`fx_epoch`) rebuild for it.
 pub(super) fn refresh_rack_macro_plock_reactive(
@@ -302,17 +303,8 @@ pub(super) fn refresh_rack_macro_plock_reactive(
     let rt = editor.runtime_mut();
     let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
     dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
-    let rows_moved = plock_rows == RackPlockRowsSync::RowSetChanged;
-    if rows_moved {
-        let result = rt.set_reactive(
-            "SEQ",
-            "track-plocks",
-            build_track_plocks_value(app, state, track, selected_steps),
-        );
-        dirty |= result.effects_dirty || result.widgets_dirty;
-    }
     flush_reactive_display_edit(editor, dirty);
-    if rows_moved {
+    if plock_rows == RackPlockRowsSync::RowSetChanged {
         ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -340,7 +332,7 @@ pub(super) enum RackDirectDisplayTarget {
 /// continuous knob drag is fully covered by the bound per-param value field,
 /// so only the FIRST write of a lock in a gesture — the one event that can
 /// change the *step* row set and light the step-grid presence tick — pays for
-/// the row-list republish, the presence sync, and one `ui_epoch` resync.
+/// the presence sync and one `ui_epoch` resync.
 /// Bumping the epochs on every drag event rebuilt the whole *fx* rack panel
 /// (every slot) per mouse move, which is what made rack knobs feel like
 /// molasses once a step was selected (eseq-lf72).
@@ -434,16 +426,9 @@ pub(super) fn refresh_rack_direct_params_reactive(
         };
     }
     if plock_rows == RackPlockRowsSync::RowSetChanged {
-        let result = rt.set_reactive(
-            "SEQ",
-            "track-plocks",
-            build_track_plocks_value(app, state, track, selected_steps),
-        );
-        dirty |= result.effects_dirty || result.widgets_dirty;
         // Step-grid tick, expanded-lane tick, variant tint: the surfaces the
         // per-event `ui_epoch` bump used to refresh for free.
-        dirty |=
-            sync_instrument_plock_presence_display_fields(rt, state, app, track, selected_steps);
+        dirty |= sync_instrument_plock_presence_display_fields(rt, state, app, track);
     }
     flush_reactive_display_edit(editor, dirty);
     if plock_rows == RackPlockRowsSync::RowSetChanged {
@@ -552,7 +537,6 @@ pub(super) fn sync_rack_slot_instrument_authoring_display(
         state,
         &app.graph.effect_descriptors,
         track,
-        selected_steps,
     );
     flush_reactive_display_edit(editor, dirty);
 }
@@ -885,103 +869,11 @@ pub(super) fn sync_step_selection_bindings(
     dirty
 }
 
-pub(super) fn sync_track_plocks_for_neural_selection(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-) -> bool {
-    if selection.is_empty()
-        && selected_plock_step(selected_steps).is_some_and(|step| {
-            !track_step_has_plock(state, track, &app.graph.effect_descriptors, step)
-        })
-    {
-        // The selected step has no locks, so the row table is empty — but the
-        // variant strip is track-scoped, not step-scoped. Keep publishing it so
-        // a lock-free step can still be stamped with an existing variant.
-        let mut dirty = rt
-            .set_reactive("SEQ", "track-plocks", Value::List(Vec::new()))
-            .effects_dirty;
-        dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "track-plock-variants",
-                build_track_plock_variants_value(state, track, selected_steps),
-            )
-            .effects_dirty;
-        return dirty;
-    }
-    let mut dirty = rt
-        .set_reactive(
-            "SEQ",
-            "track-plocks",
-            build_track_plocks_value_with_neural_selection(
-                app,
-                state,
-                track,
-                selected_steps,
-                Some(selection),
-            ),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-plock-variants",
-            build_track_plock_variants_value(state, track, selected_steps),
-        )
-        .effects_dirty;
-    dirty
-}
-
-pub(super) fn sync_track_plock_variant_preview(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    preview: Option<&(usize, String)>,
-) -> bool {
-    if !selected_steps.lock().unwrap().is_empty() {
-        return false;
-    }
-    let Some((preview_track, label)) = preview else {
-        return false;
-    };
-    if *preview_track != track {
-        return false;
-    }
-    let mut dirty = false;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-plocks",
-            build_track_plocks_value_for_variant_label(app, state, track, label),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-plock-variants",
-            build_track_plock_variants_value_with_preview(
-                state,
-                track,
-                selected_steps,
-                Some(label),
-            ),
-        )
-        .effects_dirty;
-    dirty
-}
-
 pub(super) fn sync_instrument_plock_presence_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     effect_descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
     track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
     let mut dirty = false;
     dirty |= rt
@@ -1019,13 +911,6 @@ pub(super) fn sync_instrument_plock_presence_fields(
         .effects_dirty;
     dirty |= rt
         .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b)
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-plock-variants",
-            build_track_plock_variants_value(state, track, selected_steps),
-        )
         .effects_dirty;
     dirty
 }
@@ -1150,7 +1035,6 @@ pub(super) struct InstrumentParamDisplaySync<'a> {
     pub(super) current_track_idx: usize,
     pub(super) param_idx: usize,
     pub(super) display_step: Option<usize>,
-    pub(super) sync_plock_list: bool,
     pub(super) sync_plock_presence: bool,
     pub(super) sync_sampler_times: bool,
 }
@@ -1163,15 +1047,8 @@ pub(super) fn sync_instrument_plock_presence_display_fields(
     state: &Arc<SequencerState>,
     app: &app::App,
     track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
-    sync_instrument_plock_presence_fields(
-        rt,
-        state,
-        &app.graph.effect_descriptors,
-        track,
-        selected_steps,
-    )
+    sync_instrument_plock_presence_fields(rt, state, &app.graph.effect_descriptors, track)
 }
 
 pub(super) fn sync_instrument_param_authoring_display(
@@ -1179,23 +1056,12 @@ pub(super) fn sync_instrument_param_authoring_display(
     sync: InstrumentParamDisplaySync<'_>,
 ) {
     let mut ui_dirty = false;
-    if sync.sync_plock_list {
-        ui_dirty |= sync_track_plocks_for_neural_selection(
-            editor.runtime_mut(),
-            sync.app,
-            sync.state,
-            sync.track,
-            sync.selected_steps,
-            sync.selection,
-        );
-    }
     if sync.sync_plock_presence {
         ui_dirty |= sync_instrument_plock_presence_display_fields(
             editor.runtime_mut(),
             sync.state,
             sync.app,
             sync.track,
-            sync.selected_steps,
         );
     }
     ui_dirty |= if sync.track == sync.current_track_idx {
@@ -1238,7 +1104,6 @@ pub(super) struct EffectParamDisplaySync<'a> {
     pub(super) slot_idx: usize,
     pub(super) param_idx: usize,
     pub(super) display_step: Option<usize>,
-    pub(super) sync_plock_list: bool,
 }
 
 pub(super) fn sync_effect_param_authoring_display(
@@ -1246,16 +1111,6 @@ pub(super) fn sync_effect_param_authoring_display(
     sync: EffectParamDisplaySync<'_>,
 ) {
     let mut ui_dirty = false;
-    if sync.sync_plock_list {
-        ui_dirty |= sync_track_plocks_for_neural_selection(
-            editor.runtime_mut(),
-            sync.app,
-            sync.state,
-            sync.track,
-            sync.selected_steps,
-            sync.selection,
-        );
-    }
     ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
         editor.runtime_mut(),
         sync.app,
@@ -1272,7 +1127,6 @@ pub(super) fn sync_instrument_param_batch_display(
     editor: &mut Editor,
     app: &app::App,
     state: &Arc<SequencerState>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     current_track_idx: usize,
@@ -1287,7 +1141,6 @@ pub(super) fn sync_instrument_param_batch_display(
             state,
             &app.graph.effect_descriptors,
             track,
-            selected_steps,
         );
     }
     // A batch can name any track; only the current one owns the visible *fx*
@@ -1652,14 +1505,6 @@ pub(super) fn apply_ui_invalidations(
                                 Some(Value::Number(step)) if *step >= 0.0 => Some(*step as usize),
                                 _ => None,
                             };
-                        needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
-                            rt,
-                            app,
-                            state,
-                            track,
-                            selected_steps,
-                            selected_neural_neurons,
-                        );
                         let display_values_can_differ = !selected_neural_neurons.is_empty()
                             || previous_display.is_some_and(|step| {
                                 track_step_has_plock(
@@ -1802,27 +1647,13 @@ pub(super) fn apply_ui_invalidations(
                         .effects_dirty;
                 }
                 if track == current_track_idx {
-                    sync_track_params_with_neural_selection(
-                        rt,
-                        app,
-                        state,
-                        track,
-                        selected_steps,
-                        Some(selected_neural_neurons),
-                    );
+                    sync_track_params(rt, state, track, selected_steps);
                     needs_reactive_cycle = true;
                 }
             }
             UiInvalidation::TrackParamPanel { track } => {
                 if track == current_track_idx {
-                    sync_track_params_with_neural_selection(
-                        rt,
-                        app,
-                        state,
-                        track,
-                        selected_steps,
-                        Some(selected_neural_neurons),
-                    );
+                    sync_track_params(rt, state, track, selected_steps);
                     needs_reactive_cycle = true;
                 }
             }
@@ -1871,7 +1702,6 @@ pub(super) fn apply_ui_invalidations(
                                 state,
                                 &app.graph.effect_descriptors,
                                 track,
-                                selected_steps,
                             );
                         }
                     }

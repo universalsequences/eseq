@@ -33,7 +33,6 @@ fn melt_context_pages_have_bound_controls_and_editable_envelopes() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),

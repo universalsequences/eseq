@@ -433,8 +433,8 @@ pub(super) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String
 /// The legacy p-lock lists a test published (`SEQ.track-plocks`, the
 /// selected step's lock rows; `SEQ.track-plock-any`, the params locked on
 /// any step; `SEQ.track-plock-variants`, the variant chips) as the
-/// seeded params' `locked` / `base` / `value` / `has-locks` and the
-/// track's variants.
+/// seeded params' `locked` / `base` / `value` / `has-locks`, the track's
+/// variants and the step panel's table ([`seed_plock_table`]).
 pub(super) fn seed_panel_locks(rt: &mut Runtime, track: eseqlisp::vm::InstanceId) {
     let row_param = |rt: &Runtime, row: &Value| -> Option<eseqlisp::vm::InstanceId> {
         let target = dict_string(row, "target")?;
@@ -502,23 +502,99 @@ pub(super) fn seed_panel_locks(rt: &mut Runtime, track: eseqlisp::vm::InstanceId
         })
         .collect();
     set_field(rt, track, "setting-locks", test_list(settings));
-    let variants: Vec<_> = dict_items(published(rt, "track-plock-variants"))
+    let rows = dict_items(published(rt, "track-plocks"));
+    let chips = dict_items(published(rt, "track-plock-variants"));
+    seed_plock_table(rt, track, &rows, &chips);
+}
+
+/// Register (or reuse) instance `key` of host kind `kind`.
+pub(super) fn keyed_or_registered(
+    rt: &mut Runtime,
+    kind: &str,
+    key: &[u64],
+) -> eseqlisp::vm::InstanceId {
+    match rt.keyed_instance(kind, key) {
+        Some(id) => id,
+        None => rt.register_keyed_instance(kind, key).unwrap(),
+    }
+}
+
+/// The step panel's p-lock table as the host kinds push it, from rows and
+/// chips in the legacy table's shape (eseq-0l17.74; the dicts
+/// `build_track_plocks_value` builds, the chips `kind` def or variant,
+/// `label`, `display`, `current`, `color-r/g/b`): `selection.plock-rows`
+/// (a `plock-row` per row; no step, param or rack macro: a host-less
+/// harness has no device instance at the row's address, so every edit is
+/// the table's host command), `selection.plock-variant` (the current chip's
+/// label) and `track`'s variants.
+pub(super) fn seed_plock_table(
+    rt: &mut Runtime,
+    track: eseqlisp::vm::InstanceId,
+    rows: &[Value],
+    chips: &[Value],
+) {
+    let text = |value: Option<Value>| match value {
+        Some(Value::String(text)) => text,
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    let ids: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let id = keyed_or_registered(rt, "eseq.kinds:plock-row", &[index as u64]);
+            let target = dict_string(row, "target").unwrap_or_default();
+            let (source, name) = match row {
+                Value::Map(map) => plock_row_source_and_name(map),
+                _ => ("step", String::new()),
+            };
+            let domain =
+                dict_string(row, "domain").unwrap_or_else(|| plock_entry_domain(&target).into());
+            let number = |key| Value::Number(dict_number(row, key).unwrap_or(0.0));
+            let options = dict_value(row, "options").unwrap_or_else(|| test_list(Vec::new()));
+            let address = PLOCK_ROW_ADDRESS
+                .iter()
+                .filter_map(|key| Some((*key, dict_value(row, key)?)))
+                .collect::<Vec<_>>();
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "target", Value::String(target));
+            set_field(rt, id, "domain", Value::String(domain));
+            set_field(rt, id, "source", Value::String(source.to_string()));
+            set_field(rt, id, "name", Value::String(name));
+            set_field(rt, id, "value", number("value"));
+            let shown = dict_value(row, "text-value").or_else(|| dict_value(row, "value"));
+            set_field(rt, id, "text", Value::String(text(shown)));
+            set_field(rt, id, "default", number("default"));
+            let default = dict_value(row, "default-text").or_else(|| dict_value(row, "default"));
+            set_field(rt, id, "default-text", Value::String(text(default)));
+            set_field(rt, id, "min", number("min"));
+            set_field(rt, id, "max", number("max"));
+            set_field(rt, id, "options", options);
+            set_field(rt, id, "address", map_value(address));
+            id
+        })
+        .collect();
+    let selection = kind_singleton_rt(rt, "selection");
+    set_field(rt, selection, "plock-rows", instance_list(ids));
+    let current = chips
+        .iter()
+        .find(|chip| dict_value(chip, "current") == Some(Value::Bool(true)))
+        .and_then(|chip| dict_string(chip, "label"))
+        .unwrap_or_default();
+    set_field(rt, selection, "plock-variant", Value::String(current));
+    let variants: Vec<_> = chips
         .iter()
         .filter(|chip| dict_string(chip, "kind").as_deref() == Some("variant"))
         .enumerate()
         .map(|(vid, chip)| {
-            let id = rt
-                .register_keyed_instance("eseq.kinds:variant", &[track, vid as u64])
-                .unwrap();
+            let id = keyed_or_registered(rt, "eseq.kinds:variant", &[track, vid as u64]);
             let color =
                 ["color-r", "color-g", "color-b"].map(|key| dict_number(chip, key).unwrap_or(0.0));
+            let label = dict_string(chip, "label").unwrap_or_default();
+            let name = dict_string(chip, "display").unwrap_or_else(|| label.clone());
             set_field(rt, id, "track", Value::Instance(track));
-            set_field(
-                rt,
-                id,
-                "label",
-                Value::String(dict_string(chip, "label").unwrap_or_default()),
-            );
+            set_field(rt, id, "label", Value::String(label));
+            set_field(rt, id, "name", Value::String(name));
             set_field(rt, id, "color", test_rgb(color));
             set_field(
                 rt,

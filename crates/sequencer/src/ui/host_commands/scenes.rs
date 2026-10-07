@@ -773,14 +773,7 @@ pub(super) fn handle(
             } else {
                 fx_value_epoch.fetch_add(1, Ordering::Relaxed);
             }
-            sync_track_params_with_neural_selection(
-                rt,
-                &app,
-                &state,
-                ct,
-                &selected_steps,
-                Some(&selected_neural_snapshot),
-            );
+            sync_track_params(rt, &state, ct, &selected_steps);
             sync_fx_param_binding_fields_with_neural_selection(
                 rt,
                 &app,
@@ -959,14 +952,7 @@ pub(super) fn handle(
                         let started = Instant::now();
                         let selected_neural_snapshot =
                             selected_neural_neurons.lock().unwrap().clone();
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
+                        sync_track_params(rt, &state, ct, &selected_steps);
                         sync_track_params_elapsed = started.elapsed();
                         let started = Instant::now();
                         sync_fx_param_binding_fields_with_neural_selection(
@@ -1301,14 +1287,7 @@ pub(super) fn handle(
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 let selected_neural_snapshot =
                     selected_neural_neurons.lock().unwrap().clone();
-                sync_track_params_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    ct,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
+                sync_track_params(rt, &state, ct, &selected_steps);
                 sync_fx_param_binding_fields_with_neural_selection(
                     rt,
                     &app,

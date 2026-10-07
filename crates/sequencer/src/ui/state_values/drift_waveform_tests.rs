@@ -67,7 +67,6 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),

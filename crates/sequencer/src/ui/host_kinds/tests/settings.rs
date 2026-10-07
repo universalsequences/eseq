@@ -224,7 +224,7 @@ fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     // settings' SEQ.tp-* fields went with the panels' port, eseq-0l17.61).
     let selected = h.shared.selected_steps.clone();
     let state = h.shared.state.clone();
-    sync_track_params(h.editor.runtime_mut(), &h.app, &state, 1, &selected);
+    sync_track_params(h.editor.runtime_mut(), &state, 1, &selected);
     assert_eq!(h.legacy("sync-labels"), h.eval_7i("project.sync-options"));
     assert_eq!(h.eval_7i("tn.morph"), Value::Number(1.0));
     assert_eq!(h.eval_7i("(nth mute-group-options t1.mute-group)"), s("3"));

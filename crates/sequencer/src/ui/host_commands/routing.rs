@@ -76,14 +76,7 @@ pub(super) fn track_output_applied(
         let selected_neural_snapshot = shared.selected_neural_neurons.lock().unwrap().clone();
         let selected_steps = &shared.selected_steps;
         let neural = Some(&selected_neural_snapshot);
-        sync_track_params_with_neural_selection(
-            rt,
-            app,
-            &shared.state,
-            track,
-            selected_steps,
-            neural,
-        );
+        sync_track_params(rt, &shared.state, track, selected_steps);
         sync_fx_param_binding_fields_with_neural_selection(
             rt,
             app,
@@ -457,8 +450,6 @@ pub(super) fn handle(
                     let print_gesture = printable
                         && try_latch_param_print(
                             ctx.shared,
-                            &mut *editor,
-                            &app,
                             track,
                             &[(PrintTarget::BusEffect {
                                 bus_idx,
@@ -598,8 +589,6 @@ pub(super) fn handle(
                         let print_gesture = printable
                             && try_latch_param_print(
                                 ctx.shared,
-                                &mut *editor,
-                                &app,
                                 track,
                                 &[(PrintTarget::BusEffect {
                                     bus_idx,

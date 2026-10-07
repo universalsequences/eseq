@@ -37,7 +37,6 @@ fn digi_fm_pages_expose_bound_visible_controls() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),

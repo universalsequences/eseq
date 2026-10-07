@@ -33,7 +33,6 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),

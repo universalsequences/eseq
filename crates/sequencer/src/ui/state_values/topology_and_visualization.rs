@@ -80,8 +80,6 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-process-slots", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-library", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
         for param in STEP_INSPECTOR_PARAMS {
             rt.set_reactive(
                 "SEQ",
@@ -149,7 +147,7 @@ pub(crate) fn sync_track_topology_state(
     );
     sync_fx_param_binding_fields(rt, app, state, current_track_idx, selected_steps);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, current_track_idx, selected_steps);
+    sync_track_params(rt, state, current_track_idx, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",

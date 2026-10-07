@@ -535,7 +535,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         build_instrument_panel_value(app, selected, selected_steps),
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, selected, selected_steps);
+    sync_track_params(rt, state, selected, selected_steps);
     sync_fx_param_binding_fields(rt, app, state, selected, selected_steps);
     rt.set_reactive(
         "SEQ",
@@ -645,7 +645,7 @@ pub(crate) fn finish_swapped_instrument_track(
             "instrument-panel",
             build_instrument_panel_value(app, selected_track, selected_steps),
         );
-        sync_track_params(rt, app, state, selected_track, selected_steps);
+        sync_track_params(rt, state, selected_track, selected_steps);
         sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
         rt.set_reactive(
             "SEQ",

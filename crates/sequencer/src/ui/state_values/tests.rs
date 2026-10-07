@@ -7737,7 +7737,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -8086,7 +8085,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -9207,64 +9205,34 @@ use panel_kinds_seed::*;
         state.transport.track_playheads[0].store(4, Ordering::Relaxed);
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
 
-        let idle_variants = value_list_maps(&build_track_plock_variants_value(
-            &state,
-            0,
-            &selected_steps,
-        ));
-        let def_chip = idle_variants
-            .iter()
-            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
-            .expect("default variant chip");
-        assert_eq!(value_map_bool(def_chip, "current"), Some(true));
-        assert!(
-            idle_variants
-                .iter()
-                .filter(|map| value_map_string(map, "kind").as_deref() == Some("variant"))
-                .all(|map| value_map_bool(map, "current") != Some(true)),
+        // The strip lists the track's variants (the registry reconciles
+        // when read): step 4's is A.
+        assert_eq!(state.plock_variant_registry_snapshot(0).entries.len(), 1);
+        // The chip the step panel lights (selection.plock-variant).
+        let chip = |selected_steps: &Arc<Mutex<HashSet<usize>>>| {
+            plock_variant_chip(&state, 0, selected_plock_step(selected_steps), None)
+        };
+        assert_eq!(
+            chip(&selected_steps),
+            "def",
             "idle display with no selected step should not mark a p-lock variant current"
         );
 
         state.transport.playing.store(true, Ordering::Relaxed);
-        let playing_variants = value_list_maps(&build_track_plock_variants_value(
-            &state,
-            0,
-            &selected_steps,
-        ));
-        let playing_def_chip = playing_variants
-            .iter()
-            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
-            .expect("default variant chip while playing");
-        assert_eq!(value_map_bool(playing_def_chip, "current"), Some(true));
-        assert!(
-            playing_variants
-                .iter()
-                .filter(|map| value_map_string(map, "kind").as_deref() == Some("variant"))
-                .all(|map| value_map_bool(map, "current") != Some(true)),
+        assert_eq!(
+            chip(&selected_steps),
+            "def",
             "playback should not make the variant chips follow the playhead"
         );
 
         state.pattern.effect_chains[0][0].set_plock(2, cutoff_idx, 900.0);
         selected_steps.lock().unwrap().insert(2);
-        let selected_variants = value_list_maps(&build_track_plock_variants_value(
-            &state,
-            0,
-            &selected_steps,
-        ));
-        let selected_chip = selected_variants
-            .iter()
-            .find(|map| {
-                value_map_string(map, "kind").as_deref() == Some("variant")
-                    && value_map_bool(map, "current") == Some(true)
-            })
-            .expect("selected step variant chip");
+        assert_eq!(chip(&selected_steps), "B");
+        let registry = state.plock_variant_registry_snapshot(0);
+        let b = registry.entries.iter().find(|entry| entry.label == "B").expect("chip B");
         assert_eq!(
-            value_map_string(selected_chip, "label").as_deref(),
-            Some("B")
-        );
-        assert_eq!(
-            value_map_number(selected_chip, "color-r"),
-            Some(sequencer::plock_variants::VARIANT_PALETTE[1][0] as f64)
+            VariantChip::of(b).color[0],
+            sequencer::plock_variants::VARIANT_PALETTE[1][0]
         );
     }
 
@@ -9276,25 +9244,11 @@ use panel_kinds_seed::*;
         app.state.pattern.timebase_plocks[0].set(4, Timebase::Eighth);
         let selected_steps = Arc::new(Mutex::new(HashSet::from([4])));
 
-        let variants = value_list_maps(&build_track_plock_variants_value(
-            &app.state,
-            0,
-            &selected_steps,
-        ));
-        let def = variants
-            .iter()
-            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
-            .expect("default chip");
-        assert_eq!(value_map_bool(def, "current"), Some(false));
-        let variant = variants
-            .iter()
-            .find(|map| {
-                value_map_string(map, "kind").as_deref() == Some("variant")
-                    && value_map_bool(map, "current") == Some(true)
-            })
-            .expect("timebase variant chip");
-        assert_eq!(value_map_number(variant, "count"), Some(1.0));
-        assert_eq!(value_map_string(variant, "label").as_deref(), Some("A"));
+        let chip = plock_variant_chip(&app.state, 0, selected_plock_step(&selected_steps), None);
+        assert_eq!(chip, "A", "the timebase variant chip is current");
+        let registry = app.state.plock_variant_registry_snapshot(0);
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(VariantChip::of(&registry.entries[0]).count, 1);
         assert_eq!(
             number_list_values(&build_step_plock_kinds(&app.state, 0))[4],
             2.0,
@@ -9320,7 +9274,7 @@ use panel_kinds_seed::*;
     fn recorded_step_expression_does_not_populate_the_variant_strip() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let before_recording = build_track_plock_variants_value(&state, 0, &selected_steps);
+        assert!(state.plock_variant_registry_snapshot(0).entries.is_empty());
         for step in 0..32 {
             state.pattern.step_data[0].set(step, StepParam::Velocity, 0.5 + step as f32 / 128.0);
             state.pattern.step_data[0].set(
@@ -9334,18 +9288,16 @@ use panel_kinds_seed::*;
                 (step as i32 % 12 - 6) as f32,
             );
         }
-        let after_recording = build_track_plock_variants_value(&state, 0, &selected_steps);
-        assert_eq!(
-            after_recording, before_recording,
-            "recording step expression must be a no-op for the variant-strip reactive value"
+        // Only the default chip renders: recording step expression makes no
+        // variant.
+        assert!(
+            state.plock_variant_registry_snapshot(0).entries.is_empty(),
+            "recording step expression must be a no-op for the variant strip"
         );
-        let variants = value_list_maps(&after_recording);
-        assert_eq!(variants.len(), 1, "only the default chip should render");
         assert_eq!(
-            value_map_string(&variants[0], "kind").as_deref(),
-            Some("def")
+            plock_variant_chip(&state, 0, selected_plock_step(&selected_steps), None),
+            "def"
         );
-        assert!(state.plock_variant_registry_snapshot(0).entries.is_empty());
     }
 
     #[test]
@@ -9364,21 +9316,10 @@ use panel_kinds_seed::*;
         app.state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 1200.0);
         let selected_steps = Arc::new(Mutex::new(HashSet::from([4, 2])));
 
-        let variants = value_list_maps(&build_track_plock_variants_value(
-            &app.state,
-            0,
-            &selected_steps,
-        ));
-        let current_variant = variants
-            .iter()
-            .find(|map| {
-                value_map_string(map, "kind").as_deref() == Some("variant")
-                    && value_map_bool(map, "current") == Some(true)
-            })
-            .expect("first selected step variant should be current");
         assert_eq!(
-            value_map_string(current_variant, "label").as_deref(),
-            Some("A")
+            plock_variant_chip(&app.state, 0, selected_plock_step(&selected_steps), None),
+            "A",
+            "the first selected step's variant is current"
         );
 
         let rows = value_list_maps(&build_track_plocks_value(
@@ -9402,60 +9343,6 @@ use panel_kinds_seed::*;
         assert_eq!(value_map_number(row, "value"), Some(900.0));
     }
 
-    // A continuous instrument p-lock row must read its LOCK cell from the
-    // per-param SEQV field rather than the row's own number. That is what lets
-    // a knob drag repaint the row through the binding path instead of
-    // republishing SEQ.track-plocks (which reruns the whole *step* panel on
-    // every mouse move — the 43ms p-lock drag). Enum/boolean rows render a
-    // dropdown off `:text-value`, so they deliberately stay unbound.
-    #[test]
-    fn continuous_instrument_plock_rows_bind_their_lock_value_to_the_param_field() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let mode_idx = desc
-            .params
-            .iter()
-            .position(|param| matches!(param.kind, sequencer::effects::ParamKind::Enum { .. }))
-            .expect("filter descriptor should include an enum param");
-        let app = test_app_with_instrument_descriptor(desc.clone());
-        app.state.pattern.instrument_slots[0].set_plock(2, cutoff_idx, 900.0);
-        app.state.pattern.instrument_slots[0].set_plock(2, mode_idx, 1.0);
-        let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
-
-        let rows = value_list_maps(&build_track_plocks_value(
-            &app,
-            &app.state,
-            0,
-            &selected_steps,
-        ));
-        let cutoff_row = rows
-            .iter()
-            .find(|row| value_map_string(row, "name").as_deref() == Some("cutoff"))
-            .expect("cutoff p-lock row");
-        assert_eq!(
-            value_map_string(cutoff_row, "value-field").as_deref(),
-            Some(
-                instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name).as_str()
-            ),
-            "continuous instrument p-lock rows must bind to the per-param SEQV value field"
-        );
-
-        let enum_row = rows
-            .iter()
-            .find(|row| {
-                value_map_string(row, "name").as_deref() == Some(&desc.params[mode_idx].name)
-            })
-            .expect("enum p-lock row");
-        assert!(
-            value_map_string(enum_row, "value-field").is_none(),
-            "enum p-lock rows render a dropdown off :text-value and must stay unbound"
-        );
-    }
-
     #[test]
     fn track_plock_variant_preview_rows_show_variant_without_selected_step() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
@@ -9469,24 +9356,12 @@ use panel_kinds_seed::*;
             .defaults
             .set(cutoff_idx, 5000.0);
         app.state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 1200.0);
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
 
-        let preview_variants = value_list_maps(&build_track_plock_variants_value_with_preview(
-            &app.state,
-            0,
-            &selected_steps,
-            Some("A"),
-        ));
-        let def_chip = preview_variants
-            .iter()
-            .find(|map| value_map_string(map, "kind").as_deref() == Some("def"))
-            .expect("default variant chip");
-        let preview_chip = preview_variants
-            .iter()
-            .find(|map| value_map_string(map, "label").as_deref() == Some("A"))
-            .expect("previewed variant chip");
-        assert_eq!(value_map_bool(def_chip, "current"), Some(false));
-        assert_eq!(value_map_bool(preview_chip, "current"), Some(true));
+        assert_eq!(
+            plock_variant_chip(&app.state, 0, None, Some("A")),
+            "A",
+            "the previewed chip is current, not def"
+        );
 
         let rows = value_list_maps(&build_track_plocks_value_for_variant_label(
             &app, &app.state, 0, "A",
@@ -9962,7 +9837,6 @@ use panel_kinds_seed::*;
             .defaults
             .set(cutoff_idx, 1234.0);
         let state = app.state.clone();
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let selection = std::collections::BTreeSet::new();
         let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff_name);
         let track_1_field = instrument_param_value_field(1, cutoff_idx, &cutoff_name);
@@ -9973,7 +9847,6 @@ use panel_kinds_seed::*;
             &mut editor,
             &app,
             &state,
-            &selected_steps,
             &selection,
             1,
             0,
@@ -9996,7 +9869,6 @@ use panel_kinds_seed::*;
             &mut editor,
             &app,
             &state,
-            &selected_steps,
             &selection,
             1,
             1,
@@ -11595,7 +11467,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -11712,7 +11583,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -11859,7 +11729,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -12235,7 +12104,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -12880,11 +12748,6 @@ use panel_kinds_seed::*;
             "SEQ",
             "track-plocks",
             build_track_plocks_value(&app, &app.state, 0, &selected),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-variants",
-            build_track_plock_variants_value(&app.state, 0, &selected),
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
@@ -15432,7 +15295,6 @@ use panel_kinds_seed::*;
                 ("bus-mutes", test_bool_list(&[false, false, false])),
                 ("bus-solos", test_bool_list(&[false, false, false])),
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -22647,6 +22509,24 @@ use panel_kinds_seed::*;
         assert_step_panel_hot_reload_rerenders(true);
     }
 
+    /// The step panel's p-lock table on the current track (a track 0 when
+    /// none is current), from rows and chips in the legacy table's shape
+    /// ([`seed_plock_table`]).
+    fn seed_plock_panel(editor: &mut Editor, rows: Value, chips: Value) {
+        let rt = editor.runtime_mut();
+        let selection = kind_singleton_rt(rt, "selection");
+        let track = match rt.instance_field(selection, "track") {
+            Ok(Value::Instance(id)) => id,
+            _ => {
+                let id = keyed_or_registered(rt, "eseq.kinds:track", &[0]);
+                set_field(rt, selection, "track", Value::Instance(id));
+                id
+            }
+        };
+        seed_plock_table(rt, track, &dict_items(Some(rows)), &dict_items(Some(chips)));
+        rt.run_reactive_cycle();
+    }
+
     #[test]
     fn metal_seq_track_panel_renders_selected_neuron_plock_rows() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -22705,12 +22585,11 @@ use panel_kinds_seed::*;
             "source".to_string(),
             Rc::new(RefCell::new(Value::String("neuron".to_string()))),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
+        seed_plock_panel(
+            &mut editor,
             Value::List(vec![Rc::new(RefCell::new(Value::Map(plock)))]),
+            test_list(vec![]),
         );
-        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
         editor
@@ -22831,13 +22710,7 @@ use panel_kinds_seed::*;
                 ("color-b", Value::Number(0.541_176_5)),
             ]),
         ]);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plocks", plocks);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plock-variants", variants);
-        editor.runtime_mut().run_reactive_cycle();
+        seed_plock_panel(&mut editor, plocks, variants);
         editor.refresh_runtime_side_effects();
 
         editor
@@ -22914,38 +22787,28 @@ use panel_kinds_seed::*;
     }
 
     // The drag contract behind the p-lock knob fix: once a row exists, moving
-    // the knob only rewrites the row's bound SEQV field. SEQ.track-plocks is
-    // NOT republished, so the panel's widget tree must not change identity —
-    // only the bound value the LOCK picker reads.
+    // the knob only rewrites the value the row binds (its param's, its rack
+    // macro's, else its own). selection.plock-rows keeps its instances, so
+    // the panel's widget tree must not change identity — only the bound
+    // value the LOCK picker reads.
     #[test]
-    fn bound_plock_row_lock_value_follows_the_param_field_without_republishing_the_list() {
+    fn bound_plock_row_lock_value_follows_its_value_without_rebuilding_the_table() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let value_field = "track-0-instrument-param-2-cutoff";
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", value_field, Value::Number(900.0));
         let plocks = test_list(vec![map_value([
-            ("target", Value::String("instrument".to_string())),
-            ("domain", Value::String("inst".to_string())),
+            ("target", Value::String("step-param".to_string())),
+            ("domain", Value::String("seq".to_string())),
             ("step-idx", Value::Number(2.0)),
-            ("param-idx", Value::Number(2.0)),
-            ("group", Value::String("inst".to_string())),
-            ("name", Value::String("cutoff".to_string())),
-            ("value", Value::Number(900.0)),
-            ("value-field", Value::String(value_field.to_string())),
-            ("default", Value::Number(5000.0)),
-            ("text-value", Value::String("900.00".to_string())),
-            ("default-text", Value::String("5000.00".to_string())),
-            ("min", Value::Number(20.0)),
-            ("max", Value::Number(20000.0)),
+            ("param-idx", Value::Number(0.0)),
+            ("group", Value::String("per step".to_string())),
+            ("name", Value::String("vel".to_string())),
+            ("value", Value::Number(0.4)),
+            ("default", Value::Number(1.0)),
+            ("text-value", Value::String("0.40".to_string())),
+            ("default-text", Value::String("1.00".to_string())),
+            ("min", Value::Number(0.0)),
+            ("max", Value::Number(1.0)),
         ])]);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plocks", plocks);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
-        editor.runtime_mut().run_reactive_cycle();
+        seed_plock_panel(&mut editor, plocks, test_list(vec![]));
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -22966,22 +22829,25 @@ use panel_kinds_seed::*;
         editor.set_layout_viewport(24, 60);
         editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
 
+        let row = editor
+            .runtime()
+            .keyed_instance("eseq.kinds:plock-row", &[0])
+            .expect("the seeded row");
         let lock_widget_id = {
             let layout = editor.widget_layout().expect("p-lock panel layout");
             let lock = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-lock")
                 .expect("bound p-lock row lock cell");
+            assert!(binds_kind_field(lock, "value", row, "value"), "{:?}", lock.props);
             assert_eq!(
                 layout_prop_number(lock, "value"),
-                Some(900.0),
-                "the LOCK picker must render the bound field's value"
+                Some(0.4),
+                "the LOCK picker must render the bound value"
             );
             lock.widget_id
         };
 
-        // Exactly what a knob drag does now: rewrite only the bound field.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", value_field, Value::Number(1234.0));
+        // What a lock edit pushes: the row's value alone.
+        set_field(editor.runtime_mut(), row, "value", Value::Number(0.75));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
@@ -22991,8 +22857,8 @@ use panel_kinds_seed::*;
             .expect("bound p-lock row lock cell survives the value change");
         assert_eq!(
             layout_prop_number(lock, "value"),
-            Some(1234.0),
-            "a bound p-lock row must follow its bound field without republishing SEQ.track-plocks"
+            Some(0.75),
+            "a bound p-lock row must follow its value without rebuilding the table"
         );
         assert_eq!(
             lock.widget_id, lock_widget_id,
@@ -23003,9 +22869,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_track_plock_panel_renders_preview_rows_read_only() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
+        seed_plock_panel(
+            &mut editor,
             test_list(vec![map_value([
                 ("target", Value::String("instrument".to_string())),
                 ("domain", Value::String("inst".to_string())),
@@ -23030,10 +22895,6 @@ use panel_kinds_seed::*;
                     ]),
                 ),
             ])]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plock-variants",
             test_list(vec![map_value([
                 ("kind", Value::String("variant".to_string())),
                 ("label", Value::String("A".to_string())),
@@ -23044,7 +22905,6 @@ use panel_kinds_seed::*;
                 ("color-b", Value::Number(0.862_745_1)),
             ])]),
         );
-        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
@@ -23080,9 +22940,8 @@ use panel_kinds_seed::*;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
+        seed_plock_panel(
+            &mut editor,
             test_list(vec![map_value([
                 ("target", Value::String("step-param".to_string())),
                 ("domain", Value::String("seq".to_string())),
@@ -23097,6 +22956,7 @@ use panel_kinds_seed::*;
                 ("min", Value::Number(-48.0)),
                 ("max", Value::Number(48.0)),
             ])]),
+            test_list(vec![]),
         );
         editor
             .runtime_mut()
@@ -23171,28 +23031,40 @@ use panel_kinds_seed::*;
         use eseqlisp::parser::{ExprKind, SpannedASTParser};
         let source = read_ui_source("effects/track-panels.lisp").unwrap();
         let forms = SpannedASTParser::new(Parser::new(source.clone()).parse_spanned().unwrap())
-            .parse().unwrap();
-        let definition = forms.iter().find(|form| match &form.kind {
-            ExprKind::List(items) => matches!(items.get(1).map(|item| &item.kind),
-                Some(ExprKind::Symbol(name)) if name == "plock-chip-color"),
-            _ => false,
-        }).expect("production chip color projection");
+            .parse()
+            .unwrap();
+        let definition = forms
+            .iter()
+            .find(|form| match &form.kind {
+                ExprKind::List(items) => matches!(items.get(1).map(|item| &item.kind),
+                    Some(ExprKind::Symbol(name)) if name == "plock-base-color"),
+                _ => false,
+            })
+            .expect("production def chip color");
         let span = &definition.origin.primary_span;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().eval_str(&source[span.start_byte..span.end_byte]).unwrap();
-        editor.runtime_mut().eval_str("(apply-theme (dict :plock-base '(0.3 0.6 0.2)))").unwrap();
+        // eseq.view-kit's, which the panel imports.
+        for helper in [
+            "(def rgb-part (c i) (nth c (+ i 1)))",
+            "(def color-rgba (c alpha) (rgba (rgb-part c 0) (rgb-part c 1) (rgb-part c 2) alpha))",
+            &source[span.start_byte..span.end_byte],
+            "(apply-theme (dict :plock-base '(0.3 0.6 0.2)))",
+        ] {
+            editor.runtime_mut().eval_str(helper).unwrap();
+        }
         editor.refresh_runtime_side_effects();
-        let color = |editor: &mut eseqlisp::Editor, kind: &str| {
-            let value = editor.runtime_mut().eval_str(&format!(
-                "(plock-chip-color (dict :kind {kind:?} :color-r 0.1 :color-g 0.2 :color-b 0.7) 0.11)"
-            )).unwrap().unwrap();
+        // A chip's color: the def chip's the theme's p-lock base, a
+        // variant's its own :rgb.
+        let color = |editor: &mut eseqlisp::Editor, color: &str| {
+            let code = format!("(color-rgba {color} 0.11)");
+            let value = editor.runtime_mut().eval_str(&code).unwrap().unwrap();
             eseqlisp::theme::parse_color_value(&value).unwrap()
         };
-        let base = color(&mut editor, "def");
+        let base = color(&mut editor, "(plock-base-color)");
         let expected = eseqlisp::theme::PLOCK_BASE();
         assert_eq!([base.r, base.g, base.b], [expected.r, expected.g, expected.b]);
         assert_eq!(base.a, 0.11);
-        let variant = color(&mut editor, "variant");
+        let variant = color(&mut editor, "(rgb 0.1 0.2 0.7)");
         assert_eq!([variant.r, variant.g, variant.b], [0.1, 0.2, 0.7]);
         assert_eq!(variant.a, 0.11);
     }
@@ -23204,8 +23076,8 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.effects.track-panels/plock-chip-click (dict :kind "variant" :label "A"))"#)
-            .expect("click p-lock variant chip with no selected step");
+            .eval_str("(eseq.effects.track-panels/plock-chip-click nil)")
+            .expect("click the def chip with no selected step");
 
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
@@ -23217,7 +23089,7 @@ use panel_kinds_seed::*;
                 };
                 assert_eq!(
                     payload.get("label").map(|value| value.borrow().clone()),
-                    Some(Value::String("A".to_string()))
+                    Some(Value::String("def".to_string()))
                 );
             }
             other => panic!("expected preview-plock-variant host command, got {other:?}"),
@@ -23570,9 +23442,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_preview_plock_row_backspace_does_not_clear_real_step() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
+        seed_plock_panel(
+            &mut editor,
             test_list(vec![map_value([
                 ("target", Value::String("instrument".to_string())),
                 ("domain", Value::String("inst".to_string())),
@@ -23589,6 +23460,7 @@ use panel_kinds_seed::*;
                 ("min", Value::Number(20.0)),
                 ("max", Value::Number(20_000.0)),
             ])]),
+            test_list(vec![]),
         );
         editor
             .runtime_mut()
@@ -33654,7 +33526,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("limiter".to_string())]),
@@ -34137,7 +34008,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -34250,7 +34120,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -34357,7 +34226,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -34472,7 +34340,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
@@ -34674,7 +34541,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("track-instrument-types", test_string_list(&["sampler"])),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -35160,7 +35026,6 @@ use panel_kinds_seed::*;
                     "track-instrument-types",
                     test_string_list(&["sampler", "sampler", "sampler"]),
                 ),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -35327,7 +35192,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -35485,7 +35349,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -35642,7 +35505,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -35747,7 +35609,6 @@ use panel_kinds_seed::*;
                 ("test-es-mode", Value::Number(0.0)),
                 ("test-es-tone", Value::Number(0.0)),
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -35866,7 +35727,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("test-phaser-flanger-param-1", Value::Number(0.0)),
                 ("test-phaser-flanger-param-2", Value::Number(4.0)),
@@ -36079,7 +35939,6 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("bpm", Value::Number(120.0)),
             ("available-effects", test_list(vec![])),
             (
@@ -36244,7 +36103,6 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("bpm", Value::Number(120.0)),
             ("available-effects", test_list(vec![])),
             (
@@ -36440,7 +36298,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -36601,7 +36458,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -36908,7 +36764,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("filter-table-live-0", Value::Number(0.0)),
                 ("filter-table-live-1", Value::Number(1000.0)),
                 ("filter-table-live-2", Value::Number(0.0)),
@@ -37299,7 +37154,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -37475,7 +37329,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -37676,7 +37529,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -37769,7 +37621,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("available-effects", test_list(vec![])),
                 (
@@ -37984,7 +37835,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -38118,7 +37968,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("available-effects", test_list(vec![])),
                 (
@@ -38334,7 +38183,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -39554,7 +39402,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("MODUM_DELAY".to_string())]),
@@ -39648,7 +39495,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(2.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("sidechain".to_string())]),
@@ -39795,7 +39641,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("dimension-d-chorus".to_string())]),
@@ -39919,7 +39764,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![
@@ -40070,7 +39914,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![
@@ -40251,7 +40094,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -40393,7 +40235,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("shimmerpitch".to_string())]),
@@ -40554,7 +40395,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("dimension-d-chorus".to_string())]),
@@ -40707,7 +40547,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -41116,7 +40955,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -41731,7 +41569,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("tp-gate", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -41990,7 +41827,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -42117,7 +41953,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -42375,7 +42210,7 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 24);
         editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
             ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
@@ -42499,7 +42334,7 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 24);
         editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
             ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
@@ -42912,7 +42747,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -43090,7 +42924,7 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
         editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
             ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
@@ -43314,7 +43148,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -43571,7 +43404,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -43736,7 +43568,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -44073,7 +43904,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -44444,7 +44274,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -45117,7 +44946,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -45274,7 +45102,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -45407,7 +45234,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -45529,7 +45355,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
@@ -45677,7 +45502,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),

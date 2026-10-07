@@ -484,7 +484,17 @@ pub(super) fn param_live_fields<'a>(
     };
     let bits = &*PARAM_BITS;
     let user = |stored| DeviceSlot::to_user(pdesc, stored);
-    if let Some((stored, locked)) = reading.shown {
+    // A print latch holding the param shows on its value (eseq-0l17.74): the
+    // knob follows the hand while it prints, not the step the playhead last
+    // wrote (as the legacy print display fields did).
+    let latched = (mask & (bits.shown() | bits.printing) != 0)
+        .then(|| {
+            let target = device.device.print_target(device.owner, index);
+            sources.print_latch(param_track(sources, device), target)
+        })
+        .flatten();
+    let shown = (reading.shown).map(|(stored, locked)| (latched.unwrap_or(stored), locked));
+    if let Some((stored, locked)) = shown {
         if mask & bits.value != 0 {
             emit(f::PARAM_VALUE, ParamField::Number(user(stored)));
         }
@@ -512,12 +522,9 @@ pub(super) fn param_live_fields<'a>(
         emit(f::PARAM_STEP_LOCKS, ParamField::Value(list_value(rows)));
     }
     if mask & bits.printing != 0 {
-        let track = param_track(sources, device);
-        let target = device.device.print_target(device.owner, index);
-        let printing = sources.print_latch(track, target).is_some();
-        emit(f::PARAM_PRINTING, ParamField::Bool(printing));
+        emit(f::PARAM_PRINTING, ParamField::Bool(latched.is_some()));
     }
-    let shown = reading.shown.map(|(stored, _)| stored);
+    let shown = shown.map(|(stored, _)| stored);
     let extras = bits.visible | bits.mod_display() | bits.process() | bits.key_locks;
     if mask & extras != 0 {
         let emit = &mut |key, value| emit(key, ParamField::Value(value));

@@ -67,23 +67,14 @@ fn sync_track_params_delta(
     previous: &mut Option<ParamSyncRevision>,
     revision: ParamSyncRevision,
     rt: &mut Runtime,
-    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    selected_neural_neurons: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) {
     if !claim_param_sync_revision(previous, &revision) {
         return;
     }
-    sync_track_params_with_neural_selection(
-        rt,
-        app,
-        state,
-        track,
-        selected_steps,
-        Some(selected_neural_neurons),
-    );
+    sync_track_params(rt, state, track, selected_steps);
 }
 
 fn sync_fx_param_bindings_delta(
@@ -234,7 +225,6 @@ pub(crate) fn sync_reactive_tick(
         let ct = ctx.shared.current_track.load(Ordering::Relaxed);
         sync_track_params(
             editor.runtime_mut(),
-            app,
             &ctx.shared.state,
             ct,
             &ctx.shared.selected_steps,
@@ -467,7 +457,6 @@ pub(crate) fn sync_reactive_tick(
             );
         }
         let mut needs_reactive_cycle = false;
-        let mut refresh_visible_step_after_cycle = false;
         let selected_neural_snapshot = ctx.shared.selected_neural_neurons.lock().unwrap().clone();
         // Rack trigger latches must still be consumed while hidden. Other
         // tracks need no 128-note scan unless a display consumes their activity
@@ -502,14 +491,6 @@ pub(crate) fn sync_reactive_tick(
             needs_reactive_cycle |= sync_fx_param_bindings_delta(
                 &mut ctx.frame.fx_param_sync_revision,
                 revision,
-                editor.runtime_mut(),
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
-            );
-            needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
                 editor.runtime_mut(),
                 &app,
                 &ctx.shared.state,
@@ -561,11 +542,9 @@ pub(crate) fn sync_reactive_tick(
                 &mut ctx.frame.track_param_sync_revision,
                 param_sync_revision.clone(),
                 rt,
-                &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
             );
             sync_fx_param_bindings_delta(
                 &mut ctx.frame.fx_param_sync_revision,
@@ -690,27 +669,15 @@ pub(crate) fn sync_reactive_tick(
                     &mut ctx.frame.track_param_sync_revision,
                     param_sync_revision.clone(),
                     rt,
-                    &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
-                    &selected_neural_snapshot,
                 );
                 if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                     *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
                 }) {
                     ctx.gesture.preview_plock_variant = None;
                 }
-                let preview_dirty = sync_track_plock_variant_preview(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.selected_steps,
-                    ctx.gesture.preview_plock_variant.as_ref(),
-                );
-                needs_reactive_cycle |= preview_dirty;
-                refresh_visible_step_after_cycle |= preview_dirty;
                 if fx_visible {
                     needs_reactive_cycle |= sync_fx_param_bindings_delta(
                         &mut ctx.frame.fx_param_sync_revision,
@@ -929,15 +896,6 @@ pub(crate) fn sync_reactive_tick(
             }) {
                 ctx.gesture.preview_plock_variant = None;
             }
-            let preview_dirty = sync_track_plock_variant_preview(
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                ctx.gesture.preview_plock_variant.as_ref(),
-            );
-            refresh_visible_step_after_cycle |= preview_dirty;
             if fx_visible {
                 if let Some(param_sync_revision) = param_sync_revision {
                     needs_reactive_cycle |= sync_fx_param_bindings_delta(
@@ -952,7 +910,6 @@ pub(crate) fn sync_reactive_tick(
                     );
                 }
             }
-            needs_reactive_cycle |= preview_dirty;
         }
         ctx.frame.prev_current_track_playhead_visible = current_track_playhead_visible;
         let mut profile_pattern_reactive_cycle = false;
@@ -1134,26 +1091,15 @@ pub(crate) fn sync_reactive_tick(
                 &mut ctx.frame.track_param_sync_revision,
                 param_sync_revision.clone(),
                 rt,
-                &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
             );
             if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                 *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
             }) {
                 ctx.gesture.preview_plock_variant = None;
             }
-            let preview_dirty = sync_track_plock_variant_preview(
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                ctx.gesture.preview_plock_variant.as_ref(),
-            );
-            refresh_visible_step_after_cycle |= preview_dirty;
             sync_track_params_elapsed = started.elapsed();
             let started = Instant::now();
             sync_fx_param_bindings_delta(
@@ -1297,26 +1243,15 @@ pub(crate) fn sync_reactive_tick(
                     &mut ctx.frame.track_param_sync_revision,
                     param_sync_revision.clone(),
                     rt,
-                    &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
-                    &selected_neural_snapshot,
                 );
                 if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                     *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
                 }) {
                     ctx.gesture.preview_plock_variant = None;
                 }
-                let preview_dirty = sync_track_plock_variant_preview(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.selected_steps,
-                    ctx.gesture.preview_plock_variant.as_ref(),
-                );
-                refresh_visible_step_after_cycle |= preview_dirty;
                 sync_fx_param_bindings_delta(
                     &mut ctx.frame.fx_param_sync_revision,
                     param_sync_revision,
@@ -1598,9 +1533,6 @@ pub(crate) fn sync_reactive_tick(
                 editor.refresh_visible_layouts_for_buffer_named("*samples*");
                 refresh_samples_elapsed = started.elapsed();
             }
-            if refresh_visible_step_after_cycle {
-                editor.refresh_visible_layouts_for_buffer_named("*step*");
-            }
             editor.mark_needs_redraw();
             if profile_cycle {
                 eprintln!(
@@ -1634,11 +1566,9 @@ pub(crate) fn sync_reactive_tick(
         modulator_phases: &ctx.meters.cached_modulator_phases,
         modulator_levels: &ctx.meters.cached_modulator_levels,
     };
-    if ctx
-        .frame
-        .host_kinds
-        .sync(app, editor.runtime_mut(), ctx.shared, &meters)
-    {
+    let host_kinds = &mut ctx.frame.host_kinds;
+    host_kinds.set_plock_preview(ctx.gesture.preview_plock_variant.as_ref());
+    if host_kinds.sync(app, editor.runtime_mut(), ctx.shared, &meters) {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }

@@ -15,7 +15,6 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("tp-gate", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),

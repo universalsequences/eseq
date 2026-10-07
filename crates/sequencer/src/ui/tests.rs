@@ -1391,17 +1391,7 @@
         let effect_descriptors = vec![Vec::new()];
         let mut runtime = Runtime::new();
 
-        let selected_steps =
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([
-                2, 3,
-            ])));
-        super::sync_instrument_plock_presence_fields(
-            &mut runtime,
-            &state,
-            &effect_descriptors,
-            0,
-            &selected_steps,
-        );
+        super::sync_instrument_plock_presence_fields(&mut runtime, &state, &effect_descriptors, 0);
 
         assert_eq!(
             runtime
@@ -1418,7 +1408,7 @@
     }
 
     #[test]
-    fn selecting_a_lock_free_step_still_publishes_the_track_variant_chips() {
+    fn selecting_a_lock_free_step_still_lists_the_track_variant_chips() {
         let (state, app) = history_test_app();
         state.pattern.track_params[0].set_num_steps(8);
         let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
@@ -1430,35 +1420,22 @@
         // the chip strip is how the user stamps that variant onto step 5.
         let selected_steps =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([5])));
-        let mut runtime = Runtime::new();
-        super::sync_track_plocks_for_neural_selection(
-            &mut runtime,
-            &app,
-            &state,
-            0,
-            &selected_steps,
-            &std::collections::BTreeSet::new(),
-        );
-
+        use crate::state_values::{build_track_plocks_value, plock_variant_chip, selected_plock_step};
+        let rows = build_track_plocks_value(&app, &state, 0, &selected_steps);
         assert_eq!(
-            runtime
-                .eval_str("(len SEQ.track-plocks)")
-                .expect("read p-lock rows"),
-            Some(Value::Number(0.0)),
+            rows,
+            Value::List(Vec::new()),
             "a lock-free step has no p-lock rows to show"
         );
+        // The chips: def (lit) and the track's variant, still choosable.
         assert_eq!(
-            runtime
-                .eval_str(r#"(get (nth SEQ.track-plock-variants 0) :kind)"#)
-                .expect("read default chip"),
-            Some(Value::String("def".to_string())),
+            plock_variant_chip(&state, 0, selected_plock_step(&selected_steps), None),
+            "def",
             "the default chip must stay available on a lock-free step"
         );
         assert_eq!(
-            runtime
-                .eval_str(r#"(get (nth SEQ.track-plock-variants 1) :kind)"#)
-                .expect("read variant chip"),
-            Some(Value::String("variant".to_string())),
+            state.plock_variant_registry_snapshot(0).entries.len(),
+            1,
             "the track's existing variants must stay choosable on a lock-free step"
         );
     }
@@ -4391,24 +4368,9 @@
                             &mut track_param_sync_revision,
                             &revision,
                         ) {
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                app,
-                                &state,
-                                TRACK,
-                                &selected_steps,
-                                Some(&neural),
-                            );
+                            sync_track_params(rt, &state, TRACK, &selected_steps);
                         }
                         epoch_track_params_ms = duration_ms(phase.elapsed());
-                        let _ = sync_track_plock_variant_preview(
-                            rt,
-                            app,
-                            &state,
-                            TRACK,
-                            &selected_steps,
-                            None,
-                        );
                         let phase = Instant::now();
                         if super::reactive_tick::claim_param_sync_revision(
                             &mut fx_param_sync_revision,
@@ -4922,25 +4884,6 @@
                                         stored,
                                     );
                                 assert!(!wrote_neural_plock);
-                                // Mirrors instrument_params.rs: the row list is
-                                // only republished when the row set can change.
-                                let plock_row_existed = displayed_plock_step(
-                                    &state,
-                                    TRACK,
-                                    selected_plock_step(&selected_steps),
-                                )
-                                .and_then(|step| {
-                                    state
-                                        .pattern
-                                        .instrument_slots
-                                        .get(TRACK)
-                                        .and_then(|slot| slot.plocks.get(step, param_idx))
-                                })
-                                .is_some()
-                                    && matches!(
-                                        desc.kind,
-                                        sequencer::effects::ParamKind::Continuous { .. }
-                                    );
                                 let display_step = if plock {
                                     let steps: Vec<usize> = selected_steps
                                         .lock()
@@ -4986,7 +4929,6 @@
                                         current_track_idx: TRACK,
                                         param_idx,
                                         display_step,
-                                        sync_plock_list: plock && !plock_row_existed,
                                         sync_plock_presence: plock,
                                         sync_sampler_times: true,
                                     },
@@ -5111,7 +5053,6 @@
                                         slot_idx,
                                         param_idx,
                                         display_step: None,
-                                        sync_plock_list: false,
                                     },
                                 );
                                 if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
@@ -5472,14 +5413,7 @@
                     build_instrument_panel_value(&app, track, &selected_steps),
                 );
             }
-            sync_track_params_with_neural_selection(
-                editor.runtime_mut(),
-                &app,
-                &state,
-                track,
-                &selected_steps,
-                None,
-            );
+            sync_track_params(editor.runtime_mut(), &state, track, &selected_steps);
             sync_fx_param_binding_fields_with_neural_selection(
                 editor.runtime_mut(),
                 &app,
@@ -5758,23 +5692,8 @@
                             &mut track_param_sync_revision,
                             &revision,
                         ) {
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                app,
-                                &state,
-                                track,
-                                &selected_steps,
-                                Some(&neural),
-                            );
+                            sync_track_params(rt, &state, track, &selected_steps);
                         }
-                        let _ = sync_track_plock_variant_preview(
-                            rt,
-                            app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            None,
-                        );
                         if super::reactive_tick::claim_param_sync_revision(
                             &mut fx_param_sync_revision,
                             &revision,
@@ -6204,8 +6123,8 @@
                 // Play BEFORE the epoch-driven resync, exactly like the real
                 // app: `displayed_plock_step` (state_values/track_steps.rs
                 // :760-766) falls back to the playhead step only while
-                // playing, so the transport-flip branch is what populates
-                // `SEQ.track-plocks` with the rows under the playhead. Parking
+                // playing, so the transport-flip branch is what would bring
+                // the rows under the playhead into view. Parking
                 // the playhead on a seeded step first is what a user pressing
                 // Play over an already-p-locked pattern gets.
                 state.transport.playing.store(true, Ordering::Relaxed);
@@ -6230,19 +6149,24 @@
                 // The p-lock TABLE must actually be on screen with rows, or
                 // the probe would be measuring a layout without the panel the
                 // report is about.
-                let track_plock_rows = |editor: &Editor| -> usize {
-                    match editor.runtime().reactive_field_value("SEQ", "track-plocks") {
-                        Some(Value::List(items)) => items.len(),
+                // The table lists `selection.plock-rows` (the host kinds).
+                let track_plock_rows = |editor: &mut Editor| -> usize {
+                    let rows = editor
+                        .runtime_mut()
+                        .eval_str("(len eseq.kinds/selection.plock-rows)")
+                        .expect("read the p-lock rows");
+                    match rows {
+                        Some(Value::Number(n)) => n as usize,
                         _ => 0,
                     }
                 };
-                let seeded_plock_rows = track_plock_rows(&editor);
+                let seeded_plock_rows = track_plock_rows(&mut editor);
                 let seeded_pattern_epoch =
                     state.transport.pattern_epoch.load(Ordering::Relaxed);
                 // The p-lock TABLE is structurally empty during printing, and
                 // this asserts it rather than assuming it:
-                // `build_track_plocks_value` (state_values/plocks.rs:860-862)
-                // returns an empty list unless `selected_plock_step` is Some,
+                // `build_track_plocks_value` (the rows `selection.plock-rows`
+                // lists) returns an empty list unless `selected_plock_step` is Some,
                 // i.e. unless a step is SELECTED. It never consults
                 // `displayed_plock_step`, so the table does not follow the
                 // playhead. Printing requires an empty selection
@@ -6530,14 +6454,6 @@
                                 &selected_steps,
                             );
                         }
-                        let _ = sync_track_plock_variant_preview(
-                            editor.runtime_mut(),
-                            &app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            None,
-                        );
                         if binding_change && fx_visible {
                             let mut sorted_steps: Vec<usize> =
                                 selected_steps.lock().unwrap().iter().copied().collect();
@@ -6674,11 +6590,9 @@
                                     "the printed step must project as a variant"
                                 );
                                 let at = Instant::now();
-                                let _ = build_track_plock_variants_value(
-                                    &state,
-                                    track,
-                                    &selected_steps,
-                                );
+                                let _ = (state.plock_variant_registry_snapshot(track).entries.iter())
+                                    .map(VariantChip::of)
+                                    .count();
                                 variants_value_ms.push(duration_ms(at.elapsed()));
                                 let at = Instant::now();
                                 let _ = sync_step_batch_structural_bindings(
@@ -6709,16 +6623,12 @@
                 let kind = plock_variant_step_render_values(&state, track)[last_printed_step].kind;
                 assert_eq!(kind, 2, "the printed step must play a variant");
                 let variants_after = state.plock_variant_registry_snapshot(track).entries.len();
-                let final_plock_rows = track_plock_rows(&editor);
+                let final_plock_rows = track_plock_rows(&mut editor);
                 // Evidence for the "does the table resync while printing?"
-                // question: `SEQ.track-plocks` is only rebuilt by
-                // `sync_track_params_delta`, which reactive_tick.rs calls from
-                // the neural-selection (:419), track-switch (:481),
-                // transport-flip (:618), pattern-epoch (:1275) and ui_epoch
-                // (:1445) branches. The playhead branch (:1032-1096) is not
-                // one of them, and `publish_scheduler_track` only READS
-                // `pattern_epoch` (publish.rs:311) rather than bumping it, so
-                // no printing frame can reach a rebuild.
+                // question: `selection.plock-rows` is rebuilt when its
+                // `RowsKey` moves (host_kinds/plock_rows.rs: the model
+                // revision, the track's p-lock key, the selection); the
+                // table stays empty with no step selected either way.
                 eprintln!(
                     "[{probe_prefix}-table] track_plocks_rows_before={seeded_plock_rows} \
                      track_plocks_rows_after={final_plock_rows} \
@@ -6808,11 +6718,9 @@
                     let _ = plock_variant_step_render_values(&state, heavy_track);
                     heavy_reconcile_ms.push(duration_ms(at.elapsed()));
                     let at = Instant::now();
-                    let _ = build_track_plock_variants_value(
-                        &state,
-                        heavy_track,
-                        &selected_steps,
-                    );
+                    let _ = (state.plock_variant_registry_snapshot(heavy_track).entries.iter())
+                                    .map(VariantChip::of)
+                                    .count();
                     heavy_variants_value_ms.push(duration_ms(at.elapsed()));
                 }
                 let (light_inst_params, light_effect_slots, light_effect_params) =
@@ -8432,24 +8340,9 @@
                             &mut track_param_sync_revision,
                             &revision,
                         ) {
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                app,
-                                &state,
-                                TRACK,
-                                &selected_steps,
-                                Some(&neural),
-                            );
+                            sync_track_params(rt, &state, TRACK, &selected_steps);
                         }
                         epoch_track_params_ms = duration_ms(phase.elapsed());
-                        let _ = sync_track_plock_variant_preview(
-                            rt,
-                            app,
-                            &state,
-                            TRACK,
-                            &selected_steps,
-                            None,
-                        );
                         let phase = Instant::now();
                         if super::reactive_tick::claim_param_sync_revision(
                             &mut fx_param_sync_revision,
@@ -9515,23 +9408,8 @@
                         &mut frame.track_param_sync_revision,
                         &revision,
                     ) {
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&neural),
-                        );
+                        sync_track_params(rt, &state, ct, &selected_steps);
                     }
-                    let _ = sync_track_plock_variant_preview(
-                        rt,
-                        app,
-                        &state,
-                        ct,
-                        &selected_steps,
-                        None,
-                    );
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.fx_param_sync_revision,
                         &revision,
@@ -9591,23 +9469,8 @@
                         &mut frame.track_param_sync_revision,
                         &revision,
                     ) {
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&neural),
-                        );
+                        sync_track_params(rt, &state, ct, &selected_steps);
                     }
-                    let _ = sync_track_plock_variant_preview(
-                        rt,
-                        app,
-                        &state,
-                        ct,
-                        &selected_steps,
-                        None,
-                    );
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.fx_param_sync_revision,
                         &revision,
@@ -10801,14 +10664,7 @@
                         &mut frame.track_param_sync_revision,
                         &revision,
                     ) {
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&neural),
-                        );
+                        sync_track_params(rt, &state, ct, &selected_steps);
                     }
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.fx_param_sync_revision,
@@ -10914,14 +10770,7 @@
                         &mut frame.track_param_sync_revision,
                         &revision,
                     ) {
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&neural),
-                        );
+                        sync_track_params(rt, &state, ct, &selected_steps);
                     }
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.fx_param_sync_revision,
@@ -14276,14 +14125,7 @@
 
             let started = Instant::now();
             let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
-            sync_track_params_with_neural_selection(
-                rt,
-                &app,
-                &state,
-                ct,
-                &selected_steps,
-                Some(&selected_neural_snapshot),
-            );
+            sync_track_params(rt, &state, ct, &selected_steps);
             sync_track_params_elapsed = started.elapsed();
 
             let started = Instant::now();

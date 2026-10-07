@@ -3446,25 +3446,6 @@ pub(crate) fn init_runtime(
                         build_step_variant_color_channel(&state, 0, 2)
                     },
                 ),
-                (
-                    "track-plocks",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plocks_value(&app, &state, 0, &selected_steps)
-                    },
-                ),
-                // Print latches are per-gesture; nothing can be armed at
-                // startup (bead eseq-4seq).
-                (
-                    "track-plock-variants",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plock_variants_value(&state, 0, &selected_steps)
-                    },
-                ),
-                ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
                 (
                     "record-armed",

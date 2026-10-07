@@ -226,9 +226,9 @@ impl Harness {
             modulator_phases: &self.meters.cached_modulator_phases,
             modulator_levels: &self.meters.cached_modulator_levels,
         };
-        self.frame
-            .host_kinds
-            .sync(&self.app, self.editor.runtime_mut(), &self.shared, &meters)
+        let host_kinds = &mut self.frame.host_kinds;
+        host_kinds.set_plock_preview(self.gesture.preview_plock_variant.as_ref());
+        host_kinds.sync(&self.app, self.editor.runtime_mut(), &self.shared, &meters)
     }
 
     /// Evaluate `code` as a view would: with eseq.kinds referred (an

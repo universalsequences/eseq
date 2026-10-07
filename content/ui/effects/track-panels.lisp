@@ -1,7 +1,9 @@
 ;; Track-level parameter, accumulator, and parameter-lock panels.
 (module eseq.effects.track-panels)
 
-(import eseq.kinds :refer (selection transport project mute-group-options))
+(import eseq.kinds :refer (selection transport project mute-group-options lock-param!
+                           unlock-param! lock-rack-macro! unlock-rack-macro! stamp-variant!))
+(import eseq.view-kit :refer (index-of color-rgba))
 (import eseq.effects.state :as st)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.param-controls :as pc)
@@ -115,40 +117,34 @@
 (def setting-lock (t name)
   (first (filter (lambda (row) (= (get row :name) name)) t.setting-locks)))
 
-(def plock-set-value (p v)
+;; The p-lock table (selection.plock-rows, eseq.kinds' plock-row). A device
+;; param's or rack macro's lock edits through its kind setters; any other
+;; row through the table's host commands, addressed by r.address.
+
+(def plock-set-value (r v)
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (host-command "set-track-plock-entry"
-      (dict :target (get p :target)
-            :step-idx (get p :step-idx)
-            :rack-slot (get p :rack-slot)
-            :slot-idx (get p :slot-idx)
-            :param-idx (get p :param-idx)
-            :value v))))
+    (cond
+      (r.param (lock-param! r.param (list r.step) v))
+      (r.rack-macro (lock-rack-macro! r.rack-macro (list r.step) v))
+      (else (host-command "set-track-plock-entry" (merge r.address :value v))))))
 
-(def plock-set-option (p label)
+(def plock-set-option (r label)
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (host-command "set-track-plock-entry-option"
-      (dict :target (get p :target)
-            :step-idx (get p :step-idx)
-            :rack-slot (get p :rack-slot)
-            :slot-idx (get p :slot-idx)
-            :param-idx (get p :param-idx)
-            :label label))))
+    (if r.param
+      (let ((i (index-of r.options label)))
+        (if (< i 0) nil (lock-param! r.param (list r.step) i)))
+      (host-command "set-track-plock-entry-option" (merge r.address :label label)))))
 
-(def plock-clear (p)
-  (host-command "clear-track-plock-entry"
-    (dict :target (get p :target)
-          :step-idx (get p :step-idx)
-          :rack-slot (get p :rack-slot)
-          :slot-idx (get p :slot-idx)
-          :param-idx (get p :param-idx)
-          :target-track (get p :target-track)
-          :network-id (get p :network-id)
-          :neuron-idx (get p :neuron-idx))))
+(def plock-clear (r)
+  (cond
+    (r.param (unlock-param! r.param (list r.step)))
+    (r.rack-macro (unlock-rack-macro! r.rack-macro (list r.step)))
+    (else (host-command "clear-track-plock-entry" r.address))))
 
-;; The p-lock table's selected row (its index in SEQ.track-plocks), -1 none.
+;; The p-lock table's selected row (its index in selection.plock-rows), -1
+;; none.
 (def-kind plock-table
   :key ()
   :state ((row -1)))
@@ -160,77 +156,70 @@
 
 (def plock-row-selected? ()
   (and (>= plock-table.row 0)
-       (< plock-table.row (len SEQ.track-plocks))))
+       (< plock-table.row (len selection.plock-rows))))
 
 ;; Deselect the table's row (an effect selection takes the delete key).
 (def clear-plock-row! ()
   (if (= plock-table.row -1) false (set! plock-table.row -1)))
 
-(def selected-plock-row-preview? ()
-  (and (plock-row-selected?)
-       (get (nth SEQ.track-plocks plock-table.row) :preview)))
-
 (def delete-selected-plock-row ()
   (if (plock-row-selected?)
-    (if (selected-plock-row-preview?)
-      (set! plock-table.row -1)
-      (let ((idx plock-table.row)
-            (next-count (- (len SEQ.track-plocks) 1)))
-        (do
-          (plock-clear (nth SEQ.track-plocks idx))
-          (set! plock-table.row
-            (if (<= next-count 0)
-              -1
-              (min idx (- next-count 1)))))))
+    (let ((rows selection.plock-rows)
+          (idx plock-table.row)
+          (r (nth rows idx)))
+      (if (= r.source "preview")
+        (set! plock-table.row -1)
+        (let ((next-count (- (len rows) 1)))
+          (do
+            (plock-clear r)
+            (set! plock-table.row
+              (if (<= next-count 0)
+                -1
+                (min idx (- next-count 1))))))))
     nil))
 
-(def plock-chip-color (chip alpha)
-  (let ((c (if (= (get chip :kind) "def")
-        THEME.plock_base
-        (list (get chip :color-r) (get chip :color-g) (get chip :color-b)))))
-    (rgba (nth c 0) (nth c 1) (nth c 2) alpha)))
+;; The def chip's color: the theme's p-lock base, as an :rgb.
+(def plock-base-color ()
+  (let ((b THEME.plock_base))
+    (rgb (nth b 0) (nth b 1) (nth b 2))))
 
-(def plock-chip-label (chip)
-  (if (get chip :display)
-    (substring (get chip :display) 0 6)
-    (get chip :label)))
-
-(def plock-chip-click (chip)
+;; Stamp chip v's variant (nil: the def chip) onto the selected steps, or
+;; preview its locks with none selected.
+(def plock-chip-click (v)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (set! plock-table.row -1)
-    (if (seq-has-selection?)
-      (host-command "stamp-plock-variant"
-        (dict :label (get chip :label)
-              :step (eseq.seq-core-state/current-step)))
-      (host-command "preview-plock-variant"
-        (dict :label (get chip :label))))))
+    (if (> (len selection.steps) 0)
+      (stamp-variant! selection.track selection.steps v)
+      (host-command "preview-plock-variant" (dict :label (if v v.label "def"))))))
 
-(def plock-chip (chip)
-  (let ((current (get chip :current))
-      (def-chip (= (get chip :kind) "def"))
-      (c (plock-chip-color chip 1.0)))
-    (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
+;; A variant chip (v, one of the track's variants), or the def chip (nil).
+(def plock-chip (v)
+  (let ((chip-label (if v v.label "def"))
+        (color (if v v.color (plock-base-color)))
+        (current (= selection.plock-variant chip-label))
+        (c (color-rgba color 1.0)))
+    (box :key (str "track-plock-chip-" (if v "variant" "def") "-" chip-label)
       :height 1.0
       :width 4.00
       :align :baseline
       :padding 0.014
       :background-color (if current
-        (plock-chip-color chip 0.11)
+        (color-rgba color 0.11)
         :mixer-strip-bg
         )
       :border-width (if current 0.75 0.35)
       :border-color (if current c :mixer-strip-selected-bg)
       :corner-radius 4
-      :on-click |x y r| (plock-chip-click chip)
+      :on-click |x y r| (plock-chip-click v)
       (h-stack :gap 0.16 :align :baseline
         (box :width 0.18 :height 0.28
           :corner-radius 2
-          :background-color (if def-chip :transparent c)
-          :border-width (if def-chip 1 0)
+          :background-color (if v c :transparent)
+          :border-width (if v 0 1)
           :border-color c)
         (box :width 0.2)
-        (label (plock-chip-label chip)
+        (label (substring (if v v.name "base") 0 6)
           :align :center :flex 1
           :font-size 10.0 :color (if current :black :dim) :bg :transparent)
         (box :width 0.2 )
@@ -246,43 +235,23 @@
         "NEURAL"))))
 
 (def plock-domain-count (domain)
-  (len (filter |p| (= (plock-row-domain p) domain) SEQ.track-plocks)))
-
-(def plock-row-domain (p)
-  (if (get p :domain)
-    (get p :domain)
-    (if (or (= (get p :target) "neural-instrument")
-            (= (get p :target) "neural-effect"))
-      "neural"
-      (if (or (= (get p :target) "instrument")
-              (= (get p :target) "rack-slot-param")
-              (= (get p :target) "rack-slot-instrument"))
-        "inst"
-        (if (= (get p :target) "effect")
-          "fx"
-          "seq")))))
+  (len (filter |r| (= r.domain domain) selection.plock-rows)))
 
 ;; A rack macro row is named by the macro's own name (rm.name, live while
-;; it is renamed); any other row by its :name.
-(def plock-row-name (p)
-  (if (= (get p :target) "rack-macro")
-    (let ((rack (dv/instrument-of selection.track))
-          (rm (if rack (nth rack.macros (get p :param-idx)) nil)))
-      (if rm rm.name (get p :name)))
-    (get p :name)))
-
-(def plock-row-title (p)
-  (if (= (get p :source) "neuron")
-    (str (get p :label) " " (get p :name))
-    (plock-row-name p)))
+;; it is renamed); any other row by its name.
+(def plock-row-title (r)
+  (if r.rack-macro r.rack-macro.name r.name))
 
 (def plock-row-key (idx suffix)
   (str "track-plock-row-" idx "-" suffix))
 
-(def plock-row-value (p)
-  (if (get p :value-field)
-    (bind-seq (get p :value-field))
-    (get p :value)))
+;; The lock a row shows: its param's or rack macro's value, bound (a drag
+;; repaints the row alone), else the row's own.
+(def plock-row-value (r)
+  (cond
+    (r.param #'r.param.value)
+    (r.rack-macro #'r.rack-macro.value)
+    (else #'r.value)))
 
 (def plock-group-header (domain)
   (box 
@@ -291,9 +260,8 @@
         :font-size 8.5 :color :dim :bg :transparent :width 4.5)
       (box :height 0.05 :width :fill :background-color (rgba 1 1 1 0.10)))))
 
-(def plock-row (p idx)
-  (subtree :key (str "track-plock-" idx "-" (get p :target) "-" (get p :step-idx) "-"
-      (get p :slot-idx) "-" (get p :param-idx))
+(def plock-row (r idx)
+  (subtree :key (str "track-plock-" idx "-" r.id)
     (box :width :fill
       :height 1.14
       :align :baseline
@@ -306,30 +274,30 @@
       :corner-radius 2
       :on-click |x y r| (set! plock-table.row idx)
       (h-stack :width :fill :gap plock-col-gap :align :center
-        (label (substring (plock-row-title p) 0 12)
+        (label (substring (plock-row-title r) 0 12)
           :key (plock-row-key idx "param")
           :font-size 9.2 :width plock-param-col-width
           :v-align :center
           :color (if (= plock-table.row idx) :white :dim)
           :bg :transparent)
-        (if (or (= (get p :source) "neuron") (get p :preview))
-          (label (if (get p :text-value) (get p :text-value) (str (get p :value)))
-            :key (plock-row-key idx "lock")
-            :font-size 9.2 :width plock-lock-col-width
-            :h-align :right :color :yellow :bg :transparent)
-          (if (get p :options)
-            (dropdown :value (get p :text-value)
-              :options (get p :options)
+        (if (= r.source "step")
+          (if (> (len r.options) 0)
+            (dropdown :value r.text
+              :options r.options
               :key (plock-row-key idx "lock")
-              :on-change (lambda (v) (plock-set-option p v))
+              :on-change (lambda (v) (plock-set-option r v))
               :width plock-lock-col-width :height 0.98 :font-size 8.4)
-            (number-picker :value (plock-row-value p)
-              :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 2
+            (number-picker :value (plock-row-value r)
+              :min r.min :max r.max :decimals 2
               :key (plock-row-key idx "lock")
               :noui true :font-size 9.2 :text-color :yellow :text-align :right
-              :on-change (lambda (v) (plock-set-value p v))
-              :width plock-lock-col-width :height 1.0)))
-        (label (if (get p :default-text) (get p :default-text) (str (get p :default)))
+              :on-change (lambda (v) (plock-set-value r v))
+              :width plock-lock-col-width :height 1.0))
+          (label r.text
+            :key (plock-row-key idx "lock")
+            :font-size 9.2 :width plock-lock-col-width
+            :h-align :right :color :yellow :bg :transparent))
+        (label r.default-text
           :key (plock-row-key idx "def")
           :v-align :center
           :font-size 9.2 :width plock-def-col-width
@@ -339,39 +307,40 @@
   (if (> (plock-domain-count domain) 0)
     (v-stack :gap 0.012
       (plock-group-header domain)
-      (each SEQ.track-plocks |p idx|
-        (if (= (plock-row-domain p) domain)
-          (plock-row p idx)
+      (each selection.plock-rows |r idx|
+        (if (= r.domain domain)
+          (plock-row r idx)
           (box :height 0))))
     (box :height 0)))
 
 (def track-plocks-panel ()
-  (box :debug-name "track-plocks-panel" :padding 0.72
-    (v-stack :gap 0.30
-      (if (> (len SEQ.track-plock-variants) 0)
-        (label "p-locks" :height 1 :bg :transparent :color :dim :font-size 8)
-        )
-      
-      (wrap :key "track-plock-variant-strip"
-        :width :fill :gap 0.18 :row-gap 0.04 :align :start
-        (each SEQ.track-plock-variants |chip idx|
-          (plock-chip chip)))
-      (if (> (len SEQ.track-plocks) 0)
-        (v-stack :key "track-plock-table" :width :fill :gap 0.1
-          (h-stack :key "track-plock-table-header" :width :fill :gap plock-col-gap
-            (label "PARAM" :key "track-plock-header-param"
-              :font-size 8.2 :width plock-param-col-width :color :dark-gray :bg :transparent)
-            (label "LOCK" :key "track-plock-header-lock"
-              :font-size 8.2 :width plock-lock-col-width :h-align :right
-              :color :dark-gray :bg :transparent)
-            (label "DEF" :key "track-plock-header-def"
-              :font-size 8.2 :width plock-def-col-width :h-align :right
-              :color :dark-gray :bg :transparent))
-          (plock-group "inst")
-          (plock-group "seq")
-          (plock-group "fx")
-          (plock-group "neural"))
-        ))))
+  (let ((t selection.track))
+    (box :debug-name "track-plocks-panel" :padding 0.72
+      (v-stack :gap 0.30
+        (if t
+          (label "p-locks" :height 1 :bg :transparent :color :dim :font-size 8)
+          )
+        
+        (wrap :key "track-plock-variant-strip"
+          :width :fill :gap 0.18 :row-gap 0.04 :align :start
+          ;; The def chip (nil), then the track's variants.
+          (each (if t (cons nil t.variants) (list)) |v idx| (plock-chip v)))
+        (if (> (len selection.plock-rows) 0)
+          (v-stack :key "track-plock-table" :width :fill :gap 0.1
+            (h-stack :key "track-plock-table-header" :width :fill :gap plock-col-gap
+              (label "PARAM" :key "track-plock-header-param"
+                :font-size 8.2 :width plock-param-col-width :color :dark-gray :bg :transparent)
+              (label "LOCK" :key "track-plock-header-lock"
+                :font-size 8.2 :width plock-lock-col-width :h-align :right
+                :color :dark-gray :bg :transparent)
+              (label "DEF" :key "track-plock-header-def"
+                :font-size 8.2 :width plock-def-col-width :h-align :right
+                :color :dark-gray :bg :transparent))
+            (plock-group "inst")
+            (plock-group "seq")
+            (plock-group "fx")
+            (plock-group "neural"))
+          )))))
 
 (def step-set-param-direct (mode value)
   ;; The stopped-transport edit path: cursor step, or the p-lock path for a

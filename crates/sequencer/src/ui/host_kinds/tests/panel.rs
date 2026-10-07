@@ -11,7 +11,7 @@ const START: usize = 2;
 const CUTOFF: usize = 2;
 
 const REFER_PANEL: &str = "(import eseq.kinds :refer (track tracks macros device-param \
-                           lock-param! set-tensor-cell! stamp-variant! stamp-key-variant! \
+                           lock-param! unlock-param! set-tensor-cell! stamp-variant! stamp-key-variant! \
                            lock-rack-macro! unlock-rack-macro! selection))";
 
 impl Harness {
@@ -600,22 +600,21 @@ fn step_variants_list_the_chips_and_stamp_through_history() {
         h.eval_panel("(map (lambda (v) v.label) chips)"),
         h.eval_panel(r#"(list "A" "B")"#)
     );
-    // Legacy parity (SEQ.track-plock-variants; its "def" chip first).
-    let legacy = build_track_plock_variants_value(&h.shared.state, 0, &h.shared.selected_steps);
-    let legacy: Vec<Value> = items(&legacy).into_iter().skip(1).collect();
-    assert_eq!(legacy.len(), 2);
-    for (at, chip) in legacy.iter().enumerate() {
+    // The registry's chips, as the legacy strip showed them.
+    let registry = h.shared.state.plock_variant_registry_snapshot(0);
+    assert_eq!(registry.entries.len(), 2);
+    for (at, entry) in registry.entries.iter().enumerate() {
+        let chip = VariantChip::of(entry);
         let code =
             format!("(let ((v (nth chips {at}))) (list v.label v.name v.count v.track v.device))");
         let read = items(&h.eval_panel(&code));
-        assert_eq!(read[0], get(chip, "label"));
-        assert_eq!(read[1], get(chip, "display"));
-        assert_eq!(read[2], get(chip, "count"));
+        assert_eq!(read[0], Value::String(chip.label));
+        assert_eq!(read[1], Value::String(chip.name));
+        assert_eq!(read[2], Value::Number(chip.count as f64));
         assert_eq!(read[3], h.eval_panel("t0"));
         assert_eq!(read[4], Value::Nil);
         let color = h.cells(&format!("(let ((v (nth chips {at}))) (rest v.color))"));
-        let legacy_color = ["color-r", "color-g", "color-b"].map(|key| num(get(chip, key)));
-        assert!(same_cells(&color, &legacy_color), "{color:?}");
+        assert!(same_cells(&color, &chip.color.map(f64::from)), "{color:?}");
     }
     // current follows the selected step.
     h.eval_panel(
@@ -1535,4 +1534,278 @@ fn a_cold_playhead_read_follows_a_voice_rebuild_without_a_model_sync() {
     assert_eq!(h.eval_panel("inst.playhead"), Value::Number(0.0));
     h.sync();
     assert_eq!(h.sampler_refreshes(), refreshes + 1);
+}
+
+/// What the step panel's table holds while it shows (the rows are built
+/// while observed).
+const OBSERVE_TABLE: &str = r#"(effect-buffer "*plock-table*"
+    (label (str (len selection.plock-rows) selection.plock-variant)))"#;
+
+/// eseq-0l17.74: the step panel's p-lock table is `selection.plock-rows`, a
+/// `plock-row` per lock at the first selected step. A device param's lock
+/// carries its param and step (the table binds the param's value and edits
+/// through `lock-param!` / `unlock-param!`), in the param's display units;
+/// a lock edit keeps the row's instance, and nothing rebuilds while nothing
+/// moved.
+#[test]
+fn plock_rows_list_the_selected_steps_locks_and_carry_their_param() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    h.eval_panel(OBSERVE_TABLE);
+    h.show_all();
+    h.lock_effect(slot, 2, CUTOFF, 900.0);
+    h.sync();
+    assert_eq!(
+        h.eval_panel("(len selection.plock-rows)"),
+        Value::Number(0.0)
+    );
+    assert_eq!(h.eval_panel("selection.plock-variant"), s("def"));
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    h.eval_panel("(def rows selection.plock-rows) (def r (first rows))");
+    assert_eq!(h.eval_panel("(len rows)"), Value::Number(1.0));
+    let read = items(&h.eval_panel(
+        "(list r.target r.domain r.source r.name r.text (= r.param cutoff) \
+         (= r.step (nth t0.steps 2)) r.rack-macro r.index)",
+    ));
+    assert_eq!(
+        read,
+        vec![
+            s("effect"),
+            s("fx"),
+            s("step"),
+            s("cutoff"),
+            s("900.00"),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Nil,
+            Value::Number(0.0),
+        ]
+    );
+    assert!(close(h.eval_panel("r.value"), 900.0));
+    assert_eq!(h.eval_panel("selection.plock-variant"), s("A"));
+    let row = h.eval_panel("r");
+    let builds = h.frame.host_kinds.plock_rows.builds;
+    h.sync();
+    assert_eq!(
+        h.frame.host_kinds.plock_rows.builds, builds,
+        "nothing moved"
+    );
+    // The table's edit: the row stays, its value moves.
+    h.eval_panel("(lock-param! r.param (list r.step) 1200)");
+    h.drain_and_sync();
+    assert_eq!(h.eval_panel("(first selection.plock-rows)"), row);
+    assert!(close(h.eval_panel("r.value"), 1200.0));
+    assert!(close(h.eval_panel("r.param.value"), 1200.0));
+    h.eval_panel("(unlock-param! r.param (list r.step))");
+    h.drain_and_sync();
+    assert_eq!(
+        h.eval_panel("(len selection.plock-rows)"),
+        Value::Number(0.0)
+    );
+    assert_eq!(h.eval_panel("selection.plock-variant"), s("def"));
+}
+
+/// eseq-0l17.74: a chip clicked with no step selected previews its variant
+/// (the gesture state the tick hands the host kinds): the table lists the
+/// variant's locks, read-only, and lights its chip; a selection replaces
+/// the preview with the selected step's locks.
+#[test]
+fn plock_rows_preview_a_variant_while_no_step_is_selected() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    h.eval_panel(OBSERVE_TABLE);
+    h.show_all();
+    for (step, value) in [(2, 500.0), (6, 800.0)] {
+        h.lock_effect(slot, step, CUTOFF, value);
+    }
+    app::edit::finish_active_gesture(&mut h.app);
+    h.sync();
+    h.command("preview-plock-variant", map_value([("label", s("B"))]));
+    h.sync();
+    h.eval_panel("(def r (first selection.plock-rows))");
+    let read = items(&h.eval_panel("(list (len selection.plock-rows) r.source r.param r.step)"));
+    assert_eq!(
+        read,
+        vec![Value::Number(1.0), s("preview"), Value::Nil, Value::Nil]
+    );
+    assert!(close(h.eval_panel("r.value"), 800.0));
+    assert_eq!(h.eval_panel("selection.plock-variant"), s("B"));
+    // A selected step shows its own locks (the tick drops the preview).
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    h.eval_panel("(def r (first selection.plock-rows))");
+    assert_eq!(h.eval_panel("r.source"), s("step"));
+    assert!(close(h.eval_panel("r.value"), 500.0));
+    assert_eq!(h.eval_panel("selection.plock-variant"), s("A"));
+}
+
+/// eseq-0l17.74: while a print latch holds a param, its value follows the
+/// hand (the latched value), not the step the playhead last printed.
+#[test]
+fn a_param_held_by_the_print_latch_shows_the_latched_value() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    h.eval_panel("(def shown #'cutoff.value) (def printing #'cutoff.printing)");
+    h.sync();
+    let rest = h.slot("shown");
+    let target = PrintTarget::Effect {
+        slot_idx: slot,
+        param_idx: CUTOFF,
+    };
+    h.shared.step_print.lock().unwrap().latch(0, target, 321.0);
+    h.sync();
+    assert_eq!(h.slot("shown"), rest, "only while playing and recording");
+    h.set_playing(true);
+    h.shared.recording.store(true, Ordering::Relaxed);
+    h.sync();
+    assert_eq!((h.slot("shown"), h.slot("printing")), (321.0, 1.0));
+    h.shared.step_print.lock().unwrap().latch(0, target, 654.0);
+    h.sync();
+    assert_eq!(h.slot("shown"), 654.0, "it follows every move of the hand");
+    h.shared.step_print.lock().unwrap().disarm();
+    h.sync();
+    assert_eq!((h.slot("shown"), h.slot("printing")), (rest, 0.0));
+}
+
+/// eseq-0l17.74 review: the table rebuilds when anything its rows read
+/// moves, not only the track's p-lock key: a neuron override edit (history),
+/// the song's row mirror (a pattern launch) and a sound binding loan (the
+/// DEF column) each move the model revision.
+#[test]
+fn plock_rows_follow_neuron_edits_and_the_model_revision() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    h.eval_panel(OBSERVE_TABLE);
+    h.show_all();
+    let param_id = h.filter_slot(slot).param_node_id(CUTOFF);
+    let param_id = param_id.expect("a live node identity");
+    h.shared
+        .state
+        .edit_current_neural_networks(|networks| {
+            let mut network = sequencer::neural::ProjectNeuralNetwork {
+                id: 11,
+                name: "router".to_string(),
+                num_neurons: 1,
+                ..sequencer::neural::ProjectNeuralNetwork::default()
+            };
+            network.neurons[0].output_overrides.effects =
+                vec![sequencer::neural::ProjectEffectParamOverride {
+                    target_track: 0,
+                    slot_index: slot,
+                    param_id,
+                    param_index: CUTOFF,
+                    value: 1234.0,
+                }];
+            networks.push(network);
+            Ok(())
+        })
+        .unwrap();
+    let neuron = sequencer::lisp_host::SelectedNeuralNeuron {
+        pattern_idx: 0,
+        network_id: 11,
+        neuron_idx: 0,
+    };
+    h.shared
+        .selected_neural_neurons
+        .lock()
+        .unwrap()
+        .insert(neuron);
+    h.sync();
+    h.eval_panel("(def r (first selection.plock-rows))");
+    assert_eq!(
+        h.eval_panel("(list r.source r.name)"),
+        h.eval_panel(r#"(list "neuron" "N1 cutoff")"#)
+    );
+    assert!(close(h.eval_panel("r.value"), 1234.0));
+    // The knob's edit writes the selected neuron's override.
+    let payload = map_value([
+        ("slot-idx", Value::Number(slot as f64)),
+        ("param-idx", Value::Number(CUTOFF as f64)),
+        ("value", Value::Number(2000.0)),
+    ]);
+    h.command("set-effect-param", payload);
+    h.sync();
+    assert!(close(h.eval_panel("r.value"), 2000.0));
+    h.shared.selected_neural_neurons.lock().unwrap().clear();
+
+    // A lock written with no counter but the song's row mirror moving.
+    h.shared.selected_steps.lock().unwrap().insert(4);
+    h.sync();
+    assert_eq!(
+        h.eval_panel("(len selection.plock-rows)"),
+        Value::Number(0.0)
+    );
+    h.filter_slot(slot).set_plock(4, CUTOFF, 700.0);
+    let builds = h.frame.host_kinds.plock_rows.builds;
+    h.sync();
+    assert_eq!(
+        h.frame.host_kinds.plock_rows.builds, builds,
+        "nothing moved yet"
+    );
+    h.app.song_row_mirror_epoch += 1;
+    h.sync();
+    h.eval_panel("(def r (first selection.plock-rows))");
+    assert!(close(h.eval_panel("r.value"), 700.0));
+    // The base value behind DEF, with only a sound binding loan moving.
+    h.filter_slot(slot).defaults.set(CUTOFF, 3000.0);
+    h.app.sound_binding_epoch += 1;
+    h.sync();
+    assert_eq!(h.eval_panel("r.default-text"), s("3000.00"));
+}
+
+/// eseq-0l17.74 review: the table is built only while something shows it:
+/// a lock drag with the step panel hidden builds nothing, and the first
+/// observation builds it.
+#[test]
+fn plock_rows_build_only_while_observed() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    let builds = h.frame.host_kinds.plock_rows.builds;
+    for value in [500.0, 600.0, 700.0] {
+        h.lock_effect(slot, 2, CUTOFF, value);
+        h.sync();
+    }
+    assert_eq!(
+        h.frame.host_kinds.plock_rows.builds, builds,
+        "hidden: no build"
+    );
+    h.eval_panel(OBSERVE_TABLE);
+    h.show_all();
+    h.sync();
+    assert_eq!(h.frame.host_kinds.plock_rows.builds, builds + 1);
+    h.eval_panel("(def r (first selection.plock-rows))");
+    assert!(close(h.eval_panel("r.value"), 700.0));
+}
+
+/// eseq-0l17.74 review: a drum rack macro's lock row carries its rack macro
+/// (display units, `lock-rack-macro!`) even when no rack panel ever showed
+/// the macros.
+#[test]
+fn a_rack_macro_row_carries_its_macro_before_the_rack_panel_shows() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    let command = app::AppCommand::SetRackMacroPlockMulti {
+        track: 2,
+        steps: vec![3],
+        macro_idx: 1,
+        value: 0.25,
+    };
+    app::apply_command(&mut h.app, command);
+    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.shared.selected_steps.lock().unwrap().insert(3);
+    h.eval_panel(OBSERVE_TABLE);
+    h.show_all();
+    h.sync();
+    h.eval_panel("(def r (first selection.plock-rows))");
+    let read = items(&h.eval_panel("(list r.target r.rack-macro.index r.step.index)"));
+    assert_eq!(
+        read,
+        vec![s("rack-macro"), Value::Number(1.0), Value::Number(3.0)]
+    );
+    assert!(close(h.eval_panel("r.rack-macro.value"), 0.25));
 }

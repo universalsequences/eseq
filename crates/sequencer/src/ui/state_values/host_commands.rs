@@ -20,7 +20,6 @@ pub(crate) fn poll_pending_compile_status(
     if let Some(status) = app.poll_pending_compile() {
         let ct = current_track.load(Ordering::Relaxed);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "compiling", Value::Bool(false));
         rt.set_reactive(
             "SEQ",
             "effects",

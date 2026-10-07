@@ -116,6 +116,7 @@ mod notes;
 mod panel;
 mod params;
 mod pending;
+mod plock_rows;
 mod presentation;
 mod racks;
 mod registry;
@@ -148,6 +149,7 @@ use neural::*;
 use panel::*;
 use params::*;
 use pending::PendingState;
+use plock_rows::PlockRowState;
 #[cfg(test)]
 pub(crate) use presentation::push_presented_views;
 use presentation::PresentedState;
@@ -192,6 +194,7 @@ pub(crate) const LIBRARY_GROOVE: &str = "eseq.kinds:library-groove";
 pub(crate) const MOD_TARGET: &str = "eseq.kinds:mod-target";
 pub(crate) const TENSOR: &str = "eseq.kinds:tensor";
 pub(crate) const VARIANT: &str = "eseq.kinds:variant";
+pub(crate) const PLOCK_ROW: &str = "eseq.kinds:plock-row";
 pub(crate) const MACRO: &str = "eseq.kinds:macro";
 pub(crate) const RACK_MACRO: &str = "eseq.kinds:rack-macro";
 pub(crate) const MACRO_MAPPING: &str = "eseq.kinds:macro-mapping";
@@ -1113,6 +1116,22 @@ pub(crate) mod f {
     pub(crate) const VARIANT_COLOR: FieldKey = (VARIANT, "color");
     pub(crate) const VARIANT_CURRENT: FieldKey = (VARIANT, "current");
     pub(crate) const VARIANT_NOTES: FieldKey = (VARIANT, "notes");
+    pub(crate) const PLOCK_ROW_INDEX: FieldKey = (PLOCK_ROW, "index");
+    pub(crate) const PLOCK_ROW_TARGET: FieldKey = (PLOCK_ROW, "target");
+    pub(crate) const PLOCK_ROW_DOMAIN: FieldKey = (PLOCK_ROW, "domain");
+    pub(crate) const PLOCK_ROW_SOURCE: FieldKey = (PLOCK_ROW, "source");
+    pub(crate) const PLOCK_ROW_NAME: FieldKey = (PLOCK_ROW, "name");
+    pub(crate) const PLOCK_ROW_VALUE: FieldKey = (PLOCK_ROW, "value");
+    pub(crate) const PLOCK_ROW_TEXT: FieldKey = (PLOCK_ROW, "text");
+    pub(crate) const PLOCK_ROW_DEFAULT: FieldKey = (PLOCK_ROW, "default");
+    pub(crate) const PLOCK_ROW_DEFAULT_TEXT: FieldKey = (PLOCK_ROW, "default-text");
+    pub(crate) const PLOCK_ROW_MIN: FieldKey = (PLOCK_ROW, "min");
+    pub(crate) const PLOCK_ROW_MAX: FieldKey = (PLOCK_ROW, "max");
+    pub(crate) const PLOCK_ROW_OPTIONS: FieldKey = (PLOCK_ROW, "options");
+    pub(crate) const PLOCK_ROW_STEP: FieldKey = (PLOCK_ROW, "step");
+    pub(crate) const PLOCK_ROW_PARAM: FieldKey = (PLOCK_ROW, "param");
+    pub(crate) const PLOCK_ROW_RACK_MACRO: FieldKey = (PLOCK_ROW, "rack-macro");
+    pub(crate) const PLOCK_ROW_ADDRESS: FieldKey = (PLOCK_ROW, "address");
 
     pub(crate) const MACRO_INDEX: FieldKey = (MACRO, "index");
     pub(crate) const MACRO_MID: FieldKey = (MACRO, "mid");
@@ -1197,6 +1216,8 @@ pub(crate) mod f {
     pub(crate) const SELECTION_RACK_SLOT: FieldKey = (SELECTION, "rack-slot");
     pub(crate) const SELECTION_AUTO_FOLLOW: FieldKey = (SELECTION, "auto-follow");
     pub(crate) const SELECTION_PLAYHEAD_ROW: FieldKey = (SELECTION, "playhead-row");
+    pub(crate) const SELECTION_PLOCK_ROWS: FieldKey = (SELECTION, "plock-rows");
+    pub(crate) const SELECTION_PLOCK_VARIANT: FieldKey = (SELECTION, "plock-variant");
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
@@ -1614,6 +1635,22 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::VARIANT_COLOR, ":rgb", Live),
     (f::VARIANT_CURRENT, ":bool", Live),
     (f::VARIANT_NOTES, "(list-of :int)", Live),
+    (f::PLOCK_ROW_INDEX, ":int", Model),
+    (f::PLOCK_ROW_TARGET, ":string", Model),
+    (f::PLOCK_ROW_DOMAIN, ":string", Model),
+    (f::PLOCK_ROW_SOURCE, ":string", Model),
+    (f::PLOCK_ROW_NAME, ":string", Model),
+    (f::PLOCK_ROW_VALUE, ":number", Model),
+    (f::PLOCK_ROW_TEXT, ":string", Model),
+    (f::PLOCK_ROW_DEFAULT, ":number", Model),
+    (f::PLOCK_ROW_DEFAULT_TEXT, ":string", Model),
+    (f::PLOCK_ROW_MIN, ":number", Model),
+    (f::PLOCK_ROW_MAX, ":number", Model),
+    (f::PLOCK_ROW_OPTIONS, "(list-of :string)", Model),
+    (f::PLOCK_ROW_STEP, "step", Model),
+    (f::PLOCK_ROW_PARAM, "param", Model),
+    (f::PLOCK_ROW_RACK_MACRO, "rack-macro", Model),
+    (f::PLOCK_ROW_ADDRESS, ":any", Model),
     // Project macros (`macros`): the structure when it moved, the values
     // compared every tick.
     (f::MACRO_INDEX, ":int", Model),
@@ -1759,6 +1796,10 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SELECTION_RACK_SLOT, ":int", Model),
     (f::SELECTION_AUTO_FOLLOW, ":bool", Live),
     (f::SELECTION_PLAYHEAD_ROW, ":int", Live),
+    // The step panel's p-lock table (`plock_rows`): rebuilt when the
+    // current track's locks, the selection or the preview moved.
+    (f::SELECTION_PLOCK_ROWS, "(list-of plock-row)", Model),
+    (f::SELECTION_PLOCK_VARIANT, ":string", Model),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
@@ -2659,6 +2700,8 @@ pub(crate) struct HostKinds {
     track_events: TrackEventsState,
     /// Generators (tick-mode sequencers) and their marks.
     pub(crate) generators: GeneratorState,
+    /// The step panel's p-lock table.
+    pub(crate) plock_rows: PlockRowState,
 }
 
 impl HostKinds {
@@ -2750,6 +2793,11 @@ impl HostKinds {
             self.networks.invalidate();
             self.track_events.invalidate();
             self.generators.invalidate();
+            self.plock_rows.invalidate();
+        }
+        if (self.plock_rows.representative()).is_some_and(|id| !rt.instance_is_live(*id)) {
+            // A hot reload dropped the p-lock rows.
+            self.plock_rows.invalidate();
         }
         if self
             .song
@@ -2819,7 +2867,7 @@ impl HostKinds {
             let scenes_done = self.sync_scene_model(&mut pusher, app);
             self.shared.borrow_mut().model_syncs += 1;
             if buses_done && tracks_done && scenes_done {
-                self.model = Some(revision);
+                self.model = Some(revision.clone());
                 self.model_track_ids.clear();
                 self.model_track_ids
                     .extend_from_slice(app.track_registry.ids());
@@ -2859,6 +2907,7 @@ impl HostKinds {
         self.sync_bus_mixer(&mut pusher, app);
         self.sync_compiling(&mut pusher, app);
         self.sync_rack_slot(&mut pusher, app);
+        self.sync_plock_rows(&mut pusher, app, &revision);
         let selection_changed = self.selection.refresh(&sources);
         // The live fields share one read of what several of them derive
         // from (the track selection, the p-lock display steps).

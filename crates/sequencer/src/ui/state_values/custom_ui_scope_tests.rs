@@ -25,7 +25,6 @@ fn custom_controls_keep_owners_across_step_selection() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("track-plocks", test_list(vec![])),
             ("track-plock-variants", test_list(vec![])),
             (

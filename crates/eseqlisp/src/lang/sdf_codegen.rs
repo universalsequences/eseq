@@ -2165,13 +2165,13 @@ mod tests {
         }
     }
 
-    /// Content files that call `eseq.materials/` macros without importing
-    /// the module, on purpose, until the effects-panel lane lands its imports
-    /// (eseq-0l17.25 / .61). They only use them in `:material` props, which
-    /// expand at render time, after `ui/main.lisp` has loaded the materials;
-    /// no `defwidget` shader is among them. Delete an entry once the file
-    /// imports the module (the corpus test then insists).
-    const PENDING_MACRO_IMPORTS: &[&str] = &["ui/effects/track-panels.lisp"];
+    /// Content files that call another module's macros without importing
+    /// it, on purpose (none since eseq-0l17.74: the last, track-panels,
+    /// calls no `eseq.materials` macro any more). Such a file may only use them in
+    /// `:material` props, which expand at render time, after `ui/main.lisp`
+    /// has loaded the materials, never in a `defwidget` shader. Delete an
+    /// entry once the file imports the module (the corpus test then insists).
+    const PENDING_MACRO_IMPORTS: &[&str] = &[];
 
     /// Every authored widget shader must survive the whole pipeline: parse,
     /// macro expansion, and both emitters, agreeing on region count and

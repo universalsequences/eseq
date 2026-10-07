@@ -33,7 +33,6 @@ fn clap_display_has_bound_waveform_and_visible_pages() {
         "SEQ",
         vec![
             ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
             ("available-effects", test_list(vec![])),
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),

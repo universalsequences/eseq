@@ -781,41 +781,21 @@ pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool 
 }
 
 /// Push the current track's step grid fields (`tp-num-steps`, `tp-timebase`).
-fn sync_track_param_fields(
+/// (The track panel reads the track's settings, its p-lock table and variant
+/// chips from eseq.kinds: `track.*`, `selection.plock-rows`.)
+pub(crate) fn sync_track_params(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
     let tp = &state.pattern.track_params[track];
-    // The track settings live in eseq.kinds (track, tuning, project option
-    // lists); the step grid still reads the pattern length.
     rt.set_reactive(
         "SEQ",
         "tp-num-steps",
         Value::Number(tp.get_num_steps() as f64),
     );
     let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
-}
-
-pub(crate) fn sync_track_params(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) {
-    sync_track_param_fields(rt, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "track-plocks",
-        build_track_plocks_value(app, state, track, selected),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-plock-variants",
-        build_track_plock_variants_value(state, track, selected),
-    );
 }
 
 /// Refreshes the step grid's timebase (`tp-timebase`), which follows the
@@ -841,35 +821,6 @@ pub(crate) fn sync_track_selection_param_binding_fields(
         Value::String(timebase.label().to_string()),
     )
     .effects_dirty
-}
-
-pub(crate) fn sync_track_params_with_neural_selection(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-    selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    >,
-) {
-    sync_track_param_fields(rt, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "track-plocks",
-        build_track_plocks_value_with_neural_selection(
-            app,
-            state,
-            track,
-            selected,
-            selected_neural_neurons,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-plock-variants",
-        build_track_plock_variants_value(state, track, selected),
-    );
 }
 
 #[cfg(test)]

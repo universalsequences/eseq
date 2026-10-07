@@ -315,14 +315,7 @@ pub(super) fn handle(
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 let selected_neural_snapshot =
                     selected_neural_neurons.lock().unwrap().clone();
-                sync_track_params_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    idx,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
+                sync_track_params(rt, &state, idx, &selected_steps);
                 sync_fx_param_binding_fields_with_neural_selection(
                     rt,
                     &app,
@@ -624,14 +617,7 @@ pub(super) fn handle(
                             build_accumulator_names(&app);
                         let selected_neural_snapshot =
                             selected_neural_neurons.lock().unwrap().clone();
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            selected,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
+                        sync_track_params(rt, &state, selected, &selected_steps);
                         sync_fx_param_binding_fields_with_neural_selection(
                             rt,
                             &app,

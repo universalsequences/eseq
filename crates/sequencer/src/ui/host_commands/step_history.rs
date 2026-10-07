@@ -73,7 +73,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let piano_roll_move_state = ctx.shared.piano_roll_move_state.clone();
     let step_clipboard = ctx.shared.step_clipboard.clone();
@@ -1492,15 +1491,6 @@ pub(super) fn handle(
                         _ => {}
                     }
                     if changed {
-                        let selection = selected_neural_neurons.lock().unwrap().clone();
-                        sync_track_plocks_for_neural_selection(
-                            editor.runtime_mut(),
-                            &app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            &selection,
-                        );
                         editor.runtime_mut().run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -1572,24 +1562,9 @@ pub(super) fn handle(
             let track = selected_track;
             // Same refresh arms the per-step clear uses, plus the automation
             // presence field so the knob's dot goes out with the locks.
-            let selection = selected_neural_neurons.lock().unwrap().clone();
             {
                 let rt = editor.runtime_mut();
-                sync_track_plocks_for_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    track,
-                    &selected_steps,
-                    &selection,
-                );
-                sync_instrument_plock_presence_display_fields(
-                    rt,
-                    &state,
-                    &app,
-                    track,
-                    &selected_steps,
-                );
+                sync_instrument_plock_presence_display_fields(rt, &state, &app, track);
                 rt.run_reactive_cycle();
             }
             editor.refresh_runtime_side_effects();
@@ -1605,21 +1580,9 @@ pub(super) fn handle(
                         ctx.gesture.preview_plock_variant = None;
                         return;
                     }
+                    // The host kinds show the variant's locks at the next
+                    // sync (`selection.plock-rows`, `plock-variant`).
                     ctx.gesture.preview_plock_variant = Some((track, label));
-                    {
-                        let rt = editor.runtime_mut();
-                        sync_track_plock_variant_preview(
-                            rt,
-                            &app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            ctx.gesture.preview_plock_variant.as_ref(),
-                        );
-                        rt.run_reactive_cycle();
-                    }
-                    editor.refresh_runtime_side_effects();
-                    editor.refresh_visible_layouts_for_buffer_named("*step*");
                     editor.mark_needs_redraw();
                 }
             }

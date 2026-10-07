@@ -1071,14 +1071,6 @@ pub(crate) fn run_event_loop(
                                 &shared.selected_steps,
                                 Some(&selection),
                             );
-                            sync_track_plocks_for_neural_selection(
-                                editor.runtime_mut(),
-                                &app,
-                                &shared.state,
-                                track,
-                                &shared.selected_steps,
-                                &selection,
-                            );
                             frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
@@ -1674,14 +1666,7 @@ pub(crate) fn run_event_loop(
                                 build_accumulator_names(&app);
                             let selected_neural_snapshot =
                                 shared.selected_neural_neurons.lock().unwrap().clone();
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                &app,
-                                &shared.state,
-                                ct,
-                                &shared.selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
+                            sync_track_params(rt, &shared.state, ct, &shared.selected_steps);
                             sync_fx_param_binding_fields_with_neural_selection(
                                 rt,
                                 &app,

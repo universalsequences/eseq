@@ -523,6 +523,30 @@
          (current :bool   :doc "A step variant the selected step plays")
          (notes   (list-of :int) :doc "The keys a key-lock variant is stamped on")))
 
+;; One row of the step panel's p-lock table (selection.plock-rows), keyed by
+;; what it locks while it is listed. A device param's or a drum rack macro's
+;; lock carries that instance (param, rack-macro: bind its value, edit it
+;; with lock-param! / lock-rack-macro!) and speaks its display units; any
+;; other row edits through the table's host commands, addressed by address.
+(def-kind plock-row
+  :key (index)
+  :host ((index   :int    :doc "Position in selection.plock-rows")
+         (target  :string :doc "What it locks: instrument, effect, midi-fx, rack-effect, rack-macro, step-param, bus-send, timebase, swing, swing-resolution, a neuron's neural-instrument / neural-effect, or a previewed variant's (rack-slot-param, …-tensor, …)")
+         (domain  :string :doc "The table section: inst, seq, fx or neural")
+         (source  :string :doc "step (a lock at the selected step), neuron (a selected neuron's output override) or preview (a previewed variant's lock; read-only)")
+         (name    :string :doc "The row's title (a neuron's prefixed with its label)")
+         (value   :number :doc "The locked value as the row was built (a param or rack-macro row binds that instance's value instead)")
+         (text    :string :doc "The option label value selects, else value with two decimals")
+         (default :number :doc "The unlocked value")
+         (default-text :string)
+         (min     :number)
+         (max     :number)
+         (options (list-of :string) :doc "Labels of an enum or boolean target; empty otherwise")
+         (step    step       :doc "The locked step (source step); nil otherwise")
+         (param   param      :doc "The device param it locks; nil for any other target")
+         (rack-macro rack-macro :doc "The drum rack macro it locks; nil for any other target")
+         (address :any :doc "The row's address for the table's host commands (set-track-plock-entry, …): target, step-idx, slot-idx, rack-slot, param-idx, target-track, network-id, neuron-idx as it has them")))
+
 ;; A project macro: (macros), project.macros.
 (def-kind macro
   :key (index)
@@ -1427,7 +1451,9 @@
          (edit-step step :doc "The step the step panel edits: the first selected step, else cursor-step")
          (rack-slot :int :doc "The current drum rack's selected slot, -1 when the current track is no rack")
          (auto-follow :bool :doc "The view follows the playhead (paused for a while after an edit)")
-         (playhead-row :int :doc "The current track's playhead-row (-1 while stopped or without a current track): bind it to follow the current track without reading selection.track")))
+         (playhead-row :int :doc "The current track's playhead-row (-1 while stopped or without a current track): bind it to follow the current track without reading selection.track")
+         (plock-rows (list-of plock-row) :doc "The step panel's p-lock table: the current track's locks at its first selected step (empty with none selected); a selected neural neuron's output overrides instead while one of the current scene is selected; a previewed variant's locks while no step is selected. Built while observed (an unobserved one reads its last build)")
+         (plock-variant :string :doc "The variant chip the table lights: the selected step's variant label (def when it plays none, empty when its locks match no variant), else the previewed variant's, else def")))
 
 ;; ── The browser, the sound palette, the editor and the app's views ──
 

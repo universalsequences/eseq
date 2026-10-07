@@ -7,7 +7,7 @@ use super::views::{assert_ported, distro, instance_bindings, legacy_forms, widge
 use super::*;
 
 /// The ported files that read host kinds.
-const PORTED: [(&str, &str); 5] = [
+const PORTED: [(&str, &str); 6] = [
     (
         "ui/effects/devices.lisp",
         include_str!("../../../../../../content/ui/effects/devices.lisp"),
@@ -27,6 +27,11 @@ const PORTED: [(&str, &str); 5] = [
     (
         "ui/effects/panel-bodies.lisp",
         include_str!("../../../../../../content/ui/effects/panel-bodies.lisp"),
+    ),
+    // The p-lock table reads selection.plock-rows (eseq-0l17.74).
+    (
+        "ui/effects/track-panels.lisp",
+        include_str!("../../../../../../content/ui/effects/track-panels.lisp"),
     ),
 ];
 
@@ -176,12 +181,11 @@ fn ported_panels_use_no_legacy_binding_forms() {
 }
 
 #[test]
-fn panel_layout_and_plock_table_keep_their_compat_reads() {
+fn panel_layout_keeps_its_compat_reads() {
     // COMPAT (eseq-0l17.22): the panels lay out from the host's panel dicts
     // (SEQ.instrument-panel / midi-effects / effects / bus-effects), read by
-    // the *fx* buffer and eseq.effects/device-panel alone; the p-lock table
-    // reads its rows (SEQ.track-plocks, the variant chips) and binds a row's
-    // value field: no kind holds a lock row yet.
+    // the *fx* buffer and eseq.effects/device-panel alone. (The p-lock table
+    // reads selection.plock-rows since eseq-0l17.74: PORTED.)
     for (file, source, forms) in [
         (
             "ui/effects/buffers.lisp",
@@ -192,11 +196,6 @@ fn panel_layout_and_plock_table_keep_their_compat_reads() {
             "ui/effects/index.lisp",
             include_str!("../../../../../../content/ui/effects/index.lisp"),
             vec!["SEQ."],
-        ),
-        (
-            "ui/effects/track-panels.lisp",
-            include_str!("../../../../../../content/ui/effects/track-panels.lisp"),
-            vec!["bind-seq", "SEQ."],
         ),
     ] {
         assert_eq!(legacy_forms(source), forms, "{file}");
