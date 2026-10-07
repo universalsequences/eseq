@@ -551,8 +551,7 @@ impl DeviceSlot {
 
     /// The `clear-param-plocks` target naming this device: the target, its
     /// (effect) slot and rack slot (the host commands'
-    /// `clear_plocks_command`); `None` where no clear command exists (a
-    /// rack slot's instrument, a bus effect).
+    /// `clear_plocks_command`); `None` for a bus effect (no p-locks).
     pub(crate) fn plock_target(self) -> Option<(&'static str, Option<usize>, Option<usize>)> {
         match self {
             Self::Instrument => Some(("instrument", None, None)),
@@ -561,7 +560,8 @@ impl DeviceSlot {
             Self::RackEffect { rack_slot, slot } => {
                 Some(("rack-effect", Some(slot), Some(rack_slot)))
             }
-            Self::RackSlot(_) | Self::BusEffect(_) => None,
+            Self::RackSlot(slot) => Some(("rack-slot-instrument", Some(slot), None)),
+            Self::BusEffect(_) => None,
         }
     }
 

@@ -14,7 +14,7 @@
 ;; The panel reads and edits the graph through the kinds (kind-bindings spec §14.2k,
 ;; §14.2s): every control edit is one undo entry, a drag's frames joining one. The
 ;; timing controls (dur x, swing) set every node's param at once through the graph-*
-;; natives, unrecorded.
+;; natives, one undo entry each.
 ;;
 ;; Project scratch entrypoint:
 ;;   (load "content/scripts/sequencers/graph-neural-16-demo.lisp")

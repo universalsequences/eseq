@@ -700,15 +700,16 @@ fn graph_undo_restores_only_the_edited_field() {
         h.eval_graph(code);
         h.graph_drain();
     };
+    // A legacy write is an entry of its own (eseq-0l17.53).
     let legacy = |h: &mut Harness, code: &str| {
         h.eval_graph(code);
-        h.sync();
+        h.graph_drain();
     };
     let delay = h.eval_graph("n1.delay");
     let entries = h.app.history.undo_len();
-    // A node field: undo leaves a later legacy write to another field.
-    set(&mut h, "(set! n1.delay 7)");
+    // A node field: undo leaves an earlier legacy write to another field.
     legacy(&mut h, "(graph-node nn 1 :route 2)");
+    set(&mut h, "(set! n1.delay 7)");
     h.graph_undo();
     assert_eq!(h.eval_graph("n1.delay"), delay);
     assert_eq!(
@@ -723,8 +724,8 @@ fn graph_undo_restores_only_the_edited_field() {
     );
     // A config field.
     let poly = h.eval_graph("g.max-poly");
-    set(&mut h, "(set! g.max-poly 6)");
     legacy(&mut h, "(graph-config nn :reset-bars 3)");
+    set(&mut h, "(set! g.max-poly 6)");
     h.graph_undo();
     assert_eq!(h.eval_graph("g.max-poly"), poly);
     assert_eq!(h.eval_graph("g.reset-bars"), number(3.0), "reset-bars kept");
@@ -734,8 +735,8 @@ fn graph_undo_restores_only_the_edited_field() {
         h.eval_graph("(list 6 3)")
     );
     // A group matrix cell: the matrix's other cells are kept.
-    set(&mut h, "(set-group-gain! g 0 1 1.5)");
     legacy(&mut h, "(graph-config nn :group-gain-2-3 0.5)");
+    set(&mut h, "(set-group-gain! g 0 1 1.5)");
     h.graph_undo();
     assert_eq!(
         h.eval_graph("(list (nth g.group-gain 1) (nth g.group-gain (+ (* 2 4) 3)))"),
@@ -746,7 +747,7 @@ fn graph_undo_restores_only_the_edited_field() {
         h.eval_graph("(list (graph-config-value nn :group-gain-0-1) (graph-config-value nn :group-gain-2-3))"),
         h.eval_graph("(list 1.5 0.5)")
     );
-    assert_eq!(h.app.history.undo_len(), entries + 3);
+    assert_eq!(h.app.history.undo_len(), entries + 6);
     // An undone first cell edit leaves no matrix override behind.
     set(&mut h, "(set-group-coupling! g 3 3 1)");
     h.graph_undo();
@@ -770,6 +771,68 @@ fn graph_undo_restores_only_the_edited_field() {
     );
     h.graph_undo();
     assert_eq!(h.eval_graph("n1.delay"), delay);
+}
+
+/// eseq-0l17.53: the legacy `graph-*` natives record their writes: one
+/// entry per native call (every field a `graph-node` call names), one per
+/// pass of writes to one graph (a batch), undone whole; a native write
+/// joins a kind drag on the same field (the shared merge key).
+#[test]
+fn legacy_graph_writes_record_one_entry_per_pass() {
+    let mut h = Harness::new();
+    h.neural("nn");
+    h.eval_graph(
+        "(def g (graph-of nn)) (def n1 (nth g.nodes 1))
+         (def thr (graph-param-named n1 \"threshold\"))",
+    );
+    let read = |h: &mut Harness| {
+        h.eval_graph(
+            "(list (graph-param-value nn 0 :threshold) (graph-param-value nn 1 :threshold)
+                   (graph-node-value nn 1 :delay) (graph-node-value nn 1 :resolution)
+                   (graph-edge-value nn :from 0 :to 1 :weight) (graph-config-value nn :reset-bars))",
+        )
+    };
+    let original = read(&mut h);
+    let entries = h.app.history.undo_len();
+    // One call: one entry, though it sets two fields.
+    h.eval_graph("(graph-node nn 1 :delay 6 :resolution \"8\")");
+    h.graph_drain();
+    assert_eq!(h.app.history.undo_len(), entries + 1);
+    // A pass of writes (a batch over nodes, an edge, a config field): one.
+    h.eval_graph(
+        "(for-each (lambda (n) (graph-param nn n :threshold 0.9)) (range 0 2))
+         (graph-edge nn :from 0 :to 1 :weight 0.25)
+         (graph-config nn :reset-bars 5)",
+    );
+    h.graph_drain();
+    assert_eq!(h.app.history.undo_len(), entries + 2);
+    let edited = read(&mut h);
+    assert_eq!(edited, h.eval_graph("(list 0.9 0.9 6 \"8\" 0.25 5)"));
+    // A write of the current value is no entry.
+    h.eval_graph("(graph-param nn 0 :threshold 0.9)");
+    h.graph_drain();
+    assert_eq!(h.app.history.undo_len(), entries + 2);
+    h.graph_undo();
+    h.graph_undo();
+    assert_eq!(read(&mut h), original, "undo restores every field");
+    h.graph_redo();
+    h.graph_redo();
+    assert_eq!(read(&mut h), edited);
+
+    // A native write during a kind drag of the same field joins its entry.
+    let before = h.app.history.undo_len();
+    let threshold = h.eval_graph("thr.value");
+    h.gesture.pointer_down = true;
+    h.eval_graph("(set! thr.value 0.4)");
+    h.graph_drain();
+    h.eval_graph("(graph-param nn 1 :threshold 0.6)");
+    h.graph_drain();
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 1, "one entry");
+    assert_eq!(h.eval_graph("thr.value"), number(0.6));
+    h.graph_undo();
+    assert_eq!(h.eval_graph("thr.value"), threshold);
 }
 
 #[test]

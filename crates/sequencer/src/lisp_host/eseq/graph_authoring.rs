@@ -247,25 +247,13 @@ pub fn register_graph_authoring_natives(
                 return Err("graph-node expects graph id/name and node index".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_graph_node, &args[0])?;
-            let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= graph_capacity_node_count(&manifest) {
-                return Err("graph-node node index out of range".to_string());
-            }
-            let edit = parse_graph_node_edit(&args[2..])?;
-            let sequencer_name = manifest.name.clone();
-            state_for_graph_node.edit_current_graph_overrides(|graphs| {
-                let graph = ensure_graph_overrides(graphs, &manifest);
-                let node = ensure_graph_node_intrinsic(graph, &manifest.node.name, instance);
-                apply_graph_node_edit(node, edit);
-                Ok(())
-            })?;
-            invalidate_graph_reads(
+            let edit = LegacyGraphEdit::node(&manifest, &args[1..])?;
+            write_legacy_graph_edits(
                 ctx,
                 &state_for_graph_node,
                 &manifest,
-                GraphReadScope::Node(instance),
-            );
-            ctx.set_status(format!("updated graph '{sequencer_name}' node {instance}"));
+                vec![edit],
+            )?;
             Ok(EValue::Bool(true))
         },
     );
@@ -280,32 +268,13 @@ pub fn register_graph_authoring_natives(
                 return Err("graph-param expects graph, node index, param, value".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_graph_param, &args[0])?;
-            let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= graph_capacity_node_count(&manifest) {
-                return Err("graph-param node index out of range".to_string());
-            }
-            let param = graph_key_string(&args[2]).ok_or("graph-param expects param name")?;
-            let value = graph_number(&args[3]).ok_or("graph-param value must be numeric")?;
-            let sequencer_name = manifest.name.clone();
-            state_for_graph_param.edit_current_graph_overrides(|graphs| {
-                let graph = ensure_graph_overrides(graphs, &manifest);
-                graph.set_slot(&crate::graph::GraphOverrideSlot::NodeParam {
-                    group: manifest.node.name.clone(),
-                    instance,
-                    param: param.clone(),
-                    value: Some(value),
-                });
-                Ok(())
-            })?;
-            invalidate_graph_reads(
+            let edit = LegacyGraphEdit::param(&manifest, &args[1..])?;
+            write_legacy_graph_edits(
                 ctx,
                 &state_for_graph_param,
                 &manifest,
-                GraphReadScope::Node(instance),
-            );
-            ctx.set_status(format!(
-                "updated graph '{sequencer_name}' node {instance} param {param}"
-            ));
+                vec![edit],
+            )?;
             Ok(EValue::Bool(true))
         },
     );
@@ -320,30 +289,13 @@ pub fn register_graph_authoring_natives(
                 return Err("graph-edge expects graph, :from, :to, and a param".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_graph_edge, &args[0])?;
-            let edit = parse_graph_edge_edit(&manifest, &args[1..])?;
-            let sequencer_name = manifest.name.clone();
-            let param_name = edit.param.clone();
-            let (from, to) = (edit.from, edit.to);
-            state_for_graph_edge.edit_current_graph_overrides(|graphs| {
-                let graph = ensure_graph_overrides(graphs, &manifest);
-                graph.set_slot(&crate::graph::GraphOverrideSlot::EdgeParam {
-                    group: edit.group,
-                    from: edit.from,
-                    to: edit.to,
-                    param: edit.param,
-                    value: Some(edit.value),
-                });
-                Ok(())
-            })?;
-            invalidate_graph_reads(
+            let edit = LegacyGraphEdit::edge(&manifest, &args[1..])?;
+            write_legacy_graph_edits(
                 ctx,
                 &state_for_graph_edge,
                 &manifest,
-                GraphReadScope::Edge { from, to },
-            );
-            ctx.set_status(format!(
-                "updated graph '{sequencer_name}' edge {param_name}"
-            ));
+                vec![edit],
+            )?;
             Ok(EValue::Bool(true))
         },
     );
@@ -377,14 +329,8 @@ pub fn register_graph_authoring_natives(
                 return Err("graph-config expects graph, field, value".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_graph_config, &args[0])?;
-            let field = graph_key_string(&args[1])
-                .ok_or_else(|| "graph-config expects a field name".to_string())?;
-            let sequencer_name = manifest.name.clone();
-            set_graph_config_value(&state_for_graph_config, &manifest, &field, &args[2])?;
-            // Config can move anything (`:node-count` changes which nodes and
-            // edges exist), so every tracked read of this graph re-resolves.
-            invalidate_graph_reads(ctx, &state_for_graph_config, &manifest, GraphReadScope::All);
-            ctx.set_status(format!("updated graph '{sequencer_name}' config {field}"));
+            let edit = LegacyGraphEdit::config(&manifest, &args[1..])?;
+            write_legacy_graph_edits(ctx, &state_for_graph_config, &manifest, vec![edit])?;
             Ok(EValue::Bool(true))
         },
     );
@@ -915,12 +861,13 @@ fn clamp_graph_node_count(
     Ok((value.round() as i64).clamp(min as i64, max as i64) as u32)
 }
 
-fn set_graph_config_value(
-    state: &crate::sequencer::SequencerState,
+/// The override field `(graph-config g field value)` writes, with its
+/// value (clamped to the field's range).
+fn graph_config_slot(
     manifest: &crate::graph::GraphManifest,
     field: &str,
     value: &EValue,
-) -> Result<(), String> {
+) -> Result<crate::graph::GraphOverrideSlot, String> {
     use crate::graph::{GraphConfigField as Config, GraphOverrideSlot, GroupMatrix};
     let config = |field| GraphOverrideSlot::ConfigField(field);
     let cell = |matrix, index, value| GraphOverrideSlot::GroupCell {
@@ -1009,11 +956,7 @@ fn set_graph_config_value(
             }
         }
     };
-
-    state.edit_current_graph_overrides(|graphs| {
-        ensure_graph_overrides(graphs, manifest).set_slot(&slot);
-        Ok(())
-    })
+    Ok(slot)
 }
 
 fn graph_timebase_value(timebase: crate::sequencer::Timebase) -> EValue {
@@ -1541,37 +1484,31 @@ fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
     Ok(edit)
 }
 
-fn apply_graph_node_edit(
-    node: &mut crate::graph::ProjectGraphNodeIntrinsicOverride,
+/// The node override fields a `graph-node` edit sets (the ones it names).
+fn graph_node_edit_slots(
+    group: &str,
+    instance: usize,
     edit: GraphNodeEdit,
-) {
-    if edit.resolution.is_some() {
-        node.resolution = edit.resolution;
-    }
-    if edit.delay_steps.is_some() {
-        node.delay_steps = edit.delay_steps;
-    }
-    if edit.quantize.is_some() {
-        node.quantize = edit.quantize;
-    }
-    if edit.route.is_some() {
-        node.route = edit.route;
-    }
-    if edit.seed_from.is_some() {
-        node.seed_from = edit.seed_from;
-    }
-    if edit.seed_on_reset.is_some() {
-        node.seed_on_reset = edit.seed_on_reset;
-    }
-    if edit.duration.is_some() {
-        node.duration = edit.duration;
-    }
-    if edit.swing.is_some() {
-        node.swing = edit.swing;
-    }
-    if edit.neural_group.is_some() {
-        node.neural_group = edit.neural_group;
-    }
+) -> Vec<crate::graph::GraphOverrideSlot> {
+    use crate::graph::GraphNodeField as Field;
+    let fields = [
+        edit.resolution.map(|v| Field::Resolution(Some(v))),
+        edit.delay_steps.map(|v| Field::Delay(Some(v))),
+        edit.quantize.map(|v| Field::Quantize(Some(v))),
+        edit.route.map(|v| Field::Route(Some(v))),
+        edit.seed_from.map(|v| Field::SeedFrom(Some(v))),
+        edit.seed_on_reset.map(|v| Field::SeedOnReset(Some(v))),
+        edit.duration.map(|v| Field::Duration(Some(v))),
+        edit.swing.map(|v| Field::Swing(Some(v))),
+        edit.neural_group.map(|v| Field::Group(Some(v))),
+    ];
+    (fields.into_iter().flatten())
+        .map(|field| crate::graph::GraphOverrideSlot::NodeField {
+            group: group.to_string(),
+            instance,
+            field,
+        })
+        .collect()
 }
 
 fn parse_graph_edge_edit(
@@ -2240,6 +2177,240 @@ fn enqueue_graph_node_process_history(
     }
     ctx.enqueue_command(HostCommand::Custom {
         name: GRAPH_NODE_PROCESS_HISTORY_COMMAND.to_string(),
+        payload: EValue::Map(payload),
+    });
+}
+
+/// The host command a legacy `graph-*` write (`graph-node`, `graph-param`,
+/// `graph-edge`, `graph-config`) enqueues so the host records it
+/// (eseq-0l17.53). The write is already applied; the payload carries the
+/// scene it was made in, the graph's sequencer id and every field it set,
+/// before and after (`edits`: JSON `[before, after]` pairs of
+/// [`crate::graph::GraphOverrideSlot`]). The writes of one pass (until the
+/// host drains its commands) of one graph extend one command, so a batch
+/// (a param set on every node, every delay scaled) is one undo entry.
+pub const GRAPH_OVERRIDE_HISTORY_COMMAND: &str = "graph-override-history";
+
+/// One legacy `graph-*` write, parsed from the native's arguments after the
+/// graph: the override fields it sets (values included) and what it
+/// re-renders.
+enum LegacyGraphEdit {
+    Node {
+        instance: usize,
+        slots: Vec<crate::graph::GraphOverrideSlot>,
+    },
+    Param {
+        instance: usize,
+        param: String,
+        slot: crate::graph::GraphOverrideSlot,
+    },
+    Edge {
+        query: GraphEdgeQuery,
+        slot: crate::graph::GraphOverrideSlot,
+    },
+    Config {
+        field: String,
+        slot: crate::graph::GraphOverrideSlot,
+    },
+}
+
+impl LegacyGraphEdit {
+    /// `graph-node`'s `node-index :field value ...`.
+    fn node(manifest: &crate::graph::GraphManifest, args: &[EValue]) -> Result<Self, String> {
+        let instance = parse_nonnegative_usize(&args[0], "node index")?;
+        if instance >= graph_capacity_node_count(manifest) {
+            return Err("graph-node node index out of range".to_string());
+        }
+        let edit = parse_graph_node_edit(&args[1..])?;
+        let slots = graph_node_edit_slots(&manifest.node.name, instance, edit);
+        Ok(Self::Node { instance, slots })
+    }
+
+    /// `graph-param`'s `node-index param value`.
+    fn param(manifest: &crate::graph::GraphManifest, args: &[EValue]) -> Result<Self, String> {
+        let instance = parse_nonnegative_usize(&args[0], "node index")?;
+        if instance >= graph_capacity_node_count(manifest) {
+            return Err("graph-param node index out of range".to_string());
+        }
+        let param = graph_key_string(&args[1]).ok_or("graph-param expects param name")?;
+        let value = graph_number(&args[2]).ok_or("graph-param value must be numeric")?;
+        let slot = crate::graph::GraphOverrideSlot::NodeParam {
+            group: manifest.node.name.clone(),
+            instance,
+            param: param.clone(),
+            value: Some(value),
+        };
+        Ok(Self::Param {
+            instance,
+            param,
+            slot,
+        })
+    }
+
+    /// `graph-edge`'s `:from f :to t :param value`.
+    fn edge(manifest: &crate::graph::GraphManifest, args: &[EValue]) -> Result<Self, String> {
+        let edit = parse_graph_edge_edit(manifest, args)?;
+        let slot = crate::graph::GraphOverrideSlot::EdgeParam {
+            group: edit.group.clone(),
+            from: edit.from,
+            to: edit.to,
+            param: edit.param.clone(),
+            value: Some(edit.value),
+        };
+        let query = GraphEdgeQuery {
+            group: edit.group,
+            from: edit.from,
+            to: edit.to,
+            param: edit.param,
+        };
+        Ok(Self::Edge { query, slot })
+    }
+
+    /// `graph-config`'s `field value`.
+    fn config(manifest: &crate::graph::GraphManifest, args: &[EValue]) -> Result<Self, String> {
+        let field = graph_key_string(&args[0])
+            .ok_or_else(|| "graph-config expects a field name".to_string())?;
+        let slot = graph_config_slot(manifest, &field, &args[1])?;
+        Ok(Self::Config { field, slot })
+    }
+
+    fn slots(&self) -> &[crate::graph::GraphOverrideSlot] {
+        match self {
+            Self::Node { slots, .. } => slots,
+            Self::Param { slot, .. } | Self::Edge { slot, .. } | Self::Config { slot, .. } => {
+                std::slice::from_ref(slot)
+            }
+        }
+    }
+
+    /// After the write: re-resolve the tracked reads it covers and report
+    /// it.
+    fn refresh(
+        &self,
+        ctx: &mut eseqlisp::NativeContext,
+        state: &Arc<crate::sequencer::SequencerState>,
+        manifest: &crate::graph::GraphManifest,
+    ) {
+        let name = &manifest.name;
+        match self {
+            Self::Node { instance, .. } => {
+                let instance = *instance;
+                invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Node(instance));
+                ctx.set_status(format!("updated graph '{name}' node {instance}"));
+            }
+            Self::Param {
+                instance, param, ..
+            } => {
+                let instance = *instance;
+                invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Node(instance));
+                ctx.set_status(format!(
+                    "updated graph '{name}' node {instance} param {param}"
+                ));
+            }
+            Self::Edge { query, .. } => {
+                let (from, to) = (query.from, query.to);
+                invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Edge { from, to });
+                ctx.set_status(format!("updated graph '{name}' edge {}", query.param));
+            }
+            Self::Config { field, .. } => {
+                // Config can move anything (`:node-count` changes which nodes
+                // and edges exist), so every tracked read of this graph
+                // re-resolves.
+                invalidate_graph_reads(ctx, state, manifest, GraphReadScope::All);
+                ctx.set_status(format!("updated graph '{name}' config {field}"));
+            }
+        }
+    }
+}
+
+/// Apply legacy `graph-*` writes to `manifest`'s overrides in the current
+/// scene, record them (one [`GRAPH_OVERRIDE_HISTORY_COMMAND`] per pass and
+/// graph) and refresh their readers.
+fn write_legacy_graph_edits(
+    ctx: &mut eseqlisp::NativeContext,
+    state: &Arc<crate::sequencer::SequencerState>,
+    manifest: &crate::graph::GraphManifest,
+    edits: Vec<LegacyGraphEdit>,
+) -> Result<(), String> {
+    let written = state.edit_current_graph_overrides(|graphs| {
+        let graph = ensure_graph_overrides(graphs, manifest);
+        let written = (edits.iter().flat_map(LegacyGraphEdit::slots))
+            .map(|slot| {
+                let before = graph.slot(slot);
+                graph.set_slot(slot);
+                (before, graph.slot(slot))
+            })
+            .filter(|(before, after)| before != after)
+            .collect::<Vec<_>>();
+        Ok(written)
+    })?;
+    if let (false, Some(scene)) = (written.is_empty(), state.current_scene_id()) {
+        enqueue_graph_override_history(ctx, scene, manifest.id, written);
+    }
+    for edit in &edits {
+        edit.refresh(ctx, state, manifest);
+    }
+    Ok(())
+}
+
+type GraphOverrideEdits = Vec<(
+    crate::graph::GraphOverrideSlot,
+    crate::graph::GraphOverrideSlot,
+)>;
+
+/// Queue `edits` for the host to record, extending the history command this
+/// pass queued last when it names the same scene and graph (a field it
+/// already holds keeps its first `before`).
+fn enqueue_graph_override_history(
+    ctx: &mut eseqlisp::NativeContext,
+    scene: crate::sequencer::SceneId,
+    sequencer_id: u64,
+    edits: GraphOverrideEdits,
+) {
+    // Ids go as strings: legacy hashed sequencer ids exceed an f64's exact range.
+    let (scene, sequencer_id) = (scene.0.to_string(), sequencer_id.to_string());
+    let extended = ctx.with_last_queued_command(|command| {
+        let Some(HostCommand::Custom {
+            name,
+            payload: EValue::Map(map),
+        }) = command
+        else {
+            return None;
+        };
+        let field = |key: &str| map.get(key).map(|cell| cell.borrow().clone());
+        let same = name == GRAPH_OVERRIDE_HISTORY_COMMAND
+            && field("scene-id") == Some(EValue::String(scene.clone()))
+            && field("sequencer-id") == Some(EValue::String(sequencer_id.clone()));
+        let Some(EValue::String(queued)) = field("edits").filter(|_| same) else {
+            return None;
+        };
+        let mut queued: GraphOverrideEdits = serde_json::from_str(&queued).ok()?;
+        for (before, after) in edits.iter().cloned() {
+            let address = after.address();
+            match queued
+                .iter_mut()
+                .find(|(_, held)| held.address() == address)
+            {
+                Some((_, held)) => *held = after,
+                None => queued.push((before, after)),
+            }
+        }
+        let json = serde_json::to_string(&queued).ok()?;
+        *map.get("edits")?.borrow_mut() = EValue::String(json);
+        Some(())
+    });
+    if extended.is_some() {
+        return;
+    }
+    let Ok(json) = serde_json::to_string(&edits) else {
+        return;
+    };
+    let mut payload = HashMap::new();
+    payload.insert("scene-id".to_string(), lisp_string(scene));
+    payload.insert("sequencer-id".to_string(), lisp_string(sequencer_id));
+    payload.insert("edits".to_string(), lisp_string(json));
+    ctx.enqueue_command(HostCommand::Custom {
+        name: GRAPH_OVERRIDE_HISTORY_COMMAND.to_string(),
         payload: EValue::Map(payload),
     });
 }

@@ -1681,6 +1681,7 @@ mod glyph_fingerprint_tests {
             scaling: ParamScaling::Linear,
             node_param_idx: 0,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         }

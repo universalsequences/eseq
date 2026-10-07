@@ -389,6 +389,7 @@ use panel_kinds_seed::*;
             scaling: sequencer::effects::ParamScaling::Linear,
             node_param_idx: 0,
             node_param_span: 1,
+            percent_ratio: true,
             host_control: None,
             ui_metadata: None,
         };
@@ -44796,6 +44797,7 @@ use panel_kinds_seed::*;
                     scaling: sequencer::effects::ParamScaling::Linear,
                     node_param_idx: 0,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -44810,6 +44812,7 @@ use panel_kinds_seed::*;
                     scaling: sequencer::effects::ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(sequencer::effects::HostControl::FxSidechain {
                         input_channel: 6,
                     }),

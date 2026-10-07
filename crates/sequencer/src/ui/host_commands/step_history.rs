@@ -1738,8 +1738,8 @@ pub(super) fn step_list(steps: impl IntoIterator<Item = usize>) -> Vec<usize> {
 
 /// The `Clear*PlockMulti` command clearing `param_idx`'s p-locks on `steps`
 /// of `track` for a `clear-param-plocks` target (`instrument`, `effect`,
-/// `midi-fx`, `rack-effect`, `rack-slot-param`, `rack-macro`, `bus-send`);
-/// `None` for an unknown target or a missing slot.
+/// `midi-fx`, `rack-effect`, `rack-slot-instrument`, `rack-slot-param`,
+/// `rack-macro`, `bus-send`); `None` for an unknown target or a missing slot.
 pub(super) fn clear_plocks_command(
     app: &app::App,
     target: &str,
@@ -1762,6 +1762,16 @@ pub(super) fn clear_plocks_command(
                     param,
                 })
         }),
+        "rack-slot-instrument" => {
+            slot_idx.map(
+                |slot_idx| app::AppCommand::ClearRackSlotInstrumentPlockMulti {
+                    track,
+                    slot_idx,
+                    steps,
+                    param_idx,
+                },
+            )
+        }
         "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
             track,
             steps,

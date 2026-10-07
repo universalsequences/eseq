@@ -835,6 +835,8 @@ fn push_param(
         min,
         max,
         default,
+        // Every modulator % param (the envelope sustain) is a stored ratio.
+        percent_ratio: kind.unit() == Some("%"),
         kind,
         scaling,
         node_param_idx: MOD_PARAM_BASE + idx as u32,

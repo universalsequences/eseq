@@ -33,7 +33,7 @@
 ;; The panel reads and edits the graph through the kinds (kind-bindings spec §14.2k,
 ;; §14.2s): every control edit is one undo entry, a drag's frames joining one. The
 ;; batch controls (threshold, global transpose, dur x) set every node's param at once
-;; through the graph-* natives, unrecorded; the threshold every node up to the
+;; through the graph-* natives, one undo entry each; the threshold every node up to the
 ;; graph's capacity, so a node that becomes active later already carries it.
 ;;
 ;; Project scratch entrypoint:

@@ -2283,9 +2283,31 @@ impl App {
         manifest: &crate::graph::GraphManifest,
         after: crate::graph::GraphOverrideSlot,
     ) -> Result<EditOutcome, EditError> {
-        let sequencer_id = manifest.id;
-        let merge_key = MergeKey::new(format!("graph:{sequencer_id}:{}", after.address()));
         let scene = current_scene(self)?;
+        let before = (self.state.edit_current_graph_overrides(|graphs| {
+            let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
+            let current = graph.slot(&after);
+            graph.set_slot(&after);
+            Ok(current)
+        }))
+        .map_err(EditError::ReplayFailed)?;
+        self.record_graph_override_edit(scene, manifest.id, before, after)
+    }
+
+    /// Record a graph override field edit already applied (`before` its
+    /// value before, `after` now) in scene `scene` of graph `sequencer_id`:
+    /// the staging of [`Self::apply_graph_override_edit`], shared with the
+    /// legacy `graph-*` natives' recorded edits (eseq-0l17.53), so a native
+    /// write and a kind drag on one field join one entry (merge key
+    /// `graph:{id}:{address}`).
+    pub fn record_graph_override_edit(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        sequencer_id: u64,
+        before: crate::graph::GraphOverrideSlot,
+        after: crate::graph::GraphOverrideSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let merge_key = MergeKey::new(format!("graph:{sequencer_id}:{}", after.address()));
         stage_field_edit(
             self,
             ("Edit graph", merge_key),
@@ -2298,14 +2320,7 @@ impl App {
                 }
                 _ => None,
             },
-            |app, after| {
-                app.state.edit_current_graph_overrides(|graphs| {
-                    let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
-                    let current = graph.slot(after);
-                    graph.set_slot(after);
-                    Ok(current)
-                })
-            },
+            |_, _| Ok(before),
             |scene, before, after| {
                 EditPatch::GraphOverride(GraphOverridePatch {
                     scene,
@@ -2313,6 +2328,70 @@ impl App {
                     before,
                     after,
                 })
+            },
+        )
+    }
+
+    /// Record several graph override field edits already applied (a legacy
+    /// `graph-*` batch, `(before, after)` per field) as one entry: one
+    /// field stages as [`Self::record_graph_override_edit`]; more stage a
+    /// composite keyed by every field's address, so a drag repeating the
+    /// batch (a slider moving every node's param) joins one entry, which
+    /// keeps each field's value from before the drag's first edit.
+    pub fn record_graph_override_edits(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        sequencer_id: u64,
+        mut edits: Vec<(
+            crate::graph::GraphOverrideSlot,
+            crate::graph::GraphOverrideSlot,
+        )>,
+    ) -> Result<EditOutcome, EditError> {
+        if edits.len() <= 1 {
+            let Some((before, after)) = edits.pop() else {
+                return Ok(EditOutcome::NoOp);
+            };
+            return self.record_graph_override_edit(scene, sequencer_id, before, after);
+        }
+        let addresses: Vec<String> = edits.iter().map(|(_, after)| after.address()).collect();
+        let merge_key = MergeKey::new(format!(
+            "graph:{sequencer_id}:batch:{}",
+            addresses.join(",")
+        ));
+        let (before, after): (Vec<_>, Vec<_>) = edits.into_iter().unzip();
+        stage_field_edit(
+            self,
+            ("Edit graph", merge_key),
+            (scene, after),
+            |staged, scene| {
+                let EditPatch::Composite(staged) = staged else {
+                    return None;
+                };
+                (staged.iter())
+                    .map(|patch| match patch {
+                        EditPatch::GraphOverride(staged)
+                            if staged.scene == scene && staged.sequencer_id == sequencer_id =>
+                        {
+                            Some(staged.before.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            },
+            |_, _| Ok(before),
+            |scene, before, after| {
+                EditPatch::Composite(
+                    (before.into_iter().zip(after))
+                        .map(|(before, after)| {
+                            EditPatch::GraphOverride(GraphOverridePatch {
+                                scene,
+                                sequencer_id,
+                                before,
+                                after,
+                            })
+                        })
+                        .collect(),
+                )
             },
         )
     }
@@ -5749,6 +5828,12 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
             slot_idx,
             param_idx,
             ..
+        }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
         } => {
             let rack = app
                 .state
@@ -6099,6 +6184,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotParamPlockMulti { .. }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti { .. }
         | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
     }
 }
@@ -6590,6 +6676,7 @@ fn device_plock_command_target(cmd: &AppCommand) -> Option<(usize, Vec<usize>)> 
         | AppCommand::ClearInstrumentTensorPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotParamPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti { track, steps, .. }
         | AppCommand::SetRackMacroPlockMulti { track, steps, .. }
         | AppCommand::ClearRackMacroPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotEffectPlockMulti { track, steps, .. }
@@ -6631,6 +6718,7 @@ fn device_plock_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetRackSlotEffectPlockMulti { .. } => "Set rack effect p-lock",
         AppCommand::ClearRackSlotEffectPlockMulti { .. } => "Clear rack effect p-lock",
         AppCommand::ClearRackSlotParamPlockMulti { .. } => "Clear rack strip p-lock",
+        AppCommand::ClearRackSlotInstrumentPlockMulti { .. } => "Clear rack instrument p-lock",
         _ => "Set device p-lock",
     }
 }

@@ -295,9 +295,21 @@ pub(crate) fn sync_instances_to_editor(app: &app::App, editor: &mut Editor) {
 
 /// Run the kind's `:on-create` for the fresh instance `id` in the UI VM
 /// (spec §11), then let the views re-render the defaults it wrote. A
-/// failing hook leaves the instance in place and reports it.
+/// failing hook leaves the instance in place and reports it. The defaults
+/// it writes through the legacy `graph-*` natives belong to the creation:
+/// their history commands (eseq-0l17.53) are dropped, so they record no
+/// entry of their own.
 pub(crate) fn run_on_create(editor: &mut Editor, id: u64) {
-    match sequencer::lisp_host::run_instance_on_create(editor.runtime_mut(), id) {
+    let queued = editor.drain_host_commands();
+    let result = sequencer::lisp_host::run_instance_on_create(editor.runtime_mut(), id);
+    let hook = editor.drain_host_commands().into_iter().filter(|command| {
+        !matches!(command, HostCommand::Custom { name, .. }
+            if name == sequencer::lisp_host::GRAPH_OVERRIDE_HISTORY_COMMAND)
+    });
+    for command in queued.into_iter().chain(hook) {
+        editor.runtime_mut().enqueue_host_command(command);
+    }
+    match result {
         Ok(false) => {}
         Ok(true) => {
             editor.runtime_mut().run_reactive_cycle();

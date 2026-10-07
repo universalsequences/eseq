@@ -1154,6 +1154,16 @@ impl NativeContext {
         self.shared.borrow_mut().queued_commands.push(command);
     }
 
+    /// Run `extend` on the newest command queued that the host has not
+    /// drained yet (`None` when the queue is empty): a native batching its
+    /// writes of one pass into the command it queued for an earlier one.
+    pub fn with_last_queued_command<R>(
+        &mut self,
+        extend: impl FnOnce(Option<&mut HostCommand>) -> R,
+    ) -> R {
+        extend(self.shared.borrow_mut().queued_commands.last_mut())
+    }
+
     /// The declared module of the chunk executing this native call, if
     /// any (None inside headerless eseq.vanilla code).
     pub fn current_module(&self) -> Option<String> {

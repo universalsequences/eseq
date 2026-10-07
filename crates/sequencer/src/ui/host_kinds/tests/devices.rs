@@ -355,11 +355,14 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
     assert!((num(h.eval_all("start.value")) - 50.0).abs() < 1e-3);
     app::edit::undo(&mut h.app);
     assert_eq!(h.rack_slot().instrument_slot.defaults[START], stored);
-    // A lock on the rack track's steps; clearing has no command yet.
-    h.eval_all("(lock-param! start (list (nth t2.steps 2)) 25)");
+    // Locks on the rack track's steps 2 and 5: one entry.
+    let before = h.app.history.undo_len();
+    h.eval_all("(lock-param! start (list (nth t2.steps 2) (nth t2.steps 5)) 25)");
     h.drain();
     let locked = h.rack_slot().instrument_slot.plocks[2][START];
     assert_eq!(locked, Some(0.25));
+    assert_eq!(h.rack_slot().instrument_slot.plocks[5][START], Some(0.25));
+    assert_eq!(h.app.history.undo_len(), before + 1);
     h.shared.current_track.store(2, Ordering::Relaxed);
     h.shared.selected_steps.lock().unwrap().insert(2);
     h.sync();
@@ -367,9 +370,29 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
         h.eval_all("(list start.value start.locked start.has-locks)"),
         h.eval_all("(list 25 true true)")
     );
-    h.fails(
-        "(unlock-param! start (list (nth t2.steps 2)))",
-        "no clear command",
+    // Clearing (eseq-0l17.41): a step holding no lock is no edit at all.
+    let before = h.app.history.undo_len();
+    h.eval_all("(unlock-param! start (list (nth t2.steps 7)))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before);
+    // Steps 2, 5 and 7 clear the two locks held: one entry, undone whole.
+    h.eval_all("(unlock-param! start (list (nth t2.steps 2) (nth t2.steps 5) (nth t2.steps 7)))");
+    h.drain_and_sync();
+    let plocks = h.rack_slot().instrument_slot.plocks;
+    assert_eq!((plocks[2][START], plocks[5][START]), (None, None));
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    assert_eq!(
+        h.eval_all("(list start.locked start.has-locks)"),
+        h.eval_all("(list false false)")
+    );
+    app::edit::undo(&mut h.app);
+    let plocks = h.rack_slot().instrument_slot.plocks;
+    let lock = |step: usize| plocks.get(step).and_then(|row| row[START]);
+    assert_eq!((lock(2), lock(5), lock(7)), (Some(0.25), Some(0.25), None));
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list start.value start.locked)"),
+        h.eval_all("(list 25 true)")
     );
     // Voices: through history, the value rule, undo.
     let before = h.app.history.undo_len();

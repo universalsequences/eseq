@@ -216,9 +216,8 @@ fn param_edit(
     let command = match lock {
         Some(value) => device.lock_command(track, steps.clone(), param_idx, value),
         None => {
-            let (target, slot_idx, rack_slot) = device
-                .plock_target()
-                .ok_or("a rack slot instrument's p-locks have no clear command yet")?;
+            let (target, slot_idx, rack_slot) =
+                device.plock_target().ok_or("bus effects take no p-locks")?;
             let steps = steps.clone();
             clear_plocks_command(app, target, track, steps, param_idx, slot_idx, rack_slot)
         }

@@ -127,6 +127,8 @@ pub fn descriptor() -> EffectDescriptor {
             },
             node_param_idx: (1 + i) as u32,
             node_param_span: 1,
+            // The Chorus mix, its one % param, is a stored ratio.
+            percent_ratio: c.unit == "%",
             host_control: None,
             ui_metadata: Some(super::modulatable_ui_metadata()),
         });
@@ -146,6 +148,7 @@ pub fn descriptor() -> EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: (DEPTH_BASE + i * SLOTS + slot) as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             });

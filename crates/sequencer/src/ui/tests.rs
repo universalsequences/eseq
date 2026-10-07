@@ -15393,6 +15393,7 @@
                 min,
                 max,
                 default,
+                percent_ratio: false,
                 kind,
                 scaling: ParamScaling::Linear,
                 node_param_idx: 0,

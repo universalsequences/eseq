@@ -3854,6 +3854,12 @@ pub(in crate::lisp_host) fn parse_midi_fx_param_descriptor(
         min,
         max,
         default,
+        // A script-declared param has no ratio flag: the range rule.
+        percent_ratio: crate::effects::ParamDescriptor::percent_ratio_by_range(
+            unit.as_deref(),
+            min,
+            max,
+        ),
         kind: labels
             .map(|labels| crate::effects::ParamKind::Enum { labels })
             .unwrap_or(crate::effects::ParamKind::Continuous { unit }),

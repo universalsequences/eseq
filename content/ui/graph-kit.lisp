@@ -121,8 +121,9 @@
 ;; ── batch edits ───────────────────────────────────────────────────────────
 ;; A param on every node is one recorded edit (set-graph-params!). Scaling
 ;; every delay or moving every timebase writes through the graph-* natives,
-;; unrecorded, as the legacy panels did: a kind setter per node would record
-;; an undo entry per node. The kinds show those at the host's next sync.
+;; as the legacy panels did: their writes of one pass are one undo entry
+;; (eseq-0l17.53), where a kind setter per node would record an entry per
+;; node. The kinds show those at the host's next sync.
 
 ;; The step resolutions the panels offer (graph-timebase-options' straight
 ;; ones).

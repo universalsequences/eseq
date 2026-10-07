@@ -1148,6 +1148,34 @@ impl App {
         slot_exists && wrote
     }
 
+    /// Clears a rack layer's instrument step p-lock; `true` when a lock was
+    /// held (the derived modulation-active lock is re-synced like a set).
+    pub fn clear_rack_slot_instrument_plock(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
+    ) -> bool {
+        let mut cleared = false;
+        let slot_exists = self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            let held = slot
+                .instrument_slot
+                .plocks
+                .get(step)
+                .and_then(|row| row.get(param_idx))
+                .is_some_and(Option::is_some);
+            if held && slot.instrument_slot.clear_plock(step, param_idx) {
+                slot.track_sound_state.dirty = true;
+                cleared = true;
+            }
+        });
+        if slot_exists && cleared {
+            self.sync_rack_slot_mod_active_plock(track, slot_idx, step, param_idx);
+        }
+        slot_exists && cleared
+    }
+
     pub fn set_rack_macro_plock(
         &mut self,
         track: usize,
@@ -1424,7 +1452,7 @@ impl App {
         slot_idx: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) =
+        let Some((active_param_idx, value, _)) =
             self.rack_slot_mod_active_value(track, slot_idx, None, changed_param_idx)
         else {
             return;
@@ -1441,16 +1469,21 @@ impl App {
         step: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) =
+        let Some((active_param_idx, value, step_locked)) =
             self.rack_slot_mod_active_value(track, slot_idx, Some(step), changed_param_idx)
         else {
             return;
         };
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
-            if slot
-                .instrument_slot
-                .set_plock(step, active_param_idx, value)
-            {
+            // No depth lock left on the step (a cleared p-lock): the derived
+            // active lock goes too, as `sync_instrument_mod_active_plock` does.
+            let wrote = if step_locked {
+                slot.instrument_slot
+                    .set_plock(step, active_param_idx, value)
+            } else {
+                slot.instrument_slot.clear_plock(step, active_param_idx)
+            };
+            if wrote {
                 slot.track_sound_state.dirty = true;
             }
         });
@@ -1466,7 +1499,7 @@ impl App {
         slot_idx: usize,
         step: Option<usize>,
         changed_param_idx: usize,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, f32, bool)> {
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
         let slot = racks
             .get(track)
@@ -1489,19 +1522,27 @@ impl App {
             .iter()
             .find(|target| target.depth_param_idx == changed_param_idx)
             .and_then(|target| target.active_param_idx)?;
+        let step_lock = |target: &crate::effects::InstrumentModulationTarget| {
+            step.and_then(|step| {
+                slot.instrument_slot
+                    .plocks
+                    .get(step)
+                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                    .copied()
+                    .flatten()
+            })
+        };
+        let step_locked = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| step_lock(target).is_some());
         let active = descriptor
             .instrument_modulation_targets
             .iter()
             .filter(|target| target.active_param_idx == Some(active_param_idx))
             .any(|target| {
-                step.and_then(|step| {
-                    slot.instrument_slot
-                        .plocks
-                        .get(step)
-                        .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
-                        .copied()
-                        .flatten()
-                })
+                step_lock(target)
                 .or_else(|| {
                     slot.instrument_slot
                         .defaults
@@ -1518,7 +1559,11 @@ impl App {
                 .abs()
                     > f32::EPSILON
             });
-        Some((active_param_idx, if active { 1.0 } else { 0.0 }))
+        Some((
+            active_param_idx,
+            if active { 1.0 } else { 0.0 },
+            step_locked,
+        ))
     }
 
     pub(super) fn push_instrument_defaults_for_track(&self, track: usize) {

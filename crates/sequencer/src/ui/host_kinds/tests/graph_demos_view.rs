@@ -559,14 +559,22 @@ fn the_8x8_demo_reads_and_edits_its_graph() {
     assert!(binds(&bars, "value", graph, "reset-bars"));
     // An edit from elsewhere (a native) repaints without a re-render.
     h.eval("(graph-param g8-name 2 :transpose -12)");
+    h.drain();
     h.pkg_render();
     assert_eq!(h.demo_tree("*8x8*").1, revision, "the edit only repaints");
     assert_eq!(slot_value(&picker["value"]), -12.0);
 
     // The explicit init writes the ring, which carries a seed on.
     let id = sequencer::lisp_host::graph_instance_id("neural-8x8-demo", None);
+    let entries = h.app.history.undo_len();
     h.eval("(script-init-fn)");
+    h.drain();
     h.pkg_render();
+    assert_eq!(
+        h.app.history.undo_len(),
+        entries + 1,
+        "the init's writes: one entry"
+    );
     let graph = h.demo_overrides(id);
     assert_eq!(graph.edge_params.len(), 64, "the whole matrix");
     assert!(graph.edge_params.iter().any(|edge| {
@@ -880,6 +888,55 @@ fn the_8x8_reset_demo_batch_controls_edit_every_node() {
         ),
         strings(&["16", "4T", "Prh"])
     );
+}
+
+/// eseq-0l17.53: each batch control of the reset demo (global transpose,
+/// dur x, delay x, res/q x) writes every node through the legacy natives as
+/// one undo entry, and undo restores every node.
+#[test]
+fn the_8x8_reset_demo_batch_edits_are_one_undo_entry_each() {
+    let mut h = Harness::new();
+    h.pkg_tracks(8);
+    h.demo_load(&RESET);
+    let layout = h.demo_layout("*8x8-reset*", 120.0, 60.0);
+    let id = sequencer::lisp_host::graph_instance_id(RESET.name, None);
+    // The overrides as sets (undo may reorder their entries; none yet).
+    let fields = |h: &Harness| {
+        let graph = (h.shared.state.current_graph_overrides().into_iter())
+            .find(|graph| graph.sequencer_id == id)
+            .unwrap_or_default();
+        let mut params: Vec<String> = (graph.node_params.iter())
+            .map(|p| format!("{} {} {}", p.instance, p.param, p.value))
+            .collect();
+        let mut nodes: Vec<String> = (graph.node_intrinsics.iter())
+            .map(|n| {
+                format!(
+                    "{} {:?} {:?} {:?}",
+                    n.instance, n.delay_steps, n.resolution, n.quantize
+                )
+            })
+            .collect();
+        params.sort();
+        nodes.sort();
+        (params, nodes)
+    };
+    for (key, value) in [
+        ("graph-8x8-reset-global-transpose", number(12.0)),
+        ("graph-8x8-reset-dur-factor", number(2.0)),
+        ("graph-8x8-reset-delay-factor", s("2")),
+        ("graph-8x8-reset-timebase-factor", s("2")),
+    ] {
+        let before = fields(&h);
+        let entries = h.app.history.undo_len();
+        h.demo_invoke(&layout, key, "on-change", vec![value]);
+        assert_eq!(h.app.history.undo_len(), entries + 1, "{key}: one entry");
+        let edited = fields(&h);
+        assert_ne!(edited, before, "{key} edits");
+        app::edit::undo(&mut h.app);
+        assert_eq!(fields(&h), before, "{key}: undo restores every node");
+        app::edit::redo(&mut h.app);
+        assert_eq!(fields(&h), edited, "{key}: redo");
+    }
 }
 
 /// The variable-count graph's panel lays out its active nodes (8, grown to

@@ -3230,6 +3230,7 @@ impl App {
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: input.input_channel,
                     }),
@@ -3273,6 +3274,7 @@ impl App {
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: input.input_channel,
                     }),

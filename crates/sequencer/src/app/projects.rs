@@ -6307,6 +6307,7 @@ mod tests {
             scaling: crate::effects::ParamScaling::Linear,
             node_param_idx,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         }

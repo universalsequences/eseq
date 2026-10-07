@@ -22,6 +22,12 @@
 //! of the graph's owner other than the graph's own; anything else is an
 //! error that changes nothing. Gestures as [`super::ScriptEdit`]: a numeric
 //! field's `set!`s while the pointer is down join one entry per field.
+//!
+//! The legacy `graph-*` natives' writes arrive as
+//! [`sequencer::lisp_host::GRAPH_OVERRIDE_HISTORY_COMMAND`] (applied
+//! already; eseq-0l17.53) and are recorded here the same way: one entry per
+//! command (a pass's writes of one graph), whose fields share `set-graph`'s
+//! merge keys, so a native write joins a kind drag on the same field.
 
 use super::track_settings::{command_track, SetValue};
 use crate::*;
@@ -34,7 +40,10 @@ use sequencer::neural::NeuralMaxPolySelection;
 use sequencer::sequencer::Timebase;
 use std::collections::HashMap;
 
-pub(super) const COMMANDS: &[&str] = &["set-graph"];
+pub(super) const COMMANDS: &[&str] = &[
+    "set-graph",
+    sequencer::lisp_host::GRAPH_OVERRIDE_HISTORY_COMMAND,
+];
 
 type Payload = HashMap<String, Rc<RefCell<Value>>>;
 
@@ -521,7 +530,39 @@ pub(super) fn handle(
         )));
         return;
     };
-    if let Err(message) = set_graph(app, ctx, map) {
+    let result = match name {
+        sequencer::lisp_host::GRAPH_OVERRIDE_HISTORY_COMMAND => {
+            record_graph_override_history(app, ctx, map)
+        }
+        _ => set_graph(app, ctx, map),
+    };
+    if let Err(message) = result {
         editor.handle_host_event(HostEvent::Error(format!("{name}: {message}")));
     }
+}
+
+/// Record a legacy `graph-*` write (already applied) as a script edit: one
+/// entry, which a drag repeating it (the pointer down) keeps joining.
+fn record_graph_override_history(
+    app: &mut app::App,
+    ctx: &mut LoopCtx<'_>,
+    map: &Payload,
+) -> Result<(), String> {
+    let field = |name: &str| match map.get(name).map(|cell| cell.borrow().clone()) {
+        Some(Value::String(value)) => Ok(value),
+        _ => Err(format!("missing {name}")),
+    };
+    let id = |name: &str| {
+        field(name)?
+            .parse::<u64>()
+            .map_err(|_| format!("invalid {name}"))
+    };
+    let scene = sequencer::sequencer::SceneId(id("scene-id")?);
+    let sequencer_id = id("sequencer-id")?;
+    let edits: Vec<(GraphOverrideSlot, GraphOverrideSlot)> = serde_json::from_str(&field("edits")?)
+        .map_err(|error| format!("invalid edits: {error}"))?;
+    super::ScriptEdit::run(app, ctx, true, |app| {
+        app.record_graph_override_edits(scene, sequencer_id, edits)
+    })
+    .map(|_| ())
 }

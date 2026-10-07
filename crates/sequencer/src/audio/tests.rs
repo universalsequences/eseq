@@ -692,6 +692,7 @@ fn audio_test_param(name: &str, default: f32, node_param_idx: u32) -> ParamDescr
         scaling: ParamScaling::Linear,
         node_param_idx,
         node_param_span: 1,
+        percent_ratio: false,
         host_control: None,
         ui_metadata: None,
     }

@@ -949,6 +949,13 @@ pub enum AppCommand {
         param_idx: usize,
         value: f32,
     },
+    /// Clear a rack layer's underlying instrument step p-lock across several steps.
+    ClearRackSlotInstrumentPlockMulti {
+        track: usize,
+        slot_idx: usize,
+        steps: Vec<usize>,
+        param_idx: usize,
+    },
     SetRackMacroPlockMulti {
         track: usize,
         steps: Vec<usize>,
@@ -1086,7 +1093,8 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ClearInstrumentTensorPlockMulti { .. }
         | AppCommand::ClearRackMacroPlockMulti { .. }
         | AppCommand::ClearRackSlotEffectPlockMulti { .. }
-        | AppCommand::ClearRackSlotParamPlockMulti { .. } => HistoryPolicy::Record,
+        | AppCommand::ClearRackSlotParamPlockMulti { .. }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti { .. } => HistoryPolicy::Record,
         AppCommand::DuplicateTrackPattern { .. }
         | AppCommand::HalveTrackPattern { .. }
         | AppCommand::SetTrackNumSteps { .. }
@@ -1596,6 +1604,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 10,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1608,6 +1617,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 11,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1620,6 +1630,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 12,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1632,6 +1643,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 13,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -2150,6 +2162,53 @@ mod tests {
             "rack sampler p-locks need node identity for scheduler/audio resolution"
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn rack_slot_instrument_plock_clear_is_one_recorded_entry() {
+        let mut app = test_app_with_rack_sampler_slot();
+        apply_command(
+            &mut app,
+            AppCommand::SetRackSlotInstrumentPlockMulti {
+                track: 0,
+                slot_idx: 0,
+                steps: vec![2, 3],
+                param_idx: 8,
+                value: 22_050.0,
+            },
+        );
+        let plocks = |app: &App| {
+            let racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let slot = &racks[0].as_ref().unwrap().slots[0].instrument_slot;
+            (slot.plocks[2][8], slot.plocks[3][8], slot.plocks[4][8])
+        };
+        // The set's coalescing entry closes before the clear.
+        crate::app::edit::finish_active_gesture(&mut app);
+        let before = app.history.undo_len();
+        crate::app::try_apply_command(
+            &mut app,
+            AppCommand::ClearRackSlotInstrumentPlockMulti {
+                track: 0,
+                slot_idx: 0,
+                steps: vec![2, 3, 4],
+                param_idx: 8,
+            },
+        )
+        .expect("clear rack slot instrument p-locks");
+        assert_eq!(plocks(&app), (None, None, None));
+        assert_eq!(app.history.undo_len(), before + 1);
+        crate::app::edit::undo(&mut app);
+        assert_eq!(plocks(&app), (Some(22_050.0), Some(22_050.0), None));
+        let missing = crate::app::try_apply_command(
+            &mut app,
+            AppCommand::ClearRackSlotInstrumentPlockMulti {
+                track: 0,
+                slot_idx: 0,
+                steps: vec![2],
+                param_idx: 999,
+            },
+        );
+        assert!(missing.is_err(), "a param past the slot's is refused");
     }
 
     #[test]
@@ -4177,6 +4236,17 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         } => {
             for step in steps {
                 app.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value);
+            }
+        }
+
+        AppCommand::ClearRackSlotInstrumentPlockMulti {
+            track,
+            slot_idx,
+            steps,
+            param_idx,
+        } => {
+            for step in steps {
+                app.clear_rack_slot_instrument_plock(track, slot_idx, step, param_idx);
             }
         }
 

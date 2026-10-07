@@ -757,6 +757,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
             scaling: crate::effects::ParamScaling::Linear,
             node_param_idx: (HEADER_SLOTS + dest.active_cell_id) as u32,
             node_param_span: active_span,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
                 group: None,
@@ -801,6 +802,12 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (HEADER_SLOTS + lane.depth_cell_id) as u32,
                 node_param_span: depth_span,
+                // A manifest declares no ratio flag: the range rule.
+                percent_ratio: crate::effects::ParamDescriptor::percent_ratio_by_range(
+                    dest.unit.as_deref(),
+                    depth_min,
+                    depth_max,
+                ),
                 host_control: None,
                 ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
                     group: None,

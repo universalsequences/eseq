@@ -1887,7 +1887,15 @@ its instance and field.
      `param-effective-ratio` (by value for a fraction % param).
      `ParamDescriptor::is_percent` now also requires a ratio range (within
      ±10: 0–1, the OTT time's 0.1–10); the Filterbank's 0–100 % params are
-     already display units (before, the kinds read them as 3000 %).
+     already display units (before, the kinds read them as 3000 %). Since
+     eseq-0l17.63 that is an explicit `ParamDescriptor::percent_ratio`
+     flag: built-in descriptors declare it (a literal, or a builder's
+     per-effect rule: every % param of the effect is a ratio, the
+     Filterbank's none, a % mod depth a ratio as its target), and only
+     sources with no such flag (DGen manifests and their mod depths,
+     `midi-fx-param`) infer it by the range rule
+     (`ParamDescriptor::percent_ratio_by_range`); a test holds every
+     built-in param's flag to the retired rule.
    - **View state** (`:key ()` singletons): `eseq.effects.state`'s
      `instrument-view` (tab, source-tab, mods-open, mod-slot),
      `key-lock-view` (octave, octave-count, anchor, notes, audition),
@@ -1961,8 +1969,9 @@ its instance and field.
      value fields in the bulk binding sync (the print latch and the eval
      natives still write theirs; the dict builders still carry the
      `*-field` names, which the host-less test seeds key on, until
-     eseq-0l17.22). `ParamDescriptor::is_percent` keeps its range heuristic:
-     an explicit flag would touch ~260 descriptor literals.
+     eseq-0l17.22). `ParamDescriptor::is_percent` kept its range heuristic
+     here; eseq-0l17.63 replaced it with the explicit `percent_ratio` flag
+     (above).
    - **Captures.** Of 135 baseline renders (the fixtures plus scratch
      states: mods views, p-locks, rack, bus, MIDI effects, process lanes),
      all but three are byte-identical: the Phaser-Flanger notch display
@@ -2395,9 +2404,11 @@ its instance and field.
      `t.active-notes` with its color (legacy: the project's notes with a
      rack's colors).
    - **Batch edits** (global transpose, dur x, swing, the threshold up to
-     the capacity, delay x, res/q x) stay the `graph-*` natives, unrecorded
-     as before (since eseq-0l17.67 a param on every node is one recorded
-     edit, `set-graph-params!`; delay x and res/q x stay natives) (graph-kit `set-param-on-nodes!`, `scale-delays!`,
+     the capacity, delay x, res/q x) stay the `graph-*` natives (unrecorded
+     until eseq-0l17.53, now one undo entry per batch: §14.2k; since
+     eseq-0l17.67 a param on every node is one recorded edit,
+     `set-graph-params!`; delay x and res/q x stay natives)
+     (graph-kit `set-param-on-nodes!`, `scale-delays!`,
      `shift-timebases!`, reading the current values from the kinds): a
      setter per node would record an entry per node, and the threshold
      writes dormant nodes no setter addresses. res/q x moves a resolution
@@ -4060,8 +4071,12 @@ Built (7b-2):
   refreshes the shown step's rows as the knobs do,
   `RackPlockRowsSync::for_plock_write`) and `bus_effect_param_applied`
   (`set-bus-effect-param`'s). Bus effects take
-  no p-locks (`lock-param!` / `unlock-param!` on one are errors), and a
-  rack slot instrument's locks have no clear command (eseq-0l17.41).
+  no p-locks (`lock-param!` / `unlock-param!` on one are errors). A rack
+  slot instrument's locks clear through `ClearRackSlotInstrumentPlockMulti`
+  (eseq-0l17.41; the `clear-param-plocks` target `rack-slot-instrument`,
+  `:slot-idx` the rack slot): one entry, only the steps holding a lock,
+  and a cleared modulation depth lock drops its derived active lock as
+  the track instrument's clear does.
 - **Voices.** `device.voices` is a rack slot's max polyphony (a model
   field of the device sync; the legacy `tp-poly` / `tp-max-polyphony` show
   the selected slot's: `(> rs.voices 1)`); any other device reads 0, so the
@@ -4987,14 +5002,34 @@ Built (7g):
   sequencer-level config field (`ConfigField`) or one group matrix cell
   (`GroupCell`), before and after, that undo and redo write back into the
   scene it was made in (`restore_graph_override`), leaving every other
-  field alone, an unrecorded legacy write to another field of the same
-  node, the config or the same matrix included. Every edit stages a
+  field alone, a legacy write to another field of the same node, the
+  config or the same matrix included. Every edit stages a
   coalescing gesture keyed by its field, as a bar transpose does: a
   numeric field's `set!`s while the pointer is down join one entry
   (`ScriptEdit`), a drag over two fields records two, anything else is its
   own entry. The legacy `graph-param`, `graph-edge` and `graph-config`
-  natives write through the same slots. Legacy
-  `graph-*` edits stay unrecorded; the kinds pick them up at the next sync.
+  natives write through the same slots. Since eseq-0l17.53 the legacy
+  `graph-node`, `graph-param`, `graph-edge` and `graph-config` writes are
+  recorded too (the kinds still pick them up at the next sync): each
+  native captures every field it sets, before and after, inside its
+  `edit_current_graph_overrides` and queues
+  `GRAPH_OVERRIDE_HISTORY_COMMAND` (`graph-override-history`: scene,
+  sequencer id, the slot pairs as JSON; `GraphOverrideSlot` and its parts
+  serialize for it), and the writes of one pass to one graph (until the
+  host drains its commands, `NativeContext::with_last_queued_command`)
+  extend that one command, so a batch (graph-kit's `set-param-on-nodes!`,
+  `scale-delays!`, `shift-timebases!`, a script's init) is one entry. The
+  host records it as a script edit through
+  `App::record_graph_override_edits`: one field stages with
+  `App::record_graph_override_edit` (the staging half of
+  `apply_graph_override_edit`, merge key `graph:{id}:{address}`, so a
+  native write joins a kind drag of the same field), several as one
+  composite keyed by their addresses (a batch slider's drag joins one
+  entry). `GraphNodeField` gained `Duration` and `Swing` (`graph-node
+  :duration` / `:swing`; no kind setter). An instance's `:on-create`
+  writes stay part of its creation: their history commands are dropped
+  (`run_on_create`). A `graph-node` call naming no field no longer
+  creates an empty node override entry.
   A kind setter does not echo into legacy `bind-graph` handles (the views
   move to `#'p.value`); tracked `graph-*-value` reads refresh through the
   tick's sweep as for any non-Lisp edit.
@@ -5758,7 +5793,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 |---|---|---|---|
 | 7b | eseq-0l17.28 (built) | `param` under `device` (values, p-lock display, print latch), `device.playhead`, step p-lock render (`plocked`, `lock-kind`, `variant-color`), send p-lock flags | .11 .13 .14 .18 .19 .21 |
 | 7b-2 | eseq-0l17.36 (built) | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i), `device.voices` | .13 .14 .18 .19 .21 |
-| 7b-2a | eseq-0l17.41 | the clear command for a rack slot instrument's p-locks (`unlock-param!` on a rack slot param) | — |
+| 7b-2a | eseq-0l17.41 (built) | the clear command for a rack slot instrument's p-locks (`unlock-param!` on a rack slot param) | — |
 | 7b-2b | eseq-0l17.42 (built) | rack slot strip controls (gain, pan, mute, solo, choke, enabled) on the rack slot device, with their p-lock display; `lock-strip!` / `unlock-strip!` | .14 .19 |
 | 7b-2c | eseq-0l17.54 (built) | a rack slot's base note (base, display, lock) and max-polyphony p-locks on the rack slot device | .14 .19 |
 | 7b-3 | eseq-0l17.37 (built) | panel extras: param placement and lanes, modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |

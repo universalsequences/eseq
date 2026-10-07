@@ -4,11 +4,14 @@
 //! or edge param, one param of the first nodes at once (a batch), a
 //! sequencer-level config field or one group matrix cell, so undo and redo
 //! restore exactly the edited field and leave every other edit of the graph
-//! alone (an unrecorded legacy `graph-*` write included).
+//! alone. The legacy `graph-*` natives record their writes as slots too
+//! (eseq-0l17.53).
 //! A slot's value is `None` for "no override" (the manifest default).
 
+use serde::{Deserialize, Serialize};
+
 use super::{
-    ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride,
+    GraphDurationSpec, GraphSwingSpec, ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride,
     ProjectGraphNodeParamOverride, ProjectGraphOverrides, ProjectGraphQuantizeOverride,
     ProjectGraphRouteOverride, ProjectGraphSeedFrom, GROUP_COUPLING_DEFAULT, GROUP_GAIN_DEFAULT,
     NEURAL_GROUP_CELLS,
@@ -16,8 +19,9 @@ use super::{
 use crate::neural::NeuralMaxPolySelection;
 
 /// One intrinsic of a node override, with its value (a node's process chain
-/// is not one: it has its own history).
-#[derive(Clone, Debug, PartialEq)]
+/// is not one: it has its own history). Serialized only to carry a legacy
+/// `graph-*` native's recorded edit to the host (eseq-0l17.53).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphNodeField {
     Resolution(Option<Vec<u8>>),
     Delay(Option<u32>),
@@ -28,6 +32,9 @@ pub enum GraphNodeField {
     SeedFrom(Option<ProjectGraphSeedFrom>),
     SeedOnReset(Option<f64>),
     Group(Option<u8>),
+    /// The legacy `graph-node :duration` / `:swing` (no kind setter yet).
+    Duration(Option<GraphDurationSpec>),
+    Swing(Option<GraphSwingSpec>),
 }
 
 impl GraphNodeField {
@@ -40,6 +47,8 @@ impl GraphNodeField {
             Self::SeedFrom(_) => "seed-from",
             Self::SeedOnReset(_) => "seed-on-reset",
             Self::Group(_) => "group",
+            Self::Duration(_) => "duration",
+            Self::Swing(_) => "swing",
         }
     }
 
@@ -53,6 +62,8 @@ impl GraphNodeField {
             Self::SeedFrom(_) => Self::SeedFrom(node.and_then(|n| n.seed_from.clone())),
             Self::SeedOnReset(_) => Self::SeedOnReset(node.and_then(|n| n.seed_on_reset)),
             Self::Group(_) => Self::Group(node.and_then(|n| n.neural_group)),
+            Self::Duration(_) => Self::Duration(node.and_then(|n| n.duration.clone())),
+            Self::Swing(_) => Self::Swing(node.and_then(|n| n.swing)),
         }
     }
 
@@ -65,6 +76,8 @@ impl GraphNodeField {
             Self::SeedFrom(value) => node.seed_from.clone_from(value),
             Self::SeedOnReset(value) => node.seed_on_reset = *value,
             Self::Group(value) => node.neural_group = *value,
+            Self::Duration(value) => node.duration.clone_from(value),
+            Self::Swing(value) => node.swing = *value,
         }
     }
 
@@ -82,7 +95,7 @@ impl GraphNodeField {
 
 /// One sequencer-level config field of [`ProjectGraphOverrides`], with its
 /// value (the group matrices are [`GraphOverrideSlot::GroupCell`]s).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphConfigField {
     ResetEveryBeats(Option<f64>),
     MaxPoly(Option<u32>),
@@ -134,7 +147,7 @@ impl GraphConfigField {
 
 /// A k×k group matrix: `G` propagation gain or `H` activity coupling, flat
 /// row-major (cell `row * NEURAL_GROUP_MAX + col`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupMatrix {
     Gain,
     Coupling,
@@ -191,7 +204,7 @@ pub fn graph_group_cells(cells: Option<&Vec<f64>>, default: f64) -> Vec<f64> {
 
 /// One addressable part of a graph's overrides with its value
 /// ([`ProjectGraphOverrides::slot`]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphOverrideSlot {
     NodeField {
         group: String,
