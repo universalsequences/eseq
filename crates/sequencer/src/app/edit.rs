@@ -7100,6 +7100,16 @@ impl DeviceScope {
         })
     }
 
+    /// The track the device is on.
+    fn track(self) -> crate::sequencer::TrackId {
+        match self {
+            Self::Instrument(track)
+            | Self::AudioEffect(track, _)
+            | Self::MidiEffect(track, _)
+            | Self::RackSlot(track, _) => track,
+        }
+    }
+
     /// Whether the two snapshots may share state. A track instrument's is
     /// taken to cover its whole track (a rack track's instrument is the rack).
     fn overlaps(self, other: Self) -> bool {
@@ -7129,9 +7139,13 @@ pub fn command_can_land_beside_active_gesture(app: &App, cmd: &AppCommand) -> bo
     let Some(gesture) = app.history.active_gesture() else {
         return false;
     };
-    let Some(EditPatch::DeviceValues(patch)) = app.history.active_gesture_patch(&gesture.merge_key)
-    else {
-        return false;
+    let patch = match app.history.active_gesture_patch(&gesture.merge_key) {
+        Some(EditPatch::DeviceValues(patch)) => patch,
+        // A step p-lock drag: a device-value edit of another track is
+        // disjoint, one of its own track is rebased around the drag's cells
+        // ([`rebase_step_drag_beside`], eseq-0l17.75).
+        Some(EditPatch::StepCells(_)) => return DeviceScope::of_command(app, cmd).is_some(),
+        _ => return false,
     };
     match (
         DeviceScope::of_device(app, patch.target),
@@ -7140,6 +7154,131 @@ pub fn command_can_land_beside_active_gesture(app: &App, cmd: &AppCommand) -> bo
         (Some(drag), Some(edit)) => drag == edit || !drag.overlaps(edit),
         _ => false,
     }
+}
+
+/// The device-value target `id` resolves to in `pattern` (its track index
+/// and slot), while the device is still where the registry says.
+fn resolved_device_target_of(
+    app: &App,
+    id: DeviceId,
+    pattern: crate::sequencer::PatternId,
+) -> Option<ResolvedDeviceTarget> {
+    let (track_id, slot_idx) = match DeviceScope::of_device(app, id)? {
+        DeviceScope::Instrument(track) => (track, None),
+        DeviceScope::AudioEffect(track, slot)
+        | DeviceScope::MidiEffect(track, slot)
+        | DeviceScope::RackSlot(track, slot) => (track, Some(slot)),
+    };
+    Some(ResolvedDeviceTarget {
+        id,
+        track: app.track_registry.index_of(track_id)?,
+        pattern,
+        slot_idx,
+    })
+}
+
+/// Keep a step p-lock drag's open entry (a step-cell patch) and a
+/// device-value entry committed beside it (since `revision`) on the drag's
+/// track and pattern consistent (eseq-0l17.75). The device snapshot covers
+/// the device's p-lock rows, so left alone it would hold the mid-drag locks:
+/// undoing it after the drag would bring them back. Instead its `before` and
+/// `after` are rebased onto the state without the drag's cells (the cells
+/// are set back to the drag's `before` for one capture, then restored): the
+/// drag's undo restores the locks and keeps the edit, the edit's undo then
+/// lands on the state before both. When the edit moved a cell the drag
+/// moved too, or several device entries landed, the drag's entry is split
+/// at the edit instead ([`split_device_drag_beside`]).
+fn rebase_step_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    revision: u64,
+) -> BesideDrag {
+    let Some(EditPatch::StepCells(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let Some(first) = app.history.undo_index_since(revision) else {
+        return BesideDrag::Resume;
+    };
+    let Some(track) = app.track_registry.index_of(drag.target.track) else {
+        return BesideDrag::Resume;
+    };
+    let pattern = drag.target.pattern;
+    let on_drag_track = |patch: &DeviceValuesPatch| {
+        patch.pattern == pattern
+            && DeviceScope::of_device(app, patch.target)
+                .is_none_or(|scope| scope.track() == drag.target.track)
+    };
+    let beside: Vec<usize> = (first..app.history.undo_len())
+        .filter(|index| {
+            matches!(app.history.undo_patch_at(*index),
+                Some(EditPatch::DeviceValues(patch)) if on_drag_track(patch))
+        })
+        .collect();
+    let index = match beside.as_slice() {
+        [] => return BesideDrag::Resume,
+        [index] => *index,
+        _ => return split_device_drag_beside(app, suspended, first),
+    };
+    let Some(EditPatch::DeviceValues(edit)) = app.history.undo_patch_at(index).cloned() else {
+        return BesideDrag::Resume;
+    };
+    let Some(target) = resolved_device_target_of(app, edit.target, edit.pattern) else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let drag_before: Vec<(usize, StepCellSnapshot)> = drag
+        .cells
+        .iter()
+        .map(|cell| (cell.step, cell.before.clone()))
+        .collect();
+    let registry_before = drag.variant_registry_before.clone();
+    let steps: Vec<usize> = drag_before.iter().map(|(step, _)| *step).collect();
+    let Ok((current, current_registry)) =
+        app.state.capture_pattern_step_cells(track, pattern, &steps)
+    else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let current: Vec<(usize, StepCellSnapshot)> = steps.iter().copied().zip(current).collect();
+    // The device as it would be without the drag's cells, then the cells
+    // put back as they are.
+    let mut publish = false;
+    let without_drag = app
+        .state
+        .restore_pattern_step_cells_no_publish(track, pattern, &drag_before, &registry_before)
+        .map_err(EditError::ReplayFailed)
+        .and_then(|published| {
+            publish |= published;
+            capture_device_value_snapshot(app, target)
+        });
+    match app.state.restore_pattern_step_cells_no_publish(
+        track,
+        pattern,
+        &current,
+        &current_registry,
+    ) {
+        Ok(published) => publish |= published,
+        Err(error) => eprintln!("[history] restoring a step drag's cells failed: {error}"),
+    }
+    if publish {
+        app.state.publish_scheduler_track(track);
+    }
+    // The edit's `before` rebased the same way: the components it moved
+    // (from its `after` to its `before`) onto the state without the drag.
+    let rebased = without_drag.ok().and_then(|after| {
+        DeviceValueSnapshot::rebase_edit(&after, &edit.after, &edit.before)
+            .map(|before| (before, after))
+    });
+    let Some((before, after)) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let patch = DeviceValuesPatch {
+        before,
+        after,
+        ..edit
+    };
+    let bytes = patch.retained_bytes();
+    app.history
+        .replace_undo_patch(index, EditPatch::DeviceValues(patch), bytes);
+    BesideDrag::Resume
 }
 
 /// Keep a device-value drag's open entry and an entry committed beside it
@@ -7179,9 +7318,17 @@ fn rebase_device_drag_beside(
             _ => false,
         })
         .collect();
-    let index = match beside.as_slice() {
-        [] => return BesideDrag::Resume,
-        [index] => *index,
+    // Step-cell entries (script locks) of the drag's track and pattern: the
+    // drag's snapshot covers its device's lock rows.
+    let step_beside = (first..app.history.undo_len()).any(|index| {
+        matches!(app.history.undo_patch_at(index),
+            Some(EditPatch::StepCells(patch))
+                if patch.target.track == drag_scope.track() && patch.target.pattern == drag.pattern)
+    });
+    let index = match (beside.as_slice(), step_beside) {
+        ([], false) => return BesideDrag::Resume,
+        ([], true) => return rebase_device_drag_around_cells(app, suspended, first),
+        ([index], false) => *index,
         _ => return split_device_drag_beside(app, suspended, first),
     };
     let Some(EditPatch::DeviceValues(edit)) = app.history.undo_patch_at(index) else {
@@ -7220,6 +7367,45 @@ enum BesideDrag {
     /// It ends: a split sampler slice drag, whose frames reapply the
     /// gesture-start marker index to the gesture's original snapshot.
     End,
+}
+
+/// [`rebase_device_drag_beside`] for step-cell entries (script locks:
+/// `lock-param!`, `lock-strip!`, `lock-rack-macro!`) beside a device-value
+/// drag on its track and pattern (eseq-0l17.75). The drag's snapshot covers
+/// its device's lock rows, so left alone its undo would drop the beside
+/// lock. Its snapshot is rebased instead: with the drag at `B → C` and the
+/// device now at `C′` (the locks landed), the drag becomes
+/// `B′ → C′` where `B′` is `B` with the components the locks moved
+/// ([`DeviceValueSnapshot::rebase_edit`]). The step-cell entries hold only
+/// their cells, so the drag's undo keeps the lock and the lock's undo then
+/// removes only it. A lock of a cell the drag moved too (or a device that
+/// no longer resolves) splits the drag at the locks instead.
+fn rebase_device_drag_around_cells(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    first: usize,
+) -> BesideDrag {
+    let Some(EditPatch::DeviceValues(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let rebased = resolved_device_target_of(app, drag.target, drag.pattern)
+        .and_then(|target| capture_device_value_snapshot(app, target).ok())
+        .and_then(|now| {
+            DeviceValueSnapshot::rebase_edit(&drag.before, &drag.after, &now)
+                .map(|before| (before, now))
+        });
+    let Some((before, after)) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let patch = DeviceValuesPatch {
+        target: drag.target,
+        pattern: drag.pattern,
+        before,
+        after,
+    };
+    let bytes = patch.retained_bytes();
+    suspended.replace_pending_patch(EditPatch::DeviceValues(patch), bytes);
+    BesideDrag::Resume
 }
 
 /// [`rebase_device_drag_beside`]'s fallback: commit the drag's entry so far
@@ -11461,7 +11647,9 @@ pub fn apply_command_beside_gesture(
 /// not a single `AppCommand`, such as a bar transpose).
 ///
 /// An edit of the device a device-value drag is dragging is rebased against
-/// the drag's open entry ([`rebase_device_drag_beside`], eseq-0l17.72).
+/// the drag's open entry ([`rebase_device_drag_beside`], eseq-0l17.72); a
+/// device edit on a step p-lock drag's track around the drag's cells
+/// ([`rebase_step_drag_beside`], eseq-0l17.75).
 pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T) -> T {
     let suspended = app.history.suspend_gesture();
     let pending_drag = app.pending_drag.take();
@@ -11470,7 +11658,9 @@ pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T)
     finish_gesture_entry(app);
     app.pending_drag = pending_drag;
     if let Some(mut suspended) = suspended {
-        if rebase_device_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume {
+        let resume = rebase_device_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume
+            && rebase_step_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume;
+        if resume {
             app.history.resume_gesture(suspended);
         }
     }

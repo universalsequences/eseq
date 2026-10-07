@@ -1911,3 +1911,114 @@ fn a_beside_sound_edit_keeps_the_preset_dirty_through_the_drags_undo() {
     assert_eq!((param(&h, a), param(&h, b)), (a_base, b_base));
     assert!(!dirty(&h));
 }
+
+/// eseq-0l17.75: a step-held p-lock drag (step cells) on a rack slot and a
+/// script mute of that slot (a device snapshot that covers the slot's lock
+/// rows) are an entry each: the mute's snapshot is rebased onto the state
+/// without the drag's cells, so undoing the drag restores the locks without
+/// unmuting, and undoing the mute unmutes without bringing back mid-drag
+/// locks.
+#[test]
+fn a_script_mute_beside_a_step_plock_drag_of_the_slot_keeps_its_locks_out() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    const STEP: usize = 1;
+    const PARAM: usize = 2;
+    let lock = |h: &Harness| {
+        h.rack_slot()
+            .instrument_slot
+            .plocks
+            .get(STEP)
+            .and_then(|row| row.get(PARAM))
+            .copied()
+            .flatten()
+    };
+    let state = |h: &Harness| (lock(h), h.rack_slot().mute);
+    assert_eq!(state(&h), (None, false));
+    let drag = |value| app::AppCommand::SetRackSlotInstrumentPlock {
+        track: 2,
+        slot_idx: 0,
+        step: STEP,
+        param_idx: PARAM,
+        value,
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(0.3)).expect("drag");
+    let gesture = h.app.history.active_gesture().map(|g| g.id);
+    assert!(gesture.is_some(), "the drag's gesture");
+    h.eval_all("(set! rs.muted true)");
+    h.drain();
+    assert_eq!(h.app.history.active_gesture().map(|g| g.id), gesture);
+    assert_eq!(h.app.history.undo_len(), before + 1, "the mute's entry");
+    assert_eq!(state(&h), (Some(0.3), true), "the drag's cells are back");
+    app::try_apply_command(&mut h.app, drag(0.4)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the mute"
+    );
+    assert_eq!(state(&h), (Some(0.4), true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (None, true), "the drag's undo keeps the mute");
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (None, false), "no mid-drag lock comes back");
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (None, true));
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (Some(0.4), true));
+}
+
+/// eseq-0l17.75 (reverse): a user's strip gain drag (a device snapshot of
+/// the slot, covering its strip p-locks) and a script `lock-strip!` beside
+/// it (step cells): the drag's snapshot is rebased to keep the lock, so
+/// undoing the drag keeps it and undoing the lock removes only it.
+#[test]
+fn a_script_strip_lock_beside_a_strip_gain_drag_survives_the_drags_undo() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def s2 (nth t2.steps 2))",
+    );
+    let gain = h.rack_slot().gain;
+    let locked = |h: &Harness| {
+        h.rack_slot()
+            .param_plocks
+            .rows
+            .iter()
+            .flatten()
+            .any(|lock| *lock == Some(0.25))
+    };
+    let state = |h: &Harness| (h.rack_slot().gain, locked(h));
+    let drag = |value| app::AppCommand::SetRackSlotGain {
+        track: 2,
+        slot_idx: 0,
+        value,
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(0.6)).expect("drag");
+    let gesture = h.app.history.active_gesture().map(|g| g.id);
+    h.eval_all("(lock-strip! rs \"gain\" (list s2) 0.25)");
+    h.drain();
+    assert_eq!(h.app.history.active_gesture().map(|g| g.id), gesture);
+    assert_eq!(h.app.history.undo_len(), before + 1, "the lock's entry");
+    app::try_apply_command(&mut h.app, drag(0.8)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    assert_eq!(state(&h), (0.8, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, true), "the drag's undo keeps the lock");
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, false));
+    app::edit::redo(&mut h.app);
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (0.8, true));
+}

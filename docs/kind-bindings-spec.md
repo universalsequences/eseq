@@ -3665,6 +3665,36 @@ Built (7b):
   drag's later frames start another. Not covered: an edit beside a user
   drag whose entry *covers* the dragged device (the user-drag path checks
   no scope; pre-existing).
+  Step p-lock drags (a knob turned with a step held) are recorded as
+  step-cell patches (`StepCellsPatch`), not device snapshots, but a device
+  snapshot covers its device's lock rows, so a device-value edit beside
+  one on the same track and pattern (a script `(set! rs.muted true)`
+  during a rack slot lock drag, `(set! cutoff.base …)` during a filter
+  lock drag) used to record the mid-drag locks: undoing it after the
+  drag brought them back. Since eseq-0l17.75 `apply_beside_gesture` rebases
+  such an entry too (`rebase_step_drag_beside`): the drag's cells are set
+  back to its `before` for one capture of the edited device (then
+  restored), and the edit's entry becomes `X → X′` where `X′` is that
+  capture and `X` is `X′` with the components the edit moved taken from
+  its own `before` (`DeviceValueSnapshot::rebase_edit`). The drag's
+  step-cell entry is unchanged: its undo restores the locks and keeps the
+  edit, the edit's undo then lands on the state before both. A conflict
+  (the edit moved a dragged cell), several device entries beside it, or a
+  device that no longer resolves splits the drag's entry at the edit
+  instead. During a script's own step-lock drag,
+  `command_can_land_beside_active_gesture` now lets any device-value
+  command land beside it. The reverse holds too: a script lock
+  (`lock-param!`, `lock-strip!`, `lock-rack-macro!`, a step-cell entry)
+  landing beside a user's device-value drag (a base knob, a strip gain)
+  on the same track and pattern used to be dropped by the drag's undo
+  (its snapshot covers the lock rows). `rebase_device_drag_beside` now
+  rebases the drag around such entries (`rebase_device_drag_around_cells`):
+  with the drag at `B → C` and the device captured at `C′` once the locks
+  landed, the drag becomes `B′ → C′`, `B′` being `B` with the components
+  the locks moved. The lock entry is unchanged: the drag's undo keeps the
+  lock and the lock's undo removes only it. A lock of a component the drag
+  moved too, step-cell and device entries beside it at once, or a device
+  that no longer resolves splits the drag at them instead.
 - **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
   (eseq-0l17.36, built: §14.2f); modulation display, process mapping, tensors, base
   note, key locks, rack and project macros, the variant chip list, the

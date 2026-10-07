@@ -1097,3 +1097,94 @@ fn a_sampler_slice_drag_keeps_its_original_snapshot_beside_an_edit() {
     app::edit::undo(&mut h.app);
     assert_eq!(stored(&h), None);
 }
+
+/// eseq-0l17.75: a step-held p-lock drag on a track effect param and a
+/// script base set of the same effect (a device snapshot holding the
+/// effect's lock rows): the base set's entry is rebased onto the state
+/// without the drag's cells, so each undo restores only its own change.
+#[test]
+fn a_script_base_set_beside_a_step_plock_drag_of_the_effect_keeps_its_locks_out() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_all(DEVICES);
+    let base = h.filter_slot(slot).defaults.get(CUTOFF);
+    let state = |h: &Harness| {
+        let chain = h.filter_slot(slot);
+        (chain.plocks.get(2, CUTOFF), chain.defaults.get(CUTOFF))
+    };
+    let drag = |value| app::AppCommand::SetEffectPlock {
+        track: 0,
+        step: 2,
+        slot_idx: slot,
+        param_idx: CUTOFF,
+        value,
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(500.0)).expect("drag");
+    h.eval_all("(set! cutoff.base 3000)");
+    h.drain();
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    app::try_apply_command(&mut h.app, drag(600.0)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the base"
+    );
+    assert_eq!(state(&h), (Some(600.0), 3000.0));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (None, 3000.0), "the drag's undo keeps the base");
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (None, base), "no mid-drag lock comes back");
+}
+
+/// eseq-0l17.75 (reverse): a user's base knob drag on a track effect (a
+/// device snapshot holding the effect's lock rows) and a script
+/// `lock-param!` of another step beside it: the lock survives undoing the
+/// drag, and undoing the lock removes only it.
+#[test]
+fn a_script_lock_beside_a_base_drag_of_the_effect_survives_the_drags_undo() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_all(DEVICES);
+    let base = h.filter_slot(slot).defaults.get(CUTOFF);
+    let state = |h: &Harness| {
+        let chain = h.filter_slot(slot);
+        (chain.defaults.get(CUTOFF), chain.plocks.get(5, CUTOFF))
+    };
+    let drag = |value| app::AppCommand::SetEffectParam {
+        track: 0,
+        slot_idx: slot,
+        param_idx: CUTOFF,
+        value,
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(2000.0)).expect("drag");
+    h.eval_all("(lock-param! cutoff (list (nth t0.steps 5)) 800)");
+    h.drain();
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    app::try_apply_command(&mut h.app, drag(2500.0)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the lock"
+    );
+    assert_eq!(state(&h), (2500.0, Some(800.0)));
+    app::edit::undo(&mut h.app);
+    assert_eq!(
+        state(&h),
+        (base, Some(800.0)),
+        "the drag's undo keeps the lock"
+    );
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (base, None));
+}
