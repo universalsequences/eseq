@@ -107,6 +107,7 @@ pub(crate) fn create_editor_with_root(
         .runtime_mut()
         .eval_str(&grid_source)
         .map_err(|error| format!("failed to execute {}: {error:?}", ui_entrypoint.display()))?;
+    report_boot_load_errors(&mut editor);
     // Both roots import eseq.kinds; the host must publish exactly its fields.
     super::host_kinds::check_schema_at_startup(editor.runtime());
     editor.refresh_runtime_side_effects();
@@ -205,6 +206,17 @@ fn eseqlisp_factory_init_candidates() -> Vec<std::path::PathBuf> {
     sequencer::paths::eseqlisp_init_candidates()
 }
 
+/// `eval_str` leaves the `(import …)` / `(load …)` failures of the root it
+/// ran queued on the VM: drain them and report each (log and status line),
+/// so a broken module at boot is visible instead of silently missing.
+fn report_boot_load_errors(editor: &mut Editor) {
+    for message in editor.runtime_mut().take_source_load_errors() {
+        let message = format!("UI root load error: {message}");
+        eprintln!("metal_seq: {message}");
+        editor.handle_host_event(eseqlisp::HostEvent::Error(message));
+    }
+}
+
 /// Evaluate the user tier only after every factory/content root. A failed
 /// transaction is rolled back wholesale, surfaced in the status line and
 /// `*lisp-reload*`, and never aborts application boot.
@@ -273,7 +285,7 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
 
 #[cfg(test)]
 mod tests {
-    use super::load_user_init;
+    use super::{load_user_init, report_boot_load_errors};
     use eseqlisp::vm::Value;
     use eseqlisp::{Editor, EditorConfig, Runtime};
 
@@ -315,6 +327,36 @@ mod tests {
             "init diagnostics must be visible in the reload buffer"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// eseq-0l17.70: a root's failed `(load …)` / `(import …)` is drained
+    /// after its `eval_str` and shown, not left queued and invisible.
+    #[test]
+    fn boot_load_errors_are_drained_and_shown() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(import no.such.boot-module)");
+        report_boot_load_errors(&mut editor);
+        let status = editor.minibuffer.clone().unwrap_or_default();
+        assert!(
+            status.contains("UI root load error") && status.contains("no.such.boot-module"),
+            "the load error must reach the status line: {status:?}"
+        );
+        assert!(
+            editor.runtime_mut().take_source_load_errors().is_empty(),
+            "the boot report drains the queue"
+        );
+
+        // A clean boot reports nothing.
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(def ok 1)")
+            .expect("clean eval");
+        let before = editor.minibuffer.clone();
+        report_boot_load_errors(&mut editor);
+        assert_eq!(editor.minibuffer, before);
     }
 
     #[test]

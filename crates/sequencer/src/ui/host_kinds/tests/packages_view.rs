@@ -52,11 +52,22 @@ impl Harness {
     }
 
     /// Load a factory script as the script picker does, then sync and render.
+    /// The scripts call `eseq.seq-step-tabs/seq-register-script-step-sequencer-tab`,
+    /// which the app's distro root has loaded; a bare root imports it here,
+    /// as the app has. The load must raise no load errors (eseq-0l17.70).
     pub(super) fn pkg_load(&mut self, script: &str) {
+        self.eval("(import eseq.seq-step-tabs)");
         self.eval(&format!(r#"(load "@/scripts/{script}")"#));
+        self.assert_no_load_errors(script);
         self.drain();
         self.sync();
         self.show_all();
+    }
+
+    /// No `(load …)` / `(import …)` since the last drain failed.
+    pub(super) fn assert_no_load_errors(&mut self, what: &str) {
+        let errors = self.editor.runtime_mut().take_source_load_errors();
+        assert!(errors.is_empty(), "{what}: load errors: {errors:#?}");
     }
 
     /// The transport plays with the audio clock at `sample` (stopped: None).
@@ -207,7 +218,12 @@ fn the_band_demo_shows_its_tracks_inlets() {
     h.pkg_render();
     let (tree, _) = h.buffer_tree("*band-matrix*");
     let matrix = widget_keyed(&tree, "band-cell-matrix").expect("the matrix");
-    assert_eq!(items(&items(&matrix["value"])[0])[2], number(0.9));
+    // The load runs to its end (band-attach), so the cell reads back from
+    // track 3's attached ear, an f32 inlet.
+    assert_eq!(
+        items(&items(&matrix["value"])[0])[2],
+        number(f64::from(0.9_f32))
+    );
     let lag = widget_keyed(&tree, "band-lag-1").expect("track 2's lag");
     assert_eq!(lag["value"], number(4.0));
     let coupling = widget_keyed(&tree, "band-coupling").expect("coupling");

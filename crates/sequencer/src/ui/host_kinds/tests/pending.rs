@@ -174,7 +174,6 @@ fn the_pending_surface_costs_nothing_without_a_capture_and_rebuilds_on_its_revis
     // A recorded note moves the pending revision: one rebuild.
     h.record_note(anchor, 0, 2.0, 0.0);
     h.sync();
-    h.sync();
     assert_eq!(h.pending_syncs(), syncs + 1);
     assert_eq!(h.eval_7d2("(len song.pending-lanes)"), Value::Number(1.0));
 }
@@ -247,8 +246,6 @@ fn a_launched_patterns_pool_edit_mid_capture_rebuilds_its_launch() {
     // The whole-song capture's starting clip on track 0.
     assert_eq!(h.launch_field(0, "track"), h.eval_7d2("(track 0)"));
     let events = h.launch_field(0, "events");
-    // The reads settle.
-    h.sync();
     let syncs = h.pending_syncs();
     sequencer::app::edit::try_apply_command(
         &mut h.app,
@@ -333,8 +330,6 @@ fn a_capture_started_in_the_tick_another_ended_shows_its_own_content() {
     h.record_note(anchor, 0, 2.0, 0.0);
     h.sync();
     assert_eq!(h.eval_7d2("(len song.pending-lanes)"), Value::Number(1.0));
-    // The reads settle.
-    h.sync();
     // Cancel and start again before the next tick.
     h.app.song_capture_cancel().expect("cancel");
     h.start_capture();
@@ -357,9 +352,6 @@ fn the_record_head_moves_only_the_head_fields_a_quantum_at_a_time() {
     h.sync();
     assert_eq!(h.eval_7d2("song.pending-head"), Value::Number(2.0));
     let end = h.eval_7d2("(let ((l (lane-at 0))) l.end)");
-    // A view's first reads settle (the reads themselves resync the song
-    // structure once); the counters start from there.
-    h.sync();
     let syncs = h.pending_syncs();
     let pushes = h.frame.host_kinds.song.pending.head_pushes;
     // Inside the quantum: nothing.
@@ -376,4 +368,38 @@ fn the_record_head_moves_only_the_head_fields_a_quantum_at_a_time() {
     assert_ne!(moved, end);
     let (content, head) = h.model_pending();
     assert_eq!(moved, Value::Number(content.lanes[0].span().end_beat(head)));
+}
+
+/// eseq-0l17.59: reading the kinds moves no model generation. A view's
+/// first eval in a new import pass re-imports eseq.kinds, re-registering
+/// every kind with an unchanged declaration: no schema change, so the host
+/// keeps the song structure and the pending content it pushed.
+#[test]
+fn kind_reads_move_no_generation() {
+    let mut h = Harness::new();
+    let anchor = h.start_capture();
+    h.record_note(anchor, 0, 2.0, 0.0);
+    h.sync();
+    // A new import pass (as a transactional eval or a hot reload starts):
+    // the next view eval re-evaluates eseq.kinds.
+    let report =
+        (h.editor.runtime_mut()).eval_source_transactional(None, "(def kb-pass 1)", vec![]);
+    assert!(report.success);
+    let schema = h.rt().instance_kind_schema_generation();
+    let generation = h.frame.host_kinds.song.generation();
+    let structure = h.frame.host_kinds.song.structure_syncs;
+    let syncs = h.pending_syncs();
+    let lane = h.eval_7d2("(lane-at 0)");
+    assert!(matches!(lane, Value::Instance(_)), "{lane:?}");
+    h.eval_7d2("(let ((l (lane-at 0))) (list l.start l.end l.events song.pending-head))");
+    h.sync();
+    assert_eq!(
+        h.rt().instance_kind_schema_generation(),
+        schema,
+        "no schema change"
+    );
+    assert_eq!(h.frame.host_kinds.song.generation(), generation);
+    assert_eq!(h.frame.host_kinds.song.structure_syncs, structure);
+    assert_eq!(h.pending_syncs(), syncs, "no pending rebuild");
+    assert_eq!(h.eval_7d2("(lane-at 0)"), lane, "the same instance");
 }

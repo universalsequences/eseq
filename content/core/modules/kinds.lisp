@@ -95,15 +95,17 @@
 
 ;; The setters are absolute: the host compares with the model when the
 ;; command lands, so two `set!`s (or `toggle!`s) in one frame never undo
-;; each other through a cell that has not caught up yet.
-(def set-track-volume (t v) (seq-set-track-volume t.index (max 0 (min 1 v))))
+;; each other through a cell that has not caught up yet. Numbers follow the
+;; value rule (spec §14.2c): out of range is an error that sets nothing (the
+;; natives and host commands check; nothing here clamps).
+(def set-track-volume (t v) (seq-set-track-volume t.index v))
 (def set-track-muted (t v) (seq-set-track-mute t.index v))
 (def set-track-armed (t v) (seq-set-record-arm t.index v))
 (def set-step-active (s v) (seq-set-track-step s.track.index s.index v))
 (def set-transport-playing (tr v) (seq-set-playing v))
 (def set-transport-recording (tr v) (seq-set-recording v))
 (def select-track (sel t) (if t (seq-set-track t.index) nil))
-(def set-track-pan (t v) (seq-set-track-pan t.index (max -1 (min 1 v))))
+(def set-track-pan (t v) (seq-set-track-pan t.index v))
 (def set-track-soloed (t v) (seq-set-track-solo t.index v))
 (def set-track-collapsed (t v) (seq-set-track-collapsed t.index v))
 (def step-param-setter (param)
@@ -112,8 +114,8 @@
 ;; reorder before the command lands cannot retarget it.
 (def set-send-amount (s v)
   (host-command "set-track-send-base"
-    (dict :track s.track.index :bus-id s.bus.bid :amount (max 0 (min 1 v)))))
-(def set-bus-volume (b v) (seq-set-bus-volume b.index (max 0 (min 1 v))))
+    (dict :track s.track.index :bus-id s.bus.bid :amount v)))
+(def set-bus-volume (b v) (seq-set-bus-volume b.index v))
 (def set-bus-muted (b v) (seq-set-bus-mute b.index v))
 (def set-bus-soloed (b v) (seq-set-bus-solo b.index v))
 (def set-group-collapsed (g v) (seq-set-group-collapsed g.gid v))
@@ -1987,11 +1989,11 @@
 ;; A binding to mod input i (1-4, as in mod-in-1) of x, a track or a bus;
 ;; any other i is an error (reported; the value is false).
 (def mod-in-level (x i)
-  (if (= i 1) #'x.mod-in-1
-    (if (= i 2) #'x.mod-in-2
-      (if (= i 3) #'x.mod-in-3
-        (if (= i 4) #'x.mod-in-4
-          (seq-error (str "mod-in-level: no input " i " (inputs are 1-4)")))))))
+  (cond ((= i 1) #'x.mod-in-1)
+        ((= i 2) #'x.mod-in-2)
+        ((= i 3) #'x.mod-in-3)
+        ((= i 4) #'x.mod-in-4)
+        (else (seq-error (str "mod-in-level: no input " i " (inputs are 1-4)")))))
 
 ;; ── Drum racks ──
 

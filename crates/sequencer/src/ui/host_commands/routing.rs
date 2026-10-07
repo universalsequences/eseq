@@ -402,7 +402,14 @@ pub(super) fn handle(
             if bus_id == sequencer::sequencer::BusId::MIX || track >= state.active_track_count() {
                 return;
             }
-            set_track_send_base(app, track, bus_id, amount.clamp(0.0, 1.0) as f32);
+            // The value rule (kind-bindings spec §14.2c): no silent clamping.
+            if !(amount.is_finite() && (0.0..=1.0).contains(&amount)) {
+                editor.handle_host_event(eseqlisp::HostEvent::Error(format!(
+                    "set-track-send-base: {amount} is not a number from 0 to 1"
+                )));
+                return;
+            }
+            set_track_send_base(app, track, bus_id, amount as f32);
             let rt = editor.runtime_mut();
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();

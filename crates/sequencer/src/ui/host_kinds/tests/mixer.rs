@@ -521,3 +521,119 @@ fn non_distinct_bus_or_group_ids_retry_the_model_sync() {
     h.sync();
     assert_eq!(h.model_syncs(), syncs + 6);
 }
+
+impl Harness {
+    /// `code` (a setter) is refused under the value rule: an error naming
+    /// `expected` reaches the status line (a native's) or the minibuffer
+    /// (a host command's), and no undo entry is recorded.
+    fn refuses_value(&mut self, code: &str, expected: &str) {
+        self.editor.minibuffer = None;
+        self.editor.runtime_mut().take_status_message();
+        let before = self.app.history.undo_len();
+        self.eval_all(code);
+        let status = self.editor.runtime_mut().take_status_message();
+        self.drain();
+        let shown = status
+            .or_else(|| self.editor.minibuffer.clone())
+            .unwrap_or_default();
+        assert!(shown.contains(expected), "{code}: {shown:?}");
+        assert_eq!(
+            self.app.history.undo_len(),
+            before,
+            "{code} recorded nothing"
+        );
+    }
+}
+
+/// eseq-0l17.38: the stage 1–7 number setters follow the value rule
+/// (§14.2c): out of range is an error that changes nothing (no silent
+/// clamping), the range's ends work, and the current value round-trips
+/// with no undo entry.
+#[test]
+fn earlier_number_setters_follow_the_value_rule() {
+    let mut h = Harness::new();
+    let fx = h.add_bus("FX");
+    h.share_buses_and_groups();
+    h.sync();
+    let fx_index = h.app.buses.iter().position(|bus| bus.id == fx).unwrap();
+    h.eval_all(&format!(
+        "(def t0 (track 0)) (def s3 (nth t0.steps 3)) (def fx (nth (buses) {fx_index}))
+         (def fx-send (first (filter (lambda (s) (= s.bus fx)) t0.sends)))"
+    ));
+    h.eval_all(
+        "(set! t0.volume 0.5) (set! t0.pan 0.25) (set! fx.volume 0.5) (set! fx-send.amount 0.5)
+         (set! transport.bpm 130) (set! s3.velocity 0.5)",
+    );
+    h.drain();
+    h.share_buses_and_groups();
+    h.sync();
+    let model = |h: &Harness| {
+        let tp = &h.shared.state.pattern.track_params[0];
+        let send = (tp.sends().iter())
+            .find(|send| send.destination == fx)
+            .map(|send| send.amount);
+        (
+            tp.get_volume(),
+            tp.get_pan(),
+            h.app.buses[fx_index].volume,
+            send,
+            h.shared.state.transport.bpm.load(Ordering::Relaxed),
+            h.shared.state.pattern.step_data[0].get(3, StepParam::Velocity),
+        )
+    };
+    let before = model(&h);
+    assert_eq!(before, (0.5, 0.25, 0.5, Some(0.5), 130, 0.5));
+    for (code, expected) in [
+        (
+            "(set! t0.volume 1.5)",
+            "seq-set-track-volume: 1.5 is not a number from 0 to 1",
+        ),
+        ("(set! t0.volume -0.1)", "seq-set-track-volume"),
+        (
+            "(set! t0.pan 2)",
+            "seq-set-track-pan: 2 is not a number from -1 to 1",
+        ),
+        ("(set! fx.volume 1.01)", "seq-set-bus-volume"),
+        (
+            "(set! fx-send.amount -1)",
+            "set-track-send-base: -1 is not a number from 0 to 1",
+        ),
+        (
+            "(set! transport.bpm 301)",
+            "seq-set-bpm: 301 is not a number from 20 to 300",
+        ),
+        ("(set! transport.bpm 19)", "seq-set-bpm"),
+        (
+            "(set! s3.velocity 5)",
+            "seq-set-track-step-param :velocity: 5 is not a number from 0 to 1",
+        ),
+        ("(set! s3.transpose 49)", "from -48 to 48"),
+    ] {
+        h.refuses_value(code, expected);
+        h.share_buses_and_groups();
+        assert_eq!(model(&h), before, "{code} changed nothing");
+    }
+    // The current values round-trip and record nothing.
+    let undo = h.app.history.undo_len();
+    h.eval_all(
+        "(set! t0.volume t0.volume) (set! t0.pan t0.pan) (set! fx.volume fx.volume)
+         (set! fx-send.amount fx-send.amount) (set! transport.bpm transport.bpm)
+         (set! s3.velocity s3.velocity)",
+    );
+    h.drain();
+    h.share_buses_and_groups();
+    assert_eq!(model(&h), before);
+    assert_eq!(
+        h.app.history.undo_len(),
+        undo,
+        "a round trip records nothing"
+    );
+    // The ends of each range are values.
+    h.eval_all(
+        "(set! t0.volume 1) (set! t0.pan -1) (set! fx.volume 0) (set! fx-send.amount 1)
+         (set! transport.bpm 300) (set! s3.velocity 0)",
+    );
+    h.drain();
+    h.share_buses_and_groups();
+    assert_eq!(model(&h), (1.0, -1.0, 0.0, Some(1.0), 300, 0.0));
+}

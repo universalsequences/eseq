@@ -520,6 +520,12 @@ Stdlib (`core/init.lisp`) adds:
 (defmacro when (c &rest body) `(if ,c (do ,@body) nil))
 ```
 
+with `unless` beside `when`, and (eseq-0l17.46) `cond`: `(cond (test a b)
+... (else c))` runs the first clause whose test is truthy, every form of its
+body, and yields the last; a final `else` (or `true`) clause always matches;
+no match yields nil. Like `when` / `unless` it is an init.lisp macro, absent
+from a bare runtime. `eseq.kinds/mod-in-level` dispatches with it.
+
 ## 7. Bindings
 
 ### 7.1 `#'`
@@ -2966,8 +2972,10 @@ the other port beads follow it):
      stale while held (a project load, an undo, an edit from elsewhere):
      check it is still listed (`listed?`) before sending its id (never
      send a dropped instance's id, which can read 0).
-   The authoring rules: no `\"` escapes inside Lisp strings, no `cond`
-   (`match` / `if` / `when` / `unless`).
+   The authoring rules: no `\"` escapes inside Lisp strings, and
+   (originally) no `cond` (`match` / `if` / `when` / `unless`); since
+   eseq-0l17.46 `cond` is a `core/init.lisp` macro beside `when` / `unless`
+   (§6), with multi-form clause bodies and an `else` / `true` final clause.
    Learned by the mixer (.13):
    - a binding cannot be negated: bind the positive field and put the lit
      look on the bound state (`:muted #'t.audible` with the silenced look
@@ -3235,7 +3243,8 @@ Model.
   `seq-set-track-solo` (slice-3 op `set-solo`), `seq-set-track-collapsed`,
   `seq-set-bus-mute` / `seq-set-bus-solo` (bus mixer ops `set-mute` /
   `set-solo`), `seq-set-group-collapsed`, `seq-set-master-recording`,
-  `seq-set-track-step-param` (any track, clamped, one undo entry, no
+  `seq-set-track-step-param` (any track, in the param's range (since
+  eseq-0l17.38 the value rule, §14.2c: out of range is an error), one undo entry, no
   selection side effect), host commands `set-metronome`, `set-roll-mode`
   and `set-track-send-base` (`:track`, `:bus-id`, `:amount`: the base
   level, never a p-lock; the bus by id, so a reorder before the command
@@ -3438,8 +3447,13 @@ bar v)`;
 
 Built (7i):
 
-- **The value rule** (every 7i setter; the earlier stages' clamping
-  setters are unchanged). A string field takes one of its labels,
+- **The value rule** (every 7i setter; since eseq-0l17.38 the earlier
+  stages' number setters too: `track.volume` / `pan`, `bus.volume`,
+  `send.amount`, `transport.bpm` and the `step` params, whose natives
+  and `set-track-send-base` reject what they used to clamp, the current
+  value still round-tripping with no undo entry; the one exception left is
+  7b's `param.base` / `lock-param!`, which clamp and round in display
+  units as documented in §14.2b). A string field takes one of its labels,
   case-insensitively, and its current value always works (`(set! t.fts
   t.fts)` with an edited `Major*` scale or an imported scale's name); a
   number field takes a finite number in its range; an `:int` field an

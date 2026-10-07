@@ -3036,7 +3036,8 @@ impl Runtime {
         self.vm.host_fields_observed(id, fields)
     }
 
-    /// Bumped whenever a kind schema is (re)registered or rolled back.
+    /// Bumped whenever a kind schema is registered, changed or rolled back
+    /// ([`crate::vm::VM::instance_kind_schema_generation`]).
     pub fn instance_kind_schema_generation(&self) -> u64 {
         self.vm.instance_kind_schema_generation()
     }

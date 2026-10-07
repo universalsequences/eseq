@@ -996,10 +996,25 @@ fn observed_bits_batch_children_by_kind_and_the_schema_generation() {
     eval(&mut vm, "(def held-step #'s3.active)");
     assert!(vm.instance_observer_epoch() > epoch);
     assert!(vm.keyed_children_observed(id, &step_kind, &["active"]));
-    // Every (re)registration moves the schema generation.
+    // Re-registering the same declaration (a module re-evaluated by a later
+    // import pass: fresh setter closures) moves no schema generation
+    // (eseq-0l17.59); a changed declaration moves it.
     let generation = vm.instance_kind_schema_generation();
     eval(&mut vm, TRACK);
+    assert_eq!(vm.instance_kind_schema_generation(), generation);
+    let changed = TRACK.replace("(open false)", "(open false) (pinned false)");
+    eval(&mut vm, &changed);
     assert!(vm.instance_kind_schema_generation() > generation);
+    let generation = vm.instance_kind_schema_generation();
+    let unset = TRACK.replace(":range (0 1) :set set-volume", ":range (0 1)");
+    eval(
+        &mut vm,
+        &unset.replace("(open false)", "(open false) (pinned false)"),
+    );
+    assert!(
+        vm.instance_kind_schema_generation() > generation,
+        "a field losing its setter is a change"
+    );
 }
 
 /// Every `__stable-key` in a widget tree, depth first.

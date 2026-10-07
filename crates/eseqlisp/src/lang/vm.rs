@@ -5190,6 +5190,9 @@ impl VM {
             view_buffers: view_buffers::ViewBufferStore::default(),
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
+        // The macro-call wrapper passes its residue's value through: a
+        // binding a macro yields (`(cond (… #'t.volume))`) stays a binding.
+        vm.mark_natives_ref_aware(&[SOURCE_ORIGIN_NATIVE]);
         vm
     }
 

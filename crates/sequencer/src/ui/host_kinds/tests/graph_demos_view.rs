@@ -414,6 +414,7 @@ fn every_graph_demo_loads_project_owned_and_rack_owned() {
         let group = demo_rack(&mut h, &[2, 0]);
         let load = format!(r#"(load "@/scripts/sequencers/{file}")"#);
         sequencer::lisp_host::with_graph_owner_rack(Some(group), || h.eval(&load));
+        h.assert_no_load_errors(file);
         h.drain();
         h.pkg_render();
         let rack_id = sequencer::lisp_host::graph_instance_id(demo.name, Some(group));

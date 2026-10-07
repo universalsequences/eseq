@@ -147,6 +147,19 @@ fn step_param_command(
     }
 }
 
+/// The value rule (kind-bindings spec §14.2c) for a kind setter's number:
+/// a finite `value` in `lo..=hi`, else an error naming `native` and the
+/// range (no silent clamping; nothing is set).
+fn value_in_range(native: &str, value: f64, lo: f64, hi: f64) -> Result<f64, String> {
+    if value.is_finite() && (lo..=hi).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{native}: {value} is not a number from {lo} to {hi}"
+        ))
+    }
+}
+
 fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
     HostCommand::Custom {
         name: "slice3-history-action".to_string(),
@@ -4163,7 +4176,8 @@ pub(crate) fn init_runtime(
     });
 
     // seq-set-track-step-param — (seq-set-track-step-param track step :param
-    // value): one step's parameter on any track, clamped, as one undo entry;
+    // value): one step's parameter on any track, in the param's range (the
+    // value rule: out of range is an error), as one undo entry;
     // leaves the step selection alone (the `step.velocity` … :set).
     let st = state.clone();
     runtime.register_native("seq-set-track-step-param", move |args, ctx| {
@@ -4186,7 +4200,13 @@ pub(crate) fn init_runtime(
         let Some(param) = step_param_named(param_name) else {
             return Err(format!("seq-set-track-step-param: unknown param :{param_name}").into());
         };
-        let val = (*val as f32).clamp(param.min(), param.max());
+        let (lo, hi) = (f64::from(param.min()), f64::from(param.max()));
+        let val = value_in_range(
+            &format!("seq-set-track-step-param :{param_name}"),
+            *val,
+            lo,
+            hi,
+        )? as f32;
         ctx.enqueue_command(step_param_command(
             "set-step-param-history",
             track,
@@ -4960,7 +4980,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track-volume: track {track} out of range").into());
         }
-        let vol = (*vol as f32).clamp(0.0, 1.0);
+        let vol = value_in_range("seq-set-track-volume", *vol, 0.0, 1.0)? as f32;
         ctx.enqueue_command(slice3_numeric_history_command(
             "volume",
             Some(track),
@@ -5002,7 +5022,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track-pan: track {track} out of range").into());
         }
-        let pan = (*pan as f32).clamp(-1.0, 1.0);
+        let pan = value_in_range("seq-set-track-pan", *pan, -1.0, 1.0)? as f32;
         ctx.enqueue_command(slice3_numeric_history_command(
             "pan",
             Some(track),
@@ -5168,7 +5188,7 @@ pub(crate) fn init_runtime(
             return Err("seq-set-bus-volume: expected (bus volume)".into());
         };
         let bus_idx = *bus_idx as usize;
-        let vol = (*vol as f32).clamp(0.0, 1.0);
+        let vol = value_in_range("seq-set-bus-volume", *vol, 0.0, 1.0)? as f32;
         let bus_id = {
             let buses = bus_state.lock().unwrap();
             let Some(bus) = buses.get(bus_idx) else {
@@ -5846,7 +5866,10 @@ pub(crate) fn init_runtime(
         let Some(Value::Number(bpm)) = args.first() else {
             return Err("seq-set-bpm: expected bpm number".into());
         };
-        let bpm = (*bpm as u32).clamp(20, 300);
+        if bpm.fract() != 0.0 {
+            return Err(format!("seq-set-bpm: {bpm} is not a whole number").into());
+        }
+        let bpm = value_in_range("seq-set-bpm", *bpm, 20.0, 300.0)? as u32;
         ctx.enqueue_command(slice3_numeric_history_command("bpm", None, bpm as f64));
         Ok(Value::Number(bpm as f64))
     });

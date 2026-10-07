@@ -883,6 +883,71 @@ mod tests {
         );
     }
 
+    /// `cond` (content/core/init.lisp): the first truthy clause's body runs,
+    /// every form of it, and its last form is the value; `else` / `true` is
+    /// the fallthrough; no match is nil.
+    #[test]
+    fn core_init_cond_macro() {
+        let init = include_str!("../../../content/core/init.lisp");
+        let mut runtime = Runtime::with_init_source(init);
+        let eval = |runtime: &mut Runtime, src: &str| runtime.eval_str(src).unwrap();
+
+        assert_eq!(
+            eval(&mut runtime, "(cond (false 1) (true 3))"),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def pick (x) (cond ((= x 1) \"one\") ((= x 2) \"two\") (else \"many\")))
+                 (list (pick 1) (pick 2) (pick 7))"
+            ),
+            eval(&mut runtime, "(list \"one\" \"two\" \"many\")")
+        );
+        // Multi-form bodies: every form runs, the last is the value; later
+        // clauses (and their tests) do not run.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def hits 0)
+                 (def tested 0)
+                 (list
+                   (cond ((> 2 1) (set! hits (+ hits 1)) (set! hits (+ hits 10)) hits)
+                         ((do (set! tested 1) true) 99))
+                   tested)"
+            ),
+            eval(&mut runtime, "(list 11 0)")
+        );
+        // No matching clause (and no clauses at all) is nil.
+        assert_eq!(
+            eval(&mut runtime, "(cond (false 1) (nil 2))"),
+            Some(Value::Nil)
+        );
+        assert_eq!(eval(&mut runtime, "(cond)"), Some(Value::Nil));
+        // A clause yielding a binding keeps it a binding (the macro-call
+        // wrapper passes refs through), as an `if` of the same shape does.
+        let binding = eval(
+            &mut runtime,
+            "(def-kind dk :key () :state ((open 3)))
+             (def pick-ref (x i) (cond ((= i 1) #'x.open) (else nil)))
+             (pick-ref dk 1)",
+        );
+        assert!(
+            matches!(binding, Some(Value::ReactiveRef { .. })),
+            "{binding:?}"
+        );
+        // Inside a module, with else in the middle of a chain of tests.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(module core-init-cond-test)
+                 (def sign (n) (cond ((< n 0) -1) ((= n 0) 0) (else 1)))
+                 (list (sign -5) (sign 0) (sign 4))"
+            ),
+            eval(&mut runtime, "(list -1 0 1)")
+        );
+    }
+
     #[test]
     fn test_recursion() {
         assert_eq!(

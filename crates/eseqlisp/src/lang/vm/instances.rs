@@ -693,6 +693,37 @@ impl InstanceKindSchema {
         }
     }
 
+    /// Whether `other` declares the same kind as `self` up to the identity
+    /// of its function values: the same fields (names, types, defaults),
+    /// host fields (and which are settable), key, keymap and whether it has
+    /// a `:view` / `:on-create`. Re-evaluating an unchanged `def-kind` (a
+    /// later pass re-importing its module) re-registers such a schema with
+    /// fresh closures; that is no schema change (eseq-0l17.59).
+    pub fn same_declaration(&self, other: &Self) -> bool {
+        let fields = |a: &[KindField], b: &[KindField]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| a.name == b.name && a.ty == b.ty && a.default == b.default)
+        };
+        self.kind == other.kind
+            && fields(&self.fields, &other.fields)
+            && fields(&self.document, &other.document)
+            && self.host.len() == other.host.len()
+            && self.host.iter().zip(&other.host).all(|(a, b)| {
+                fields(
+                    std::slice::from_ref(&a.field),
+                    std::slice::from_ref(&b.field),
+                ) && a.set.is_some() == b.set.is_some()
+                    && a.range == b.range
+                    && a.doc == b.doc
+            })
+            && self.key == other.key
+            && self.keymap == other.keymap
+            && self.view.is_some() == other.view.is_some()
+            && self.on_create.is_some() == other.on_create.is_some()
+    }
+
     pub fn with_on_create(mut self, on_create: Option<Value>) -> Self {
         self.on_create = on_create;
         self
@@ -1571,8 +1602,12 @@ impl VM {
             .instances
             .kind_rc(&schema.kind)
             .unwrap_or_else(|| Rc::from(schema.kind.as_str()));
+        let unchanged = (self.instances.kinds.get(&kind))
+            .is_some_and(|previous| previous.same_declaration(&schema));
         let previous = self.instances.kinds.insert(kind.clone(), schema);
-        self.kind_schema_generation += 1;
+        if !unchanged {
+            self.kind_schema_generation += 1;
+        }
         // A (re)registered kind may carry a new `:view`: every bound view
         // buffer of its instances re-renders through it.
         self.mark_instance_views_of_kind_dirty(&kind);
@@ -2382,8 +2417,10 @@ impl VM {
         self.instance_observer_epoch
     }
 
-    /// Bumped whenever a kind schema is (re)registered or rolled back, so a
-    /// host can re-check the kinds it publishes after a hot reload.
+    /// Bumped whenever a kind schema is registered or changed by a
+    /// re-registration (not an identical one,
+    /// [`InstanceKindSchema::same_declaration`]) or rolled back, so a host
+    /// can re-check the kinds it publishes after a hot reload.
     pub fn instance_kind_schema_generation(&self) -> u64 {
         self.kind_schema_generation
     }
