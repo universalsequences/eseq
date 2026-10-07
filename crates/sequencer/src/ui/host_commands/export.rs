@@ -27,8 +27,8 @@ fn refresh(editor: &mut Editor) {
     editor.mark_needs_redraw();
 }
 
-/// Publish one complete job transition and refresh the already-open modal.
-/// This must not rely on transport/UI epochs or another user gesture.
+/// Present one complete job transition: the next tick's host-kinds push
+/// repaints the open modal, with no transport/UI epoch or user gesture.
 pub(crate) fn publish_job_status(editor: &mut Editor, status: &WorkerStatus, running: bool) {
     let text = match status {
         WorkerStatus::Preparing => "Preparing export…".into(),
@@ -77,6 +77,9 @@ pub(super) fn handle(
                         .map_err(|e| e.to_string())?;
                     JOB.with(|value| *value.borrow_mut() = None);
                     let rt = editor.runtime_mut();
+                    // The view's drafts take these now: the kind fields land
+                    // at the next tick.
+                    let reset_args = vec![Value::String(filename.clone()), Value::Number(end)];
                     present_export(rt, |x| {
                         *x = ExportView {
                             default_name: filename,
@@ -94,8 +97,10 @@ pub(super) fn handle(
                             ..ExportView::default()
                         }
                     });
-                    rt.eval_str("(eseq.export-song/reset)")
-                        .map_err(|e| format!("{e:?}"))?;
+                    let reset = rt
+                        .global_value("eseq.export-song/reset")
+                        .ok_or("Export UI is unavailable")?;
+                    rt.invoke(reset, reset_args).map_err(|e| format!("{e:?}"))?;
                 }
                 if !editor.switch_active_tile_to_buffer_named("*arrangement*") {
                     editor.switch_active_tile_to_buffer_named("*sequencer*");

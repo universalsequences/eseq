@@ -3454,9 +3454,6 @@ pub(crate) fn init_runtime(
                 ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
                 ("rack-clips", Value::List(vec![])),
             ];
-            // The editor's and Patch Learn's legacy fields, as the record
-            // (`presented`) holds them.
-            fields.extend(crate::presented::seq_registration());
             for idx in 0..track_count {
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
@@ -3483,8 +3480,6 @@ pub(crate) fn init_runtime(
     crate::midi_dispatch::register_device_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
-    crate::host_commands::factory_promote::register_state(&mut runtime);
-    runtime.register_reactive("AGENT", crate::presented::agent_registration(), false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
     }
@@ -6977,7 +6972,6 @@ pub(crate) fn init_runtime(
     crate::host_commands::packages::register_package_import_natives(&mut runtime);
     crate::host_commands::packages::register_package_export_natives(&mut runtime);
     crate::host_commands::packages::register_package_tree_natives(&mut runtime, state.clone());
-    runtime.register_reactive("EXPORT", crate::presented::export_registration(), true);
     crate::presented::register_fixture_native(&mut runtime);
 
     let sample_db_for_search = sample_db.clone();

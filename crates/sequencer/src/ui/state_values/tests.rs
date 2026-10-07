@@ -1657,11 +1657,6 @@ use panel_kinds_seed::*;
         let mut editor =
             eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
         register_agent_test_natives(editor.runtime_mut());
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
         editor
             .runtime_mut()
             .eval_str(r#"(load "ui/themes/mac-osx-dark.lisp")"#)
@@ -1704,11 +1699,6 @@ use panel_kinds_seed::*;
                 captured_calls.lock().unwrap().push(args.to_vec());
                 Ok(Value::Number(1.0))
             });
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
         editor
             .runtime_mut()
             .eval_str(r#"(load "ui/themes/mac-osx-dark.lisp")"#)
@@ -1772,11 +1762,6 @@ use panel_kinds_seed::*;
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.set_layout_viewport(92, 24);
         register_agent_test_natives(editor.runtime_mut());
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
         editor
             .runtime_mut()
             .eval_str(r#"(load "ui/themes/mac-osx-dark.lisp")"#)
@@ -1905,11 +1890,6 @@ use panel_kinds_seed::*;
                 captured_cancel_calls.lock().unwrap().push(*conv_id as i64);
                 Ok(Value::Nil)
             });
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
         editor
             .runtime_mut()
             .eval_str(r#"(load "ui/themes/mac-osx-dark.lisp")"#)
@@ -1920,7 +1900,7 @@ use panel_kinds_seed::*;
             .expect("load agent lisp");
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.agent/agent-current-conv 1)")
+            .eval_str("(let ((chat eseq.agent/agent-chat)) (set! chat.conv 1))")
             .expect("select test conversation");
         editor
             .runtime_mut()
@@ -2017,11 +1997,6 @@ use panel_kinds_seed::*;
                     .collect::<Vec<_>>();
                 Ok(test_list(messages))
             });
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
         editor
             .runtime_mut()
             .eval_str(r#"(load "ui/themes/mac-osx-dark.lisp")"#)
@@ -2032,7 +2007,7 @@ use panel_kinds_seed::*;
             .expect("load agent lisp");
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.agent/agent-current-conv 1)")
+            .eval_str("(let ((chat eseq.agent/agent-chat)) (set! chat.conv 1))")
             .expect("select test conversation");
         editor.refresh_runtime_side_effects();
 
@@ -15172,11 +15147,6 @@ use panel_kinds_seed::*;
             ]))
         });
 
-        editor.runtime_mut().register_reactive(
-            "AGENT",
-            vec![("generation", Value::Number(0.0))],
-            false,
-        );
 
         let steps = test_bool_list(&[
             true, false, true, false, true, false, true, false, true, false, true, false, true,
@@ -15313,7 +15283,6 @@ use panel_kinds_seed::*;
                     test_list(vec![Value::Map(test_instrument_map())]),
                 ),
                 ("current-pattern", Value::Number(0.0)),
-                ("editor-mode", Value::String(String::new())),
                 ("recording", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
@@ -15336,11 +15305,6 @@ use panel_kinds_seed::*;
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
-        editor.runtime_mut().register_reactive(
-            "EXPORT",
-            crate::presented::export_registration(),
-            true,
-        );
         register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
@@ -17462,14 +17426,14 @@ use panel_kinds_seed::*;
         });
         editor.runtime_mut().eval_str("(eseq.agent/agent-open)").unwrap();
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            editor.runtime_mut().eval_str("(let ((chat eseq.agent/agent-chat)) chat.conv)").unwrap(),
             Some(Value::Number(0.0)),
         );
         assert!(editor.runtime_mut().take_status_message().unwrap().contains("agent-models.lisp"));
-        editor.runtime_mut().eval_str("(set! eseq.agent/agent-current-conv 7)").unwrap();
+        editor.runtime_mut().eval_str("(let ((chat eseq.agent/agent-chat)) (set! chat.conv 7))").unwrap();
         editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            editor.runtime_mut().eval_str("(let ((chat eseq.agent/agent-chat)) chat.conv)").unwrap(),
             Some(Value::Number(7.0)),
         );
         editor.runtime_mut().register_native("agent/new", |_args, _ctx| {
@@ -17477,7 +17441,7 @@ use panel_kinds_seed::*;
         });
         editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            editor.runtime_mut().eval_str("(let ((chat eseq.agent/agent-chat)) chat.conv)").unwrap(),
             Some(Value::Number(8.0)),
         );
     }
@@ -49799,6 +49763,31 @@ use panel_kinds_seed::*;
             .unwrap_or_else(|| panic!("lane {name}"))
     }
 
+    /// Push the presented export into the `song-export` kind as the
+    /// host-kinds tick does (host_kinds/presentation.rs), then refresh as the
+    /// tick does when it pushed.
+    fn sync_export_kind(editor: &mut Editor) {
+        let view = crate::presented::presented(|p| p.export.get().clone());
+        let export = kind_singleton(editor, "song-export");
+        let rt = editor.runtime_mut();
+        for (field, value) in [
+            ("default-name", Value::String(view.default_name)),
+            ("project", Value::String(view.project)),
+            ("folder", Value::String(view.folder)),
+            ("end", Value::Number(view.end)),
+            ("busy", Value::Bool(view.busy)),
+            ("done", Value::Bool(view.done)),
+            ("message", Value::String(view.message)),
+            ("percent", Value::Number(view.percent)),
+            ("output-name", Value::String(view.output_name)),
+            ("reveal-label", Value::String(view.reveal_label)),
+        ] {
+            set_field(rt, export, field, value);
+        }
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+    }
+
     #[test]
     fn metal_seq_export_song_modal_has_usable_settings_and_job_states() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -49810,19 +49799,19 @@ use panel_kinds_seed::*;
         let setup = &fixture[fixture.find("(def capture-after-sync").unwrap()..];
         editor.runtime_mut().eval_str(setup).unwrap();
         editor.runtime_mut().eval_str("(capture-after-sync)").unwrap();
-        // The fixture seeds the record (`present-fixture`), and its mirror.
+        // The fixture seeds the record (`present-fixture`); the host kinds
+        // push it, and the drafts took the fixture's name and end.
         let export = crate::presented::presented(|p| p.export.get().clone());
         assert_eq!(export.default_name, "Night Drive (2)");
         assert_eq!(export.end, 64.0);
-        let Some(Value::Map(legacy)) = editor.runtime_mut().global_value("EXPORT") else {
-            panic!("EXPORT");
-        };
-        assert_eq!(
-            *legacy["export-default-name"].borrow(),
-            Value::String("Night Drive (2)".into())
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
+        sync_export_kind(&mut editor);
+        for (field, value) in [("name", "Night Drive (2)"), ("end", "64"), ("range", "Beat range")] {
+            assert_eq!(
+                editor.runtime_mut().eval_str(&format!("(let ((d eseq.export-song/export-draft)) d.{field})")).unwrap(),
+                Some(Value::String(value.into())),
+                "{field}"
+            );
+        }
         editor.set_layout_viewport(160, 60);
         let layout = editor.widget_layout().unwrap();
         assert_finite_layout_tree(&layout);
@@ -49834,9 +49823,11 @@ use panel_kinds_seed::*;
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, .. } if name == "export-song-open")));
         use sequencer::bounce::job::WorkerStatus;
-        // Exercise the same publisher used by Start and worker polling. No
-        // test-only reactive cycle, reopening or resize may make it repaint.
+        // Exercise the same publisher used by Start and worker polling; the
+        // modal repaints from the host-kinds push alone (no reopening or
+        // resize).
         crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Preparing, true);
+        sync_export_kind(&mut editor);
         let layout = editor.widget_layout().unwrap();
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-cancel").is_some());
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-submit").is_none());
@@ -49846,12 +49837,14 @@ use panel_kinds_seed::*;
         assert!(status.rect.width > 0.0 && status.rect.height > 0.0);
         let preparing_text = status.props.get("text").cloned();
         crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Rendering { percent: 37 }, true);
+        sync_export_kind(&mut editor);
         let layout = editor.widget_layout().unwrap();
         let status = find_layout_node_by_stable_key_suffix(&layout, "/export-status").unwrap();
         assert_ne!(status.props.get("text").cloned(), preparing_text);
         assert!(matches!(status.props.get("text"), Some(Value::String(text)) if text.contains("37%")));
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-preparing").is_none());
         crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Completed { frames: 24000, tail_warning: false }, false);
+        sync_export_kind(&mut editor);
         let layout = editor.widget_layout().unwrap();
         let reveal = find_layout_node_by_stable_key_suffix(&layout, "/export-reveal").unwrap();
         assert!(reveal.rect.width > 0.0 && reveal.rect.height > 0.0);

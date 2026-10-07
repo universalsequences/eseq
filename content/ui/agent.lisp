@@ -6,16 +6,12 @@
 ;; target, so NEVER import this module from a library file; that would drag a
 ;; UI root into every VM that loads the importer.
 ;;
-;; It adds NO imports of its own, and must not grow any: five Rust tests in
-;; src/ui/state_values/tests.rs eval this whole file into a bare
-;; `Runtime::new()` with no `@/` source root (hazard n2), where an `import`
-;; would resolve through `module_file_candidates`, fall through to a
-;; cwd-relative path that does not exist, and push a load error into every one
-;; of those VMs. Nothing here needs one: everything it touches outside the file
-;; is a Rust native (the `agent/…` conversation API — an undotted slash
-;; namespace that resolves flat, exactly as it does in eseq.choose-model), a
-;; builtin widget, or the AGENT reactive namespace, none of which are
-;; module-scoped.
+;; Its one import is `eseq.kinds`, for the host's `agent` singleton: both
+;; buffers read `agent.generation`, which moves whenever an agent session
+;; changes, so they re-render then. Everything else it touches outside the
+;; file is a Rust native (the `agent/…` conversation API — an undotted slash
+;; namespace that resolves flat, exactly as it does in eseq.choose-model) or a
+;; builtin widget, none of which are module-scoped.
 ;;
 ;; Widget `:key` props auto-qualify (hazard a), so the hand-rolled `agent-`
 ;; prefix is dropped from every key string here and the layout assertions in
@@ -23,8 +19,9 @@
 ;; `*agent-artifacts*` buffer names and the `agent-submit-icon` `defwidget`
 ;; name are flat keyspaces and stay byte-identical (hazard e).
 (module eseq.agent)
+(import eseq.kinds :refer (agent))
 
-(export agent-current-conv
+(export agent-chat
         agent-open
         agent-submit-current)
 
@@ -37,18 +34,14 @@
 ;;   bind-key qualifies the handler string against the binding module and
 ;;   finds it exactly here).
 ;; `agent-submit-current` — the busy/cancel test evals it by flat name.
-;; `agent-current-conv` — the same tests seed it with a flat
-;;   `(set! agent-current-conv 1)`. It is a `defstate`, so the write lands in
-;;   `state_bindings`, whose lookup ladder honours this alias too (hazard b);
-;;   the writers are `#[cfg(test)]` only, so no `eseq.vanilla` pin is needed.
-;;
-;; All three are functions or a `defstate`, i.e. the two shapes immune to
-;; hazard (m). This file has no mutable plain `def` and no outbound `set!` —
-;; every `set!` below targets one of its own `defstate`s (hazard j clear).
 
-(defstate agent-current-conv 0)
-(defstate prompt "")
-(defstate finalize-name "")
+;; The open conversation (0: none), the composer's draft and the artifact's
+;; save-as name.
+(def-kind agent-chat
+  :key ()
+  :state ((conv 0)
+          (prompt "")
+          (finalize-name "")))
 
 (defwidget agent-submit-icon
   :width 3.2 :height 3.2
@@ -77,53 +70,45 @@
         (sdf/rounded-rect 0.34 0.34 0.04)
         (material :color stop-col)))))
 
+(def chatting? () (> agent-chat.conv 0))
+
 (def agent-open ()
-  (do
-    (if (= agent-current-conv 0)
-      (new-conversation)
-      nil)
-    (if (> agent-current-conv 0)
-      (do
-        (set-window-buffer-for "*track*" "*agent-artifacts*")
-        (switch-to-buffer "*agent*"))
-      nil)))
+  (unless (chatting?)
+    (new-conversation))
+  (when (chatting?)
+    (set-window-buffer-for "*track*" "*agent-artifacts*")
+    (switch-to-buffer "*agent*")))
 
 (def close-panel ()
-  (do
-    (set-window-buffer-for "*agent-artifacts*" "*track*")
-    ;; *metal* (legacy step grid) is no longer loaded; land on the live view.
-    (switch-to-buffer "*sequencer*")))
+  (set-window-buffer-for "*agent-artifacts*" "*track*")
+  ;; *metal* (legacy step grid) is no longer loaded; land on the live view.
+  (switch-to-buffer "*sequencer*"))
 
 (def new-conversation ()
   (let ((id (agent/new :kind 'general)))
-    (if id
-      (do
-        (set! agent-current-conv id)
-        (set! finalize-name ""))
-      nil)))
+    (when id
+      (set! agent-chat.conv id)
+      (set! agent-chat.finalize-name ""))))
 
 (def send-current ()
-  (if (and (> agent-current-conv 0) (not (= prompt "")))
-    (do
-      (agent/send agent-current-conv prompt)
-      (set! prompt ""))
-    nil))
+  (when (and (chatting?) (not (= agent-chat.prompt "")))
+    (agent/send agent-chat.conv agent-chat.prompt)
+    (set! agent-chat.prompt "")))
 
 (def agent-submit-current ()
   (if (busy?)
-    (if (> agent-current-conv 0)
-      (agent/cancel agent-current-conv)
-      nil)
+    (when (chatting?)
+      (agent/cancel agent-chat.conv))
     (send-current)))
 
 (def status-label ()
-  (if (> agent-current-conv 0)
-    (str (agent/status agent-current-conv))
+  (if (chatting?)
+    (str (agent/status agent-chat.conv))
     "idle"))
 
 (def busy? ()
-  (if (> agent-current-conv 0)
-    (let ((status (agent/status agent-current-conv)))
+  (if (chatting?)
+    (let ((status (agent/status agent-chat.conv)))
       (or (= status 'streaming)
           (= status 'compiling)
           (= status 'auditioning)))
@@ -134,15 +119,14 @@
     (if (= models false) (list) models)))
 
 (def current-model ()
-  (if (> agent-current-conv 0)
-    (agent/model agent-current-conv)
+  (if (chatting?)
+    (agent/model agent-chat.conv)
     (let ((models (model-options)))
       (if models (nth models 0) ""))))
 
 (def set-current-model (model)
-  (if (> agent-current-conv 0)
-    (agent/set-model agent-current-conv model)
-    nil))
+  (when (chatting?)
+    (agent/set-model agent-chat.conv model)))
 
 (def message-card (m i)
   (let ((role (get m :role))
@@ -152,16 +136,18 @@
          :width :fill
          :padding 0.55
          :corner-radius 7
-         :background-color (if (= role 'user)
-                             :button-ghost-bg
-                             (if (= role 'tool) :widget-bg
-                               (if (= role 'system) :widget-bg :buffer-bg)))
+         :background-color (cond
+                             ((= role 'user) :button-ghost-bg)
+                             ((= role 'tool) :widget-bg)
+                             ((= role 'system) :widget-bg)
+                             (else :buffer-bg))
       (v-stack :width :fill :gap 0.25
         (label (str role)
           :font-size 9
-          :color (if (= role 'tool)
-                   :blue
-                   (if (= role 'system) :orange :gray))
+          :color (cond
+                   ((= role 'tool) :blue)
+                   ((= role 'system) :orange)
+                   (else :gray))
           :bg :transparent)
         (label text
           :font-size 11
@@ -177,13 +163,13 @@
           (box :height 0.0))))))
 
 (def message-list ()
-  (if (= agent-current-conv 0)
+  (if (not (chatting?))
     (box :width :fill :flex 1 :align :center
       (button "Ask agent"
         :variant :primary
         :height 1.5
         :on-click |x y r| (agent-open)))
-    (let ((messages (agent/messages agent-current-conv)))
+    (let ((messages (agent/messages agent-chat.conv)))
       (if (= (len messages) 0)
         (box :width :fill :flex 1 :align :center :padding 1.0
           (v-stack :gap 0.65 :align :center
@@ -193,8 +179,8 @@
               :bg :transparent)
             (button "tape delay effect"
               :variant :ghost
-              :on-click |x y r| (set! prompt "create a tape delay effect"))))
-        (scroll :key (str "scroll-" agent-current-conv)
+              :on-click |x y r| (set! agent-chat.prompt "create a tape delay effect"))))
+        (scroll :key (str "scroll-" agent-chat.conv)
                 :width :fill
                 :flex 1
                 :stick-to-bottom true
@@ -209,36 +195,35 @@
               (message-card (nth messages i) i))))))))
 
 (def draft-actions ()
-  (if (> agent-current-conv 0)
-    (let ((artifact (agent/artifact agent-current-conv)))
+  (if (chatting?)
+    (let ((artifact (agent/artifact agent-chat.conv)))
       (if (get artifact :can-apply)
         (h-stack :width :fill :gap 0.5 :align :center
           (button (str (get artifact :apply-label))
             :variant :primary
             :height 1.25
-            :on-click |x y r| (agent/accept agent-current-conv))
+            :on-click |x y r| (agent/accept agent-chat.conv))
           (button "Discard"
             :variant :danger
             :height 1.25
-            :on-click |x y r| (agent/discard agent-current-conv)))
+            :on-click |x y r| (agent/discard agent-chat.conv)))
         (box :height 0.1)))
     (box :height 0.1)))
 
 (def artifact-finalize-name (artifact)
-  (if (= finalize-name "")
+  (if (= agent-chat.finalize-name "")
     (str (get artifact :display-name))
-    finalize-name))
+    agent-chat.finalize-name))
 
 (def finalize-current (artifact)
-  (if (and (> agent-current-conv 0) (get artifact :can-finalize))
-    (agent/finalize agent-current-conv (artifact-finalize-name artifact))
-    nil))
+  (when (and (chatting?) (get artifact :can-finalize))
+    (agent/finalize agent-chat.conv (artifact-finalize-name artifact))))
 
 (def artifact-panel ()
-  (if (= agent-current-conv 0)
+  (if (not (chatting?))
     (box :width :fill :height :fill :padding 0.8
       (label "No artifact" :color :gray :bg :transparent))
-    (let ((artifact (agent/artifact agent-current-conv)))
+    (let ((artifact (agent/artifact agent-chat.conv)))
       (if (get artifact :exists)
         (v-stack :width :fill :height :fill :gap 0.75 :padding 0.8
           (v-stack :width :fill :gap 0.2
@@ -273,11 +258,11 @@
               :color :gray
               :bg :transparent)
             (text-input
-              :value finalize-name
+              :value agent-chat.finalize-name
               :placeholder (str (get artifact :display-name))
               :width :fill
               :height 1.35
-              :on-change (lambda (v) (set! finalize-name v)))
+              :on-change (lambda (v) (set! agent-chat.finalize-name v)))
             (if (get artifact :can-finalize)
               (button "Finalize"
                 :variant :primary
@@ -305,7 +290,7 @@
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*agent*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*agent*"
-  (let ((agent-generation AGENT.generation))
+  (let ((agent-generation agent.generation))
     (v-stack :width :fill :height :fill :gap 0.5 :padding 0.65
       (h-stack :width :fill :align :center :gap 0.5
         (label "Agent"
@@ -338,14 +323,14 @@
         (v-stack :width :fill :gap 0.25
           (textbox
             :key "prompt-input"
-            :value prompt
+            :value agent-chat.prompt
             :placeholder "Describe an instrument, effect, or change..."
             :width :fill
             :min-lines 2
             :max-lines 7
             :font-size 13
             :bg :transparent
-            :on-change (lambda (v) (set! prompt v)))
+            :on-change (lambda (v) (set! agent-chat.prompt v)))
           (box :flex 1)
           (h-stack :key "composer-actions"
             :padding 0.5
@@ -369,13 +354,13 @@
               :on-click |x y r| (agent-submit-current)
               (agent-submit-icon
                 :on-click |x y r| (agent-submit-current)
-                :active (if (or (busy?) (not (= prompt ""))) 1 0)
+                :active (if (or (busy?) (not (= agent-chat.prompt ""))) 1 0)
                 :canceling (if (busy?) 1 0)))))))))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*agent-artifacts*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*agent-artifacts*"
-  (let ((agent-generation AGENT.generation))
+  (let ((agent-generation agent.generation))
     (artifact-panel)))
 
 ;; Entry point. `C-g` used to open this panel, but Cmd/Ctrl+G is now the

@@ -513,6 +513,7 @@ mod graph_demos_view;
 mod lanes;
 mod mixer;
 mod mixer_view;
+mod modals_view;
 mod neural;
 mod neural_panel;
 mod packages_view;

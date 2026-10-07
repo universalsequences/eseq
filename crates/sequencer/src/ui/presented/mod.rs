@@ -1,31 +1,27 @@
 //! What the host presents beside its model: the browser sidebar, the
 //! preset and kit listings, the sound palette, the instrument and effect
-//! editor, Patch Learn, MIDI capture, the song export, Settings and the agent
-//! (docs/kind-bindings-spec.md §14.2i).
+//! editor, Patch Learn, MIDI capture, the song export, Settings, the agent
+//! and Promote to factory (docs/kind-bindings-spec.md §14.2i).
 //!
-//! This record is the source of truth. A command or a job event edits an
-//! area through its typed mutator (`present_editor`, `present_learn`,
-//! `present_export`, …); a computed snapshot (the sidebar, the listings, the
-//! palette) is recorded whole by its publisher. Each area moves its own
-//! generation only when its value changed, and the host kinds push an area's
-//! fields only when that generation moved (`host_kinds::presentation`).
+//! This record is the source of truth; views read it through the host
+//! kinds. A command or a job event edits an area through its typed mutator
+//! (`present_editor`, `present_learn`, `present_export`, …); a computed
+//! snapshot (the sidebar, the listings, the palette) is recorded whole by
+//! its publisher. Each area moves its own generation only when its value
+//! changed, and the host kinds push an area's fields only when that
+//! generation moved (`host_kinds::presentation`), on the next tick: a view
+//! the host opens right after an edit takes what it needs as arguments.
 //!
-//! The legacy reactive names unported views still read (`SEQ.editor-active`
-//! / `editor-mode`, `EXPORT`, `AGENT`) are a mirror: after each typed edit the
-//! mutator writes the legacy fields that changed, derived from the record by
-//! [`legacy`], which holds every legacy name. Their registrations derive
-//! their defaults from the record too. Removing the legacy names
-//! (eseq-0l17.22) deletes `legacy.rs` and the mirror calls here; no call site
-//! changes.
+//! The older mutators still take the runtime they once mirrored legacy
+//! reactive names into (eseq-0l17.76 removed the mirror and left their call
+//! sites alone); `present_promote`, added then, takes none.
 //!
 //! The record lives on the UI thread (a thread local, like the export job
 //! it describes): every publisher and the host kinds' tick run there.
 
 mod fixture;
-mod legacy;
 
 pub(crate) use fixture::register as register_fixture_native;
-pub(crate) use legacy::{agent_registration, export_registration, seq_registration};
 
 use crate::app::sound_palette::{PaletteEntry, PaletteTarget};
 use crate::*;
@@ -70,6 +66,7 @@ pub(crate) struct Presented {
     pub(crate) export: Area<ExportView>,
     pub(crate) settings: Area<SettingsView>,
     pub(crate) agent: Area<u64>,
+    pub(crate) promote: Area<PromoteView>,
 }
 
 thread_local! {
@@ -81,13 +78,11 @@ pub(crate) fn presented<R>(f: impl FnOnce(&Presented) -> R) -> R {
     PRESENTED.with(|presented| f(&presented.borrow()))
 }
 
-/// Edit one area: when `edit` changed it, move its generation and write the
-/// legacy fields that changed (`mirror`). Returns whether it changed.
+/// Edit one area: when `edit` changed it, move its generation. Returns
+/// whether it changed.
 fn present<T: Clone + PartialEq>(
-    sink: &mut dyn legacy::Sink,
     area: fn(&mut Presented) -> &mut Area<T>,
     edit: impl FnOnce(&mut T),
-    mirror: fn(&mut dyn legacy::Sink, &T, &T),
 ) -> bool {
     PRESENTED.with(|presented| {
         let mut presented = presented.borrow_mut();
@@ -98,58 +93,69 @@ fn present<T: Clone + PartialEq>(
             return false;
         }
         area.generation += 1;
-        mirror(sink, &old, &area.value);
         true
     })
 }
 
-/// Edit the record outside the mutators: no generation moves and nothing is
-/// mirrored (a registration seeds a value before its namespace exists).
+/// Edit the record outside `present`: a snapshot recorded whole
+/// (`Area::set` moves its generation), or a value seeded before the first
+/// host-kinds push.
 fn seed(edit: impl FnOnce(&mut Presented)) {
     PRESENTED.with(|presented| edit(&mut presented.borrow_mut()));
 }
 
 /// Edit the editor's state.
-pub(crate) fn present_editor(rt: &mut Runtime, edit: impl FnOnce(&mut EditorView)) -> bool {
-    present(rt, |p| &mut p.editor, edit, legacy::mirror_editor)
+pub(crate) fn present_editor(_rt: &mut Runtime, edit: impl FnOnce(&mut EditorView)) -> bool {
+    present(|p| &mut p.editor, edit)
 }
 
 /// Edit the editor's macro sidebar.
 pub(crate) fn present_editor_sidebar(
-    rt: &mut Runtime,
+    _rt: &mut Runtime,
     edit: impl FnOnce(&mut EditorSidebar),
 ) -> bool {
-    present(rt, |p| &mut p.editor_sidebar, edit, legacy::unmirrored)
+    present(|p| &mut p.editor_sidebar, edit)
 }
 
 /// Edit Patch Learn.
-pub(crate) fn present_learn(rt: &mut Runtime, edit: impl FnOnce(&mut LearnView)) -> bool {
-    present(rt, |p| &mut p.learn, edit, legacy::unmirrored)
+pub(crate) fn present_learn(_rt: &mut Runtime, edit: impl FnOnce(&mut LearnView)) -> bool {
+    present(|p| &mut p.learn, edit)
 }
 
 /// Edit the MIDI capture.
-pub(crate) fn present_retro(rt: &mut Runtime, edit: impl FnOnce(&mut RetroView)) -> bool {
-    present(rt, |p| &mut p.retro, edit, legacy::unmirrored)
+pub(crate) fn present_retro(_rt: &mut Runtime, edit: impl FnOnce(&mut RetroView)) -> bool {
+    present(|p| &mut p.retro, edit)
 }
 
 /// Edit the song export.
-pub(crate) fn present_export(rt: &mut Runtime, edit: impl FnOnce(&mut ExportView)) -> bool {
-    present(rt, |p| &mut p.export, edit, legacy::mirror_export)
+pub(crate) fn present_export(_rt: &mut Runtime, edit: impl FnOnce(&mut ExportView)) -> bool {
+    present(|p| &mut p.export, edit)
 }
 
 /// Edit the settings.
-pub(crate) fn present_settings(rt: &mut Runtime, edit: impl FnOnce(&mut SettingsView)) -> bool {
-    present(rt, |p| &mut p.settings, edit, legacy::unmirrored)
+pub(crate) fn present_settings(_rt: &mut Runtime, edit: impl FnOnce(&mut SettingsView)) -> bool {
+    present(|p| &mut p.settings, edit)
 }
 
 /// Record the agent's generation.
-pub(crate) fn present_agent(rt: &mut Runtime, generation: u64) -> bool {
-    present(
-        rt,
-        |p| &mut p.agent,
-        |agent| *agent = generation,
-        legacy::mirror_agent,
-    )
+pub(crate) fn present_agent(_rt: &mut Runtime, generation: u64) -> bool {
+    present(|p| &mut p.agent, |agent| *agent = generation)
+}
+
+/// Edit Promote to factory.
+pub(crate) fn present_promote(edit: impl FnOnce(&mut PromoteView)) -> bool {
+    present(|p| &mut p.promote, edit)
+}
+
+/// Whether an instrument editor session (a draft or an existing
+/// instrument) is open.
+pub(crate) fn instrument_editor_open() -> bool {
+    presented(|p| {
+        matches!(
+            p.editor.get().mode.as_str(),
+            "new-instrument" | "edit-instrument"
+        )
+    })
 }
 
 /// What the browser sidebar shows for the current track (the `browser`
@@ -246,8 +252,8 @@ pub(crate) fn present_palette(palette: Option<Palette>) {
 /// The instrument / effect editor's state.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EditorView {
-    /// An editor session is open (legacy only; `mode` says which).
-    pub(crate) active: bool,
+    /// The open session's mode (`new-instrument`, `edit-effect`, …); empty
+    /// while none is open.
     pub(crate) mode: String,
     pub(crate) surface: String,
     pub(crate) buffer: String,
@@ -262,7 +268,6 @@ pub(crate) struct EditorView {
 impl Default for EditorView {
     fn default() -> Self {
         Self {
-            active: false,
             mode: String::new(),
             surface: String::new(),
             buffer: String::new(),
@@ -286,7 +291,6 @@ pub(crate) fn present_editor_open(
     surface: EditorSurface,
 ) {
     present_editor(rt, |e| {
-        e.active = true;
         mode.clone_into(&mut e.mode);
         buffer.clone_into(&mut e.buffer);
         e.error.clear();
@@ -300,7 +304,6 @@ pub(crate) fn present_editor_open(
 /// Present the editor closed (its surface kept for the next open).
 pub(crate) fn present_editor_closed(rt: &mut Runtime) {
     present_editor(rt, |e| {
-        e.active = false;
         e.canceling = false;
         e.mode.clear();
         e.error.clear();
@@ -384,8 +387,6 @@ pub(crate) struct LearnView {
     pub(crate) optimization_losses: Vec<f64>,
     pub(crate) plan_params: Vec<LearnPlanParam>,
     pub(crate) epoch_params: Vec<LearnEpochParam>,
-    /// The latest checkpoint render (legacy only).
-    pub(crate) checkpoint_wav: String,
     pub(crate) improvement_pct: f64,
     pub(crate) abs_distance: f64,
     pub(crate) basin_check: String,
@@ -434,7 +435,6 @@ impl Default for LearnView {
             optimization_losses: Vec::new(),
             plan_params: Vec::new(),
             epoch_params: Vec::new(),
-            checkpoint_wav: String::new(),
             improvement_pct: 0.0,
             abs_distance: 0.0,
             basin_check: String::new(),
@@ -623,6 +623,22 @@ impl Default for ExportView {
             reveal_label: String::new(),
         }
     }
+}
+
+/// Promote to factory: what the open promotion copies and skips, and what
+/// its commit reported (the `factory-promote` kind).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PromoteView {
+    /// What is promoted: `Sound`, `kit`, `rack preset` or `preset`.
+    pub(crate) target: String,
+    pub(crate) destination: String,
+    /// The dependencies left out, one line each.
+    pub(crate) skipped: Vec<String>,
+    /// Why it cannot be promoted; empty when it can.
+    pub(crate) blocking: String,
+    pub(crate) error: String,
+    /// The name a commit found already taken: Promote then replaces it.
+    pub(crate) taken: String,
 }
 
 /// Settings: the audio workers and the MIDI inputs.

@@ -13,6 +13,7 @@
           :done false
           :message ""
           :reveal-label "Show in Finder"))
-  (eseq.export-song/reset)
-  (set! eseq.export-song/range-draft "Beat range")
+  (eseq.export-song/reset "Night Drive (2)" 64)
+  (let ((draft eseq.export-song/export-draft))
+    (set! draft.range "Beat range"))
   (eseq.export-song/open))

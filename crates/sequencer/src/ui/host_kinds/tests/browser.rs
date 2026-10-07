@@ -2,14 +2,15 @@
 //! (`browser`, `preset-file`, `slot-presets`, `sound-palette`, `sound`,
 //! `editor`, `editor-macro`, `editor-asset`, `asset-info`, `learn` and its
 //! rows, `retro` and its rows, `song-export`, `settings`, `midi-device`,
-//! `agent`, `project.name`, `project.audio-workers-options`,
-//! `track.instrument-id`).
+//! `agent`, `factory-promote`, `project.name`,
+//! `project.audio-workers-options`, `track.instrument-id`).
 
 use super::*;
 use sequencer::app::sound_palette::PaletteTarget;
 use crate::presented::{
-    present_kit_presets, present_sound_presets, presented, AssetInfo, EditorAsset, LearnPlanParam,
-    PresetFile, RetroItem, RetroView, LEARN_METHODS, LEARN_REFINE_MODES,
+    present_kit_presets, present_promote, present_sound_presets, presented, AssetInfo, EditorAsset,
+    LearnPlanParam, PresetFile, PromoteView, RetroItem, RetroView, LEARN_METHODS,
+    LEARN_REFINE_MODES,
 };
 
 const REFER_7F: &str = "(import eseq.kinds :refer (track tracks project selection browser \
@@ -36,13 +37,6 @@ impl Harness {
 
     fn cell(&self, id: InstanceId, field: &str) -> Value {
         self.rt().instance_field(id, field).expect(field)
-    }
-
-    fn legacy_in(&self, namespace: &str, field: &str) -> Value {
-        self.rt()
-            .reactive_field_value(namespace, field)
-            .unwrap_or_else(|| panic!("{namespace}.{field}"))
-            .clone()
     }
 
     fn view_pushes(&self) -> u64 {
@@ -346,8 +340,6 @@ fn editor_fields_follow_the_published_editor_state() {
     ] {
         assert_eq!(h.single(EDITOR, field), value, "{field}");
     }
-    // The name unported views still read is mirrored.
-    assert_eq!(h.legacy_in("SEQ", "editor-mode"), s("new-instrument"));
     // The macro sidebar: the patch's macros, then the library's, kept by
     // name.
     let patch = patch_macro_sidebar(vec![
@@ -587,20 +579,53 @@ fn song_export_follows_the_job_status() {
         true,
     );
     h.sync();
-    for (field, legacy) in [
-        ("busy", "export-busy"),
-        ("done", "export-done"),
-        ("percent", "export-percent"),
-        ("message", "export-message"),
-    ] {
-        assert_eq!(
-            h.single(SONG_EXPORT, field),
-            h.legacy_in("EXPORT", legacy),
-            "{field}"
-        );
-    }
     assert_eq!(h.single(SONG_EXPORT, "busy"), Value::Bool(true));
+    assert_eq!(h.single(SONG_EXPORT, "done"), Value::Bool(false));
     assert_eq!(h.single(SONG_EXPORT, "percent"), Value::Number(37.0));
+    assert_eq!(h.single(SONG_EXPORT, "message"), s("Exporting audio — 37%"));
+    crate::host_commands::export::publish_job_status(
+        &mut h.editor,
+        &sequencer::bounce::job::WorkerStatus::Completed {
+            frames: 1,
+            tail_warning: false,
+        },
+        false,
+    );
+    h.sync();
+    assert_eq!(h.single(SONG_EXPORT, "busy"), Value::Bool(false));
+    assert_eq!(h.single(SONG_EXPORT, "done"), Value::Bool(true));
+    assert_eq!(h.single(SONG_EXPORT, "message"), s("Export complete."));
+}
+
+#[test]
+fn factory_promote_follows_the_presented_promotion() {
+    let mut h = Harness::new();
+    h.sync();
+    assert_eq!(h.single(FACTORY_PROMOTE, "blocking"), s(""));
+    assert_eq!(h.single(FACTORY_PROMOTE, "skipped"), list_value([]));
+    present_promote(|view| {
+        *view = PromoteView {
+            target: "kit".to_string(),
+            destination: "content/kits/".to_string(),
+            skipped: vec!["pad 'Kick': skipped".to_string()],
+            ..PromoteView::default()
+        }
+    });
+    h.sync();
+    assert_eq!(h.single(FACTORY_PROMOTE, "target"), s("kit"));
+    assert_eq!(h.single(FACTORY_PROMOTE, "destination"), s("content/kits/"));
+    assert_eq!(
+        strings_of(h.single(FACTORY_PROMOTE, "skipped")),
+        vec!["pad 'Kick': skipped".to_string()]
+    );
+    // A command's error shows in the modal (a commit with nothing open).
+    h.command("factory-promote-commit", Value::Nil);
+    h.sync();
+    assert_eq!(
+        h.single(FACTORY_PROMOTE, "error"),
+        s("Open a promotion first")
+    );
+    assert_eq!(h.single(FACTORY_PROMOTE, "target"), s("kit"));
 }
 
 #[test]
@@ -693,10 +718,6 @@ fn project_name_and_agent_generation() {
     assert_eq!(h.single(PROJECT, "name"), s(""));
     present_agent(h.editor.runtime_mut(), 7);
     h.sync();
-    assert_eq!(
-        h.single(AGENT, "generation"),
-        h.legacy_in("AGENT", "generation")
-    );
     assert_eq!(h.single(AGENT, "generation"), Value::Number(7.0));
 }
 

@@ -4,16 +4,16 @@
 //! `editor-asset`s and `asset-info`, `learn` with its `learn-plan-param`,
 //! `learn-epoch-param` and `learn-delta` rows, `retro` with its
 //! `retro-lane`s and `retro-item`s, `song-export`, `settings` with its
-//! `midi-device`s, `agent`, and `project.name` /
+//! `midi-device`s, `agent`, `factory-promote`, and `project.name` /
 //! `project.audio-workers-options` / `instances`.
 //!
 //! **Feeds.** The model fields come from the presented record
 //! (`ui::presented`, which commands, job events and the snapshot
 //! publishers edit): one area per view (the sidebar, the Sound and kit
 //! listings, the palette, the editor, its macro sidebar, Patch Learn, the
-//! capture, the export, the settings, the agent), each pushed only when its
-//! generation moved since the last push. An idle tick compares those
-//! counters and allocates nothing, and nothing here lists a directory or
+//! capture, the export, the settings, the agent, the promotion), each pushed
+//! only when its generation moved since the last push. An idle tick compares
+//! those counters and allocates nothing, and nothing here lists a directory or
 //! reads a file: the listings are the ones the legacy publishers made. Also
 //! compared every tick, in place: the sidebar's track and slot devices
 //! against the track and device instances, the palette's track and the
@@ -52,6 +52,7 @@ struct Seen {
     export: Option<u64>,
     settings: Option<u64>,
     agent: Option<u64>,
+    promote: Option<u64>,
 }
 
 /// The views' sync state (in [`HostKinds`]).
@@ -92,7 +93,7 @@ pub(crate) struct PresentedState {
 }
 
 /// The singletons whose instances key the pushes.
-const SINGLETONS: [&str; 9] = [
+const SINGLETONS: [&str; 10] = [
     BROWSER,
     SOUND_PALETTE,
     EDITOR,
@@ -101,6 +102,7 @@ const SINGLETONS: [&str; 9] = [
     SONG_EXPORT,
     SETTINGS,
     AGENT,
+    FACTORY_PROMOTE,
     PROJECT,
 ];
 
@@ -166,7 +168,8 @@ impl HostKinds {
             state.invalidate();
             state.singletons = singletons;
         }
-        let [browser, palette, editor, learn, retro, export, settings, agent, project] = singletons;
+        let [browser, palette, editor, learn, retro, export, settings, agent, promote, project] =
+            singletons;
         if let Some(browser) = browser {
             self.sync_browser(pusher, app, browser);
         }
@@ -195,6 +198,9 @@ impl HostKinds {
                 let value = presented(|p| *p.agent.get());
                 pusher.push(agent, f::AGENT_GENERATION, number(value as f64));
             }
+        }
+        if let Some(promote) = promote {
+            state.sync_promote(pusher, promote);
         }
         if let Some(project) = project {
             let name = app.current_project_name.as_deref();
@@ -702,6 +708,21 @@ impl PresentedState {
         pusher.push(export, f::EXPORT_PERCENT, number(view.percent));
         pusher.push(export, f::EXPORT_OUTPUT_NAME, text(&view.output_name));
         pusher.push(export, f::EXPORT_REVEAL_LABEL, text(&view.reveal_label));
+    }
+
+    /// Promote to factory when its area moved.
+    fn sync_promote(&mut self, pusher: &mut Pusher<'_>, promote: InstanceId) {
+        let generation = presented(|p| p.promote.generation());
+        if !moved(&mut self.seen.promote, generation, &mut self.pushes) {
+            return;
+        }
+        let view = presented(|p| p.promote.get().clone());
+        pusher.push(promote, f::PROMOTE_TARGET, text(&view.target));
+        pusher.push(promote, f::PROMOTE_DESTINATION, text(&view.destination));
+        pusher.push(promote, f::PROMOTE_SKIPPED, strings(&view.skipped));
+        pusher.push(promote, f::PROMOTE_BLOCKING, text(&view.blocking));
+        pusher.push(promote, f::PROMOTE_ERROR, text(&view.error));
+        pusher.push(promote, f::PROMOTE_TAKEN, text(&view.taken));
     }
 
     /// The settings (and the project's audio worker options) when their area

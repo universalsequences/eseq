@@ -1,5 +1,4 @@
 old	new	source
-agent-current-conv	eseq.agent/agent-current-conv	content/ui/agent.lisp
 agent-open	eseq.agent/agent-open	content/ui/agent.lisp
 agent-submit-current	eseq.agent/agent-submit-current	content/ui/agent.lisp
 aqua-color	eseq.materials/color	content/ui/materials.lisp

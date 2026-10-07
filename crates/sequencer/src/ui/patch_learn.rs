@@ -495,11 +495,8 @@ fn publish_event(
                 l.epoch_params = epoch_params(&pending.expected_seed, params, steps);
             });
         }
-        LearnEvent::Checkpoint { wav, .. } => {
-            present_learn(rt, |l| {
-                l.checkpoint_wav = wav.to_string_lossy().into_owned()
-            });
-        }
+        // No view shows the checkpoint renders.
+        LearnEvent::Checkpoint { .. } => {}
         LearnEvent::Result { improvement_pct, abs_distance, basin_check, deltas, seeded_wav, final_wav, .. } => {
             present_learn(rt, |l| {
                 l.phase = "result".to_string();

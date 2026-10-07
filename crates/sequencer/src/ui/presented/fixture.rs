@@ -1,16 +1,16 @@
 //! The capture fixtures' hook: `(present-fixture area fields)` seeds a
 //! presented area as a command or job would, by the kind's field names
-//! (`song-export`, `settings`, `retro`, `learn`, `editor`), so a fixture
-//! shows a modal's or a pane's states without running an export, a MIDI
-//! service, a capture, a learn job or an edit session. The record moves
-//! like any typed edit and the legacy mirror follows (applied when the
-//! native returns).
+//! (`song-export`, `settings`, `retro`, `learn`, `editor`,
+//! `factory-promote`), so a fixture shows a modal's or a pane's states
+//! without running an export, a MIDI service, a capture, a learn job, an
+//! edit session or a promotion. The record moves like any typed edit; the
+//! host kinds push it after `capture-after-sync`.
 
 use super::*;
 
 /// Register `present-fixture`.
 pub(crate) fn register(runtime: &mut Runtime) {
-    runtime.register_native("present-fixture", |args, ctx| {
+    runtime.register_native("present-fixture", |args, _ctx| {
         let (Some(Value::String(area)), Some(fields)) = (args.first(), args.get(1)) else {
             return Err(
                 "present-fixture takes an area name and a dict of its fields"
@@ -18,17 +18,13 @@ pub(crate) fn register(runtime: &mut Runtime) {
                     .into(),
             );
         };
-        present_fixture(ctx, area, fields).map_err(|error| format!("present-fixture: {error}"))?;
+        present_fixture(area, fields).map_err(|error| format!("present-fixture: {error}"))?;
         Ok(Value::Nil)
     });
 }
 
 /// Apply `fields` (a dict by the kind's field names) to `area`.
-pub(crate) fn present_fixture(
-    sink: &mut dyn legacy::Sink,
-    area: &str,
-    fields: &Value,
-) -> Result<(), String> {
+pub(crate) fn present_fixture(area: &str, fields: &Value) -> Result<(), String> {
     let Value::Map(map) = fields else {
         return Err(format!("{area} takes a dict of fields"));
     };
@@ -41,33 +37,28 @@ pub(crate) fn present_fixture(
             for (name, value) in &fields {
                 export_field(&mut view, name, value)?;
             }
-            present(
-                sink,
-                |p| &mut p.export,
-                |x| *x = view,
-                legacy::mirror_export,
-            );
+            present(|p| &mut p.export, |x| *x = view);
         }
         "settings" => {
             let mut view = presented(|p| p.settings.get().clone());
             for (name, value) in &fields {
                 settings_field(&mut view, name, value)?;
             }
-            present(sink, |p| &mut p.settings, |s| *s = view, legacy::unmirrored);
+            present(|p| &mut p.settings, |s| *s = view);
         }
         "retro" => {
             let mut view = presented(|p| p.retro.get().clone());
             for (name, value) in &fields {
                 retro_field(&mut view, name, value)?;
             }
-            present(sink, |p| &mut p.retro, |r| *r = view, legacy::unmirrored);
+            present(|p| &mut p.retro, |r| *r = view);
         }
         "learn" => {
             let mut view = presented(|p| p.learn.get().clone());
             for (name, value) in &fields {
                 learn_field(&mut view, name, value)?;
             }
-            present(sink, |p| &mut p.learn, |l| *l = view, legacy::unmirrored);
+            present(|p| &mut p.learn, |l| *l = view);
         }
         "editor" => {
             let mut view = presented(|p| p.editor.get().clone());
@@ -75,18 +66,15 @@ pub(crate) fn present_fixture(
             for (name, value) in &fields {
                 editor_field(&mut view, &mut sidebar, name, value)?;
             }
-            present(
-                sink,
-                |p| &mut p.editor,
-                |e| *e = view,
-                legacy::mirror_editor,
-            );
-            present(
-                sink,
-                |p| &mut p.editor_sidebar,
-                |s| *s = sidebar,
-                legacy::unmirrored,
-            );
+            present(|p| &mut p.editor, |e| *e = view);
+            present(|p| &mut p.editor_sidebar, |s| *s = sidebar);
+        }
+        "factory-promote" => {
+            let mut view = presented(|p| p.promote.get().clone());
+            for (name, value) in &fields {
+                promote_field(&mut view, name, value)?;
+            }
+            present(|p| &mut p.promote, |x| *x = view);
         }
         _ => return Err(format!("no presented area {area}")),
     }
@@ -106,6 +94,19 @@ fn export_field(view: &mut ExportView, name: &str, value: &Value) -> Result<(), 
         "output-name" => view.output_name = text(name, value)?,
         "reveal-label" => view.reveal_label = text(name, value)?,
         _ => return Err(format!("song-export has no field {name}")),
+    }
+    Ok(())
+}
+
+fn promote_field(view: &mut PromoteView, name: &str, value: &Value) -> Result<(), String> {
+    match name {
+        "target" => view.target = text(name, value)?,
+        "destination" => view.destination = text(name, value)?,
+        "skipped" => view.skipped = rows(name, value, text)?,
+        "blocking" => view.blocking = text(name, value)?,
+        "error" => view.error = text(name, value)?,
+        "taken" => view.taken = text(name, value)?,
+        _ => return Err(format!("factory-promote has no field {name}")),
     }
     Ok(())
 }

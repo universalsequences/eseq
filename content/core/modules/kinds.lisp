@@ -56,6 +56,7 @@
         add-process! remove-process! bind-port! add-fanout! unbind-port! clear-port!
         remove-fanout!
         browser sound-palette editor learn retro song-export settings agent
+        factory-promote
         apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
         learn-method-options learn-refine-mode-options
         piano-roll add-note! delete-notes! pitch-min pitch-max
@@ -1709,6 +1710,18 @@
 (def-kind agent
   :key ()
   :host ((generation :int :doc "Moves whenever an agent session changes")))
+
+;; Promote to factory: what the open promotion copies and skips
+;; (`factory-promote-open`), and what its commit reported. `kind` is a
+;; built-in field, so what is promoted is `target`.
+(def-kind factory-promote
+  :key ()
+  :host ((target      :string :doc "What is promoted: Sound, kit, rack preset or preset")
+         (destination :string :doc "The content/ folder it is written to")
+         (skipped     (list-of :string) :doc "The dependencies left out, one line each")
+         (blocking    :string :doc "Why it cannot be promoted; empty when it can")
+         (error       :string :doc "The last open or commit error")
+         (taken       :string :doc "The name a commit found taken; Promote then replaces it")))
 
 ;; A note of the piano roll's source: (nth piano-roll.notes 0). The host gives
 ;; each note an id while it exists; a set! that moves a note keeps its id (and

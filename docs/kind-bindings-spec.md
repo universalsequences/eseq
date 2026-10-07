@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .21, .65, .66 and .67 ported, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .21, .65, .66, .67 and .76 ported, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -3116,6 +3116,63 @@ its instance and field.
      repo fixture `tracker.lisp` addresses tracks as instances
      (`(eseq.kinds/track 3)`, its first `t.lanes`) and opens the picker
      with an event's `:at`.
+   Built (stage 8, eseq-0l17.76, legacy removal C of eseq-0l17.22): the
+   song export (`ui/export-song.lisp`), Agent Mode (`ui/agent.lisp`) and
+   Promote to factory (`ui/factory-promote.lisp`), and the end of the
+   presented record's legacy mirror:
+   - **Kinds.** `factory-promote` (`:key ()`, all M; the stage 7 inventory
+     missed the `FACTORY_PROMOTE` namespace): `target` (what is promoted;
+     `kind` is built in), `destination`, `skipped (list-of :string)`,
+     `blocking`, `error`, `taken`. It is a presented area (`promote`,
+     `present_promote`, pushed like the others when its generation moves)
+     and a `present-fixture` area. The Lisp writes none of these: the open
+     and commit stay host commands (`factory-promote-open` /
+     `-commit`), whose errors and taken name the host presents. `song-export`
+     and `agent` were built by 7f.
+   - **View state** (`:key ()` singletons): `eseq.export-song`'s
+     `export-draft` (`open`, the settings being typed: `name`, `range`,
+     `start`, `end`, `rate`, `tail`), `eseq.agent`'s `agent-chat` (`conv`,
+     the open conversation; `prompt`; `finalize-name`),
+     `eseq.factory-promote`'s `promote-form` (`open`, `name`). The modules
+     export the singletons in place of the `defstate`s (`open?`,
+     `name-draft`, `range-draft`, `agent-current-conv`, `name`).
+     `eseq.export-song/reset` takes the suggested name and end beat: the
+     host calls it right after presenting the export, before the next tick
+     pushes `song-export` (§13.1). Agent Mode's two buffers read
+     `agent.generation`, so they re-render when an agent session changes;
+     `ui/agent.lisp` gains its one import (`eseq.kinds`), which resolves in
+     the bare runtimes its tests load it into.
+   - **Legacy removed:** `presented/legacy.rs` (the mirror, its `Sink`
+     impls and the `seq_registration` / `export_registration` /
+     `agent_registration` re-exports), the `EXPORT` and `AGENT`
+     registrations, `SEQ.editor-active` / `editor-mode` (the last reader,
+     Shift+Tab in an instrument editor, asks the record:
+     `presented::instrument_editor_open`), the `FACTORY_PROMOTE` namespace
+     (`factory_promote::register_state`), the record's legacy-only
+     `EditorView::active` and `LearnView::checkpoint_wav`, and the compat
+     alias row `agent-current-conv`. The mutators' `rt` argument stays
+     (unused) so their ~100 call sites did not change. `legacy_forms`
+     flags `FACTORY_PROMOTE.` too.
+   - **Tests.** `host_kinds::tests::modals_view` (Distro root): the three
+     files use no legacy form; the export modal follows a job's
+     transitions through the kinds with no reopening; Agent Mode re-renders
+     on a new generation and not on an idle tick; the promote modal shows
+     the presented promotion, turns Promote into Replace on a taken name
+     and commits nothing while blocked. `host_kinds::tests::browser`:
+     `song-export` through a job's completion, `factory-promote` from the
+     record and a command's error. `presented::tests` lose the mirror and
+     registration checks (`instrument_editor_open`, the promote area and
+     its fixture added). The host-less tests seed `song-export` and
+     `factory-promote` as the tick pushes them (`sync_export_kind`,
+     `set_kind_field`) and address the view singletons; the agent tests
+     drop their `AGENT` registrations.
+   - **Captures.** 12 renders (`export-song` over the sequencer and the
+     arrangement, `export-song-progress`, and scratch states: preparing,
+     done, failed, three promotions (skips, blocked with an error, a taken
+     name), a promotion over the arrangement, Agent Mode and its artifact
+     panel): all 12 byte-identical. The repo fixture `export-song.lisp`
+     passes `reset` its name and end and sets the range through
+     `export-draft`.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -4740,6 +4797,7 @@ Built (7c):
 | `settings` | `()` | `audio-workers-choice :string` [`audio-set-workers`], `audio-workers-note`, `midi-error :string`, `midi-persistent :bool`, `midi-devices (list-of midi-device)` |
 | `midi-device` | `(index)` | `index :int`, `device-id`, `name`, `status :string`, `enabled :bool` [`midi-set-enabled`], `connected :bool` |
 | `agent` | `()` | `generation :int` |
+| `factory-promote` | `()` | since .76: `target`, `destination :string`, `skipped (list-of :string)`, `blocking`, `error`, `taken :string` (Promote to factory; the presented `promote` area) |
 | `project` | `()` | `name :string`, `audio-workers-options (list-of :string)`; since .17 `instances (list-of :any)` (the package instances, the Packages tree's rows) |
 | `track` | `(index)` | `instrument-id :string` (the Instruments tab's `:instrument-id`) |
 
@@ -4786,13 +4844,14 @@ Built (7f):
   the registrations share the list, so the legacy defaults are the
   record's: `LearnView::default()`, `EditorView::default()`,
   `ExportView::default()`, …), and never parses a legacy value back.
-  **eseq-0l17.22 deletes `presented/legacy.rs` and the mirror calls in
+  **eseq-0l17.76 deleted `presented/legacy.rs` and the mirror calls in
   `presented` (the `mirror` argument of each mutator, the
-  `*_registration` calls); no call site changes then.** Capture fixtures
+  `*_registration` calls, the `Sink` impls); no call site changed: the
+  mutators keep their now unused runtime argument.** Capture fixtures
   seed an area through `(present-fixture area fields)` (by the kind's
   field names: `song-export`, `settings`, `retro`), which edits the record
-  as a command would, the mirror following. Compared every tick in place:
-  the sidebar's track and slot devices against the track and device
+  as a command would (the mirror followed until .76). Compared every
+  tick in place: the sidebar's track and slot devices against the track and device
   instances, the palette's track and the variant tint its colors go
   through (`theme::variant_display_key`, read once per tick into the
   `ModelRevision` with the track tint), `project.name` (the `App`'s) and
@@ -4850,8 +4909,9 @@ Built (7f):
   `eseq.resample/open`).
 - **Not covered:** the legacy-only fields no content reads
   (`SEQ.sidebar-preset-tree`, `MIDI.ports`; `learn-checkpoint-wav` and
-  `editor-active` are in the record, mirrored, but no kind pushes them),
-  and renaming a mix (the palette lists patches).
+  `editor-active` were in the record, mirrored, but no kind pushed them:
+  .76 dropped both from the record), and renaming a mix (the palette lists
+  patches).
 
 ### 14.2j Built in stage 7e (eseq-0l17.31)
 
@@ -6139,20 +6199,21 @@ builds the field name.
 | `SEQ.track-grid-playhead-row-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | `#'selection.playhead-row` (the scroll's follow) | built (.65); ported (.65), removed | .65 |
 | `SEQ.track-lock-targets` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | t.devices / t.midi-devices → d.params, device.macros (rack-macro) | built (.31); ported (.65), removed | .65 |
 | `SEQ.tracker-rows` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | step.active / transpose / velocity / ‹param› + param.step-locks / rack-macro.step-locks | built (.31); ported (.65), removed | .65 |
-| `AGENT.generation` | 2 | agent | browser.rs | model | agent.generation | built (.32) | — |
+| `AGENT.generation` | 2 | agent | browser.rs | model | agent.generation | built (.32); ported, legacy removed (.76) | .76 |
 | `AUDIO.workers-choice` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-choice | built (.32); ported, legacy removed (.18: all of `AUDIO`) | .18 |
 | `AUDIO.workers-note` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-note | built (.32); ported, legacy removed (.18) | .18 |
 | `AUDIO.workers-options` | 1 | settings | host_commands/audio_settings.rs | model | project.audio-workers-options (an option list, §14.1) | built (.32); ported, legacy removed (.18) | .18 |
-| `EXPORT.export-busy` | 4 | export-song | host_commands/export.rs | model | song-export.busy | built (.32) | — |
-| `EXPORT.export-default-name` | 1 | export-song | host_commands/export.rs | model | song-export.default-name | built (.32) | — |
-| `EXPORT.export-done` | 3 | export-song | host_commands/export.rs | model | song-export.done | built (.32) | — |
-| `EXPORT.export-end` | 1 | export-song | host_commands/export.rs | model | song-export.end | built (.32) | — |
-| `EXPORT.export-folder` | 1 | export-song | host_commands/export.rs | model | song-export.folder | built (.32) | — |
-| `EXPORT.export-message` | 2 | export-song | host_commands/export.rs | model | song-export.message | built (.32) | — |
-| `EXPORT.export-output-name` | 1 | export-song | host_commands/export.rs | model | song-export.output-name | built (.32) | — |
-| `EXPORT.export-percent` | 1 | export-song | host_commands/export.rs | model | song-export.percent | built (.32) | — |
-| `EXPORT.export-project` | 1 | export-song | host_commands/export.rs | model | song-export.project | built (.32) | — |
-| `EXPORT.export-reveal-label` | 1 | export-song | host_commands/export.rs | model | song-export.reveal-label | built (.32) | — |
+| `EXPORT.export-busy` | 4 | export-song | host_commands/export.rs | model | song-export.busy | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-default-name` | 1 | export-song | host_commands/export.rs | model | song-export.default-name | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-done` | 3 | export-song | host_commands/export.rs | model | song-export.done | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-end` | 1 | export-song | host_commands/export.rs | model | song-export.end | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-folder` | 1 | export-song | host_commands/export.rs | model | song-export.folder | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-message` | 2 | export-song | host_commands/export.rs | model | song-export.message | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-output-name` | 1 | export-song | host_commands/export.rs | model | song-export.output-name | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-percent` | 1 | export-song | host_commands/export.rs | model | song-export.percent | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-project` | 1 | export-song | host_commands/export.rs | model | song-export.project | built (.32); ported, legacy removed (.76) | .76 |
+| `EXPORT.export-reveal-label` | 1 | export-song | host_commands/export.rs | model | song-export.reveal-label | built (.32); ported, legacy removed (.76) | .76 |
+| `FACTORY_PROMOTE.*` | 11 | factory-promote | host_commands/factory_promote.rs | model | factory-promote.target (was `kind`) / destination / skipped / blocking / error / taken | missed by the stage 7 inventory; built, ported, legacy removed (.76) | .76 |
 | `MIDI.devices` | 1 | settings | midi_dispatch.rs | model | settings.midi-devices → midi-device (by device id) | built (.32); ported, legacy removed (.18; `MIDI.ports` stays: the dispatch's port identities) | .18 |
 | `MIDI.error` | 1 | settings | lisp_host/eseq/expr_process.rs | model | settings.midi-error | built (.32); ported, legacy removed (.18) | .18 |
 | `MIDI.persistent` | 1 | settings | midi_dispatch.rs | model | settings.midi-persistent | built (.32); ported, legacy removed (.18) | .18 |
@@ -6176,7 +6237,7 @@ builds the field name.
 | `SEQ.editor-error` | 5 | browser | event_loop.rs | model | editor.error | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.editor-instrument-run-mode` | 4 | browser | host_commands/instrument_authoring.rs | model | editor.run-mode | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.editor-library-macros` | 2 | patch-macros | reactive_tick.rs | model | editor.library-macros → editor-macro | built (.32); ported, legacy removed (.18) | .18 |
-| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | built (.32); ported (.17), kept: seq-panels, scale-editor | .11 .17 |
+| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | built (.32); ported (.17), kept: seq-panels, scale-editor; legacy removed (.76: the last reader, the Shift+Tab shortcut in `input.rs`, reads the presented editor) | .11 .17 .76 |
 | `SEQ.editor-open-macro` | 2 | patch-macros | reactive_tick.rs | model | editor.open-macro | built (.32); ported, legacy removed (.18) | .18 |
 | `SEQ.editor-patch-macros` | 4 | patch-macros | reactive_tick.rs | model | editor.patch-macros → editor-macro | built (.32); ported, legacy removed (.18) | .18 |
 | `SEQ.editor-selected-asset` | 1 | patch-macros | reactive_tick.rs | model | editor.selected-asset → asset-info (nil: none) | built (.32); ported, legacy removed (.18) | .18 |

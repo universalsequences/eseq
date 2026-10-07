@@ -296,7 +296,7 @@ fn slot_value(value: &Value) -> f64 {
 
 /// Show `buffer` alone in the active window, so its subtrees re-run in
 /// place (an off-screen buffer's renders wait for it to show).
-fn show_on_screen(h: &mut Harness, buffer: &str) {
+pub(super) fn show_on_screen(h: &mut Harness, buffer: &str) {
     h.eval(&format!(
         "(set-layout (list :buf \"{buffer}\" :hide-status true))"
     ));

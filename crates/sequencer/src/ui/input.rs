@@ -1353,12 +1353,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && editor.prompt_text().is_none()
         && !focused_widget_captures_text_input(editor)
         && is_shift_tab_shortcut(key)
-        && editor
-            .runtime_mut()
-            .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
-            .ok()
-            .flatten()
-            .is_some_and(|value| matches!(value, eseqlisp::vm::Value::Bool(true)))
+        && crate::presented::instrument_editor_open()
     {
         let _ = editor
             .runtime_mut()

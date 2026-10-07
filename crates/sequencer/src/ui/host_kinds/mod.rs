@@ -226,6 +226,7 @@ pub(crate) const SONG_EXPORT: &str = "eseq.kinds:song-export";
 pub(crate) const SETTINGS: &str = "eseq.kinds:settings";
 pub(crate) const MIDI_DEVICE: &str = "eseq.kinds:midi-device";
 pub(crate) const AGENT: &str = "eseq.kinds:agent";
+pub(crate) const FACTORY_PROMOTE: &str = "eseq.kinds:factory-promote";
 pub(crate) const NOTE: &str = "eseq.kinds:note";
 pub(crate) const PIANO_ROLL: &str = "eseq.kinds:piano-roll";
 pub(crate) const FOCUS_STEP: &str = "eseq.kinds:focus-step";
@@ -613,6 +614,13 @@ pub(crate) mod f {
     pub(crate) const SETTINGS_MIDI_PERSISTENT: FieldKey = (SETTINGS, "midi-persistent");
 
     pub(crate) const AGENT_GENERATION: FieldKey = (AGENT, "generation");
+
+    pub(crate) const PROMOTE_TARGET: FieldKey = (FACTORY_PROMOTE, "target");
+    pub(crate) const PROMOTE_DESTINATION: FieldKey = (FACTORY_PROMOTE, "destination");
+    pub(crate) const PROMOTE_SKIPPED: FieldKey = (FACTORY_PROMOTE, "skipped");
+    pub(crate) const PROMOTE_BLOCKING: FieldKey = (FACTORY_PROMOTE, "blocking");
+    pub(crate) const PROMOTE_ERROR: FieldKey = (FACTORY_PROMOTE, "error");
+    pub(crate) const PROMOTE_TAKEN: FieldKey = (FACTORY_PROMOTE, "taken");
 
     pub(crate) const NOTE_TRACK: FieldKey = (NOTE, "track");
     pub(crate) const NOTE_NID: FieldKey = (NOTE, "nid");
@@ -2099,6 +2107,12 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SETTINGS_MIDI_ERROR, ":string", Model),
     (f::SETTINGS_MIDI_PERSISTENT, ":bool", Model),
     (f::AGENT_GENERATION, ":int", Model),
+    (f::PROMOTE_TARGET, ":string", Model),
+    (f::PROMOTE_DESTINATION, ":string", Model),
+    (f::PROMOTE_SKIPPED, "(list-of :string)", Model),
+    (f::PROMOTE_BLOCKING, ":string", Model),
+    (f::PROMOTE_ERROR, ":string", Model),
+    (f::PROMOTE_TAKEN, ":string", Model),
     // The piano roll (`piano_roll`): the focus behind its key, the notes
     // registered on the first read of `notes` and re-read when their source
     // or a counter moved, the selection compared every tick; the playhead

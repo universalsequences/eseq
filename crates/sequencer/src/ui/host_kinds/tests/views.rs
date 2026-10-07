@@ -314,7 +314,15 @@ pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
     }
     found.extend(
         [
-            "SEQ.", "SEQV.", "RETRO.", "EXPORT.", "AUDIO.", "MIDI.", "AGENT.", "GRAPH.",
+            "SEQ.",
+            "SEQV.",
+            "RETRO.",
+            "EXPORT.",
+            "AUDIO.",
+            "MIDI.",
+            "AGENT.",
+            "GRAPH.",
+            "FACTORY_PROMOTE.",
         ]
         .into_iter()
         .filter(|namespace| has_symbol_starting_with(&code, namespace)),

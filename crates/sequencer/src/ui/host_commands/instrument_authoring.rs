@@ -2613,7 +2613,7 @@ pub(super) fn handle(
         // In-editor Fork (spec §3.5): you started editing in place and now want
         // out without discarding your work. Copies the *in-editor* source — not
         // the on-disk source — into a fresh draft dir, converts the session from
-        // EditExisting to CreateDraft, and flips SEQ.editor-mode so the create
+        // EditExisting to CreateDraft, and flips `editor.mode` so the create
         // flow's (empty) name field appears and the primary button becomes
         // Finalize. The original on disk is never written.
         "fork-editor-session" => {
