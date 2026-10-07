@@ -6,11 +6,19 @@
 ;; source state's delay. Put a trigger on track 0 to seed state 0; the seed step
 ;; itself plays normally and starts the chain.
 ;;
+;; The panel reads and edits the graph through the kinds (kind-bindings spec §14.2k):
+;; every control edit is one undo entry, a drag's frames joining one.
+;;
 ;; Project scratch entrypoint:
 ;;   (load "content/scripts/sequencers/graph-markov-8x8-demo.lisp")
 ;;
 ;; Loading this file publishes the graph/UI only. For a fresh patch, run:
 ;;   (script-init-fn)
+
+(import eseq.kinds :refer (graph-of graph-param-named graph-quantize-options))
+(import eseq.view-kit :refer (nothing))
+(import eseq.graph-kit :refer (route-options node-route-label set-route-label! weight-rows
+                               set-weight! column rack-name res-options))
 
 ;; `def-sequencer` returns the instance handle; every graph-* native below takes
 ;; it, so this script also works when a drum rack owns it (routes then address
@@ -53,33 +61,12 @@
 (def script-buffer-name "*markov-8x8*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def m8-owner-rack (graph-owner m8-name))
-(def m8-route-tracks ()
-  ;; Read live so a member that joins the rack later shows up; SEQ.groups
-  ;; is read only to re-render when the membership changes.
-  (let ((groups SEQ.groups)) (graph-route-tracks m8-name)))
-(def script-tab-label
-  (if m8-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id m8-owner-rack)) "Markov 8x8"))
+(def script-tab-label (if m8-owner-rack (rack-name m8-owner-rack) "Markov 8x8"))
 (def script-sequencer-name "markov-8x8-demo")
 
-(def m8-res-options (list "1" "2" "4" "8" "16" "32" "64"))
-(def m8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
-;; Route option n is track n (project-owned) or rack member n (rack-owned);
-;; "Off" is always last. Either way the option index IS the route value.
-(def m8-route-options ()
-  (if (m8-route-tracks)
-    (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (m8-route-tracks))
-      (list "Off"))
-    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-          "Off")))
-
-(def m8-index-of (xs item)
-  (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
-    (if (> (len hits) 0) (nth hits 0) 0)))
-
-(def m8-route->internal (label)
-  (if (= label "Off") :off (m8-index-of (m8-route-options) label)))
+;; ── init helpers (explicit-only; loading the file does NOT call these) ──
+;; They write through the graph-* natives, which answer at once: the graph is
+;; not a kind instance until the host's next sync.
 
 (def m8-ring-weights ()
   (list
@@ -94,35 +81,6 @@
 
 (def m8-node-delays ()
   (list 1 1 2 1 3 2 1 4))
-
-(defstate m8-weights (list))
-
-(def m8-read-edge-matrix (field)
-  (map
-    (lambda (r) (map (lambda (c) (graph-edge-value m8-name r c field)) (range 0 m8-node-count)))
-    (range 0 m8-node-count)))
-
-(def m8-set-cell (matrix r c v)
-  (set-nth matrix r (set-nth (nth matrix r) c v)))
-
-(def m8-zero-row ()
-  (map (lambda (n) 0) (range 0 m8-node-count)))
-
-(def m8-zero-matrix ()
-  (map (lambda (n) (m8-zero-row)) (range 0 m8-node-count)))
-
-(def m8-zero-column-matrix ()
-  (map (lambda (n) (list 0)) (range 0 m8-node-count)))
-
-(def m8-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :id) m8-name)) visualizations)))
-    (if (> (len hits) 0) (nth hits 0) nil)))
-
-(def m8-viz-matrix (viz field fallback)
-  (if viz
-    (let ((value (get viz field)))
-      (if value value fallback))
-    fallback))
 
 (def m8-apply-edge-matrix (field matrix)
   (for-each
@@ -140,42 +98,22 @@
     (range m8-node-count)))
 
 (def m8-init-defaults ()
-  (do
-    (set! m8-weights (m8-ring-weights))
-    (m8-apply-edge-matrix :weight m8-weights)
-    (m8-apply-node-delays (m8-node-delays))
-    (graph-node m8-name 0 :seed-from 0)
-    (graph-param m8-name 0 :transpose 0)
-    (graph-param m8-name 1 :transpose 2)
-    (graph-param m8-name 2 :transpose 3)
-    (graph-param m8-name 3 :transpose 5)
-    (graph-param m8-name 4 :transpose 7)
-    (graph-param m8-name 5 :transpose 10)
-    (graph-param m8-name 6 :transpose 12)
-    (graph-param m8-name 7 :transpose -5)))
+  (m8-apply-edge-matrix :weight (m8-ring-weights))
+  (m8-apply-node-delays (m8-node-delays))
+  (graph-node m8-name 0 :seed-from 0)
+  (graph-param m8-name 0 :transpose 0)
+  (graph-param m8-name 1 :transpose 2)
+  (graph-param m8-name 2 :transpose 3)
+  (graph-param m8-name 3 :transpose 5)
+  (graph-param m8-name 4 :transpose 7)
+  (graph-param m8-name 5 :transpose 10)
+  (graph-param m8-name 6 :transpose 12)
+  (graph-param m8-name 7 :transpose -5))
 
 (def script-init-fn ()
   (m8-init-defaults))
 
-(def m8-edit-num (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key m8-name n field) v)
-    (graph-node m8-name n field v)))
-
-(def m8-edit-param (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key m8-name n field) v)
-    (graph-param m8-name n field v)))
-
-(def m8-edit-enum (n field options label internal)
-  (do
-    (reactive-set "GRAPH" (graph-key m8-name n field) (m8-index-of options label))
-    (graph-node m8-name n field internal)))
-
-(def m8-edit-config (field v)
-  (do
-    (reactive-set "GRAPH" (graph-config-key m8-name field) v)
-    (graph-config m8-name field v)))
+;; ── UI ──
 
 (def m8-row-height 1.3)
 (def m8-node-width 1.4)
@@ -188,105 +126,103 @@
     :width m8-control-width :height m8-row-height :font-size 9
     :on-change on-change))
 
-(def m8-pick (key value-index options on-change)
+(def m8-pick (key value options on-change)
   (dropdown
     :key key
-    :value-index value-index :options options
+    :value value :options options
     :width m8-control-width :height m8-row-height :font-size 9
     :on-change on-change))
 
-(def m8-row (n)
-  (h-stack :gap 0.4 :align :center
-    (label (str n) :width m8-node-width :height m8-row-height :font-size 9 :h-align :center :color :dim)
-    (m8-pick (str "markov-8x8-route-" n)
-      (bind-graph m8-name n :route (m8-route-options)) (m8-route-options)
-      (lambda (v) (m8-edit-enum n :route (m8-route-options) v (m8-route->internal v))))
-    (m8-num (str "markov-8x8-delay-" n)
-      (bind-graph m8-name n :delay) 0 16 1 0
-      (lambda (v) (m8-edit-num n :delay v)))
-    (m8-num (str "markov-8x8-transpose-" n)
-      (bind-graph m8-name n :transpose) -48 48 1 0
-      (lambda (v) (m8-edit-param n :transpose v)))
-    (m8-num (str "markov-8x8-vel-scale-" n)
-      (bind-graph m8-name n :vel-scale) 0 2 0.01 2
-      (lambda (v) (m8-edit-param n :vel-scale v)))
-    (m8-pick (str "markov-8x8-resolution-" n)
-      (bind-graph m8-name n :resolution m8-res-options) m8-res-options
-      (lambda (v) (m8-edit-enum n :resolution m8-res-options v v)))
-    (m8-pick (str "markov-8x8-quantize-" n)
-      (bind-graph m8-name n :quantize m8-quant-options) m8-quant-options
-      (lambda (v) (m8-edit-enum n :quantize m8-quant-options v v)))))
+;; Node n's param `name`, bound.
+(def m8-param (n name lo hi stp dec)
+  (let ((p (graph-param-named n name)))
+    (m8-num (str "markov-8x8-" name "-" n.index) #'p.value lo hi stp dec
+      (lambda (v) (set! p.value v)))))
+
+(def m8-row (n routes)
+  (subtree :key (str "markov-8x8-row-" n.index)
+    (h-stack :gap 0.4 :align :center
+      (label (str n.index) :width m8-node-width :height m8-row-height :font-size 9 :h-align :center :color :dim)
+      (m8-pick (str "markov-8x8-route-" n.index)
+        (node-route-label n) routes
+        (lambda (label) (set-route-label! n label)))
+      (m8-num (str "markov-8x8-delay-" n.index) #'n.delay 0 16 1 0
+        (lambda (v) (set! n.delay v)))
+      (m8-param n "transpose" -48 48 1 0)
+      (m8-param n "vel-scale" 0 2 0.01 2)
+      (m8-pick (str "markov-8x8-resolution-" n.index) n.resolution res-options
+        (lambda (v) (set! n.resolution v)))
+      (m8-pick (str "markov-8x8-quantize-" n.index) n.quantize graph-quantize-options
+        (lambda (v) (set! n.quantize v))))))
+
+(def m8-header-label (text width)
+  (label text :width width :height 1.0 :font-size 8 :h-align :center :color :dim))
 
 (def m8-header ()
   (h-stack :gap 0.4 :align :center
-    (label "node" :width m8-node-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "route" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "delay" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "transp" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel x" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "res" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "quant" :width m8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
+    (m8-header-label "node" m8-node-width)
+    (m8-header-label "route" m8-control-width)
+    (m8-header-label "delay" m8-control-width)
+    (m8-header-label "transp" m8-control-width)
+    (m8-header-label "vel x" m8-control-width)
+    (m8-header-label "res" m8-control-width)
+    (m8-header-label "quant" m8-control-width)))
 
-(def m8-panel (current-pattern graph-visualizations)
-  (do
-    current-pattern
-    (set! m8-weights (m8-read-edge-matrix :weight))
-    (let ((viz (m8-viz graph-visualizations)))
-      (box
-        :padding 0.85
-        :gap 0.6
-        :width 42
-        :height 43
-        (v-stack :gap 0.55
-          (h-stack :gap 0.6 :align :center
-            (label "8x8 markov" :width 8 :height 1.2 :font-size 11 :color :foreground)
-            (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (m8-num "markov-8x8-max-poly"
-              (bind-graph-config m8-name :max-poly) 0 16 1 0
-              (lambda (v) (m8-edit-config :max-poly v))))
-          (h-stack
-            (v-stack :gap 0.5
-              (label "per-state controls" :width 14 :height 1.2 :font-size 9 :color :dim)
-              (v-stack :gap 0.2
-                (m8-header)
-                (each (range 0 m8-node-count) |n| (m8-row n))))
-            (v-stack :gap 0.35
-              (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
-              (matrix
-                :key "markov-8x8-trigger-matrix"
-                :rows 8
-                :cols 1
-                :width 1
-                :height 12
-                :min 0
-                :max 1
-                :value (m8-viz-matrix viz :trigger-matrix (m8-zero-column-matrix))))
-            (v-stack :gap 0.35
-              (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
-              (matrix
-                :key "markov-8x8-energy-matrix"
-                :rows 8
-                :cols 1
-                :width 2
-                :height 12
-                :min 0
-                :max 4
-                :value (m8-viz-matrix viz :energy-matrix (m8-zero-column-matrix)))))
-          (v-stack :gap 0.35
-            (label "transition weights (row -> col)" :width 18 :height 1.3 :font-size 8 :color :dim)
-            (matrix
-              :key "markov-8x8-weight-matrix"
-              :rows 8
-              :cols 8
-              :width 26
-              :height 12
-              :min 0
-              :max 1
-              :value m8-weights
-              :on-cell-change (lambda (r c v)
-                (do
-                  (set! m8-weights (m8-set-cell m8-weights r c v))
-                  (graph-edge m8-name :from r :to c :weight v))))))))))
+;; A playback column (each node's trigger or energy), in a subtree of its
+;; own so playback re-runs only it.
+(def m8-column-matrix (title title-width key width hi values)
+  (v-stack :gap 0.35
+    (label title :width title-width :height 2.5 :font-size 8 :color :dim)
+    (subtree :key key
+      (matrix
+        :key key
+        :rows 8
+        :cols 1
+        :width width
+        :height 12
+        :min 0
+        :max hi
+        :value (column (values))))))
 
-(effect-buffer "*markov-8x8*" (m8-panel SEQ.current-pattern SEQ.graph-visualizations))
+(def m8-graph-panel (g)
+  (box
+    :padding 0.85
+    :gap 0.6
+    :width 42
+    :height 43
+    (v-stack :gap 0.55
+      (h-stack :gap 0.6 :align :center
+        (label "8x8 markov" :width 8 :height 1.2 :font-size 11 :color :foreground)
+        (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+        (m8-num "markov-8x8-max-poly" #'g.max-poly 0 16 1 0
+          (lambda (v) (set! g.max-poly v))))
+      (h-stack
+        (v-stack :gap 0.5
+          (label "per-state controls" :width 14 :height 1.2 :font-size 9 :color :dim)
+          (v-stack :gap 0.2
+            (m8-header)
+            (let ((routes (route-options g)))
+              (each g.nodes |n| (m8-row n routes)))))
+        (m8-column-matrix "trig" 2 "markov-8x8-trigger-matrix" 1 1 (lambda () g.triggers))
+        (m8-column-matrix "energy" 3 "markov-8x8-energy-matrix" 2 4 (lambda () g.energy)))
+      (v-stack :gap 0.35
+        (label "transition weights (row -> col)" :width 18 :height 1.3 :font-size 8 :color :dim)
+        (subtree :key "markov-8x8-weight-matrix"
+          (matrix
+            :key "markov-8x8-weight-matrix"
+            :rows 8
+            :cols 8
+            :width 26
+            :height 12
+            :min 0
+            :max 1
+            :value (weight-rows g)
+            :on-cell-change (lambda (r c v) (set-weight! g r c v))))))))
+
+;; The panel, empty until the host publishes the graph (at its next sync).
+(def m8-panel ()
+  (let ((g (graph-of m8-name)))
+    (if g (m8-graph-panel g) (nothing))))
+
+(effect-buffer "*markov-8x8*" (m8-panel))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

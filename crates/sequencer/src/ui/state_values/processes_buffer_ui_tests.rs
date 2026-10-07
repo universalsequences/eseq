@@ -17,7 +17,7 @@ impl Dock {
     /// builtin library published; the instance's tab is not in the main
     /// tile until `show_tab`.
     fn open() -> Self {
-        let (state, editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor(true);
+        let (state, editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor();
         let mut authoring = Runtime::new();
         sequencer::lisp_host::register_published_process_authoring_natives(
             &mut authoring,
@@ -544,7 +544,7 @@ fn processes_buffer_promote_moves_the_card_into_my_processes() {
     let tmp = tempfile::tempdir().unwrap();
     let package = tmp.path().join("packages/user.processes");
     let _package_guard = sequencer::lisp_host::set_my_processes_package_dir_override(Some(package.clone()));
-    let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor(true);
+    let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor();
     // The app's UI VM holds def-process and the builtin library itself, so
     // `load` of a promoted module registers and publishes its class.
     sequencer::lisp_host::register_published_process_authoring_natives(
@@ -816,7 +816,7 @@ fn processes_buffer_expr_commit_and_promote_rebind_undo() {
     let tmp = tempfile::tempdir().unwrap();
     let package = tmp.path().join("packages/user.processes");
     let _package_guard = sequencer::lisp_host::set_my_processes_package_dir_override(Some(package.clone()));
-    let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor(true);
+    let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor();
     sequencer::lisp_host::register_published_process_authoring_natives(
         editor.runtime_mut(),
         Arc::clone(&state),

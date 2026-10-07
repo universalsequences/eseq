@@ -226,14 +226,6 @@ impl SequencerState {
         read(self.track_output_events_revision(), &history)
     }
 
-    pub fn track_output_events(&self) -> Vec<TrackOutputEvent> {
-        self.track_output_events.lock().unwrap().clone()
-    }
-
-    pub fn has_track_output_events(&self) -> bool {
-        !self.track_output_events.lock().unwrap().is_empty()
-    }
-
     pub fn set_track_output_current_beat(&self, beat: f64) {
         self.track_output_current_beat_bits
             .store(beat.max(0.0).to_bits(), Ordering::Relaxed);

@@ -1,32 +1,19 @@
 use super::*;
 use sequencer::graph::{GraphVisualizationEdge, GraphVisualizationEvent, GraphVisualizationSnapshot};
 
-pub(super) fn graph_panel_editor(package: bool) -> (Arc<SequencerState>, Editor, u64) {
+/// A `neural` instance's panel (alez/neural), shown in its buffer, with the
+/// instance's graph published into `state`. (The graph demo scripts read the
+/// kinds: their tests are `host_kinds::tests::graph_demos_view`.)
+pub(super) fn graph_panel_editor() -> (Arc<SequencerState>, Editor, u64) {
     let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
     let mut editor = full_grid_editor_for_scroll_tests();
     let (roots, errors) = sequencer::app_paths::app_paths().module_load_roots();
     assert!(errors.is_empty(), "{errors:?}");
     editor.runtime_mut().set_scoped_module_load_path(roots);
     sequencer::lisp_host::register_graph_authoring_natives(editor.runtime_mut(), Arc::clone(&state));
-    let published_state = Arc::clone(&state);
-    editor.runtime_mut().register_native("def-sequencer", move |args, _ctx| {
-        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
-        let id = published.id;
-        published_state.publish_sequencer(published);
-        Ok(Value::Number(id as f64))
-    });
     editor.runtime_mut().set_reactive("SEQ", "graph-visualizations", test_list(vec![]));
     editor.runtime_mut().set_reactive("SEQ", "track-active-notes", test_list(vec![]));
-    let buffer = if package {
-        neural_instance_view(&state, &mut editor, 1, "neural 1")
-    } else {
-        let source = "(load \"@/scripts/sequencers/graph-neural-variable-reset-demo.lisp\")";
-        let overlays = editor.snapshot_file_backed_sources();
-        let report = editor.runtime_mut().eval_source_transactional(None, source, overlays);
-        assert!(report.success, "{:?}", report.diagnostics);
-        editor.process_lisp_reload_report(report);
-        "*variable-reset*".to_string()
-    };
+    let buffer = neural_instance_view(&state, &mut editor, 1, "neural 1");
     editor.runtime_mut().eval_str(&format!("(set-layout (list :buf \"{buffer}\" :hide-status true))")).unwrap();
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -99,14 +86,13 @@ fn graph_widget<'a>(layout: &'a eseqlisp::layout::LayoutNode, suffix: &str) -> &
     node
 }
 
-fn graph_activity_updates_only_visualizations(package: bool) {
-    let (state, mut editor, graph_id) = graph_panel_editor(package);
+#[test]
+fn neural_package_activity_updates_only_visualizations() {
+    let (state, mut editor, graph_id) = graph_panel_editor();
     let edit_count = |count: usize| {
-        if package {
-            format!("(alez.neural.variable-reset/gvr-edit-config (instance-ref {graph_id}) :node-count {count})")
-        } else {
-            format!("(gvr-edit-config :node-count {count})")
-        }
+        format!(
+            "(alez.neural.variable-reset/gvr-edit-config (instance-ref {graph_id}) :node-count {count})"
+        )
     };
     // Recreate the parent with a different node count, then update activity
     // again: subtree captures must follow the current graph dimensions.
@@ -195,23 +181,13 @@ fn graph_activity_updates_only_visualizations(package: bool) {
     assert_eq!(graph_widget(&layout, "piano").props.get("notes-by-track"), Some(&test_list(vec![])));
 }
 
-#[test]
-fn neural_package_activity_updates_only_visualizations() {
-    graph_activity_updates_only_visualizations(true);
-}
-
-#[test]
-fn legacy_graph_activity_updates_only_visualizations() {
-    graph_activity_updates_only_visualizations(false);
-}
-
 /// A node's patch bay in the package panel: a selected cable goes on a real
 /// click of the "× cable" chip and on a real Backspace in the instance's
 /// `*neural · neural 1*` buffer (the kind's :keymap).
 #[test]
 fn neural_package_node_bay_removes_selected_cable_by_chip_and_backspace() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    let (state, mut editor, graph_id) = graph_panel_editor(true);
+    let (state, mut editor, graph_id) = graph_panel_editor();
     let mut authoring = Runtime::new();
     sequencer::lisp_host::register_published_process_authoring_natives(
         &mut authoring,
@@ -340,7 +316,7 @@ fn importing_the_neural_package_registers_its_kind() {
 /// every edit through tracked graph reads, with no echo or cache.
 #[test]
 fn neural_instances_get_the_ring_on_create_and_stay_independent() {
-    let (state, mut editor, first) = graph_panel_editor(true);
+    let (state, mut editor, first) = graph_panel_editor();
     let second_buffer = neural_instance_view(&state, &mut editor, 2, "neural 2");
     let eval = |editor: &mut Editor, source: &str| {
         let value = editor.runtime_mut().eval_str(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));

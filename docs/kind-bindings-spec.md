@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18 and .21 ported, .14 and .20 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18 and .21 ported, .14, .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -2016,7 +2016,7 @@ its instance and field.
      `track-event-current-beat` (graph-neural-8x8-demo),
      `track-process-slots` (sequencer, seqv-track-params), `current-pattern`,
      `track-names`, `track-colors`, `groups`.
-   - **Not ported (the rest of .20):** the GRAPH namespace's consumers,
+   - **Not ported (the rest of .20; the graph demos since .64):** the GRAPH namespace's consumers,
      `packages/alez.neural/src/variable-reset.lisp` and the seven graph
      demos (`graph-markov-8x8`, `graph-neural-16`, `-16-cycle`, `-8x8`,
      `-8x8-reset`, `-group-matrix`, `-variable-reset`): the kinds cover them
@@ -2048,6 +2048,127 @@ its instance and field.
      render, its publishers ran before the hook), the kinds show the edits
      and the lit row. The untouched graph demos and neural panel differ run
      to run in their auto-rotating event views only.
+   Built (stage 8, eseq-0l17.64, in part): the seven graph demo scripts in
+   `scripts/sequencers/` (`graph-markov-8x8`, `graph-neural-16`,
+   `-16-cycle`, `-8x8`, `-8x8-reset`, `-group-matrix`, `-variable-reset`),
+   over a shared, side-effect-free `eseq.graph-kit` (`ui/graph-kit.lisp`):
+   - **Kinds.** No new field: 7g (§14.2k) and 7g-4 (§14.2s) cover them. A
+     panel finds its graph with `(graph-of <prefix>-name)` (the handle
+     `def-sequencer` returns is the sequencer id); until the host publishes
+     it (the next sync) the panel is an empty box, re-rendered when
+     `project.graphs` lists it.
+   - **Controls.** Node fields and params bind (`#'n.delay`, `#'p.value` of
+     `(graph-param-named n "transpose")`, `#'g.reset-bars`, `#'g.max-poly`,
+     `#'g.node-count`, the group knobs' `#'g.group-trace-decay` …) and edit
+     with `set!`: one undo entry each, a drag's frames joining one (the
+     legacy natives recorded nothing). Labels (resolution, quantize, the
+     max-poly selection, a node's group) are values: a dropdown's `:value`
+     is the label (a bound string would not draw). 0 / 1 params and
+     `seed-route` are toggles bound to the field; `seed-on-reset` (a
+     number) passes `(> n.seed-on-reset 0)`. Each row is a subtree of its
+     own (`<key>-row-<n>`), so a route or label edit re-runs one row. The
+     group-matrix and variable rows are a highlight box (lit by the pressed
+     weight column) around a controls subtree (`<key>-row-controls-<n>`):
+     a press re-runs the boxes, which reuse the controls.
+   - **Routes** (graph-kit `route-options`, `node-route-label`,
+     `set-route-label!`): a track of the graph's owner, the project's
+     ("Track n") or a rack's members (`g.owner.tracks`, "n name"), then
+     Off; `set-route-label!` sets `n.route` to the track a label names,
+     which stores a rack-owned graph's member index. A panel builds the
+     options once and passes them to its rows. Legacy: a fixed
+     sixteen "Track n" on a project-owned graph. The route color strips
+     (`ggm-` / `gvr-route-color-strip`, no longer `:bindable`) take
+     `n.route.color`.
+   - **Weights:** `weight-rows` builds the matrix from the nodes' edges and
+     their weight params (in the matrix's subtree), `set-weight!` sets one
+     edge's; the group cells are `(chunks g.group-gain 4)` and
+     `set-group-gain!` / `set-group-coupling!`.
+   - **Playback**, each in a subtree: `g.events` and `#'g.beat` (the event
+     views), `(column g.triggers)`, `(column g.energy)`, `g.dampening`,
+     `(column g.group-activity)` / `g.group-suppression`; the 8x8's track
+     heatmap `transport.track-events` and `#'transport.track-events-beat`,
+     colored by the tracks; the keyboards each route track's
+     `t.active-notes` with its color (legacy: the project's notes with a
+     rack's colors).
+   - **Batch edits** (global transpose, dur x, swing, the threshold up to
+     the capacity, delay x, res/q x) stay the `graph-*` natives, unrecorded
+     as before (graph-kit `set-param-on-nodes!`, `scale-delays!`,
+     `shift-timebases!`, reading the current values from the kinds): a
+     setter per node would record an entry per node, and the threshold
+     writes dormant nodes no setter addresses. res/q x moves a resolution
+     and a quantize alike, within its family (straight 1–64, triplets
+     2T–64T), off and Prh kept. The factor pickers are one-shot (they show
+     1). The explicit inits (`script-init-fn`) stay natives too: the graph
+     is no kind instance until the next sync.
+   - **View state** is a singleton per demo (`g8-view`: the keys' press
+     depth; `ggm-view`, `gvr-view`: the pressed weight column's neuron;
+     `g16c-view`: the cycle text typed, a `(dict :node :field :text :cycle)`
+     per field). A 16-cycle field shows the text typed into it while the
+     node's cycle is still the one that text set (or, a resolution naming
+     no label, left), else the cycle, so an undo, a scene switch or an
+     init shows the real cycle; it sets `n.resolution-cycle` /
+     `quantize-cycle` to the labels it names: tokens among
+     `graph-timebase-options` in any case, or the words the `graph-*`
+     natives take (`parse_timebase_arg`: `whole` … `sixty-fourth`,
+     `half-triplet` / `halftriplet` … `sixty-fourth-triplet`,
+     `polyrhythm`), as their label; the rest (`off`, `none` included)
+     dropped; a quantize field naming none is off. Each field is a subtree
+     of its own, so a keystroke re-runs the fields, never the rows.
+     Legacy: the native's lenient parse, the strings re-read on a pattern
+     switch.
+   - **Capture fixtures:** `graph-neural-8x8-piano-panel.lisp` renders
+     `(g8-panel :notes …)` (the keyboard's notes in place of the tracks');
+     `graph-homeostat-panel.lisp` sets `gvr-view.selected-neuron`.
+   - **Legacy removed:** `SEQ.track-events` and
+     `track-event-current-beat` (their registration, the pattern-sync and
+     visualization-poll publishers, `build_track_output_events_value`,
+     `build_track_output_current_beat_value`, `track_output_event_value`,
+     `SequencerState::track_output_events` / `has_track_output_events`, the
+     replay probe's hidden fields), the parity checks against them (now the
+     rows themselves), the docs naming them.
+   - **Kept** (eseq-0l17.22): `SEQ.graph-visualizations` and
+     `track-active-notes` (alez.neural's panel; `panel_kinds_seed` reads
+     the latter), the GRAPH namespace and `bind-graph*` / `graph-*-value`
+     reads (alez.neural; the demos' explicit inits read
+     `graph-config-value` once), `SEQ.groups`, `track-names`,
+     `track-colors`, `instances`, `process-library` (alez.neural and
+     others). `SEQ.current-pattern` has no `content/` reader left; its
+     publisher and Rust tests remain.
+   - **Not ported:** `packages/alez.neural/src/variable-reset.lisp`. Its
+     expanded node editor is `eseq.sequencer`'s lane patchbay and the
+     *processes* dock, which read a node's chain through the
+     `graph-node-process-*` natives, and its bare-runtime tests (the
+     package's graph visualization, node notes, processes dock and expr
+     card tests) move to Harness tests with it.
+   - **Tests.** `host_kinds::tests::graph_demos_view` (bare root; the
+     owners test on the Distro root, whose step tabs it reads): the files
+     and graph-kit use no legacy form; every demo keeps its handle, writes
+     no override when loaded, registers its step tab, routes to the
+     project's tracks, and under a rack owner publishes a rack-owned
+     instance named for the rack whose routes are its members (a later
+     member included) and stores a member index; the 8x8 panel's widgets,
+     keyboard and bindings (an edit from elsewhere only repaints), its init
+     ring (which propagates a seed through the engine's update), its
+     control and cell edits (one entry each; a zero matrix is silent), its
+     saved overrides and each scene's; the reset fork's batch and toggle
+     edits; the variable graph's node count (dormant overrides kept), row
+     lighting, route colors, seeds, threshold and selection; the group
+     cells; res/q x keeping a triplet and Prh; the Markov init; the
+     16-node controls and ring; the cycle fields' text and cycles (any
+     case, the natives' words, an undo showing the restored cycle, a
+     keystroke re-running only the fields); a weight-cell press re-running
+     only the row highlights; playback re-running only the playback
+     subtrees (four) and notes only the keyboard; a rack's graph tab
+     restored from an empty scratch (its tab click showing the panel), and
+     its rows whole through member churn (legacy and clip rack). They replace the bare-runtime demo tests
+     in `lisp_host::tests`, `rack_sequencer_restore_tests` and the demo
+     half of `graph_visualization_ui_tests`.
+   - **Captures.** Every demo fixture, with and without its init, and the
+     piano fixture render byte-identical outside the auto-rotating event
+     views (which differ run to run). The homeostat fixture now lights
+     row 3: its hook's selection shows (the legacy capture rendered
+     before it). The untouched alez.neural fixtures differ in their event
+     views only.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -4651,11 +4772,11 @@ builds the field name.
 | `SEQ.bus-solos` | 4 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.soloed | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15, .20: jaki-builder-demo), kept: macros, the graph demo scripts | .12 .13 .15 .20 |
+| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15, .20: jaki-builder-demo, .64: the graph demo scripts), no content reader left (its publisher remains) | .12 .13 .15 .20 |
 | `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .16, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index); ported (.18: application menus read selection.track) | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10) | .11 |
-| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17, .20: alez.jaki), kept: drum-rack-v2, seq-core-state + | .11 .13 .17 .19 .20 |
+| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17, .20: alez.jaki, .64: the graph demos' route menus), kept: drum-rack-v2, seq-core-state, alez.neural + | .11 .13 .17 .19 .20 .64 |
 | `SEQ.master-peak-l` | 2 | mixer, transport | event_loop.rs | live | master.peak-l | built (.10); ported (.12, .13), removed | .12 .13 |
 | `SEQ.master-peak-r` | 2 | mixer, transport | event_loop.rs | live | master.peak-r | built (.10); ported (.12, .13), removed | .12 .13 |
 | `SEQ.master-recording` | 2 | transport | reactive_tick.rs | live | master.recording | built (.10); ported, legacy removed (.12) | .12 |
@@ -4699,14 +4820,14 @@ builds the field name.
 | `SEQ.track-color-b-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-g-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-r-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (dim in the shader) | built (.10) | .11 |
-| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13, .15, .16, .20: alez.jaki, the event-view demos), kept: sequencer +; ported (.14 A: panel-bodies) | .11 .13 .14 .15 .16 .19 .20 |
+| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13, .15, .16, .20: alez.jaki, the event-view demos, .64: the graph demos), kept: sequencer, alez.neural +; ported (.14 A: panel-bodies) | .11 .13 .14 .15 .16 .19 .20 .64 |
 | `SEQ.track-delays` | 1 | seqv-track-params | reactive_sync.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.track-durations` | 1 | seqv-track-params | reactive_sync.rs | model | step.duration | built (.10) | .11 |
 | `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10); ported (.13, .16), kept: track-collapse +; ported (.18: application menus read selection.track.instrument-type) | .11 .13 .18 |
 | `SEQ.track-length-row-*` | 1 | sequencer | sv/expanded_step.rs | model | track.num-steps | built (.10) | .11 |
 | `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10); ported (.13), kept: sequencer + | .11 .13 .14 |
 | `SEQ.track-mutes` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.muted | built (.10); ported (.13), kept: sequencer | .11 .13 |
-| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki), kept: many; ported (.18: the scene macro track mask lists (tracks)) | .11 .13 .14 .16 .18 .19 .20 |
+| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki, .64: the graph demos), kept: many; ported (.18: the scene macro track mask lists (tracks)) | .11 .13 .14 .16 .18 .19 .20 |
 | `SEQ.track-num-steps` | 5 | sequencer, packages/alez.tracker/src/ui | event_loop.rs | model | track.num-steps | built (.10) | .11 .20 |
 | `SEQ.track-pans` | 1 | seqv-track-params | reactive_sync.rs | model | step.pan (per-step lists, see steps) | built (.10) | .11 |
 | `SEQ.track-peak-*` | 3 | mixer, sequencer, legacy/mixer | sv/meters_and_modulation.rs | live | track.peak | built (.10); ported (.13), kept: sequencer | .11 .13 |
@@ -4887,19 +5008,19 @@ builds the field name.
 | `SEQ.sound-palette` | 7 | sound-palette | sv/sound_palette.rs | model | sound-palette singleton; sound-palette.sounds → sound (track, patch-id) | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.sound-presets` | 2 | browser | sv/project_state.rs | model | browser.sound-presets → preset-file | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | built (.32); ported, legacy removed (.17) | .17 |
-| `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
-| `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
+| `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33); ported (.64), removed with the demo's writes | .20 .64 |
+| `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33); ported (.64), removed with the demo's writes | .20 .64 |
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.selected (the native neural engine; `nr.selected`, setter `neural-set-neuron-selected`) | built (.50); ported (.20), removed | .20 |
 | `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | live | `generator-mark-<id>[-<key>]` → `(generator-mark-named (generator-of self) key).value` (live; key `""` unkeyed) | built (.52); ported (.20), removed | .20 |
 | `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33); ported (.13), removed | .13 |
-| `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event-history → graph.events, node-events → graph.node-events (events: its non-empty rows), delta-matrix → graph.deltas, node-delta-column → graph.node-deltas, group-activity / group-suppression-matrix → graph.group-activity / group-suppression (live, built .51) | built (.33, .51) | .20 |
+| `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event-history → graph.events, node-events → graph.node-events (events: its non-empty rows), delta-matrix → graph.deltas, node-delta-column → graph.node-deltas, group-activity / group-suppression-matrix → graph.group-activity / group-suppression (live, built .51) | built (.33, .51); ported (.64: the seven graph demos), kept: alez.neural | .20 .64 |
 | `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.dampening (live; the matrix is `(map (lambda (nr) nr.dampening) nw.neurons)`) | built (.50); ported (.20), removed | .20 |
 | `SEQ.neural-energy-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.energy (live; one per neuron) | built (.50); ported (.20), removed | .20 |
 | `SEQ.neural-networks` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | project.networks → network / neuron | built (.50); ported (.20), removed | .20 |
 | `SEQ.neural-trigger-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.trigger (live; one per neuron) | built (.50); ported (.20), removed | .20 |
-| `SEQ.track-active-notes` | 5 | effects/panel-bodies, scripts/sequencers/graph-neural-8x8-demo, scripts/sequencers/graph-neural-variable-reset-demo +2 | reactive_tick.rs | live | track.active-notes (live; `(note velocity trigger-id)` rows) | built (.33); ported (.14 A: panel-bodies reads t.active-notes) | .14 .20 |
-| `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | transport.track-events-beat (live) | built (.51); ported (.20: process-ui-control-demo, band-coupling-matrix-demo), kept: graph-neural-8x8-demo | .20 |
-| `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | transport.track-events (live, positional rows) | built (.51); ported (.20: process-ui-control-demo, band-coupling-matrix-demo), kept: graph-neural-8x8-demo | .20 |
+| `SEQ.track-active-notes` | 5 | effects/panel-bodies, scripts/sequencers/graph-neural-8x8-demo, scripts/sequencers/graph-neural-variable-reset-demo +2 | reactive_tick.rs | live | track.active-notes (live; `(note velocity trigger-id)` rows) | built (.33); ported (.14 A: panel-bodies reads t.active-notes; .64: the graph demos), kept: alez.neural, panel_kinds_seed | .14 .20 .64 |
+| `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | transport.track-events-beat (live) | built (.51); ported (.20: process-ui-control-demo, band-coupling-matrix-demo; .64: graph-neural-8x8-demo), removed (.64) | .20 .64 |
+| `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | transport.track-events (live, positional rows) | built (.51); ported (.20: process-ui-control-demo, band-coupling-matrix-demo; .64: graph-neural-8x8-demo), removed (.64) | .20 .64 |
 | `SEQ.<rack/groove-amount-field>` | 1 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove.timing / velocity / random; a pad's share pad-groove.amount (of the playing clip's groove: `(or g.rack-clip.groove g.groove)`) | built (.34) | .19 |
 | `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed (live) | built (.34); ported (.13), kept: drum-rack-v2 | .13 .19 |
 | `SEQ.groove-pool` | 2 | rack-groove-buffer | sv/rack_groove_fields.rs | model | project.groove-pool (pool-groove) | built (.34) | .19 |
@@ -4995,8 +5116,8 @@ builds the field name.
 | `THEME.buffer_bg` | 1 | sequencer | - | model | THEME stays (theme namespace, not host state) | keep | .11 |
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |
 | `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep; kept (.15) | .15 |
-| `GRAPH` via `bind-graph` / `bind-graph-config` (103 calls) | 103 | scripts/sequencers/graph-*, packages/alez.neural | lisp_host/eseq/graph_authoring.rs | model | graph-node.‹field›, graph-param.value, graph.‹field› (`#'` bindings) | built (.33) | .20 |
-| `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node / graph-param / graph `:set` (`set-graph`) | built (.33) | .20 |
+| `GRAPH` via `bind-graph` / `bind-graph-config` (103 calls) | 103 | scripts/sequencers/graph-*, packages/alez.neural | lisp_host/eseq/graph_authoring.rs | model | graph-node.‹field›, graph-param.value, graph.‹field› (`#'` bindings) | built (.33); ported (.64: the seven graph demos), kept: alez.neural | .20 .64 |
+| `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node / graph-param / graph `:set` (`set-graph`) | built (.33); ported (.64), gone from content | .20 .64 |
 | `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step (`:set`) / step.‹param› | built (.35) | .11 |
 
 ## Appendix A. Target example (abridged)

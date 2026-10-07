@@ -48,7 +48,7 @@ pub(super) fn graph_node_event_row(event: &GraphVisualizationEvent) -> EventRow 
     ]
 }
 
-/// A track's output event (the legacy `SEQ.track-events` entry): no node.
+/// A track's output event as a row: no node.
 pub(super) fn track_event_row(event: &TrackOutputEvent) -> EventRow {
     [
         -1.0,

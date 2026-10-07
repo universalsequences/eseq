@@ -8,4 +8,4 @@
 ;; interaction regression separately verifies that matrix column 3 drives this
 ;; state; this fixture pins the resulting Metal composition.
 (def capture-after-sync ()
-  (set! gvr-selected-neuron 3))
+  (set! gvr-view.selected-neuron 3))

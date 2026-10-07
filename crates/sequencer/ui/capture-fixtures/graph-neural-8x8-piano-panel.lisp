@@ -22,13 +22,6 @@
     (list (dict :note 60 :velocity 0.90 :trigger-id 13) (dict :note 84 :velocity 0.95 :trigger-id 14))
     (list (dict :note 60 :velocity 0.90 :trigger-id 15) (dict :note 67 :velocity 0.80 :trigger-id 16) (dict :note 91 :velocity 1.0 :trigger-id 17))))
 
-;; SEQ is host-owned and read-only to ordinary Lisp. Publish a capture-only
-;; view with deterministic activity after the production script has installed
-;; its live effect.
-(effect-buffer "*8x8*"
-  (g8-panel SEQ.current-pattern
-    SEQ.graph-visualizations
-    SEQ.track-events
-    SEQ.track-event-current-beat
-    SEQ.track-colors
-    capture-track-active-notes))
+;; The tracks' active notes are live (nothing plays in a capture): publish
+;; the panel again with deterministic activity in their place.
+(effect-buffer "*8x8*" (g8-panel :notes capture-track-active-notes))

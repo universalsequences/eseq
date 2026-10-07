@@ -2,8 +2,6 @@
 mod sample_search_tests;
 #[path = "chorus_ui_tests.rs"]
 mod chorus_ui_tests;
-#[path = "rack_sequencer_restore_tests.rs"]
-mod rack_sequencer_restore_tests;
 #[path = "graph_visualization_ui_tests.rs"]
 mod graph_visualization_ui_tests;
 #[path = "processes_buffer_ui_tests.rs"]
@@ -335,47 +333,41 @@ use panel_kinds_seed::*;
     fn visualization_sync_requires_live_consumers_and_refreshes_reopened_panels() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![
-            ("graph-visualizations", Value::Number(-1.0)),
-            ("track-events", Value::Number(-1.0)),
-            ("track-event-current-beat", Value::Number(-1.0)),
-        ], true);
-        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
-            track: 0, sample_time: 1, beat: 2.0, transpose: 0.0, velocity: 1.0,
+        runtime.register_reactive("SEQ", vec![("graph-visualizations", Value::Number(-1.0))], true);
+        state.set_graph_visualizations(vec![sequencer::graph::GraphVisualizationSnapshot {
+            id: 7, name: "g".to_string(), active: true, current_beat: 2.0, num_nodes: 1,
             ..Default::default()
         }]);
-        state.set_track_output_current_beat(2.0);
         let mut liveness = VisualizationLiveness::default();
         sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-1.0)),
-            "unobserved histories must not be converted or published");
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-1.0)),
+            "unobserved snapshots must not be converted or published");
 
-        runtime.eval_str(r#"(effect-buffer "*events*" (label :text (str SEQ.track-events)))"#).unwrap();
+        runtime.eval_str(r#"(effect-buffer "*viz*" (label :text (str SEQ.graph-visualizations)))"#).unwrap();
         sync_visualization_fields(&mut runtime, &state, &mut liveness);
         runtime.run_reactive_cycle();
-        let published = runtime.reactive_field_value("SEQ", "track-events").unwrap().clone();
-        assert!(matches!(&published, Value::List(events) if events.len() == 1));
-        assert_eq!(runtime.reactive_field_value("SEQ", "track-event-current-beat"), Some(&Value::Number(-1.0)),
-            "a reader of one visualization does not demand the others");
-        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-1.0)));
+        let published = runtime.reactive_field_value("SEQ", "graph-visualizations").unwrap().clone();
+        assert!(matches!(&published, Value::List(graphs) if graphs.len() == 1));
 
-        runtime.set_hidden_effect_buffer_names(HashSet::from(["*events*".to_string()]));
-        state.clear_track_output_events();
+        runtime.set_hidden_effect_buffer_names(HashSet::from(["*viz*".to_string()]));
+        state.set_graph_visualizations(Vec::new());
         sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&published));
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&published));
         runtime.set_hidden_effect_buffer_names(HashSet::new());
         sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::List(vec![])),
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::List(vec![])),
             "reopening clears data whose source stopped while hidden");
         runtime.run_reactive_cycle();
-        runtime.set_reactive("SEQ", "track-events", Value::Number(-2.0));
+        runtime.set_reactive("SEQ", "graph-visualizations", Value::Number(-2.0));
         sync_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-2.0)),
+        assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::Number(-2.0)),
             "a dead source clears once, not on every poll");
 
         // Nonvisual observers still run in scratch-only mode.
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![("graph-visualizations", Value::Number(-1.0))], true);
         runtime.eval_str("(observe SEQ.graph-visualizations)").unwrap();
-        sync_visualization_fields(&mut runtime, &state, &mut liveness);
+        sync_visualization_fields(&mut runtime, &state, &mut VisualizationLiveness::default());
         assert_eq!(runtime.reactive_field_value("SEQ", "graph-visualizations"), Some(&Value::List(vec![])));
     }
 
@@ -605,59 +597,6 @@ use panel_kinds_seed::*;
                 .get("velocity")
                 .map(|value| value.borrow().clone()),
             Some(Value::Number(0.625))
-        );
-    }
-
-    #[test]
-    fn track_output_events_value_reflects_scheduler_output_telemetry() {
-        let state = Arc::new(SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
-        ));
-        state.set_track_output_current_beat(8.5);
-        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
-            track: 1,
-            sample_time: 48_000,
-            beat: 8.25,
-            transpose: 7.0,
-            velocity: 0.75,
-            ..Default::default()
-        }]);
-
-        assert_eq!(
-            build_track_output_current_beat_value(&state),
-            Value::Number(8.5)
-        );
-        let Value::List(events) = build_track_output_events_value(&state) else {
-            panic!("expected track output events");
-        };
-        assert_eq!(events.len(), 1);
-        let Value::Map(event) = &*events[0].borrow() else {
-            panic!("expected track output event map");
-        };
-        assert_eq!(
-            event.get("node").map(|value| value.borrow().clone()),
-            Some(Value::Nil)
-        );
-        assert_eq!(
-            event.get("track").map(|value| value.borrow().clone()),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            event.get("sample").map(|value| value.borrow().clone()),
-            Some(Value::Number(48_000.0))
-        );
-        assert_eq!(
-            event.get("beat").map(|value| value.borrow().clone()),
-            Some(Value::Number(8.25))
-        );
-        assert_eq!(
-            event.get("transpose").map(|value| value.borrow().clone()),
-            Some(Value::Number(7.0))
-        );
-        assert_eq!(
-            event.get("velocity").map(|value| value.borrow().clone()),
-            Some(Value::Number(0.75))
         );
     }
 
@@ -964,6 +903,7 @@ use panel_kinds_seed::*;
             "ui/seq-core-state.lisp",
             "ui/scene-banks.lisp",
             "ui/view-kit.lisp",
+            "ui/graph-kit.lisp",
             "ui/seq-grid-mode.lisp",
             "ui/seq-step-tabs.lisp",
             "ui/seq-script-picker.lisp",

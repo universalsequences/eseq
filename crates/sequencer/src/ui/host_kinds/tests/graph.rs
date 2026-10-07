@@ -1300,7 +1300,7 @@ fn node_process_errors_and_scopes_are_live_observed_gated_and_drop_with_their_sl
     assert!(!h.rt().instance_is_live(hit));
 }
 
-/// A legacy event map (`event-history`, `node-events`, `SEQ.track-events`)
+/// A legacy event map (`event-history`, `node-events`)
 /// as the kinds' positional row: [`ROW_FIELDS`] in order, nil as -1.
 fn legacy_event_row(event: &Value) -> Value {
     list_value(ROW_FIELDS.iter().map(|field| match get(event, field) {
@@ -1531,7 +1531,7 @@ fn graph_event_streams_read_like_the_legacy_visualization_and_skip_an_unchanged_
 }
 
 #[test]
-fn transport_track_events_read_like_the_legacy_and_skip_an_unchanged_revision() {
+fn transport_track_events_read_the_track_output_and_skip_an_unchanged_revision() {
     let mut h = Harness::new();
     let state = h.shared.state.clone();
     let event = |track: usize, beat: f64| TrackOutputEvent {
@@ -1548,19 +1548,12 @@ fn transport_track_events_read_like_the_legacy_and_skip_an_unchanged_revision() 
         h.sync();
     }
     assert_eq!(h.computed(f::TRANSPORT_TRACK_EVENTS), 0, "unobserved");
-    // Cold reads: the legacy `SEQ.track-events`, as rows (no node: -1).
+    // Cold reads: the tracks' output, as rows (no node: -1).
     assert_eq!(
         h.eval_all("transport.track-events"),
-        legacy_event_rows(&build_track_output_events_value(&state))
+        h.eval_all("(list (list -1 1 1.5 7 0.5))")
     );
-    assert_eq!(
-        h.eval_all("(first transport.track-events)"),
-        h.eval_all("(list -1 1 1.5 7 0.5)")
-    );
-    assert_eq!(
-        h.eval_all("transport.track-events-beat"),
-        build_track_output_current_beat_value(&state)
-    );
+    assert_eq!(h.eval_all("transport.track-events-beat"), number(2.0));
 
     h.eval_all(
         r#"(effect-buffer "*track-events*" (label (str (len transport.track-events) transport.track-events-beat)))"#,
@@ -1586,7 +1579,7 @@ fn transport_track_events_read_like_the_legacy_and_skip_an_unchanged_revision() 
     h.sync();
     assert_eq!(
         h.eval_all("transport.track-events"),
-        legacy_event_rows(&build_track_output_events_value(&state))
+        h.eval_all("(list (list -1 1 1.5 7 0.5) (list -1 0 3 7 0.5))")
     );
     assert_eq!(h.eval_all("transport.track-events-beat"), number(3.5));
     state.clear_track_output_events();

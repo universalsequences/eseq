@@ -40,7 +40,7 @@ fn ported_packages_and_demos_use_no_legacy_binding_forms() {
 
 impl Harness {
     /// `count` tracks in all (blank samplers added after the project's two).
-    fn pkg_tracks(&mut self, count: usize) {
+    pub(super) fn pkg_tracks(&mut self, count: usize) {
         while self.app.tracks.len() < count {
             self.app
                 .graph_controller()
@@ -52,7 +52,7 @@ impl Harness {
     }
 
     /// Load a factory script as the script picker does, then sync and render.
-    fn pkg_load(&mut self, script: &str) {
+    pub(super) fn pkg_load(&mut self, script: &str) {
         self.eval(&format!(r#"(load "@/scripts/{script}")"#));
         self.drain();
         self.sync();
@@ -60,7 +60,7 @@ impl Harness {
     }
 
     /// The transport plays with the audio clock at `sample` (stopped: None).
-    fn pkg_play_at(&mut self, sample: Option<u64>) {
+    pub(super) fn pkg_play_at(&mut self, sample: Option<u64>) {
         let state = &self.shared.state;
         state
             .transport
@@ -69,14 +69,19 @@ impl Harness {
         state.set_audio_rendered_sample(sample.unwrap_or(0));
     }
 
-    fn pkg_render(&mut self) {
+    pub(super) fn pkg_render(&mut self) {
         self.sync();
         self.show_all();
     }
 }
 
 /// Whether `widget`'s `prop` is a binding of `field` on instance `id`.
-fn binds(widget: &HashMap<String, Value>, prop: &str, id: InstanceId, field: &str) -> bool {
+pub(super) fn binds(
+    widget: &HashMap<String, Value>,
+    prop: &str,
+    id: InstanceId,
+    field: &str,
+) -> bool {
     let mut bound = Vec::new();
     instance_bindings(&widget[prop], &mut bound, &mut Vec::new());
     bound == [(id, field.to_string())]
@@ -220,14 +225,14 @@ fn router_network(h: &Harness) -> sequencer::neural::ProjectNeuralNetwork {
     networks[0].clone()
 }
 
-fn by_key<'a>(node: &'a LayoutNode, key: &str) -> Option<&'a LayoutNode> {
+pub(super) fn by_key<'a>(node: &'a LayoutNode, key: &str) -> Option<&'a LayoutNode> {
     if node.stable_key.as_deref() == Some(key) {
         return Some(node);
     }
     node.children.iter().find_map(|child| by_key(child, key))
 }
 
-fn of_type<'a>(node: &'a LayoutNode, widget: &str, out: &mut Vec<&'a LayoutNode>) {
+pub(super) fn of_type<'a>(node: &'a LayoutNode, widget: &str, out: &mut Vec<&'a LayoutNode>) {
     if node.widget_type == widget {
         out.push(node);
     }

@@ -15,7 +15,7 @@ impl Bay {
     /// The package panel with node 1 expanded, the builtin process library
     /// (which holds the plain `expr` class) published.
     fn open() -> Self {
-        let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor(true);
+        let (state, mut editor, graph) = super::graph_visualization_ui_tests::graph_panel_editor();
         let mut authoring = Runtime::new();
         sequencer::lisp_host::register_published_process_authoring_natives(
             &mut authoring,

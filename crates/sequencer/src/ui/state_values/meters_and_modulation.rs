@@ -1467,8 +1467,6 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct VisualizationLiveness {
     graph: Option<bool>,
-    track_output: Option<bool>,
-    track_beat: Option<bool>,
     /// Last published `graph-node-notes-<id>` list per graph.
     pub(crate) graph_node_notes: HashMap<u64, Vec<f64>>,
 }
@@ -1500,14 +1498,13 @@ pub(crate) fn sync_visualization_fields(
     state: &Arc<SequencerState>,
     previous: &mut VisualizationLiveness,
 ) -> bool {
-    let mut dirty = false;
-    dirty |= sync_visualization_field(rt, "graph-visualizations", &mut previous.graph,
-        || state.has_graph_visualizations(), || build_graph_visualizations_value(state));
-    dirty |= sync_visualization_field(rt, "track-events", &mut previous.track_output,
-        || state.has_track_output_events(), || build_track_output_events_value(state));
-    dirty |= sync_visualization_field(rt, "track-event-current-beat", &mut previous.track_beat,
-        || state.has_track_output_events(), || build_track_output_current_beat_value(state));
-    dirty
+    sync_visualization_field(
+        rt,
+        "graph-visualizations",
+        &mut previous.graph,
+        || state.has_graph_visualizations(),
+        || build_graph_visualizations_value(state),
+    )
 }
 
 /// Publish `SEQ.graph-node-notes-<id>` for every graph a visible widget binds

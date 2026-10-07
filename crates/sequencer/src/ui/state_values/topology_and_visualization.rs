@@ -195,16 +195,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "graph-visualizations",
         build_graph_visualizations_value(state),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-events",
-        build_track_output_events_value(state),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-event-current-beat",
-        build_track_output_current_beat_value(state),
-    );
 
     // `defscene` values are not ordinary SEQ fields: each reader injects a
     // qualified host-owned dependency. Queue every currently subscribed slot
@@ -225,20 +215,6 @@ pub(crate) fn build_graph_visualizations_value(state: &Arc<SequencerState>) -> V
             .map(|snapshot| Rc::new(RefCell::new(graph_visualization_value(snapshot))))
             .collect(),
     )
-}
-
-pub(crate) fn build_track_output_events_value(state: &Arc<SequencerState>) -> Value {
-    Value::List(
-        state
-            .track_output_events()
-            .into_iter()
-            .map(|event| Rc::new(RefCell::new(track_output_event_value(event))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_track_output_current_beat_value(state: &Arc<SequencerState>) -> Value {
-    Value::Number(state.track_output_current_beat())
 }
 
 pub(crate) fn build_active_notes_value(notes: &[u8]) -> Value {
@@ -282,17 +258,6 @@ pub(crate) fn build_track_active_notes_snapshot_value(
             })
             .collect(),
     )
-}
-
-pub(super) fn track_output_event_value(event: sequencer::sequencer::TrackOutputEvent) -> Value {
-    map_value([
-        ("node", Value::Nil),
-        ("track", Value::Number(event.track as f64)),
-        ("sample", Value::Number(event.sample_time as f64)),
-        ("beat", Value::Number(event.beat)),
-        ("transpose", Value::Number(event.transpose as f64)),
-        ("velocity", Value::Number(event.velocity as f64)),
-    ])
 }
 
 pub(super) fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnapshot) -> Value {
