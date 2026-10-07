@@ -6,6 +6,7 @@
 
 (import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
 (import eseq.effects.builtin.dynamics :refer (percent-knob number-knob))
+(import eseq.effects.devices :as dv)
 
 (export convolution-reverb-ui)
 
@@ -21,31 +22,37 @@
           (dict :track track :slot slot :bus bus :path path))
         (status "Drop a sample file, not a folder")))))
 
+;; The impulse response's name: device d's (nil while not published), else
+;; the drop hint.
+(def ir-label (d)
+  (let ((name (if d d.ir-name nil)))
+    (if name name "Drop a sample")))
+
 (def convolution-reverb-ui (fx)
-  (let ((params (get fx :params)))
-    (let ((mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
-          (gain-p (eseq.effects.builtin.filter-core/builtin-fx-param params "gain"))
-          (ir-name (get fx :ir-name)))
-      (v-stack :gap 0.4
-        ;; Impulse-response slot: drop a sample here to swap the IR.
-        (box :width :fill :height 2.1 :padding 0.5 :v-align :center :h-align :center
-          :background-color :instrument-control-bg :corner-radius 8
-          :drop-types (list "sample")
-          :drop-meta (dict :kind "conv-reverb-ir"
-                           :track SEQ.current-track
-                           :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                           :slot (get fx :slot-idx))
-          :drop-hover-border-color :blue
-          :on-drop (lambda (event) (drop-ir event))
-          (v-stack :gap 0.15 :align :center
-            (label "IMPULSE RESPONSE" :font-size 7.5 :color :dim :bg :transparent)
-            (label (if ir-name ir-name "Drop a sample")
-              :font-size 10.5 :color :fg :bg :transparent)))
-        ;; Wet mix + output gain.
-        (h-stack :gap 0.6 :align :center
-          (if mix-p
-            (percent-knob fx "mix" mix-p)
-            (box :width 0 :height 0))
-          (if gain-p
-            (number-knob fx "gain" gain-p 2)
-            (box :width 0 :height 0)))))))
+  (let ((params (get fx :params))
+        (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
+        (gain-p (eseq.effects.builtin.filter-core/builtin-fx-param params "gain"))
+        (d (dv/fx-device fx)))
+    (v-stack :gap 0.4
+      ;; Impulse-response slot: drop a sample here to swap the IR.
+      (box :width :fill :height 2.1 :padding 0.5 :v-align :center :h-align :center
+        :background-color :instrument-control-bg :corner-radius 8
+        :drop-types (list "sample")
+        :drop-meta (dict :kind "conv-reverb-ir"
+                         :track (dv/current-track-index)
+                         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
+                         :slot (get fx :slot-idx))
+        :drop-hover-border-color :blue
+        :on-drop (lambda (event) (drop-ir event))
+        (v-stack :gap 0.15 :align :center
+          (label "IMPULSE RESPONSE" :font-size 7.5 :color :dim :bg :transparent)
+          (label (ir-label d)
+            :font-size 10.5 :color :fg :bg :transparent)))
+      ;; Wet mix + output gain.
+      (h-stack :gap 0.6 :align :center
+        (if mix-p
+          (percent-knob fx "mix" mix-p)
+          (box :width 0 :height 0))
+        (if gain-p
+          (number-knob fx "gain" gain-p 2)
+          (box :width 0 :height 0))))))

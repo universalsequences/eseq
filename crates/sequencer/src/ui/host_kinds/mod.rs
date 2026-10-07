@@ -310,6 +310,7 @@ pub(crate) mod f {
     ];
     pub(crate) const TRACK_BAR_TRANSPOSES: FieldKey = (TRACK, "bar-transposes");
     pub(crate) const TRACK_DELETE_TARGET: FieldKey = (TRACK, "delete-target");
+    pub(crate) const TRACK_SETTING_LOCKS: FieldKey = (TRACK, "setting-locks");
     pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
     pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
@@ -995,6 +996,7 @@ pub(crate) mod f {
     pub(crate) const DEVICE_BASE_NOTE_DISPLAY: FieldKey = (DEVICE, "base-note-display");
     pub(crate) const DEVICE_BASE_NOTE_LOCKED: FieldKey = (DEVICE, "base-note-locked");
     pub(crate) const DEVICE_VOICES_DISPLAY: FieldKey = (DEVICE, "voices-display");
+    pub(crate) const DEVICE_STRIP_LOCKS: FieldKey = (DEVICE, "strip-locks");
     pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
     pub(crate) const DEVICE_DISPLAY_NAME: FieldKey = (DEVICE, "display-name");
     pub(crate) const DEVICE_SOUND_BINDING: FieldKey = (DEVICE, "sound-binding");
@@ -1067,6 +1069,7 @@ pub(crate) mod f {
     pub(crate) const PARAM_MOD_VALUE: FieldKey = (PARAM, "mod-value");
     pub(crate) const PARAM_MOD_SCALE: FieldKey = (PARAM, "mod-scale");
     pub(crate) const PARAM_MOD_RATIO: FieldKey = (PARAM, "mod-ratio");
+    pub(crate) const PARAM_MOD_PHASE: FieldKey = (PARAM, "mod-phase");
     pub(crate) const PARAM_PROCESS_MAPPED: FieldKey = (PARAM, "process-mapped");
     pub(crate) const PARAM_PROCESS_VALUE: FieldKey = (PARAM, "process-value");
     pub(crate) const PARAM_PROCESS_CLAMPED: FieldKey = (PARAM, "process-clamped");
@@ -1275,6 +1278,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_MOD_IN[3], ":number", Live),
     (f::TRACK_BAR_TRANSPOSES, "(list-of :number)", Live),
     (f::TRACK_DELETE_TARGET, ":bool", Live),
+    // The track settings a p-lock supplies at the displayed step (eseq-0l17.61).
+    (f::TRACK_SETTING_LOCKS, "(list-of :any)", Live),
     // The arrangement (`arrangement`): clips and cells at the song and cell
     // model syncs, `governed` per tick behind its inputs, `latched` from the
     // shared latch mask.
@@ -1484,6 +1489,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_BASE_NOTE_DISPLAY, ":number", Live),
     (f::DEVICE_BASE_NOTE_LOCKED, ":bool", Live),
     (f::DEVICE_VOICES_DISPLAY, ":int", Live),
+    (f::DEVICE_STRIP_LOCKS, "(list-of :string)", Live),
     // The panel header (`DeviceModel`): pushed with the device's model
     // fields; `modulators` registered with its descriptor (`panel`).
     (f::DEVICE_DISPLAY_NAME, ":string", Model),
@@ -1562,6 +1568,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_MOD_VALUE, ":number", Live),
     (f::PARAM_MOD_SCALE, ":number", Live),
     (f::PARAM_MOD_RATIO, ":number", Live),
+    (f::PARAM_MOD_PHASE, ":number", Live),
     (f::PARAM_PROCESS_MAPPED, ":bool", Live),
     (f::PARAM_PROCESS_VALUE, ":number", Live),
     (f::PARAM_PROCESS_CLAMPED, ":bool", Live),

@@ -5,15 +5,21 @@
 (import eseq.effects.builtin.filter-core :as fc)
 (export panel select-filter)
 
-(defstate filter-tabs '())
+;; Each panel's filter tab (0 wet, 1 output), as (scope-key tab) rows: a
+;; panel without a row shows 0.
+(def-kind chorus-view
+  :key ()
+  :state ((tabs (list-of :any) :default '())))
 (def scope-key (fx)
   (fc/builtin-fx-param-subtree-key fx (fc/builtin-fx-param (get fx :params) "enabled") "chorus"))
 (def tab-for (fx)
-  (let ((row (nth (filter |row| (= (nth row 0) (scope-key fx)) filter-tabs) 0)))
+  (let ((key (scope-key fx))
+        (row (first (filter |row| (= (nth row 0) key) chorus-view.tabs))))
     (if row (nth row 1) 0)))
 (def select-filter (fx tab)
-  (set! filter-tabs (cons (list (scope-key fx) tab)
-    (filter |row| (not (= (nth row 0) (scope-key fx))) filter-tabs))))
+  (let ((key (scope-key fx)))
+    (set! chorus-view.tabs
+      (cons (list key tab) (filter |row| (not (= (nth row 0) key)) chorus-view.tabs)))))
 
 (def knob (fx p)
   (let ((unit (pc/param-control-unit fx p))
@@ -69,11 +75,12 @@
           (pc/fx-set-effect-value fx (if (= (get event :id) 1) hp lp) (get event :freq)) nil))))
 
 (def tab-button (fx tab title)
-  (button title :debug-name (str "chorus-filter-tab-" tab)
-    :width 14.35 :height 0.9 :font-size 9 :padding 0 :corner-radius 2
-    :background-color (if (= (tab-for fx) tab) :blue :instrument-control-bg)
-    :color (if (= (tab-for fx) tab) :white :dim)
-    :on-click (lambda (x y r) (select-filter fx tab))))
+  (let ((on (= (tab-for fx) tab)))
+    (button title :debug-name (str "chorus-filter-tab-" tab)
+      :width 14.35 :height 0.9 :font-size 9 :padding 0 :corner-radius 2
+      :background-color (if on :blue :instrument-control-bg)
+      :color (if on :white :dim)
+      :on-click (lambda (x y r) (select-filter fx tab)))))
 
 (def panel (fx)
   (let ((params (get fx :params)) (output (= (tab-for fx) 1)))

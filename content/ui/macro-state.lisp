@@ -5,7 +5,6 @@
 (export macro-arm
         rack-armed?
         arm-macro!
-        macro-name
         macro-mapping-sidebar-open-hook
         macro-mapping-sidebar-close-hook
         macro-mapping-sidebar-refresh-hook
@@ -30,13 +29,6 @@
   (set! macro-arm.open true)
   (set! macro-arm.mid mid))
 
-;; COMPAT (eseq-0l17.61): the rack panel's macro dicts name a legacy field
-;; for live typing (`:name-field`); the effects port reads the rack macro's
-;; own `rm.name` and deletes this. Empty text is an edit in progress, so fall
-;; back only when the field is absent.
-(def macro-name (macro)
-  (let ((name (if (get macro :name-field) (reactive-get "SEQ" (get macro :name-field)) nil)))
-    (if (= name nil) (get macro :name) name)))
 
 ;; Extension hooks: the full sequencer adds listeners that temporarily mount
 ;; the mapping table in its sidebar. Standalone macro-control tests and

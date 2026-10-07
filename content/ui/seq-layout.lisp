@@ -79,7 +79,7 @@
 
 ;; *track* is a fixed 7 rows; the scale editor needs 13 while it is open.
 (def track-tile-height ()
-  (if scale-editor/scale-editor-open 13 7))
+  (if (scale-editor/editor-open?) 13 7))
 
 (def main-panel-layout-spec ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)

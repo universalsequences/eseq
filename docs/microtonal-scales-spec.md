@@ -124,7 +124,8 @@ If every degree is disabled the input passes through unchanged.
 ### 5.1 Track settings
 
 `content/ui/effects/track-panels.lisp`: a small gear button right of the
-`scale` dropdown toggles `eseq.effects.track-panels/scale-editor-open`. While
+`scale` dropdown opens the scale editor (`eseq.effects.scale-editor`'s
+`scale-view.open` view singleton; it edits the track's `tuning` kind). While
 open, the `*track*` buffer renders `scale-editor-panel` instead of
 `track-parameters-panel`. The dropdown shows the custom scale name when one
 is loaded, and a `*` suffix when the tuning has edits.

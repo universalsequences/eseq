@@ -780,132 +780,22 @@ pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool 
     )
 }
 
-/// Publish the poly/voices fields the *track* panel, mixer strip and
-/// instrument header read. Split out so a rack-slot voice edit can republish
-/// them: for a rack those fields show the selected slot, and a stale value
-/// left the *track* voices picker pinned at its old number while dragging.
-pub(crate) fn sync_track_polyphony_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-) -> bool {
-    let mut dirty = false;
-    let tp = &state.pattern.track_params[track];
-    // For a Rack track, playback polyphony is governed per-slot
-    // (RackSlotSnapshot::max_polyphony, read by fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) — the track-level TrackParams poly/voices
-    // fields below are never consulted for Sampler/Custom rack slots. Surface
-    // the *selected slot's* values here (and which slot they'd be writing to)
-    // so this panel's poly/voices controls can be routed to the right place
-    // instead of silently editing a value playback ignores.
-    let rack_slot_poly = rack_slot_selection(app, track);
-    dirty |= changed(rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some())));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-rack-slot-idx",
-        Value::Number(rack_slot_poly.map(|(slot_idx, _)| slot_idx).unwrap_or(0) as f64),
-    ));
-    let (tp_poly, max_polyphony) = match rack_slot_poly {
-        Some((_, max_polyphony)) => (max_polyphony > 1, max_polyphony),
-        // Non-rack tracks: `is_polyphonic` is its own independently-toggled
-        // flag, distinct from the voice-count value — don't derive it from
-        // max_polyphony or the toggle button's state gets stomped every
-        // render.
-        None => (tp.is_polyphonic(), tp.get_max_polyphony()),
-    };
-    dirty |= changed(rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly)));
-    // Rack tracks: every slot's note-on path (fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
-    // voice priority, with "mono" decided per slot by its max_polyphony. So a
-    // rack slot at 1 voice gets legato from this same track-level control.
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-supports-mono-trigger",
-        Value::Bool(track_supports_mono_trigger(app, track)),
-    ));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-voice-priority",
-        Value::String(voice_priority_label(tp.get_voice_priority()).to_string()),
-    ));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-mono-trigger",
-        Value::String(mono_trigger_label(tp.get_mono_trigger()).to_string()),
-    ));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-max-polyphony",
-        Value::Number(max_polyphony as f64),
-    ));
-    dirty
-}
-
-fn changed(result: ReactiveSetResult) -> bool {
-    result.effects_dirty || result.widgets_dirty
-}
-
-/// Push individual tp-* reactive fields for the current track.
+/// Push the current track's step grid fields (`tp-num-steps`, `tp-timebase`).
 fn sync_track_param_fields(
     rt: &mut Runtime,
-    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
     let tp = &state.pattern.track_params[track];
-    rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
-    rt.set_reactive(
-        "SEQ",
-        "tp-release",
-        Value::Number(tp.get_release_ms() as f64),
-    );
-    rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
-    rt.set_reactive("SEQ", "tp-output", build_track_output_label(app, tp));
-    rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
-    sync_current_track_bus_send_binding_fields(rt, app, state, track);
+    // The track settings live in eseq.kinds (track, tuning, project option
+    // lists); the step grid still reads the pattern length.
     rt.set_reactive(
         "SEQ",
         "tp-num-steps",
         Value::Number(tp.get_num_steps() as f64),
     );
-    rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
-    let _ = sync_track_polyphony_fields(rt, app, state, track);
     let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "tp-fts",
-        Value::String(fts_scale_label(tp)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-mute-group",
-        Value::String(mute_group_label(tp.get_mute_group())),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accumulator",
-        Value::String(selected_accumulator_name(app, track)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accum-limit",
-        Value::Number(tp.get_accum_limit() as f64),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accum-mode",
-        Value::String(accum_mode_label(tp.get_accum_mode()).to_string()),
-    );
-    rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
-    rt.set_reactive("SEQ", "fts-options", build_fts_options());
-    for (key, value) in tuning_reactive_fields(tp) {
-        rt.set_reactive("SEQ", key, value);
-    }
-    rt.set_reactive("SEQ", "tuning-root-options", build_tuning_root_options());
-    rt.set_reactive("SEQ", "mute-group-options", build_mute_group_options());
-    rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
 }
 
 pub(crate) fn sync_track_params(
@@ -915,7 +805,7 @@ pub(crate) fn sync_track_params(
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
-    sync_track_param_fields(rt, app, state, track, selected);
+    sync_track_param_fields(rt, state, track, selected);
     rt.set_reactive(
         "SEQ",
         "track-plocks",
@@ -928,9 +818,11 @@ pub(crate) fn sync_track_params(
     );
 }
 
-/// Refreshes only track-parameter fields whose displayed value follows the
-/// selected step's p-lock. Selection changes should use this instead of
-/// rebuilding every track parameter and option list.
+/// Refreshes the step grid's timebase (`tp-timebase`), which follows the
+/// selected (else playing) step's p-lock. Selection changes should use this
+/// instead of rebuilding every track field. (The track panel reads the
+/// track's own settings and their locks from eseq.kinds:
+/// `track.setting-locks`.)
 pub(crate) fn sync_track_selection_param_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -940,34 +832,15 @@ pub(crate) fn sync_track_selection_param_binding_fields(
     let tp = &state.pattern.track_params[track];
     let selected_step = selected_plock_step(selected);
     let display_step = displayed_plock_step(state, track, selected_step);
-    let swing = display_step
-        .and_then(|step| state.pattern.swing_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing());
     let timebase = display_step
         .and_then(|step| state.pattern.timebase_plocks[track].get(step))
         .unwrap_or_else(|| tp.get_timebase());
-    let swing_resolution = display_step
-        .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing_resolution());
-
-    let mut dirty = rt
-        .set_reactive("SEQ", "tp-swing", Value::Number(swing as f64))
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "tp-timebase",
-            Value::String(timebase.label().to_string()),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "tp-swing-resolution",
-            Value::String(swing_resolution.label().to_string()),
-        )
-        .effects_dirty;
-    dirty
+    rt.set_reactive(
+        "SEQ",
+        "tp-timebase",
+        Value::String(timebase.label().to_string()),
+    )
+    .effects_dirty
 }
 
 pub(crate) fn sync_track_params_with_neural_selection(
@@ -980,7 +853,7 @@ pub(crate) fn sync_track_params_with_neural_selection(
         &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) {
-    sync_track_param_fields(rt, app, state, track, selected);
+    sync_track_param_fields(rt, state, track, selected);
     rt.set_reactive(
         "SEQ",
         "track-plocks",

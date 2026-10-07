@@ -201,7 +201,9 @@ pub(super) fn sync_steps(
         }
     }
     diff.playing = playing;
-    // The value fields: only those some step of the track observes.
+    // The value fields: only those some step of the track observes (the
+    // edit step shows the print latch while it prints).
+    let print_step = pusher.sources.print_step(&*pusher.rt, track);
     for (slot, &(bit, param)) in bits.values.iter().enumerate() {
         if union & bit == 0 {
             diff.values[slot].clear();
@@ -215,7 +217,9 @@ pub(super) fn sync_steps(
         last.resize(num_steps, f64::NAN);
         for (step, previous) in last.iter_mut().enumerate() {
             let value = match param {
-                Some(param) => pusher.sources.step_param(track, step, param),
+                Some(param) => pusher
+                    .sources
+                    .shown_step_param(track, step, param, print_step),
                 None => f64::from(u8::from(diff.held[step])),
             };
             if fresh || *previous != value {

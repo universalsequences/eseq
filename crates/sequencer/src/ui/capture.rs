@@ -1356,15 +1356,18 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         piano_roll_selection: Arc::clone(&piano_roll_selection),
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
+    // Whether the sync pushed anything.
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
-        if host_kinds.sync_with(
+        let changed = host_kinds.sync_with(
             app,
             editor.runtime_mut(),
             &kinds_handles,
             &Default::default(),
-        ) {
+        );
+        if changed {
             editor.refresh_runtime_side_effects();
         }
+        changed
     };
 
     let mut editor = if args.noui {
@@ -1441,20 +1444,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let selected_track = current_track.load(std::sync::atomic::Ordering::Relaxed);
     editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(selected_track as f64));
     sync_selected_tracks_bindings(editor.runtime_mut(), &selected_tracks.lock().unwrap());
-    // Capture has no meter tick. Seed the same effective-value bindings at
-    // rest, so mod-capable curves draw their resolved base rather than reading
-    // an uninitialized reactive field as zero. No DSP or watchlist is needed.
-    let mod_values = read_mod_display_values(
-        app.graph.lg, &app, &state, Some(selected_track), selected_plock_step(&selected_steps),
-        false, &mut HashSet::new(),
-    );
-    sync_effect_mod_phase_field_delta(editor.runtime_mut(), &[], &mod_values.effects);
-    sync_instrument_mod_phase_field_delta(
-        editor.runtime_mut(),
-        None,
-        mod_values.instrument.as_ref(),
-    );
-    sync_rack_slot_mod_phase_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
     let _ = sync_sound_palette(&app, &mut SoundPaletteFrameState::default(), true);
@@ -1532,6 +1521,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.set_layout_viewport(columns as u16, rows as u16);
     editor.update_tile_rects(columns as u16, rows as u16);
     let mut frame = build_render_frame(&mut editor, columns, rows);
+    // A frame observes the kind fields its views read. The ones computed
+    // only while observed (a sampler's media, a sound binding) arrive with
+    // the next sync, as on the live loop's next tick: settle them.
+    if sync_host_kinds(&mut editor, &app) {
+        frame = build_render_frame(&mut editor, columns, rows);
+    }
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
         frame = build_render_frame(&mut editor, columns, rows);
     }

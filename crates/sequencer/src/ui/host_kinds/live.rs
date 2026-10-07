@@ -95,6 +95,9 @@ pub(crate) struct KindsShared {
     pub(super) process_bound_sends: PlockCache<usize, HashSet<u64>>,
     pub(super) variants: PlockCache<(usize, VariantScope), VariantSnapshot>,
     pub(super) send_locks: PlockCache<usize, HashSet<BusId>>,
+    /// Per (track position, rack slot): `device.strip-locks`, under the
+    /// track's [`PlockKey`] and step count.
+    pub(super) strip_locks: PlockCache<(usize, usize), Value>,
     /// The table asset list (`device.table-options`, built from the asset
     /// stems) and the key it was listed under; how many listings that took
     /// and how many times an observer was pushed it, for tests.
@@ -339,6 +342,52 @@ impl KindsHandles {
         self.state.pattern.step_data[track].get(step, param) as f64
     }
 
+    /// Whether a print may hold: the transport plays and records.
+    fn print_gate(&self) -> bool {
+        self.state.transport.playing.load(Ordering::Relaxed)
+            && self.recording.load(Ordering::Relaxed)
+    }
+
+    /// The value the print latch writes for `target` on `track` while it
+    /// prints (`param.printing`): the held control shows it, not the value
+    /// it snaps back to between the steps the latch passes.
+    pub(super) fn print_latch(&self, track: usize, target: PrintTarget) -> Option<f32> {
+        if !self.print_gate() {
+            return None;
+        }
+        self.step_print.lock().unwrap().latched(track, target)
+    }
+
+    /// The step whose fields show the print latch's step params while it
+    /// prints on `track`: the step the step panel edits
+    /// (`selection.edit-step`, whose pickers the latch is held from).
+    pub(super) fn print_step<S: KindStore>(&self, store: &S, track: usize) -> Option<usize> {
+        if !self.print_gate()
+            || self.current_track.load(Ordering::Relaxed) != track
+            || !self.step_print.lock().unwrap().armed_on(track)
+        {
+            return None;
+        }
+        let cursor = fx_step_cursor_value(store.global(FX_STEP_CURSOR_GLOBAL));
+        let selected = selected_plock_step(&self.selected_steps);
+        Some(fx_step_cursor(self.num_steps(track), cursor, selected).1)
+    }
+
+    /// A step's parameter as its field shows it: the print latch's value on
+    /// `print_step` ([`Self::print_step`]), else the step's own.
+    pub(super) fn shown_step_param(
+        &self,
+        track: usize,
+        step: usize,
+        param: StepParam,
+        print_step: Option<usize>,
+    ) -> f64 {
+        let latched = (print_step == Some(step))
+            .then(|| self.print_latch(track, PrintTarget::Step(param)))
+            .flatten();
+        latched.map_or_else(|| self.step_param(track, step, param), f64::from)
+    }
+
     /// The step whose p-locks `track`'s controls show: on the current track
     /// the selected step, else the playing one; none on other tracks (like
     /// the legacy `track-N-bus-M-send`).
@@ -409,6 +458,35 @@ pub(super) fn display_step(
         tick.display_steps.insert(track, step);
     }
     step
+}
+
+/// `track.setting-locks`: the settings (timebase, swing, swing resolution)
+/// a p-lock of `track` supplies at the displayed `step`, as `{:name
+/// :value}` rows (what the legacy `tp-timebase`, `tp-swing` and
+/// `tp-swing-resolution` showed in place of the track's own values).
+fn track_setting_locks(state: &SequencerState, track: usize, step: Option<usize>) -> Value {
+    let pattern = &state.pattern;
+    let row = |name: &str, value| {
+        crate::values::map_value([("name", Value::String(name.to_string())), ("value", value)])
+    };
+    let Some(step) = step else {
+        return list_value([]);
+    };
+    let timebase = (pattern.timebase_plocks.get(track))
+        .and_then(|locks| locks.get(step))
+        .map(|timebase| row("timebase", Value::String(timebase.label().to_string())));
+    let swing = (pattern.swing_plocks.get(track))
+        .and_then(|locks| locks.get(step))
+        .map(|swing| row("swing", number(f64::from(swing))));
+    let resolution = (pattern.swing_resolution_plocks.get(track))
+        .and_then(|locks| locks.get(step))
+        .map(|resolution| {
+            row(
+                "swing-resolution",
+                Value::String(resolution.label().to_string()),
+            )
+        });
+    list_value([timebase, swing, resolution].into_iter().flatten())
 }
 
 /// The buses some step of `track` locks a send to, cached per track under
@@ -540,6 +618,10 @@ pub(super) fn live_value<S: KindStore>(
                     let target = sources.active_delete_target.lock().unwrap();
                     Value::Bool(mixer_track_delete_target_selected(target.as_ref(), track))
                 }
+                f::TRACK_SETTING_LOCKS => {
+                    let step = display_step(sources, shared, track);
+                    track_setting_locks(&sources.state, track, step)
+                }
                 f::TRACK_LATCHED => Value::Bool(song_lane_latched(
                     sources.state.song_manual_latch_mask(),
                     track,
@@ -589,7 +671,11 @@ pub(super) fn live_value<S: KindStore>(
                         .variant;
                     step_variant(store, sources, shared, (parent, track), vid)
                 }
-                _ => number(sources.step_param(track, step, step_param_named(key.1)?)),
+                _ => {
+                    let param = step_param_named(key.1)?;
+                    let print_step = sources.print_step(&*store, track);
+                    number(sources.shown_step_param(track, step, param, print_step))
+                }
             }
         }
         SEND => {

@@ -269,6 +269,7 @@ pub(super) struct ParamBits {
     pub(super) mod_value: u32,
     pub(super) mod_scale: u32,
     pub(super) mod_ratio: u32,
+    pub(super) mod_phase: u32,
     pub(super) process_mapped: u32,
     pub(super) process_value: u32,
     pub(super) process_clamped: u32,
@@ -282,7 +283,15 @@ impl ParamBits {
         self.value | self.locked | self.overridden | self.text | self.mod_value | self.process_value
     }
 
+    /// The modulation display fields: what the tick's modulation sample
+    /// feeds (observing one keeps it polled; `mod-phase` only on a
+    /// modulation source's setting).
     pub(super) fn mod_display(&self) -> u32 {
+        self.mod_values() | self.mod_phase
+    }
+
+    /// The modulation display fields that read the param's own modulation.
+    pub(super) fn mod_values(&self) -> u32 {
         self.mod_offset | self.mod_value | self.mod_scale | self.mod_ratio
     }
 
@@ -310,6 +319,7 @@ pub(super) static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
     mod_value: PARAM_LIVE.bit(f::PARAM_MOD_VALUE),
     mod_scale: PARAM_LIVE.bit(f::PARAM_MOD_SCALE),
     mod_ratio: PARAM_LIVE.bit(f::PARAM_MOD_RATIO),
+    mod_phase: PARAM_LIVE.bit(f::PARAM_MOD_PHASE),
     process_mapped: PARAM_LIVE.bit(f::PARAM_PROCESS_MAPPED),
     process_value: PARAM_LIVE.bit(f::PARAM_PROCESS_VALUE),
     process_clamped: PARAM_LIVE.bit(f::PARAM_PROCESS_CLAMPED),
@@ -502,12 +512,9 @@ pub(super) fn param_live_fields<'a>(
         emit(f::PARAM_STEP_LOCKS, ParamField::Value(list_value(rows)));
     }
     if mask & bits.printing != 0 {
-        let state = &sources.state;
         let track = param_track(sources, device);
         let target = device.device.print_target(device.owner, index);
-        let printing = state.transport.playing.load(Ordering::Relaxed)
-            && sources.recording.load(Ordering::Relaxed)
-            && (sources.step_print.lock().unwrap()).holds(track, target);
+        let printing = sources.print_latch(track, target).is_some();
         emit(f::PARAM_PRINTING, ParamField::Bool(printing));
     }
     let shown = reading.shown.map(|(stored, _)| stored);
@@ -843,12 +850,17 @@ impl HostKinds {
         let bits = DeviceBits::get();
         let mut mod_display = false;
         let mut modulator_meters = false;
+        let mut sampler_playhead = false;
         for index in 0..self.device_observed.entries.len() {
             let (id, mut mask, seen) = self.device_observed.entries[index];
             let Some(source) = pusher.shared.borrow().devices.get(&id).cloned() else {
                 continue;
             };
             mod_display |= mask & bits.mod_phases != 0 && mod_sampled(pusher.sources, &source);
+            // The tick watches the current track's sampler voices alone.
+            sampler_playhead |= mask & bits.playhead != 0
+                && source.sampler.is_some()
+                && source.owner == pusher.sources.current_track.load(Ordering::Relaxed);
             // Only a modulator track's instrument reads the envelopes.
             modulator_meters |= mask & (bits.modulator_phase | bits.modulator_level) != 0
                 && source.device == DeviceSlot::Instrument
@@ -907,7 +919,14 @@ impl HostKinds {
             let Some(device) = shared.borrow().devices.get(&device_id).cloned() else {
                 continue;
             };
-            mod_display |= mask & PARAM_BITS.mod_display() != 0 && mod_sampled(sources, &device);
+            // `mod-phase` reads the sample for a source's setting alone.
+            let source_setting = || {
+                let pdesc = device.params().get(param as usize);
+                pdesc.and_then(param_source_slot).is_some()
+            };
+            let mod_phase = mask & PARAM_BITS.mod_phase != 0 && source_setting();
+            let mod_read = mask & PARAM_BITS.mod_values() != 0 || mod_phase;
+            mod_display |= mod_read && mod_sampled(sources, &device);
             // `has-locks` scans the slot's p-locks, `key-locks` and
             // `process-mapped` read caches under the same key: only after
             // they may have moved.
@@ -933,6 +952,7 @@ impl HostKinds {
         }
         self.panel.mod_display_observed = mod_display;
         self.panel.modulator_meters_observed = modulator_meters;
+        self.panel.sampler_playhead_observed = sampler_playhead;
     }
 
     /// One observed device's live fields in `mask`.

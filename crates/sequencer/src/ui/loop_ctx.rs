@@ -181,9 +181,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_track_peak_levels: Vec<f64>,
     pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) prev_bus_peak_levels: Vec<f64>,
-    pub(crate) prev_modulator_phases: Vec<f64>,
-    pub(crate) prev_modulator_levels: Vec<f64>,
-    pub(crate) prev_mod_display_values: ModDisplayValues,
     /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
     /// the instant each rack member last triggered, which is what the light
     /// decays from.

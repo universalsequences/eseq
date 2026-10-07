@@ -42,7 +42,7 @@
         lock-rack-macro! unlock-rack-macro!
         set-tensor-cell! stamp-variant! stamp-key-variant!
         lock-none lock-seq lock-variant
-        reset-tuning! justify-tuning! randomize-tuning! stretch-tuning!
+        reset-tuning! justify-tuning! randomize-tuning! stretch-tuning! clear-degree!
         set-bar-transpose! mod-in-level
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options swing-resolution-options
@@ -469,6 +469,7 @@
          (mod-value  :number :doc "Where modulation moves value now; value while unmodulated")
          (mod-scale  :number :doc "An exponential destination's modulation ratio (mod-value / value); 1 otherwise")
          (mod-ratio  :number :doc "mod-value as a 0-1 fraction where the param is percent (mod-value / 100), else mod-value: for visualizers drawn on the stored scale")
+         (mod-phase  :number :doc "A modulation source's setting (section source): its source's cycle position, device.mod-phases' entry for mod-slot (an LFO curve's playhead); -1 when it has none, and for any other param")
          (process-mapped :bool :doc "An enabled process slot of the track writes this instrument param")
          (process-value :number :doc "The value a process last wrote here (display units); value when none has")
          (process-clamped :bool :doc "That write hit the end of the param's range")
@@ -630,6 +631,7 @@
                             :doc "The base note shown (a track instrument's: its base-note)")
          (base-note-locked :bool :doc "base-note-display comes from a p-lock")
          (voices-display :int :doc "The voices shown (the rack panel's V picker); 0 for any other device")
+         (strip-locks (list-of :string) :doc "The strip controls some step of a drum rack slot's track pattern locks (base-note, gain, pan, max-polyphony, mute, solo; the p-lock presence dot); empty for any other device")
          ;; The panel header and its meters (spec §14.2l).
          (display-name :string :doc "The name the panel header shows: an instrument's or rack slot's without its folder or pin (a drum rack's track name, Sampler for a sampler), else name")
          (sound-binding :string :doc "A track instrument's bound sound (the header badge): the patch name, else the binding's (Take 2 · bars 0-2, Pattern 2); empty when unbound or for any other device. Computed while observed (an unobserved one reads its last value, empty before)")
@@ -1054,6 +1056,8 @@
          (bar-transposes (list-of :number)
                     :doc "Per 16-step bar of the pattern, semitones; (set-bar-transpose! t bar v)")
          (delete-target :bool :set set-track-delete-target :doc "Among the mixer's delete target (one track or several)")
+         (setting-locks (list-of :any)
+                    :doc "The settings a p-lock supplies at the displayed step (the current track's selected, else playing, step): (dict :name :value) per lock, name timebase (a label), swing or swing-resolution (a label); empty otherwise. The fields above are the track's own values")
          ;; The arrangement.
          (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
@@ -1951,6 +1955,9 @@
 (def randomize-tuning! (tn cents) (tuning-edit tn "rand" cents))
 ;; Stretch the scale by cents per period (-600-600).
 (def stretch-tuning! (tn cents) (tuning-edit tn "stretch" cents))
+;; Drop degree dg's offset: its own undo entry (a (set! dg.offset 0) right
+;; after a drag on it merges into the drag's).
+(def clear-degree! (dg) ((degree-setter "clear") dg 0))
 
 ;; Transpose bar (16-step page) bar of track t's pattern by v semitones
 ;; (-60-60; out of range is an error).

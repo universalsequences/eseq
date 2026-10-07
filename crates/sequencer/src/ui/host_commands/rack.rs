@@ -394,9 +394,8 @@ pub(super) fn rack_slot_plock_applied(
 }
 
 /// After a rack slot's voices changed (`set-rack-slot-max-polyphony`, the
-/// host kinds' `device.voices`): the *track* panel, mixer strip and
-/// instrument header show the selected slot's voices through the `tp-*`
-/// fields when the rack is the current track, and the rack's own "V" field.
+/// host kinds' `device.voices`): the rack's own "V" field. (The *track*
+/// panel and the instrument header read the slot device's `voices`.)
 pub(super) fn rack_slot_voices_applied(
     editor: &mut Editor,
     app: &app::App,
@@ -405,10 +404,6 @@ pub(super) fn rack_slot_voices_applied(
     slot_idx: usize,
 ) {
     let shared = ctx.shared;
-    if track == shared.current_track.load(Ordering::Relaxed) {
-        let dirty = sync_track_polyphony_fields(editor.runtime_mut(), app, &shared.state, track);
-        flush_reactive_display_edit(editor, dirty);
-    }
     refresh_rack_direct_param_reactive(
         editor,
         app,
@@ -2925,7 +2920,7 @@ mod tests {
                 &slot.effect_descriptors[0].params[param].name);
             assert_eq!(reactive_number(&h.editor, &field), value);
         }
-        assert!(tick_step_print(&mut h.app, &h.shared, h.editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut h.app, &h.shared).printed);
         let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
         assert_eq!(&slot.effect_slots[0].plocks[STEP][3..6],
             &[Some(800.0), Some(6.0), Some(1.5)]);
@@ -3196,34 +3191,6 @@ mod tests {
             assert_eq!(
                 reactive_number(&h.editor, &value_field),
                 param.stored_to_user(expected) as f64
-            );
-        }
-    }
-
-    /// The *track* buffer's voices picker reads SEQ.tp-max-polyphony, which
-    /// for a rack shows the selected slot. The slot-voices command only
-    /// refreshed the rack's own "V" field, so that picker stayed at its old
-    /// value (12) and every drag restarted from it.
-    #[test]
-    fn set_rack_slot_max_polyphony_republishes_track_panel_voices() {
-        let mut h = RackHarness::new(HashSet::new());
-        let mut types = vec![sequencer::sequencer::InstrumentType::Rack];
-        types.resize(h.app.graph.track_instrument_types.len().max(1),
-            sequencer::sequencer::InstrumentType::Rack);
-        h.app.graph.track_instrument_types = types;
-        for voices in [2.0, 3.0, 1.0, 6.0] {
-            h.dispatch(
-                "set-rack-slot-max-polyphony",
-                number_payload(&[("track", TRACK as f64), ("slot", SLOT as f64), ("value", voices)]),
-            );
-            assert_eq!(
-                rack_slot_snapshot_for_host(&h.state, TRACK, SLOT).unwrap().max_polyphony,
-                voices as usize
-            );
-            assert_eq!(reactive_number(&h.editor, "tp-max-polyphony"), voices);
-            assert_eq!(
-                h.editor.runtime().reactive_field_value("SEQ", "tp-poly"),
-                Some(&Value::Bool(voices > 1.0))
             );
         }
     }

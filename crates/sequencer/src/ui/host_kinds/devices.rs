@@ -92,8 +92,46 @@ struct StripWork {
     device: DeviceSlot,
     /// The displayed step (read before the rack lock).
     step: Option<usize>,
+    /// The track's pattern length (`strip-locks` scans its steps).
+    num_steps: usize,
     /// The observed strip bits.
     mask: u32,
+    /// A rack slot's: the key its `strip-locks` is cached under.
+    locks_key: Option<StripLocksKey>,
+}
+
+/// What a rack slot's `strip-locks` is cached under: its track's
+/// [`PlockKey`] and step count.
+type StripLocksKey = (PlockKey, usize);
+
+static STRIP_LOCKS_BIT: LazyLock<u32> = LazyLock::new(|| DEVICE_LIVE.bit(f::DEVICE_STRIP_LOCKS));
+
+/// Rack slot `slot_idx` of `track`'s `strip-locks` as last read under
+/// `key`, if it was.
+fn cached_strip_locks(
+    shared: &RefCell<KindsShared>,
+    track: usize,
+    slot_idx: usize,
+    key: StripLocksKey,
+) -> Option<Value> {
+    let shared = shared.borrow();
+    let (at, num_steps, value) = shared.strip_locks.get(&(track, slot_idx))?;
+    (*at == key.0 && *num_steps == key.1).then(|| (**value).clone())
+}
+
+/// Cache rack slot `slot_idx` of `track`'s `strip-locks`, read under
+/// `key` (counting a panel scan).
+fn cache_strip_locks(
+    shared: &RefCell<KindsShared>,
+    track: usize,
+    slot_idx: usize,
+    (at, num_steps): StripLocksKey,
+    value: &Value,
+) {
+    let mut shared = shared.borrow_mut();
+    shared.panel_scans += 1;
+    let entry = (at, num_steps, Rc::new(value.clone()));
+    shared.strip_locks.insert((track, slot_idx), entry);
 }
 
 /// One rack's devices as of its last pass.
@@ -803,37 +841,60 @@ const STRIP_FIELDS: [(FieldKey, StripControl, StripPart); 17] = [
     ),
 ];
 
-/// The strip fields' keys.
+/// The strip fields' keys, `strip-locks` included.
 pub(super) fn strip_keys() -> impl Iterator<Item = FieldKey> {
-    STRIP_FIELDS.iter().map(|(key, ..)| *key)
+    STRIP_FIELDS
+        .iter()
+        .map(|(key, ..)| *key)
+        .chain([f::DEVICE_STRIP_LOCKS])
 }
 
-/// Whether `key` is a strip field.
+/// Whether `key` is a strip field (or `strip-locks`).
 pub(super) fn is_strip_field(key: FieldKey) -> bool {
-    STRIP_FIELDS.iter().any(|(strip, ..)| *strip == key)
+    key == f::DEVICE_STRIP_LOCKS || STRIP_FIELDS.iter().any(|(strip, ..)| *strip == key)
+}
+
+/// `device.strip-locks` of rack slot `slot`: the strip controls some step
+/// of its track's first `num_steps` locks, in [`RackSlotParam::ALL`] order
+/// (the legacy `SEQ.track-plock-any` rack slot rows).
+///
+/// [`RackSlotParam::ALL`]: sequencer::sequencer::RackSlotParam::ALL
+fn strip_locks(slot: &sequencer::sequencer::RackSlotSnapshot, num_steps: usize) -> Value {
+    let locked = sequencer::sequencer::RackSlotParam::ALL
+        .into_iter()
+        .filter(|param| (0..num_steps).any(|step| slot.param_plocks.get(step, *param).is_some()));
+    list_value(locked.map(|param| Value::String(param.name().to_string())))
 }
 
 /// Strip field `key` of rack slot `slot_idx` of `rack` (read under the rack
-/// lock) at the displayed step `step`; `None` for another key. The base
-/// value is the slot's stored one, unclamped (as `set-device` compares it),
-/// so it round-trips as a no-op.
+/// lock) at the displayed step `step` (`strip-locks` over the track's first
+/// `num_steps`); `None` for another key. A control the print latch holds
+/// (`latched`) shows the value it prints. The base value is the slot's
+/// stored one, unclamped (as `set-device` compares it), so it round-trips
+/// as a no-op.
 fn rack_strip_field(
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
     key: FieldKey,
     step: Option<usize>,
+    num_steps: usize,
+    latched: impl FnOnce(sequencer::sequencer::RackSlotParam) -> Option<f32>,
 ) -> Option<Value> {
+    if key == f::DEVICE_STRIP_LOCKS {
+        return Some(strip_locks(slot, num_steps));
+    }
     let &(_, control, part) = STRIP_FIELDS.iter().find(|(strip, ..)| *strip == key)?;
     let Some(param) = control.param() else {
         return Some(number(control.read(slot).number()));
     };
     Some(match part {
         StripPart::Base => rack_slot_control_reactive_value(param, control.read(slot).number()),
-        StripPart::Display => rack_slot_control_reactive_value(
-            param,
-            rack_slot_control_value(rack, slot_idx, slot, param, step),
-        ),
+        StripPart::Display => {
+            let shown = latched(param)
+                .unwrap_or_else(|| rack_slot_control_value(rack, slot_idx, slot, param, step));
+            rack_slot_control_reactive_value(param, shown)
+        }
         StripPart::Locked => {
             Value::Bool(step.is_some_and(|step| slot.param_plocks.get(step, param).is_some()))
         }
@@ -848,6 +909,9 @@ fn other_strip_field(
     device: DeviceSlot,
     key: FieldKey,
 ) -> Option<Value> {
+    if key == f::DEVICE_STRIP_LOCKS {
+        return Some(list_value([]));
+    }
     let &(_, control, part) = STRIP_FIELDS.iter().find(|(strip, ..)| *strip == key)?;
     let own = match (control, device) {
         (StripControl::BaseNote, DeviceSlot::Instrument) => instrument_base_note(sources, owner),
@@ -879,11 +943,25 @@ pub(super) fn device_strip_field(
     let DeviceSlot::RackSlot(slot_idx) = device.device else {
         return other_strip_field(sources, device.owner, device.device, key);
     };
-    let step = display_step(sources, shared, device.owner);
-    with_rack_slot(&sources.state, device.owner, slot_idx, |rack, slot| {
-        rack_strip_field(rack, slot_idx, slot, key, step)
+    let track = device.owner;
+    let num_steps = sources.num_steps(track);
+    let locks_key = (sources.plock_key(track), num_steps);
+    if key == f::DEVICE_STRIP_LOCKS {
+        if let Some(locks) = cached_strip_locks(shared, track, slot_idx, locks_key) {
+            return Some(locks);
+        }
+    }
+    let step = display_step(sources, shared, track);
+    let latched =
+        |param| sources.print_latch(track, PrintTarget::RackSlotParam { slot_idx, param });
+    let value = with_rack_slot(&sources.state, track, slot_idx, |rack, slot| {
+        rack_strip_field(rack, slot_idx, slot, key, step, num_steps, latched)
     })
-    .flatten()
+    .flatten();
+    if let Some(locks) = value.as_ref().filter(|_| key == f::DEVICE_STRIP_LOCKS) {
+        cache_strip_locks(shared, track, slot_idx, locks_key, locks);
+    }
+    value
 }
 
 impl DeviceState {
@@ -897,27 +975,49 @@ impl DeviceState {
         device: &DeviceSource,
         mask: u32,
     ) {
-        // The displayed step before the rack lock (it reads the selection).
-        let step = match device.device {
-            DeviceSlot::RackSlot(_) => display_step(sources, shared, device.owner),
-            _ => None,
+        let track = device.owner;
+        let mut mask = mask;
+        // The displayed step before the rack lock (it reads the selection),
+        // and `strip-locks` from its cache when its key has not moved.
+        let (step, num_steps, locks_key) = match device.device {
+            DeviceSlot::RackSlot(slot_idx) => {
+                let num_steps = sources.num_steps(track);
+                let locks_key = (sources.plock_key(track), num_steps);
+                if mask & *STRIP_LOCKS_BIT != 0 {
+                    if let Some(locks) = cached_strip_locks(shared, track, slot_idx, locks_key) {
+                        self.strip_pending.push((id, f::DEVICE_STRIP_LOCKS, locks));
+                        mask &= !*STRIP_LOCKS_BIT;
+                    }
+                }
+                (
+                    display_step(sources, shared, track),
+                    num_steps,
+                    Some(locks_key),
+                )
+            }
+            _ => (None, 0, None),
         };
+        if mask == 0 {
+            return;
+        }
         self.strip_work.push(StripWork {
             id,
-            track: device.owner,
+            track,
             device: device.device,
             step,
+            num_steps,
             mask,
+            locks_key,
         });
     }
 
     /// Read every queued strip field under one rack lock, then push them.
     pub(super) fn push_strips(&mut self, pusher: &mut Pusher<'_>) {
-        if self.strip_work.is_empty() {
+        if self.strip_work.is_empty() && self.strip_pending.is_empty() {
             return;
         }
         let pending = &mut self.strip_pending;
-        let sources = pusher.sources;
+        let (sources, shared) = (pusher.sources, pusher.shared);
         let any_slot =
             (self.strip_work.iter()).any(|work| matches!(work.device, DeviceSlot::RackSlot(_)));
         {
@@ -931,7 +1031,9 @@ impl DeviceState {
                     track,
                     device,
                     step,
+                    num_steps,
                     mask,
+                    locks_key,
                 } = *work;
                 for (bit, key) in DEVICE_LIVE.keys.iter().enumerate() {
                     if mask & (1 << bit) == 0 {
@@ -940,10 +1042,21 @@ impl DeviceState {
                     let value = match (device, &racks) {
                         (DeviceSlot::RackSlot(slot_idx), Some(racks)) => {
                             let rack = racks.get(track).and_then(Option::as_ref);
-                            rack.and_then(|rack| {
+                            let latched = |param| {
+                                let target = PrintTarget::RackSlotParam { slot_idx, param };
+                                sources.print_latch(track, target)
+                            };
+                            let value = rack.and_then(|rack| {
                                 let slot = rack.slots.get(slot_idx)?;
-                                rack_strip_field(rack, slot_idx, slot, *key, step)
-                            })
+                                rack_strip_field(
+                                    rack, slot_idx, slot, *key, step, num_steps, latched,
+                                )
+                            });
+                            let locks = value.as_ref().filter(|_| *key == f::DEVICE_STRIP_LOCKS);
+                            if let (Some(locks), Some(locks_key)) = (locks, locks_key) {
+                                cache_strip_locks(shared, track, slot_idx, locks_key, locks);
+                            }
+                            value
                         }
                         _ => other_strip_field(sources, track, device, *key),
                     };

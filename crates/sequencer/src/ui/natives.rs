@@ -3204,7 +3204,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
-                ("sampler-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
                 (
@@ -3334,14 +3333,6 @@ pub(crate) fn init_runtime(
                     build_all_track_process_lanes_value(&state, track_count),
                 ),
                 (
-                    "process-slots",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_process_slots_value(&state, 0)
-                    },
-                ),
-                (
                     "track-process-slots",
                     build_all_track_process_slots_value(&state, track_count),
                 ),
@@ -3454,69 +3445,8 @@ pub(crate) fn init_runtime(
                 ),
                 ("track-params", build_track_params(&state, 0)),
                 (
-                    "tp-attack",
-                    Value::Number(state.pattern.track_params[0].get_attack_ms() as f64),
-                ),
-                (
-                    "tp-release",
-                    Value::Number(state.pattern.track_params[0].get_release_ms() as f64),
-                ),
-                (
-                    "tp-swing",
-                    Value::Number(state.pattern.track_params[0].get_swing() as f64),
-                ),
-                (
-                    "tp-send",
-                    Value::Number(state.pattern.track_params[0].get_send() as f64),
-                ),
-                (
-                    "tp-output",
-                    Value::String(track_output_label(app, &state.pattern.track_params[0])),
-                ),
-                ("tp-bus-sends", {
-                    use std::collections::HashMap;
-                    let tp = &state.pattern.track_params[0];
-                    let sends = tp.sends();
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
-                            .map(|(bus_idx, bus)| {
-                                let amount = sends
-                                    .iter()
-                                    .find(|send| send.destination == bus.id)
-                                    .map(|send| send.amount)
-                                    .unwrap_or(0.0);
-                                let mut map = HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(amount as f64))),
-                                );
-                                Rc::new(RefCell::new(Value::Map(map)))
-                            })
-                            .collect(),
-                    )
-                }),
-                (
                     "tp-num-steps",
                     Value::Number(state.pattern.track_params[0].get_num_steps() as f64),
-                ),
-                (
-                    "tp-gate",
-                    Value::Bool(state.pattern.track_params[0].is_gate_on()),
-                ),
-                (
-                    "tp-poly",
-                    Value::Bool(state.pattern.track_params[0].is_polyphonic()),
                 ),
                 (
                     "tp-timebase",
@@ -3527,44 +3457,6 @@ pub(crate) fn init_runtime(
                             .to_string(),
                     ),
                 ),
-                (
-                    "tp-swing-resolution",
-                    Value::String(
-                        state.pattern.track_params[0]
-                            .get_swing_resolution()
-                            .label()
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "tp-fts",
-                    Value::String(fts_scale_label(&state.pattern.track_params[0])),
-                ),
-                (
-                    "tp-mute-group",
-                    Value::String(mute_group_label(
-                        state.pattern.track_params[0].get_mute_group(),
-                    )),
-                ),
-                (
-                    "tp-accumulator",
-                    Value::String(selected_accumulator_name(&app, 0)),
-                ),
-                (
-                    "tp-accum-limit",
-                    Value::Number(state.pattern.track_params[0].get_accum_limit() as f64),
-                ),
-                (
-                    "tp-accum-mode",
-                    Value::String(
-                        accum_mode_label(state.pattern.track_params[0].get_accum_mode())
-                            .to_string(),
-                    ),
-                ),
-                ("accumulator-options", build_accumulator_options(&app)),
-                ("fts-options", build_fts_options()),
-                ("mute-group-options", build_mute_group_options()),
-                ("accum-mode-options", build_accum_mode_options()),
                 (
                     "available-builtin-effects",
                     build_available_builtin_effects(),
@@ -3620,14 +3512,6 @@ pub(crate) fn init_runtime(
                         build_track_plocks_value(&app, &state, 0, &selected_steps)
                     },
                 ),
-                (
-                    "track-plock-any",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plock_any_value(&app, &state, 0)
-                    },
-                ),
                 // Print latches are per-gesture; nothing can be armed at
                 // startup (bead eseq-4seq).
                 (
@@ -3646,24 +3530,14 @@ pub(crate) fn init_runtime(
                 ),
                 ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
                 ("rack-clips", Value::List(vec![])),
-                ("tuning-root-options", build_tuning_root_options()),
             ];
             // The editor's and Patch Learn's legacy fields, as the record
             // (`presented`) holds them.
             fields.extend(crate::presented::seq_registration());
-            fields.extend(tuning_reactive_fields(&state.pattern.track_params[0]));
             for idx in 0..track_count {
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
-                ));
-                fields.push((
-                    Box::leak(format!("modulator-phase-{idx}").into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-                fields.push((
-                    Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
-                    Value::Number(1.0),
                 ));
             }
             for idx in 0..app.buses.len() {
@@ -3671,19 +3545,6 @@ pub(crate) fn init_runtime(
                     Box::leak(format!("bus-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
-            }
-            if track_count > 0 {
-                for (bus_idx, bus) in app.buses.iter().enumerate() {
-                    if bus.id == sequencer::sequencer::BusId::MIX {
-                        continue;
-                    }
-                    fields.push((
-                        Box::leak(current_track_bus_send_field(bus_idx).into_boxed_str()),
-                        Value::Number(
-                            track_bus_send_amount(&app, &state, 0, bus_idx).unwrap_or(0.0) as f64,
-                        ),
-                    ));
-                }
             }
             for idx in 0..MAX_STEPS {
                 fields.push((

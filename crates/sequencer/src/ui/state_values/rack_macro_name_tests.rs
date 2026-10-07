@@ -14,6 +14,18 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
     editor.runtime_mut().eval_str(r#"
         (set-layout (list :buf "*fx*" :hide-status true))
     "#).unwrap();
+    // The rack's macros are eseq.kinds rack-macros: the name field shows
+    // rm.name, which the host pushes after each rename lands.
+    seed_panel_kinds(&mut editor);
+    let rack = {
+        let rt = editor.runtime();
+        rt.keyed_instance("eseq.kinds:device", &[kind_track(rt, 0), 0])
+            .unwrap()
+    };
+    let rm = editor
+        .runtime()
+        .keyed_instance("eseq.kinds:rack-macro", &[rack, 0])
+        .unwrap();
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     let buffer = editor.buffers.iter().find(|b| b.name == "*fx*").unwrap().id;
@@ -61,10 +73,29 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
             let eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(map) } = command else {
                 panic!("expected rack rename");
             };
-            assert_eq!(name, "rename-rack-macro");
-            assert_eq!(*map["name"].borrow(), Value::String(expected.to_string()));
+            // (set! rm.name …): the rack macro's setter.
+            assert_eq!(name, "set-rack-macro");
+            assert_eq!(*map["field"].borrow(), Value::String("name".to_string()));
+            assert_eq!(*map["value"].borrow(), Value::String(expected.to_string()));
+            let Value::Map(rename) = map_value([
+                ("track", Value::Number(0.0)),
+                ("id", Value::Number(0.0)),
+                ("name", Value::String(expected.to_string())),
+            ]) else {
+                unreachable!()
+            };
             let epoch = AtomicUsize::new(0);
-            apply_rack_macro_rename_host_command(&mut editor, &mut app, &map, &selected, &epoch);
+            apply_rack_macro_rename_host_command(&mut editor, &mut app, &rename, &selected, &epoch);
+            // The host kinds push the new name (rm.name) after the edit
+            // lands, as the frame's sync does before the next key.
+            set_field(
+                editor.runtime_mut(),
+                rm,
+                "name",
+                Value::String(expected.to_string()),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
         }
         let layout = editor.widget_layout().unwrap();
         timings.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -83,53 +114,4 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
     timings.sort_by(f64::total_cmp);
     eprintln!("rack macro typing: median {:.3} ms, max {:.3} ms (key + host + reactive + layout, {} events)",
         timings[timings.len() / 2], timings.last().unwrap(), timings.len());
-}
-
-#[test]
-fn rack_macro_cached_labels_follow_names_without_rebuilding_metadata() {
-    use crate::piano_roll::{build_track_automation_value, build_track_lock_targets_value,
-        compact_param_label};
-    let mut app = test_app_with_rack_panel();
-    let id = sequencer::sequencer::RackMacroId::from_index(0).unwrap();
-    assert!(app.state.set_rack_macro_plocks_in_current_pattern(0, id, &[0], 0.5));
-    let selected = Arc::new(Mutex::new(HashSet::from([0])));
-    let mut editor = full_grid_editor_for_scroll_tests();
-    let (roots, errors) = sequencer::app_paths::app_paths().module_load_roots();
-    assert!(errors.is_empty());
-    editor.runtime_mut().set_scoped_module_load_path(roots);
-    let overlays = editor.snapshot_file_backed_sources();
-    let report = editor.runtime_mut().eval_source_transactional(None, "(import alez.tracker.ui)", overlays);
-    assert!(report.success, "{:?}", report.diagnostics);
-    editor.process_lisp_reload_report(report);
-    sync_all_rack_macro_name_fields(editor.runtime_mut(), &app);
-    editor.runtime_mut().register_reactive("NAMES", vec![
-        ("panel", build_instrument_panel_value(&app, 0, &selected)),
-        ("plocks", build_track_plocks_value(&app, &app.state, 0, &selected)),
-        ("columns", build_track_automation_value(&app, &app.state)),
-        ("targets", build_track_lock_targets_value(&app, &app.state)),
-    ], false);
-    editor.runtime_mut().eval_str(r#"
-        (def cached-macro (nth (get (nth NAMES.panel 0) :macros) 0))
-        (def cached-plock (nth (filter |p| (= (get p :target) "rack-macro") NAMES.plocks) 0))
-        (def cached-column (nth (filter |p| (= (get p :key) "rack-macro:0") (nth NAMES.columns 0)) 0))
-        (def cached-target (nth (get (nth (filter |g| (= (get g :group) "Macros") (nth NAMES.targets 0)) 0) :items) 0))
-    "#).unwrap();
-    for name in ["", "Tone ", "Écho Depth"] {
-        let Value::Map(map) = map_value([
-            ("track", Value::Number(0.0)), ("id", Value::Number(0.0)),
-            ("name", Value::String(name.to_string())),
-        ]) else { unreachable!() };
-        let epoch = AtomicUsize::new(0);
-        apply_rack_macro_rename_host_command(&mut editor, &mut app, &map, &selected, &epoch);
-        for expression in [
-            "(eseq.macro-state/macro-name cached-macro)",
-            "(eseq.effects.track-panels/plock-row-title cached-plock)",
-            "(alez.tracker.ui/column-label cached-column)",
-            "(alez.tracker.ui/column-label cached-target)",
-        ] {
-            assert_eq!(editor.runtime_mut().eval_str(expression).unwrap(), Some(Value::String(name.to_string())), "{expression}");
-        }
-        assert_eq!(editor.runtime_mut().eval_str("(alez.tracker.ui/column-title cached-column)").unwrap(),
-            Some(Value::String(compact_param_label(name))));
-    }
 }

@@ -121,10 +121,20 @@ impl StepPrintState {
         !self.values.is_empty()
     }
 
-    /// Whether the latch holds `target` on `track` (the host kinds'
-    /// `param.printing`).
-    pub(crate) fn holds(&self, track: usize, target: PrintTarget) -> bool {
-        self.armed() && self.track == track && self.values.iter().any(|(t, _)| *t == target)
+    /// Whether the latch prints on `track`.
+    pub(crate) fn armed_on(&self, track: usize) -> bool {
+        self.armed() && self.track == track
+    }
+
+    /// The value the latch holds for `target` on `track` (what the host
+    /// kinds show while it prints: `param.printing`, the step panel's
+    /// pickers, a rack macro, a rack slot's strip).
+    pub(crate) fn latched(&self, track: usize, target: PrintTarget) -> Option<f32> {
+        if self.track != track {
+            return None;
+        }
+        let held = self.values.iter().find(|(held, _)| *held == target);
+        held.map(|(_, value)| *value)
     }
 
     /// Arm-on-touch: latch a param value for printing. A touch on a
@@ -269,13 +279,11 @@ impl StepPrintState {
     }
 }
 
-/// The reactive display field(s) a device print target's own control binds to,
-/// paired with the latched value rendered the way that control's normal sync
-/// path renders it (instrument and rack-instrument params are published in
-/// user units; every other family publishes the stored value as-is).
-///
-/// Step targets are absent on purpose: their pickers are re-asserted every
-/// armed frame by `sync_print_display_fields`.
+/// The legacy value field(s) of a device print target (the p-lock table
+/// rows' `:value-field`), paired with the latched value
+/// rendered the way that field's normal sync path renders it (instrument and
+/// rack-instrument params are published in user units; every other family
+/// publishes the stored value as-is).
 fn print_latch_display_updates(
     app: &app::App,
     track: usize,
@@ -285,7 +293,9 @@ fn print_latch_display_updates(
     for (target, value) in targets {
         let value = *value;
         match target {
-            PrintTarget::Step(_) => {}
+            // The host kinds show these latches (`step.*` of the edit step,
+            // a rack slot's `device.*-display`).
+            PrintTarget::Step(_) | PrintTarget::RackSlotParam { .. } => {}
             PrintTarget::Instrument { param_idx } => {
                 if let Some(pdesc) = app
                     .graph
@@ -365,16 +375,6 @@ fn print_latch_display_updates(
                 updates.push((
                     rack_macro_value_field(track, *macro_idx),
                     Value::Number(value as f64),
-                ));
-            }
-            PrintTarget::RackSlotParam { slot_idx, param } => {
-                updates.push((
-                    rack_slot_value_field(track, *slot_idx, *param),
-                    if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
-                        Value::Bool(value > 0.5)
-                    } else {
-                        Value::Number(value as f64)
-                    },
                 ));
             }
             PrintTarget::RackSlotInstrument {
@@ -609,57 +609,6 @@ pub(crate) fn print_pass(
 pub(crate) struct StepPrintTick {
     /// Steps were printed: mark the record take changed + redraw.
     pub(crate) printed: bool,
-    /// The *step* panel's picker readouts changed: run a reactive cycle and
-    /// refresh the *step* layout so the display tracks the latch tightly.
-    pub(crate) display_dirty: bool,
-}
-
-/// While armed, the *step* panel's `fx-step-value-*` pickers must read the
-/// LATCH — the value being printed — not the cursor step, or the readout
-/// lags/snaps back mid-sweep. Re-asserted every armed frame (set_reactive is
-/// change-detecting) so cursor-step republishes from other sync paths
-/// self-heal within a frame.
-fn sync_print_display_fields(rt: &mut Runtime, print: &StepPrintState) -> bool {
-    let mut dirty = false;
-    for (target, value) in &print.values {
-        if let PrintTarget::Step(param) = target {
-            if let Some(field) = fx_step_param_value_field(*param) {
-                dirty |= rt
-                    .set_reactive("SEQ", field, Value::Number(*value as f64))
-                    .effects_dirty;
-            }
-        }
-    }
-    dirty
-}
-
-/// The latch just ended: hand the picker readouts back to the cursor step
-/// (or the selected step, matching `sync_single_step_param_binding`).
-pub(crate) fn restore_cursor_display_fields(
-    rt: &mut Runtime,
-    state: &SequencerState,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) -> bool {
-    if track >= state.pattern.step_data.len() {
-        return false;
-    }
-    let num_steps = state.pattern.track_params[track]
-        .get_num_steps()
-        .clamp(1, sequencer::sequencer::MAX_STEPS);
-    let parameter_step = selected_plock_step(selected_steps)
-        .unwrap_or_else(|| fx_step_cursor_from_runtime(rt))
-        .min(num_steps.saturating_sub(1));
-    let mut dirty = false;
-    for param in STEP_INSPECTOR_PARAMS {
-        if let Some(field) = fx_step_param_value_field(param) {
-            let value = state.pattern.step_data[track].get(parameter_step, param);
-            dirty |= rt
-                .set_reactive("SEQ", field, Value::Number(value as f64))
-                .effects_dirty;
-        }
-    }
-    dirty
 }
 
 /// Per-frame drive, mirroring `tick_roll_record`: run the print pass, push
@@ -668,27 +617,14 @@ pub(crate) fn restore_cursor_display_fields(
 /// so the printed values are audible on the same pass's later steps. The
 /// publish defers while a roll hold has unpublished pattern writes; the
 /// roll's own release publish carries the printed values along.
-pub(crate) fn tick_step_print(
-    app: &mut app::App,
-    shared: &SharedHandles,
-    rt: &mut Runtime,
-) -> StepPrintTick {
+pub(crate) fn tick_step_print(app: &mut app::App, shared: &SharedHandles) -> StepPrintTick {
     let mut print = shared.step_print.lock().unwrap();
     if !print.armed() && print.dirty_unpublished_tracks == 0 {
         return StepPrintTick::default();
     }
-    let was_armed = print.armed();
     let recording = shared.recording.load(Ordering::Relaxed);
     let focused_track = shared.current_track.load(Ordering::Relaxed);
     let printed = print_pass(&shared.state, &mut print, focused_track, recording);
-    let display_dirty = if print.armed() {
-        sync_print_display_fields(rt, &print)
-    } else if was_armed {
-        // Gate just failed: give the readouts back to the cursor step.
-        restore_cursor_display_fields(rt, &shared.state, focused_track, &shared.selected_steps)
-    } else {
-        false
-    };
     let roll_publish_pending = shared.roll_record.lock().unwrap().has_unpublished_writes();
     let publish_tracks = if roll_publish_pending {
         0
@@ -871,26 +807,16 @@ pub(crate) fn tick_step_print(
                 change: StepInvalidation::PlockPresence,
             });
     }
-    StepPrintTick {
-        printed: wrote,
-        display_dirty,
-    }
+    StepPrintTick { printed: wrote }
 }
 
 #[cfg(test)]
 mod step_print_tests {
-    use super::{
-        print_pass, restore_cursor_display_fields, sync_print_display_fields, PrintTarget,
-        StepPrintState,
-    };
-    use eseqlisp::vm::Value;
-    use eseqlisp::Runtime;
+    use super::{print_pass, PrintTarget, StepPrintState};
     use sequencer::sequencer::{
         default_empty_effect_chain, RollHitRecorded, SequencerState, StepParam,
     };
-    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex};
 
     fn playing_state() -> SequencerState {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
@@ -1243,52 +1169,6 @@ mod step_print_tests {
         assert!(!print.armed());
         print.publish_engine_override(&state);
         assert!(state.step_print_override.values_for_track(0).is_empty());
-    }
-
-    #[test]
-    fn picker_readouts_track_the_latch_while_armed_and_the_cursor_after() {
-        let mut rt = Runtime::new();
-        rt.register_reactive("SEQ", Vec::new(), true);
-        rt.eval_str("(def cursor-step 2)")
-            .expect("seed the lisp cursor-step global");
-
-        let mut print = StepPrintState::default();
-        print.latch(0, StepParam::Velocity, 0.25);
-        assert!(
-            sync_print_display_fields(&mut rt, &print)
-                || matches!(
-                    rt.reactive_field_value("SEQ", "fx-step-value-velocity"),
-                    Some(Value::Number(value)) if *value == 0.25
-                ),
-            "armed latch must land in the picker binding"
-        );
-        assert!(
-            matches!(
-                rt.reactive_field_value("SEQ", "fx-step-value-velocity"),
-                Some(Value::Number(value)) if *value == 0.25
-            ),
-            "while armed the velocity picker must read the printed value"
-        );
-        // A sweep update follows the finger, not the cursor step.
-        print.latch(0, StepParam::Velocity, 0.75);
-        sync_print_display_fields(&mut rt, &print);
-        assert!(matches!(
-            rt.reactive_field_value("SEQ", "fx-step-value-velocity"),
-            Some(Value::Number(value)) if *value == 0.75
-        ));
-
-        // Disarm hands the readouts back to the cursor step's stored values.
-        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
-        state.pattern.step_data[0].set(2, StepParam::Velocity, 0.5);
-        let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
-        restore_cursor_display_fields(&mut rt, &state, 0, &selected_steps);
-        assert!(
-            matches!(
-                rt.reactive_field_value("SEQ", "fx-step-value-velocity"),
-                Some(Value::Number(value)) if *value == 0.5
-            ),
-            "after disarm the picker must show the cursor step's value again"
-        );
     }
 
     #[test]

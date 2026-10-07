@@ -44,12 +44,14 @@ fn mute_and_solo_repaint_all_channel_views_without_rebuilding_layout() {
         editor.set_active_buffer(id);
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 240, 100);
         let layout = editor.widget_layout().expect(buffer);
-        assert_binding(
-            &layout,
-            "/step-track-badge",
-            "muted",
-            "track-muted-effective",
-            0,
+        // The step panel's track chip binds the current track's
+        // eseq.kinds `audible` (no SEQ mute field).
+        let badge = find_layout_node_by_stable_key_suffix(&layout, "/step-track-badge")
+            .expect("step track badge");
+        assert!(
+            matches!(badge.props.get("muted"), Some(Value::ReactiveRef { field, .. }) if field == "audible"),
+            "{:?}",
+            badge.props.get("muted")
         );
         for (field, index) in [("track-solos", 0), ("track-mutes", 0),
             ("track-mutes", 3), ("bus-solos", 2), ("bus-mutes", 2)] {

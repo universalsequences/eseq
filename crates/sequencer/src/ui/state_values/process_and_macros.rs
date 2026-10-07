@@ -1506,11 +1506,6 @@ pub(crate) fn sync_process_chain_state(
     );
     rt.set_reactive(
         "SEQ",
-        "process-slots",
-        build_process_slots_value(state, current_track),
-    );
-    rt.set_reactive(
-        "SEQ",
         "track-process-slots",
         build_all_track_process_slots_value(state, track_count),
     );

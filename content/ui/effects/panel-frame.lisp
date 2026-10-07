@@ -237,9 +237,7 @@
 
 (def fx-clear-delete-selection ()
   (do
-    (if (not (= tp/selected-plock-row -1))
-      (set! tp/selected-plock-row -1)
-      false)
+    (tp/clear-plock-row!)
     ;; seq-clear-delete-target is a Rust native (src/ui/natives.rs) — bare.
     (seq-clear-delete-target)))
 

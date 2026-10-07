@@ -1284,15 +1284,9 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
     Value::List(items)
 }
 
-pub(super) fn build_track_output_label(
-    app: &app::App,
-    tp: &sequencer::sequencer::TrackParams,
-) -> Value {
-    Value::String(track_output_label(app, tp))
-}
-
 /// Where a track's audio goes, as the output dropdown names it
-/// (`SEQ.tp-output`, `track.output`).
+/// (`track.output`'s bus name; main, sends only).
+#[cfg(test)]
 pub(crate) fn track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> String {
     match tp.output() {
         sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
@@ -1342,31 +1336,6 @@ pub(crate) fn track_output_for_bus(
             .any(|known| known.id == bus)
             .then_some(TrackOutput::Bus(bus)),
     }
-}
-
-pub(super) fn build_track_bus_sends(app: &app::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
-    use std::collections::HashMap;
-
-    let items = app
-        .buses
-        .iter()
-        .enumerate()
-        .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
-        .map(|(bus_idx, bus)| {
-            let mut map = HashMap::new();
-            map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))));
-            map.insert(
-                "bus-idx".to_string(),
-                Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
-            );
-            map.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-            );
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    Value::List(items)
 }
 
 /// Build a Lisp Value::Map of track parameters for the current track.
@@ -1839,18 +1808,20 @@ pub(crate) fn plock_key_row(
 /// Params on `track` that carry at least one p-lock on ANY step of the current
 /// pattern (bead eseq-yr6w) — the Ableton-style "this control is automated"
 /// indicator, as opposed to `SEQ.track-plocks`, which only ever describes the
-/// selected step.
+/// selected step. The legacy `SEQ.track-plock-any` rows, kept for the tests
+/// (the kinds read `param.has-locks`, `rack-macro.has-locks`,
+/// `device.strip-locks`).
 ///
 /// The traversal mirrors `track_step_plock_mask` family for family; this is its
 /// transpose (per param rather than per step). `SlotPLockData::has_any_plock`
 /// makes a lock-free slot O(1), which is the overwhelmingly common case, so the
-/// whole build costs nothing on a pattern with no automation. Runs at publish
-/// time, never per frame.
+/// whole build costs nothing on a pattern with no automation.
 ///
 /// Deliberately excludes `step-param` rows: velocity/duration/transpose deviate
 /// from their defaults on almost every pattern, so a presence dot there would
 /// be permanently lit and carry no information. Rack slot instrument params
 /// are excluded because their controls do not yet consume a dedicated target.
+#[cfg(test)]
 pub(crate) fn build_track_plock_any_value(
     app: &app::App,
     state: &Arc<SequencerState>,

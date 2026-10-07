@@ -1,5 +1,46 @@
 use super::*;
 
+/// The kinds the voice controls read (eseq.effects.track-panels/poly?): track
+/// 2 current, a drum rack whose selected slot 3 plays `voices` voices
+/// (`rack`), else a plain track whose own poly flag is `voices > 1`. Returns
+/// the tracks.
+fn seed_voice_owner(rt: &mut Runtime, rack: bool, voices: f64) -> Vec<eseqlisp::vm::InstanceId> {
+    let mut tracks = project_list(rt, "tracks");
+    if tracks.len() < 6 {
+        tracks = register_kind_range(rt, "eseq.kinds:track", 6);
+        for (index, &track) in tracks.iter().enumerate() {
+            set_field(rt, track, "index", Value::Number(index as f64));
+        }
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "tracks", instance_list(tracks.iter().copied()));
+    }
+    let rack_device = rt
+        .register_keyed_instance("eseq.kinds:device", &[tracks[2], 0])
+        .unwrap();
+    let slot_device = rt
+        .register_keyed_instance("eseq.kinds:device", &[tracks[2], 4000])
+        .unwrap();
+    for (device, position) in [(rack_device, -1.0), (slot_device, 3.0)] {
+        set_field(rt, device, "track", Value::Instance(tracks[2]));
+        set_field(rt, device, "slot", Value::Number(position));
+    }
+    set_field(rt, slot_device, "voices", Value::Number(voices));
+    set_field(rt, rack_device, "devices", instance_list([slot_device]));
+    set_field(rt, tracks[2], "devices", instance_list([rack_device]));
+    set_field(rt, tracks[2], "rack", Value::Bool(rack));
+    set_field(rt, tracks[2], "poly", Value::Bool(!rack && voices > 1.0));
+    let selection = kind_singleton_rt(rt, "selection");
+    set_field(rt, selection, "track", Value::Instance(tracks[2]));
+    set_field(
+        rt,
+        selection,
+        "rack-slot",
+        Value::Number(if rack { 3.0 } else { -1.0 }),
+    );
+    rt.run_reactive_cycle();
+    tracks
+}
+
 #[test]
 fn polyphony_header_follows_voice_mode_and_toggles_the_selected_owner() {
     let mut editor = full_grid_editor_for_scroll_tests();
@@ -19,11 +60,7 @@ fn polyphony_header_follows_voice_mode_and_toggles_the_selected_owner() {
     editor.set_layout_viewport(80, 20);
     for rack in [false, true] {
         for poly in [false, true, false] {
-            editor.runtime_mut().set_reactive("SEQ", "tp-is-rack", Value::Bool(rack));
-            editor.runtime_mut().set_reactive("SEQ", "tp-poly", Value::Bool(poly));
-            editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(2.0));
-            editor.runtime_mut().set_reactive("SEQ", "tp-rack-slot-idx", Value::Number(3.0));
-            editor.runtime_mut().run_reactive_cycle();
+            seed_voice_owner(editor.runtime_mut(), rack, if poly { 6.0 } else { 1.0 });
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
             let button = find_layout_node_by_debug_name(&layout, "instrument-polyphony").unwrap();
@@ -65,17 +102,17 @@ fn polyphony_header_right_click_applies_the_choice_to_all_scenes() {
     editor.set_active_buffer(buffer);
     editor.set_layout_viewport(80, 20);
     for rack in [false, true] {
-        editor.runtime_mut().set_reactive("SEQ", "tp-is-rack", Value::Bool(rack));
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(2.0));
-        editor.runtime_mut().set_reactive("SEQ", "tp-rack-slot-idx", Value::Number(3.0));
-        editor.runtime_mut().run_reactive_cycle();
+        let tracks = seed_voice_owner(editor.runtime_mut(), rack, 1.0);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let button = find_layout_node_by_debug_name(&layout, "instrument-polyphony").unwrap();
         editor.runtime_mut().invoke(button.props["on-right-click"].clone(),
             vec![map_value([("col", Value::Number(1.0)), ("row", Value::Number(1.0))])]).unwrap();
         // The target is captured at open time, not at apply time.
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(5.0));
+        let rt = editor.runtime_mut();
+        let selection = kind_singleton_rt(rt, "selection");
+        set_field(rt, selection, "track", Value::Instance(tracks[5]));
+        set_field(rt, selection, "rack-slot", Value::Number(-1.0));
         editor.drain_host_commands();
         editor.runtime_mut()
             .eval_str("(eseq.effects.track-panels/apply-polyphony-to-all-scenes)")

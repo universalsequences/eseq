@@ -393,7 +393,8 @@ fn track_setting_request(
 }
 
 /// What `set-tuning` asks for (`{:op :value :degree}`: `root`, `morph`,
-/// `mode`, `offset`, `enabled`, `reset`, `just`, `rand`, `stretch`), as the
+/// `mode`, `offset`, `enabled`, `clear`, `reset`, `just`, `rand`,
+/// `stretch`), as the
 /// scale editor's edit ([`track_tuning_command`]); `Ok(None)` when the
 /// scale already is so.
 fn tuning_request(
@@ -442,6 +443,7 @@ fn tuning_request(
             set("degree", Value::Number(index as f64));
             op = "toggle";
         }
+        "clear" => set("degree", Value::Number(degree()? as f64)),
         "reset" | "just" => {}
         "rand" => set("value", Value::Number(value.number(0.0, 600.0)?)),
         "stretch" => set("value", Value::Number(value.number(-600.0, 600.0)?)),

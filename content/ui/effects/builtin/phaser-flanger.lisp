@@ -8,6 +8,7 @@
 ;; (amount / feedback / Ø / stereo), and output (warmth / dry-wet / output).
 (module eseq.effects.builtin.phaser-flanger)
 
+(import eseq.kinds :refer (transport))
 (import eseq.effects.param-controls :refer
   (fx-param-numeric-value
    fx-param-on-for?
@@ -156,7 +157,7 @@
     :rate (eseq.effects.param-controls/param-effective-value rate-p)
     :sync-div (eseq.effects.param-controls/param-effective-value div-p)
     :lfo-shape (eseq.effects.param-controls/param-effective-value shape-p)
-    :bpm (bind-seq "bpm")))
+    :bpm #'transport.bpm))
 
 (def notches-control (fx p)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")

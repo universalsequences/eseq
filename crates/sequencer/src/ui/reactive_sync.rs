@@ -111,14 +111,12 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, selected_track, selected_steps);
-    sync_selected_track_bus_send_binding_fields(rt, app, state, selected_track, selected_steps);
     sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
         build_step_has_plocks(state, selected_track, &app.graph.effect_descriptors),
     );
-    sync_track_plock_any_field(rt, app, state, selected_track);
     sync_sidebar_browser(rt, app, selected_track);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -558,7 +556,6 @@ pub(super) fn sync_rack_slot_instrument_authoring_display(
         track,
         selected_steps,
     );
-    dirty |= sync_track_plock_any_field(rt, app, state, track);
     flush_reactive_display_edit(editor, dirty);
 }
 
@@ -920,7 +917,6 @@ pub(super) fn sync_single_track_sequencer_state(
         dirty |= rt
             .set_reactive("SEQ", "step-has-plocks", step_has_plocks)
             .effects_dirty;
-        dirty |= sync_track_plock_any_field(rt, app, state, track);
         dirty |= rt
             .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
             .effects_dirty;
@@ -1304,25 +1300,6 @@ pub(super) fn sync_track_plock_variant_preview(
     dirty
 }
 
-/// Republish the per-param "this param carries a p-lock somewhere in the
-/// pattern" row list (bead eseq-yr6w), which drives the presence dot on the
-/// knob. Belongs beside every current-track `SEQ.step-has-plocks` publish:
-/// those are exactly the points where a p-lock was added or removed, or where
-/// the pattern under the panel changed.
-pub(super) fn sync_track_plock_any_field(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-) -> bool {
-    rt.set_reactive(
-        "SEQ",
-        "track-plock-any",
-        build_track_plock_any_value(app, state, track),
-    )
-    .effects_dirty
-}
-
 pub(super) fn sync_instrument_plock_presence_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1551,7 +1528,6 @@ pub(super) fn sync_instrument_plock_presence_display_fields(
         track,
         selected_steps,
     );
-    dirty |= sync_track_plock_any_field(rt, app, state, track);
     let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
     dirty |= sync_expanded_step_plocked_fields_for_steps(
         rt,
@@ -1680,7 +1656,6 @@ pub(super) fn sync_instrument_param_batch_display(
             track,
             selected_steps,
         );
-        ui_dirty |= sync_track_plock_any_field(editor.runtime_mut(), app, state, track);
     }
     // A batch can name any track; only the current one owns the visible *fx*
     // panel's current-track-relative fields (cf. `apply_ui_invalidations`).
@@ -2206,13 +2181,6 @@ pub(super) fn apply_ui_invalidations(
                     multi_track_selection.as_deref(),
                 );
                 if track == current_track_idx {
-                    needs_reactive_cycle |= sync_selected_track_bus_send_binding_fields(
-                        rt,
-                        app,
-                        state,
-                        track,
-                        selected_steps,
-                    );
                     if fx_visible {
                         let next_display =
                             displayed_plock_step(state, track, selected_plock_step(selected_steps));
@@ -2397,12 +2365,8 @@ pub(super) fn apply_ui_invalidations(
                     }
                 }
             }
-            UiInvalidation::TrackBusSend { track, bus } => {
-                if track == current_track_idx {
-                    needs_reactive_cycle |=
-                        sync_current_track_bus_send_binding_field(rt, app, state, track, bus);
-                }
-            }
+            // The send controls read eseq.kinds `send` (live).
+            UiInvalidation::TrackBusSend { .. } => {}
             UiInvalidation::TrackRoute { .. } => {
                 sync_track_mixer_state(rt, app, state);
                 needs_reactive_cycle = true;
@@ -2506,8 +2470,6 @@ pub(super) fn apply_ui_invalidations(
                                 track,
                                 selected_steps,
                             );
-                            needs_reactive_cycle |=
-                                sync_track_plock_any_field(rt, app, state, track);
                         }
                     }
                     InstrumentInvalidation::BaseNote => {
@@ -2531,16 +2493,8 @@ pub(super) fn apply_ui_invalidations(
                             needs_reactive_cycle = true;
                         }
                     }
-                    InstrumentInvalidation::Playhead => {
-                        if app.is_sampler_track(track) {
-                            let ph = read_sampler_playhead_seconds(app, track);
-                            if ph > 0.0 {
-                                needs_reactive_cycle |= rt
-                                    .set_reactive("SEQ", "sampler-playhead", Value::Number(ph))
-                                    .effects_dirty;
-                            }
-                        }
-                    }
+                    // The waveform binds device.playhead (live).
+                    InstrumentInvalidation::Playhead => {}
                 }
             }
             UiInvalidation::TrackFx { track, change } => match change {
@@ -2564,7 +2518,6 @@ pub(super) fn apply_ui_invalidations(
                                 build_step_has_plocks(state, track, &app.graph.effect_descriptors),
                             )
                             .effects_dirty;
-                        needs_reactive_cycle |= sync_track_plock_any_field(rt, app, state, track);
                     }
                 }
                 TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
@@ -2592,7 +2545,6 @@ pub(super) fn apply_ui_invalidations(
                     if track == current_track_idx {
                         // A MIDI-FX p-lock write arrives on this same arm, so
                         // the automation dot has to be re-derived here too.
-                        needs_reactive_cycle |= sync_track_plock_any_field(rt, app, state, track);
                     }
                 }
                 MidiFxInvalidation::Topology => {
@@ -2669,14 +2621,7 @@ pub(super) fn apply_ui_invalidations(
                         .effects_dirty;
                 }
             },
-            UiInvalidation::DeleteTarget => {
-                sync_mixer_delete_target_binding_fields(
-                    rt,
-                    app.tracks.len(),
-                    &state,
-                    active_delete_target.lock().unwrap().as_ref(),
-                );
-            }
+            UiInvalidation::DeleteTarget => {}
             UiInvalidation::AutoFollow => {
                 needs_reactive_cycle = true;
             }

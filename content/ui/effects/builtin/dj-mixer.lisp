@@ -57,7 +57,7 @@
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def toggle-active? (fx p)
-  (> (reactive-value (eseq.effects.param-controls/fx-param-value-for fx p)) 0.5))
+  (> (eseq.effects.param-controls/fx-param-value-for fx p) 0.5))
 
 (def toggle-mod-mode? (fx p)
   (and (eseq.effects.param-controls/param-mods-open? fx) (get p :modulatable)))

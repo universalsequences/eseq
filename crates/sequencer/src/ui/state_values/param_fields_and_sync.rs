@@ -1530,6 +1530,7 @@ pub(crate) fn build_accumulator_names(app: &app::App) -> Vec<String> {
     names
 }
 
+#[cfg(test)]
 pub(crate) fn build_accumulator_options(app: &app::App) -> Value {
     let items = build_accumulator_names(app)
         .into_iter()
@@ -1538,6 +1539,7 @@ pub(crate) fn build_accumulator_options(app: &app::App) -> Value {
     Value::List(items)
 }
 
+#[cfg(test)]
 pub(crate) fn build_accum_mode_options() -> Value {
     let items = ACCUM_MODE_LABELS
         .iter()
@@ -1614,8 +1616,9 @@ pub(crate) fn tuning_degrees(
     (period, degrees)
 }
 
-/// The scale editor's `SEQ.tp-tuning-*` fields for one track. Degree lists
-/// are empty while the scale is Off.
+/// The scale editor's legacy `SEQ.tp-tuning-*` fields for one track (the
+/// host-less test seeds). Degree lists are empty while the scale is Off.
+#[cfg(test)]
 pub(crate) fn tuning_reactive_fields(
     tp: &sequencer::sequencer::TrackParams,
 ) -> Vec<(&'static str, Value)> {
@@ -1681,6 +1684,7 @@ pub(crate) fn tuning_root_label(tuning: &sequencer::scale::TrackTuning) -> &'sta
     TUNING_ROOT_NAMES[usize::from(tuning.root % 12)]
 }
 
+#[cfg(test)]
 pub(crate) fn build_tuning_root_options() -> Value {
     Value::List(
         TUNING_ROOT_NAMES
@@ -1690,6 +1694,7 @@ pub(crate) fn build_tuning_root_options() -> Value {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_fts_options() -> Value {
     let items = fts_scale_names()
         .map(|scale| Rc::new(RefCell::new(Value::String(scale.to_string()))))
@@ -1697,13 +1702,7 @@ pub(crate) fn build_fts_options() -> Value {
     Value::List(items)
 }
 
-pub(crate) fn mute_group_label(group: u8) -> String {
-    match group.min(8) {
-        0 => "Off".to_string(),
-        group => group.to_string(),
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn build_mute_group_options() -> Value {
     let items = std::iter::once("Off".to_string())
         .chain((1..=8).map(|group| group.to_string()))
@@ -1725,11 +1724,6 @@ pub(crate) fn accum_mode_label(mode: u32) -> &'static str {
         .get(mode as usize)
         .copied()
         .unwrap_or(ACCUM_MODE_LABELS[0])
-}
-
-pub(crate) fn selected_accumulator_name(app: &app::App, track: usize) -> String {
-    let tp = &app.state.pattern.track_params[track];
-    selected_accumulator_name_in(tp, &build_accumulator_names(app))
 }
 
 /// The accumulator `tp` runs, by name, among `names` ([`build_accumulator_names`]).

@@ -289,10 +289,6 @@ pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
     format!("seq-track-step-selected-{track}-{step}")
 }
 
-pub(crate) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String {
-    format!("rack-slot-delete-target-{track}-{slot}")
-}
-
 /// The delete target that selects a mod route (`route.selected`).
 pub(crate) fn mod_route_delete_target(
     connection: &sequencer::sequencer::ModConnection,
@@ -328,37 +324,6 @@ pub(crate) fn mixer_track_delete_target_selected(
         Some(ActiveDeleteTarget::MixerTrack { track: selected }) => *selected == track,
         Some(ActiveDeleteTarget::MixerTracks { tracks }) => tracks.contains(&track),
         _ => false,
-    }
-}
-
-pub(crate) fn sync_mixer_delete_target_binding_fields(
-    rt: &mut Runtime,
-    track_count: usize,
-    state: &Arc<SequencerState>,
-    active_delete_target: Option<&ActiveDeleteTarget>,
-) {
-    let rack_tracks = state.pattern.rack_tracks.lock().unwrap();
-    for track in 0..track_count {
-        let rack_slot_count = rack_tracks
-            .get(track)
-            .and_then(|rack| rack.as_ref())
-            .map(|rack| rack.slots.len())
-            .unwrap_or(0);
-        for slot in 0..sequencer::sequencer::MAX_RACK_SLOTS {
-            rt.set_reactive(
-                "SEQ",
-                &rack_slot_delete_target_field(track, slot),
-                Value::Bool(matches!(
-                    active_delete_target,
-                    Some(ActiveDeleteTarget::RackSlot {
-                        track: selected_track,
-                        slot: selected_slot,
-                    }) if *selected_track == track
-                        && *selected_slot == slot
-                        && slot < rack_slot_count
-                )),
-            );
-        }
     }
 }
 

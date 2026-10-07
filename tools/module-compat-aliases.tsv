@@ -171,7 +171,6 @@ fx-select-bus-effect	eseq.effects.panel-widgets/select-bus-effect	content/ui/eff
 fx-select-effect	eseq.effects.panel-widgets/select-effect	content/ui/effects/panel-widgets.lisp
 fx-select-midi-effect	eseq.effects.panel-widgets/select-midi-effect	content/ui/effects/panel-widgets.lisp
 fx-select-rack-effect	eseq.effects.panel-widgets/select-rack-effect	content/ui/effects/panel-widgets.lisp
-fx-selected-plock-row	eseq.effects.track-panels/selected-plock-row	content/ui/effects/track-panels.lisp
 fx-set-effect-value	eseq.effects.param-controls/fx-set-effect-value	content/ui/effects/param-controls.lisp
 fx-set-instrument-option	eseq.effects.param-controls/fx-set-instrument-option	content/ui/effects/param-controls.lisp
 fx-set-instrument-value	eseq.effects.param-controls/fx-set-instrument-value	content/ui/effects/param-controls.lisp
@@ -322,11 +321,7 @@ rack-slot-set-choke-group-label	eseq.effects.instrument-panel/rack-slot-set-chok
 rack-slot-set-gain	eseq.effects.instrument-panel/rack-slot-set-gain	content/ui/effects/instrument-panel.lisp
 remembered-step-panel-buffer	eseq.seq-step-tabs/remembered-step-panel-buffer	content/ui/seq-step-tabs.lisp
 sample-browser-here	eseq.browser/sample-browser-here	content/ui/browser.lisp
-sampler-active-marker	eseq.effects.sampler-panel/sampler-active-marker	content/ui/effects/sampler-panel.lisp
-sampler-cursor-time	eseq.effects.sampler-panel/sampler-cursor-time	content/ui/effects/sampler-panel.lisp
 sampler-reset-view	eseq.effects.sampler-panel/sampler-reset-view	content/ui/effects/sampler-panel.lisp
-sampler-view-duration	eseq.effects.sampler-panel/sampler-view-duration	content/ui/effects/sampler-panel.lisp
-sampler-view-start	eseq.effects.sampler-panel/sampler-view-start	content/ui/effects/sampler-panel.lisp
 samples-sidebar-visible	eseq.seq-core-state/samples-sidebar-visible	content/ui/seq-core-state.lisp
 sbrowser-activate-audio-effect	eseq.browser/activate-audio-effect	content/ui/browser.lisp
 sbrowser-activate-midi-effect	eseq.browser/activate-midi-effect	content/ui/browser.lisp

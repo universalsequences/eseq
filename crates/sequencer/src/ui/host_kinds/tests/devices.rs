@@ -447,7 +447,7 @@ fn device_delete_targets_follow_and_set_the_active_target() {
     assert_eq!(h.computed(f::DEVICE_DELETE_TARGET), 1, "the #' seed only");
     h.sync();
     let observed = h.computed(f::DEVICE_DELETE_TARGET);
-    // A rack slot: the legacy rack-slot-delete-target field agrees.
+    // A rack slot.
     h.eval_all("(set! rs.delete-target true)");
     h.drain_and_sync();
     let target = h.shared.active_delete_target.lock().unwrap().clone();
@@ -456,17 +456,6 @@ fn device_delete_targets_follow_and_set_the_active_target() {
         Some(ActiveDeleteTarget::RackSlot { track: 2, slot: 0 })
     );
     assert_eq!(h.slot("rs-target"), 1.0);
-    let held = h.shared.active_delete_target.lock().unwrap().clone();
-    sync_mixer_delete_target_binding_fields(
-        h.editor.runtime_mut(),
-        3,
-        &h.shared.state,
-        held.as_ref(),
-    );
-    assert_eq!(
-        legacy(&h, &rack_slot_delete_target_field(2, 0)),
-        Some(Value::Bool(true))
-    );
     assert!(
         h.computed(f::DEVICE_DELETE_TARGET) > observed,
         "observed: computed per tick"
@@ -951,6 +940,60 @@ impl Harness {
     fn strip_computed(&self) -> u64 {
         strip_keys().map(|key| self.computed(key)).sum()
     }
+}
+
+#[test]
+fn rack_slot_strip_locks_list_the_controls_some_step_locks() {
+    // eseq-0l17.61: the rack panel's p-lock presence dot (the legacy
+    // SEQ.track-plock-any rack slot rows), any step of the pattern, the
+    // track current or not.
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def s2 (nth t2.steps 2)) (def s5 (nth t2.steps 5))",
+    );
+    assert_eq!(h.eval_all("rs.strip-locks"), list_value([]));
+    h.eval_all("(lock-strip! rs \"muted\" (list s5) true)");
+    h.eval_all("(lock-strip! rs \"gain\" (list s2) 0.5)");
+    h.drain();
+    h.sync();
+    // In RackSlotParam order, by the slot dicts' control names.
+    assert_eq!(
+        h.eval_all("rs.strip-locks"),
+        h.eval_all("(list \"gain\" \"mute\")")
+    );
+    assert_eq!(
+        h.eval_all("rk.strip-locks"),
+        list_value([]),
+        "any other device: none"
+    );
+    h.eval_all("(unlock-strip! rs \"gain\" (list s2))");
+    h.drain();
+    h.sync();
+    assert_eq!(h.eval_all("rs.strip-locks"), h.eval_all("(list \"mute\")"));
+    // Observed, it is cached under the track's p-lock key: an idle tick
+    // neither scans the pattern nor takes the rack lock.
+    h.eval_all(r#"(effect-buffer "*locks*" (label (str rs.strip-locks)))"#);
+    h.show_all();
+    h.sync();
+    let scans = h.frame.host_kinds.shared.borrow().panel_scans;
+    let locks = h.frame.host_kinds.devices.strip_locks;
+    let computed = h.computed(f::DEVICE_STRIP_LOCKS);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(h.computed(f::DEVICE_STRIP_LOCKS), computed + 3, "observed");
+    assert_eq!(h.frame.host_kinds.shared.borrow().panel_scans, scans);
+    assert_eq!(h.frame.host_kinds.devices.strip_locks, locks);
+    h.eval_all("(lock-strip! rs \"gain\" (list s5) 0.25)");
+    h.drain();
+    h.sync();
+    assert_eq!(
+        h.eval_all("rs.strip-locks"),
+        h.eval_all("(list \"gain\" \"mute\")")
+    );
 }
 
 #[test]
@@ -1549,4 +1592,48 @@ fn rack_slot_base_note_fields_are_computed_only_while_observed() {
     h.eval_all("(set! rs.voices 4)");
     h.drain_and_sync();
     assert_eq!(h.slot("v"), 4.0);
+}
+
+#[test]
+fn the_held_rack_controls_and_step_pickers_show_the_print_latch() {
+    // eseq-0l17.61: while a print holds them, the step panel's pickers (the
+    // edit step's fields), a rack macro's knob and a rack slot's strip show
+    // the value being printed, not the one they snap back to between the
+    // steps it lands on (the legacy print display fields).
+    let mut h = Harness::new();
+    h.rack_track();
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def rm (nth rk.macros 1)) (def s0 (nth t2.steps 0)) (def s1 (nth t2.steps 1))
+         (def gain #'rs.gain-display) (def knob #'rm.value)
+         (def vel #'s0.velocity) (def vel1 #'s1.velocity)",
+    );
+    h.sync();
+    let names = ["gain", "knob", "vel", "vel1"];
+    let shown = |h: &mut Harness| names.map(|name| h.slot(name) as f32);
+    let rest = shown(&mut h);
+    {
+        let mut print = h.shared.step_print.lock().unwrap();
+        let gain = sequencer::sequencer::RackSlotParam::Gain;
+        let strip = PrintTarget::RackSlotParam {
+            slot_idx: 0,
+            param: gain,
+        };
+        print.latch(2, strip, 0.3);
+        print.latch(2, PrintTarget::RackMacro { macro_idx: 1 }, 0.8);
+        print.latch(2, StepParam::Velocity, 0.2);
+    }
+    h.sync();
+    assert_eq!(shown(&mut h), rest, "only while playing and recording");
+    h.set_playing(true);
+    h.shared.recording.store(true, Ordering::Relaxed);
+    h.sync();
+    // The edit step (the cursor's: step 0) alone.
+    assert_eq!(shown(&mut h), [0.3, 0.8, 0.2, rest[3]]);
+    assert_ne!(rest[..3], [0.3, 0.8, 0.2]);
+    h.shared.step_print.lock().unwrap().disarm();
+    h.sync();
+    assert_eq!(shown(&mut h), rest);
 }

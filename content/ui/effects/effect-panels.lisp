@@ -46,7 +46,6 @@
   :width 1.55 :height 1.0
   :paint-margin 0.1
   :state (active)
-  :bindable (active)
   :shader
   (sdf/fill (sdf/circle 0.86)
     (material :color (if (> active 0.5) :device-enabled :device-disabled))))

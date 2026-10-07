@@ -44,7 +44,10 @@
 (def cyan   () (rgba 0.45 0.78 0.95 1.0))
 (def pink   () (rgba 0.95 0.45 0.62 1.0))
 
-(defstate selected-stage 0)
+;; The stage tab shown (one for every Roar panel).
+(def-kind roar-view
+  :key ()
+  :state ((stage 0)))
 
 (def effect-source (fx)
   (if (get fx :bus-fx)
@@ -182,7 +185,7 @@
     :width 5.0 :height 1.15 :padding 0 :font-size 8.5
     :background-color (if selected (stage-color idx) :mixer-control-bg)
     :color (if selected :black :dim)
-    :on-click |x y r| (set! selected-stage idx)))
+    :on-click |x y r| (set! roar-view.stage idx)))
 
 (def stage-tabs (fx routing stage)
   (let ((count (tab-count routing)))
@@ -223,7 +226,7 @@
       (parameter-toggle fx pre-p "Pre" 2.4))))
 
 (def stage-box (fx params routing)
-  (let ((stage (min selected-stage (- (tab-count routing) 1))))
+  (let ((stage (min roar-view.stage (- (tab-count routing) 1))))
     (let ((shaper-p (stage-param params stage "shaper"))
           (amount-p (stage-param params stage "amount"))
           (bias-p (stage-param params stage "bias"))

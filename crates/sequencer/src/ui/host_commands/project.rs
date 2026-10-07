@@ -295,8 +295,6 @@ pub(super) fn handle(
             sync_bus_mixer_state(rt, &app);
             sync_groups_bindings(rt, &app.groups, &app.grooves);
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-            sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
             // New projects have default tracks; publish their real topology,
             // rather than leaving live input and the UI with empty mirrors.
             sync_track_topology_state(
@@ -323,8 +321,6 @@ pub(super) fn handle(
             ctx.frame.prev_playing = playing;
             ctx.frame.prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             ctx.frame.prev_track_peak_levels.clear();
-            ctx.frame.prev_modulator_phases = ctx.meters.cached_modulator_phases.clone();
-            ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
             ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, &app);
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
             ctx.frame.prev_ui_epoch = ui_epoch.fetch_add(1, Ordering::Relaxed) + 1;

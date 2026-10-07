@@ -121,8 +121,6 @@ fn sync_after_track_topology_delete(
     );
     sync_bus_mixer_state(rt, app);
     sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-    sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-    sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
     rt.clear_subtree_effects_for_named_target("*sequencer*");
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();

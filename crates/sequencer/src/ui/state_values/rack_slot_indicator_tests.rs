@@ -44,6 +44,7 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
     register_test_delete_target_natives(&mut editor, 1);
     editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap())
         .expect("load rack panel");
+    seed_panel_kinds(&mut editor);
     editor.refresh_runtime_side_effects();
     let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
     editor.set_active_buffer(fx_id);
@@ -68,6 +69,8 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
             }
             editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
                 build_track_plock_any_value(&app, &app.state, 0));
+            // The slots' strip-locks, as the host kinds push them.
+            seed_panel_kinds(&mut editor);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("rack lock layout");

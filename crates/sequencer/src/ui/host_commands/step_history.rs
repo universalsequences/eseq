@@ -491,44 +491,11 @@ pub(super) fn handle(
             let Some(param) = param else {
                 return;
             };
+            // The pickers show the latch through the host kinds
+            // (`step.*` of the edit step): nothing to hand back.
             let mut print = ctx.shared.step_print.lock().unwrap();
-            let was_latched = print.armed();
-            let ended = print.unlatch(param);
+            print.unlatch(param);
             print.publish_engine_override(&state);
-            drop(print);
-            if was_latched && ended {
-                // The whole latch ended here (not in the tick's gate check),
-                // so restore all picker readouts to the cursor step now.
-                if crate::step_print::restore_cursor_display_fields(
-                    editor.runtime_mut(),
-                    &state,
-                    current_track.load(Ordering::Relaxed),
-                    &selected_steps,
-                ) {
-                    editor.refresh_visible_layouts_for_buffer_named("*step*");
-                }
-            } else if was_latched {
-                // Other params are still held: hand only THIS param's picker
-                // readout back to the cursor step. (When the whole latch
-                // ends, the tick's disarm branch restores all three.)
-                if let Some(field) = fx_step_param_value_field(param) {
-                    let track = current_track.load(Ordering::Relaxed);
-                    if track < state.pattern.step_data.len() {
-                        let cursor = fx_step_cursor_from_runtime(editor.runtime());
-                        let num_steps = state.pattern.track_params[track]
-                            .get_num_steps()
-                            .clamp(1, MAX_STEPS);
-                        let value = state.pattern.step_data[track]
-                            .get(cursor.min(num_steps.saturating_sub(1)), param);
-                        editor.runtime_mut().set_reactive(
-                            "SEQ",
-                            field,
-                            Value::Number(value as f64),
-                        );
-                        editor.refresh_visible_layouts_for_buffer_named("*step*");
-                    }
-                }
-            }
         }
         "set-step-param-history" => {
             match apply_step_param_history_host_command(&mut app, &payload) {
@@ -1609,11 +1576,6 @@ pub(super) fn handle(
                 } else {
                     sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, track, display_step);
                 }
-            }
-            if target == "bus-send" {
-                sync_selected_track_bus_send_binding_fields(
-                    editor.runtime_mut(), &app, &state, selected_track, &selected_steps,
-                );
             }
             let track = selected_track;
             // Same refresh arms the per-step clear uses, plus the automation

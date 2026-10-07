@@ -224,6 +224,30 @@ fn has_symbol_starting_with(code: &str, prefix: &str) -> bool {
     })
 }
 
+/// How many arguments the form whose arguments start `rest` has (up to its
+/// closing paren).
+fn form_args(rest: &str) -> usize {
+    let (mut depth, mut args, mut in_arg) = (0usize, 0, false);
+    for ch in rest.chars() {
+        match ch {
+            ')' if depth == 0 => break,
+            ' ' if depth == 0 => in_arg = false,
+            _ => {
+                if depth == 0 && !in_arg {
+                    args += 1;
+                    in_arg = true;
+                }
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    args
+}
+
 /// The legacy reactive forms `source` uses (kind-bindings spec §13 stage
 /// 8): string-key bindings, legacy namespaces read dotted, `:bindable`,
 /// view state outside kinds. A ported view uses none of them.
@@ -251,7 +275,6 @@ pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
     let mut found: Vec<&'static str> = [
         "bind-seq",
         "bind-nth",
-        "(bind ",
         "bind-graph",
         "reactive-get",
         "reactive-set",
@@ -263,6 +286,15 @@ pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
     .into_iter()
     .filter(|form| flat.contains(form))
     .collect();
+    // The generic `(bind "NS" field)`; a surface's own one-argument `bind`
+    // (`drum-surface/bind`) is no legacy form.
+    if flat
+        .match_indices("(bind ")
+        .any(|(at, form)| form_args(&flat[at + form.len()..]) > 1)
+    {
+        let at = (found.iter()).take_while(|form| ["bind-seq", "bind-nth"].contains(form));
+        found.insert(at.count(), "(bind ");
+    }
     found.extend(
         [
             "SEQ.", "SEQV.", "RETRO.", "EXPORT.", "AUDIO.", "MIDI.", "AGENT.", "GRAPH.",

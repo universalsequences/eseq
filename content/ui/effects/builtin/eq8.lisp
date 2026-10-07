@@ -30,43 +30,27 @@
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
 (import eseq.effects.panel-frame :refer (fx-clear-selected-effect))
+(import eseq.effects.devices :as dv)
 
 (export eq8-source
         eq8-ui)
 
-;; Migration alias (module spec §10). `builtin-fx-eq8-source` is evaled by
-;; name from src/ui/state_values/tests.rs (read-only, alias-covered).
+;; `eq8-source` is evaled by name from src/ui/state_values/tests.rs.
 
-(defstate selected-track -1)
-(defstate selected-bus -1)
-(defstate selected-rack-slot -1)
-(defstate selected-slot -1)
-(defstate selected-band 0)
-
-(def track-key (fx)
-  (if (get fx :bus-fx) -1 (get fx :track-idx)))
-
-(def bus-key (fx)
-    (if (get fx :bus-fx) (get fx :bus-idx) -1))
-
-(def rack-slot-key (fx)
-  (if (get fx :rack-fx) (get fx :rack-slot) -1))
+;; The selected band (0-7) of the one EQ8 whose band is picked (its
+;; device): every other EQ8 shows band 0.
+(def-kind eq8-view
+  :key ()
+  :state ((device :any :default nil)
+          (band 0)))
 
 (def selected-band-for (fx)
-  (if (and (= selected-track (track-key fx))
-           (= selected-bus (bus-key fx))
-           (= selected-rack-slot (rack-slot-key fx))
-           (= selected-slot (get fx :slot-idx)))
-    selected-band
-    0))
+  (let ((d (dv/fx-device fx)))
+    (if (and d (= eq8-view.device d)) eq8-view.band 0)))
 
 (def select-band (fx band)
-  (do
-    (set! selected-track (track-key fx))
-    (set! selected-bus (bus-key fx))
-    (set! selected-rack-slot (rack-slot-key fx))
-    (set! selected-slot (get fx :slot-idx))
-    (set! selected-band band)))
+  (set! eq8-view.device (dv/fx-device fx))
+  (set! eq8-view.band band))
 
 (def param (params band suffix)
   (eseq.effects.builtin.filter-core/builtin-fx-param params (str "b" (+ band 1) " " suffix)))
@@ -76,13 +60,13 @@
     (get p :text-value)
     "bell"))
 
-(def band-data (fx params band)
+;; Band `band`'s editor dict (`selected-band`: the panel's selected band).
+(def band-data (fx params band selected-band)
   (let ((enabled-p (param params band "enabled"))
         (type-p (param params band "type"))
         (freq-p (param params band "freq"))
         (gain-p (param params band "gain"))
-        (q-p (param params band "q"))
-        (selected-band (selected-band-for fx)))
+        (q-p (param params band "q")))
     (dict
       :id band
       :type (band-type type-p)
@@ -98,10 +82,16 @@
       :enabled (eseq.effects.param-controls/fx-param-on-for? fx enabled-p)
       :selected (= selected-band band))))
 
-(def bands (fx params)
-  (map |band| (band-data fx params band) (range 8)))
+(def bands (fx params selected-band)
+  (map |band| (band-data fx params band selected-band) (range 8)))
 
+;; The spectrum the editor draws: fx's device's meter selector (its output),
+;; else one built from the dict's address.
 (def eq8-source (fx)
+  (let ((d (dv/fx-device fx)))
+    (if d d.meter (dict-source fx))))
+
+(def dict-source (fx)
   (if (get fx :rack-fx)
     (dict :kind :rack-effect :index (get fx :track-idx)
           :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
@@ -149,10 +139,10 @@
               (= type :commit-band)))
           nil)))))
 
-(def band-button (fx params band)
-  (let ((band-map (band-data fx params band))
-      (enabled-p (param params band "enabled"))
-      (selected (= (selected-band-for fx) band)))
+(def band-button (fx params band selected-band)
+  (let ((band-map (band-data fx params band selected-band))
+        (enabled-p (param params band "enabled"))
+        (selected (= selected-band band)))
     (h-stack :gap 1.58 :align :center
       (box 
         :selected selected
@@ -178,9 +168,10 @@
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-            :on-click |x y r| (do
-              (select-band fx band)
-              (eseq.effects.param-controls/fx-toggle-effect-value fx enabled-p))))))
+            :on-click |x y r|
+              (do
+                (select-band fx band)
+                (eseq.effects.param-controls/fx-toggle-effect-value fx enabled-p))))))
     ))
 
 (def selected-knob (fx label-text p decimals)
@@ -207,53 +198,47 @@
         :width 4.45 :height 3.48 :knob-size 2.65
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
-(def selected-knobs (fx params)
-  (let ((band (selected-band-for fx)))
-    (let ((freq-p (param params band "freq"))
-          (q-p (param params band "q")))
-      (box :width 4.9 :height 7.05 :padding 0.22
-        :background-color :mixer-control-bg :corner-radius 12
-        (v-stack :gap 0.22 :align :center
-          (selected-knob fx "freq" freq-p 0)
-          (selected-knob fx "q" q-p 2))))))
+(def selected-knobs (fx params band)
+  (box :width 4.9 :height 7.05 :padding 0.22
+    :background-color :mixer-control-bg :corner-radius 12
+    (v-stack :gap 0.22 :align :center
+      (selected-knob fx "freq" (param params band "freq") 0)
+      (selected-knob fx "q" (param params band "q") 2))))
 
-(def selected-controls (fx params)
-  (let ((band (selected-band-for fx)))
-    (let ((type-p (param params band "type"))
-        (freq-p (param params band "freq"))
-        (gain-p (param params band "gain"))
-        (q-p (param params band "q")))
-      (box :width 43.2 :height 1.65 :padding 0.24
-        :corner-radius 7
-        (h-stack :gap 0.44 :align :baseline
-          (dropdown :value (get type-p :text-value)
-            :options (get type-p :options)
-            :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
-            :bg-color :mixer-strip-bg
-            :border-color :buffer-bg
-            :badge-color :eq8-badge-bg
-            :chevron-color :black
-            :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
-            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
-            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
-            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-            :width 6.6 :height 1.05 :font-size 9.0)
-          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" freq-p)
-          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "gain" gain-p)
-          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "q" q-p))))))
+(def selected-controls (fx params band)
+  (let ((type-p (param params band "type")))
+    (box :width 43.2 :height 1.65 :padding 0.24
+      :corner-radius 7
+      (h-stack :gap 0.44 :align :baseline
+        (dropdown :value (get type-p :text-value)
+          :options (get type-p :options)
+          :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
+          :bg-color :mixer-strip-bg
+          :border-color :buffer-bg
+          :badge-color :eq8-badge-bg
+          :chevron-color :black
+          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
+          :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+          :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+          :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+          :width 6.6 :height 1.05 :font-size 9.0)
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" (param params band "freq"))
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "gain" (param params band "gain"))
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "q" (param params band "q"))))))
 
 (def eq8-ui (fx)
-  (let ((params (get fx :params)))
+  (let ((params (get fx :params))
+        (selected-band (selected-band-for fx)))
     (if (= (len params) 41)
       (v-stack :gap 0.020
         :padding 0.1
         (h-stack :gap 0.25 :align :start
-          (selected-knobs fx params)
+          (selected-knobs fx params selected-band)
           (box :width 38.05 :height 6.85
             (eq8-editor
               :width 38.05 :height 6.85
-              :bands (bands fx params)
-              :selected-band (selected-band-for fx)
+              :bands (bands fx params selected-band)
+              :selected-band selected-band
               :source (eq8-source fx)
               :tap-point :post-fx
               :mode :eq
@@ -275,14 +260,14 @@
             (box :width 43.2 :height 1.02 :padding 0.22
               :corner-radius 7
               (h-stack  :align :center :gap 0.4
-                (band-button fx params 0)
-                (band-button fx params 1)
-                (band-button fx params 2)
-                (band-button fx params 3)
-                (band-button fx params 4)
-                (band-button fx params 5)
-                (band-button fx params 6)
-                (band-button fx params 7)))
-            (selected-controls fx params))))
+                (band-button fx params 0 selected-band)
+                (band-button fx params 1 selected-band)
+                (band-button fx params 2 selected-band)
+                (band-button fx params 3 selected-band)
+                (band-button fx params 4 selected-band)
+                (band-button fx params 5 selected-band)
+                (band-button fx params 6 selected-band)
+                (band-button fx params 7 selected-band)))
+            (selected-controls fx params selected-band))))
       (eseq.effects.param-grid/fx-param-grid params fx))
     ))

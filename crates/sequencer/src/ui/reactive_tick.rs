@@ -354,25 +354,15 @@ pub(crate) fn sync_reactive_tick(
     // onto each trigger step the playhead passes. Step targets push targeted
     // invalidations; instrument targets update atomic p-lock storage directly.
     // Both ride the open "Record take" transaction like live note recording.
-    let step_print_tick = tick_step_print(&mut app, ctx.shared, editor.runtime_mut());
-    if step_print_tick.printed {
+    // The held controls show the latch through the host kinds.
+    if tick_step_print(&mut app, ctx.shared).printed {
         app.mark_recording_take_changed();
-    }
-    if step_print_tick.display_dirty {
-        // The picker readouts moved to (or back from) the print latch: flush
-        // them through the same cycle + *step* refresh a normal param edit
-        // gets, so the display tracks the sweep tightly.
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor.refresh_visible_layouts_for_buffer_named("*step*");
-    }
-    if step_print_tick.printed || step_print_tick.display_dirty {
         editor.mark_needs_redraw();
     }
 
     // 2. Sync reactive state AFTER events
     let ct = current_track_for_app(&mut app, &ctx.shared.current_track).unwrap_or(0);
-    let sampler_playhead_wanted = editor.runtime().has_live_reactive_consumers("SEQ", "sampler-playhead");
+    let sampler_playhead_wanted = ctx.frame.host_kinds.wants_sampler_playhead();
     sync_watched_sampler_voices(
         &app,
         sampler_playhead_wanted.then_some(ct),
@@ -970,51 +960,9 @@ pub(crate) fn sync_reactive_tick(
             // its observers, not by a panel).
             ctx.frame.rack_pad_triggers = rack_pad_triggers;
         }
-        if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
-            if fx_visible {
-                needs_reactive_cycle |= sync_modulator_phase_field_delta(
-                    editor.runtime_mut(),
-                    &ctx.frame.prev_modulator_phases,
-                    &ctx.meters.cached_modulator_phases,
-                );
-            }
-            ctx.frame.prev_modulator_phases = ctx.meters.cached_modulator_phases.clone();
-        }
-        if ctx.meters.cached_modulator_levels != ctx.frame.prev_modulator_levels {
-            if fx_visible {
-                needs_reactive_cycle |= sync_modulator_level_field_delta(
-                    editor.runtime_mut(),
-                    &ctx.frame.prev_modulator_levels,
-                    &ctx.meters.cached_modulator_levels,
-                );
-            }
-            ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
-        }
-        // Modulator slot phases (the source editors' waveform markers). The
-        // per-param modulated values reach the panels as eseq.kinds param
-        // fields (mod-offset, mod-value, mod-scale); this only writes on
-        // change.
-        if fx_visible && ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
-            needs_reactive_cycle |= sync_effect_mod_phase_field_delta(
-                editor.runtime_mut(),
-                &ctx.frame.prev_mod_display_values.effects,
-                &ctx.meters.cached_mod_display_values.effects,
-            )
-            .0;
-            needs_reactive_cycle |= sync_instrument_mod_phase_field_delta(
-                editor.runtime_mut(),
-                ctx.frame.prev_mod_display_values.instrument.as_ref(),
-                ctx.meters.cached_mod_display_values.instrument.as_ref(),
-            )
-            .0;
-            needs_reactive_cycle |= sync_rack_slot_mod_phase_field_delta(
-                editor.runtime_mut(),
-                ctx.frame.prev_mod_display_values.rack_slot.as_ref(),
-                ctx.meters.cached_mod_display_values.rack_slot.as_ref(),
-            )
-            .0;
-            ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
-        }
+        // The modulator envelopes and the modulation sources' phases reach
+        // the panels as eseq.kinds fields (device.modulator-phase / -level,
+        // param.mod-phase), which read the meter cache themselves.
         if sequencer_visible {
             // Length-lane marker (`length!`) of the expanded editors: changes
             // at most once per cycle, so republish only the tracks whose
@@ -1121,13 +1069,6 @@ pub(crate) fn sync_reactive_tick(
             if displayed_param_value_may_change {
                 needs_reactive_cycle |= sync_track_selection_param_binding_fields(
                     rt,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.selected_steps,
-                );
-                needs_reactive_cycle |= sync_selected_track_bus_send_binding_fields(
-                    rt,
-                    &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
@@ -1407,7 +1348,6 @@ pub(crate) fn sync_reactive_tick(
                 "step-has-plocks",
                 build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
             );
-            sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             sync_sidebar_browser(rt, &app, ct);
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
@@ -1446,15 +1386,8 @@ pub(crate) fn sync_reactive_tick(
             .load(Ordering::Relaxed);
         if delete_target_version != ctx.frame.prev_delete_target_version {
             ctx.frame.prev_delete_target_version = delete_target_version;
-            let rt = editor.runtime_mut();
             let multi_track_selection = {
                 let guard = ctx.shared.active_delete_target.lock().unwrap();
-                sync_mixer_delete_target_binding_fields(
-                    rt,
-                    app.tracks.len(),
-                    &ctx.shared.state,
-                    guard.as_ref(),
-                );
                 match guard.as_ref() {
                     Some(ActiveDeleteTarget::TrackSteps { tracks }) => tracks.clone(),
                     _ => Vec::new(),
@@ -1597,18 +1530,11 @@ pub(crate) fn sync_reactive_tick(
                     "step-has-plocks",
                     build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
                 );
-                sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             }
             // Sync recording state
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);
             let master_rec_on = ctx.shared.master_recording.load(Ordering::Acquire);
             rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
-            sync_mixer_delete_target_binding_fields(
-                rt,
-                app.tracks.len(),
-                &ctx.shared.state,
-                ctx.shared.active_delete_target.lock().unwrap().as_ref(),
-            );
             if app.record_arm_sync_pending {
                 // Project load restored per-track arm flags (takes spec
                 // 8.1): push them INTO the shared vector once — the per-tick
@@ -1705,19 +1631,6 @@ pub(crate) fn sync_reactive_tick(
                     needs_reactive_cycle = true;
                 }
                 ctx.frame.prev_sampler_analysis_key = analysis_key;
-            }
-        }
-        // Update sampler playhead for waveform display
-        {
-            let ct = ctx.shared.current_track.load(Ordering::Relaxed);
-            if sampler_playhead_wanted && app.is_sampler_track(ct) {
-                let ph = read_sampler_playhead_seconds(&app, ct);
-                if ph > 0.0 {
-                    editor
-                        .runtime_mut()
-                        .set_reactive("SEQ", "sampler-playhead", Value::Number(ph));
-                    needs_reactive_cycle = true;
-                }
             }
         }
         let auto_follow = auto_follow_enabled(&ctx.shared.auto_follow_override_until);

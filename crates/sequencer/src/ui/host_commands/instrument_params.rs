@@ -1435,7 +1435,7 @@ mod tests {
             print_epochs_before,
             "the display-only latch mirror must not bump any epoch"
         );
-        let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
+        let tick = tick_step_print(&mut app, &shared);
         assert!(tick.printed);
         assert_eq!(
             state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, PARAM),
@@ -1525,7 +1525,7 @@ mod tests {
             epochs_before,
             "the effect display-only latch mirror must not bump any epoch"
         );
-        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
         assert_eq!(
             state.latest_scheduler_snapshot().tracks[TRACK].effect_slots
@@ -1551,7 +1551,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
-        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(2_200.0));
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 3), Some(0.8));
         shared
@@ -1572,7 +1572,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
-        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 1), Some(1.0));
         assert_eq!(effect_slot.defaults.get(1), descriptor.params[1].default);
         assert_eq!(
@@ -1609,7 +1609,7 @@ mod tests {
         // from its published snapshot, not live slot state, so this tick must
         // republish the track by itself (no rack target may piggyback the
         // publish).
-        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(
             state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
             midi_default_before,
@@ -1675,7 +1675,7 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
-        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
         assert_eq!(app.buses[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_600.0));
         let racks = state.pattern.rack_tracks.lock().unwrap();

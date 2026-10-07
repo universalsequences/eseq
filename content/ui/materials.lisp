@@ -28,7 +28,6 @@
 (defwidget cursor-highlight
   :width 1 :height 1
   :state (active selected hide)
-  :bindable (active selected hide)
   :shader
   (if (= hide 1)
     (rgba 0 0 0 0)
@@ -45,7 +44,6 @@
   :width 1.5 :height 1.5
   :state (collapsed surface-alpha col)
   :paint-margin 0.2
-  :bindable (collapsed surface-alpha)
   :shader
   (sdf/layer
     (sdf/stroke (sdf/rounded-rect (* width 0.9) (* height 0.9) 1)
@@ -161,7 +159,6 @@
   :width 4 :height 3
   :paint-margin 1
   :state (active plocked selected)
-  :bindable (active plocked selected)
   :shader
   (let ((sel-y (if (= selected 1) 0.03 0)))
     (sdf/translate 0 sel-y
@@ -188,7 +185,6 @@
 (defwidget tick
   :width 1.5 :height 1.5
   :state (active plocked selected)
-  :bindable (active plocked selected)
   :shader
   (let ((sel-y (if (= selected 1) 0.01 0)))
     (sdf/translate 0 sel-y
@@ -206,7 +202,6 @@
 (defwidget page-playhead-dot
   :width 0.7 :height 0.7
   :state (active)
-  :bindable (active)
   :shader
   (if (= active 1)
     (sdf/layer
@@ -217,7 +212,6 @@
 (defwidget step-playhead-dot
   :width 1.0 :height 0.7
   :state (active)
-  :bindable (active)
   :shader
   (sdf/layer
     (sdf/fill (sdf/circle 0.45)

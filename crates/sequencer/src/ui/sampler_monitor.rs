@@ -1,11 +1,5 @@
 use super::*;
 
-/// Read the current sampler playhead position (in seconds) for a track.
-/// Scans all voices and returns the newest active voice.
-pub(crate) fn read_sampler_playhead_seconds(app: &app::App, track: usize) -> f64 {
-    SamplerPlayhead::of(app, track).map_or(0.0, |source| source.seconds())
-}
-
 /// What reading a sampler track's playhead needs, copied out of the `App`
 /// (the host kinds' `device.playhead` reads it without the `App`).
 #[derive(Clone)]

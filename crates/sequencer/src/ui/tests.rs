@@ -2253,8 +2253,6 @@
 
         let cached_track_peak_levels = vec![0.0; track_names.len()];
         let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-        let (cached_modulator_phases, cached_modulator_levels) =
-            read_modulator_display_values(app.graph.lg, &app);
 
         {
             let rt = editor.runtime_mut();
@@ -2281,14 +2279,6 @@
                 build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
             );
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &cached_modulator_phases);
-            sync_modulator_level_fields(rt, &cached_modulator_levels);
-            sync_mixer_delete_target_binding_fields(
-                rt,
-                app.tracks.len(),
-                &state,
-                active_delete_target.lock().unwrap().as_ref(),
-            );
             rt.run_reactive_cycle();
         }
         editor.refresh_runtime_side_effects();
@@ -2391,12 +2381,6 @@
                 "SEQ",
                 "bus-effects",
                 build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
-            );
-            sync_mixer_delete_target_binding_fields(
-                rt,
-                app.tracks.len(),
-                &state,
-                active_delete_target.lock().unwrap().as_ref(),
             );
             rt.run_reactive_cycle();
         }
@@ -3508,14 +3492,6 @@
                 build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
             );
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &cached_modulator_phases);
-            sync_modulator_level_fields(rt, &cached_modulator_levels);
-            sync_mixer_delete_target_binding_fields(
-                rt,
-                app.tracks.len(),
-                &state,
-                active_delete_target.lock().unwrap().as_ref(),
-            );
             rt.run_reactive_cycle();
         }
         editor.refresh_runtime_side_effects();
@@ -4531,12 +4507,6 @@
                             "SEQ",
                             "step-has-plocks",
                             build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
-                        );
-                        sync_mixer_delete_target_binding_fields(
-                            rt,
-                            app.tracks.len(),
-                            &state,
-                            active_delete_target.lock().unwrap().as_ref(),
                         );
                         rt.set_reactive(
                             "SEQ",
@@ -5923,12 +5893,6 @@
                             "step-has-plocks",
                             build_step_has_plocks(&state, track, &app.graph.effect_descriptors),
                         );
-                        sync_mixer_delete_target_binding_fields(
-                            rt,
-                            app.tracks.len(),
-                            &state,
-                            active_delete_target.lock().unwrap().as_ref(),
-                        );
                         rt.set_reactive(
                             "SEQ",
                             "record-armed",
@@ -6598,15 +6562,10 @@
                         // between frames: this is the boundary that prints.
                         state.transport.track_playheads[track]
                             .store(next_playhead as u32, Ordering::Relaxed);
-                        let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
+                        let tick = tick_step_print(&mut app, &shared);
                         let print_done = Instant::now();
                         if tick.printed {
                             app.mark_recording_take_changed();
-                        }
-                        if tick.display_dirty {
-                            editor.runtime_mut().run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
-                            editor.refresh_visible_layouts_for_buffer_named("*step*");
                         }
                         let take_done = Instant::now();
                         if scenario && !measured {
@@ -6661,13 +6620,6 @@
                             let rt = editor.runtime_mut();
                             let _ = sync_track_selection_param_binding_fields(
                                 rt,
-                                &state,
-                                track,
-                                &selected_steps,
-                            );
-                            let _ = sync_selected_track_bus_send_binding_fields(
-                                rt,
-                                &app,
                                 &state,
                                 track,
                                 &selected_steps,
@@ -8651,12 +8603,6 @@
                             "step-has-plocks",
                             build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
                         );
-                        sync_mixer_delete_target_binding_fields(
-                            rt,
-                            app.tracks.len(),
-                            &state,
-                            active_delete_target.lock().unwrap().as_ref(),
-                        );
                         rt.set_reactive(
                             "SEQ",
                             "record-armed",
@@ -9763,13 +9709,6 @@
                 let delete_version = active_delete_target_version.load(Ordering::Relaxed);
                 if delete_version != frame.prev_delete_target_version {
                     frame.prev_delete_target_version = delete_version;
-                    let rt = editor.runtime_mut();
-                    sync_mixer_delete_target_binding_fields(
-                        rt,
-                        app.tracks.len(),
-                        &state,
-                        active_delete_target.lock().unwrap().as_ref(),
-                    );
                 }
 
                 // --- reactive_tick.rs ui_epoch / fx_epoch branches ---------
@@ -9848,12 +9787,6 @@
                         "SEQ",
                         "step-has-plocks",
                         build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
-                    sync_mixer_delete_target_binding_fields(
-                        rt,
-                        app.tracks.len(),
-                        &state,
-                        active_delete_target.lock().unwrap().as_ref(),
                     );
                     rt.set_reactive(
                         "SEQ",
@@ -14906,8 +14839,6 @@
         }
         let cached_track_peak_levels = vec![0.0; app.tracks.len()];
         let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-        let (cached_modulator_phases, cached_modulator_levels) =
-            read_modulator_display_values(app.graph.lg, &app);
         let mut song_frame = SongFrameState::default();
         // The arrangement reads the host kinds; the live loop syncs them
         // every tick.
@@ -14949,8 +14880,6 @@
                 &cached_track_peak_levels,
             );
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &cached_modulator_phases);
-            sync_modulator_level_fields(rt, &cached_modulator_levels);
             sync_song_state(rt, &app, &mut song_frame);
             host_kinds.sync_with(&app, rt, &kinds_handles, &Default::default());
             rt.run_reactive_cycle();
@@ -15863,25 +15792,6 @@
             offset_at(&modulated, FRAME)
         );
 
-        // Widget end: the per-param values reach the panels as eseq.kinds
-        // param fields; the delta sync writes only the slot phases (the
-        // source editor's waveform markers), and nothing while they rest.
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
-        let (_, published) =
-            super::sync_effect_mod_phase_field_delta(&mut runtime, &[], &[modulated.clone()]);
-        assert_eq!(published, SLOT_COUNT, "a first sample publishes the slot phases only");
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &super::effect_mod_value_field(node_id, FRAME)),
-            None,
-            "no per-param display field"
-        );
-        let (_, republished) = super::sync_effect_mod_phase_field_delta(
-            &mut runtime,
-            std::slice::from_ref(&modulated),
-            std::slice::from_ref(&modulated),
-        );
-        assert_eq!(republished, 0, "an unchanged sample must write nothing");
     }
 
     /// The built-in Filter's cutoff lane is declared in *octaves* and its DSP

@@ -192,7 +192,7 @@ Extends the existing waveform widget
      slice mode is on.
 5. **In slice mode the waveform body is a slice picker, not a range selector.**
    A press selects the slice under the pointer (`:select-slice`, held in
-   `sampler-selected-slice`, which also drives `:active-slice` highlighting and
+   `sampler-view.selected-slice`, which also drives `:active-slice` highlighting and
    falls back to the playhead-derived slice when nothing is picked). Body
    click-drag emits no `set-selection`, and the start/end handles are not
    grabbable (`marker-selection` off) — start/end stay editable through their

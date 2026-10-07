@@ -367,13 +367,6 @@ fn a_modulators_envelope_reads_the_meter_cache_while_observed() {
         h.eval_x("(list 0.25 0.5 0)")
     );
     assert!(!h.frame.host_kinds.wants_modulator_meters());
-    // Legacy parity (the modulator phase field).
-    let rt = h.editor.runtime_mut();
-    sync_modulator_phase_fields(rt, &[0.0, 0.0, 0.25]);
-    let legacy = rt
-        .reactive_field_value("SEQ", &modulator_phase_field(2))
-        .cloned();
-    assert_eq!(legacy, Some(Value::Number(0.25)));
     // Observed: computed per tick; only a modulator track's instrument
     // keeps the cache polled.
     h.eval_x("(def phase #'inst.modulator-phase)");

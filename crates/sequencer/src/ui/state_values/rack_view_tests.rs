@@ -9,6 +9,8 @@ fn show_track(editor: &mut Editor, app: &app::App, track: usize) {
     sync_rack_macro_value_fields(rt, app, track, None);
     sync_rack_panel_param_value_fields(rt, app, track, None);
     rt.run_reactive_cycle();
+    // The rack's devices and macros, as the host kinds push them.
+    seed_panel_kinds(editor);
     editor.refresh_runtime_side_effects();
 }
 

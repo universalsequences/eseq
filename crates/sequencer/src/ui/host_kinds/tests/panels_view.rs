@@ -71,6 +71,138 @@ fn ported_panel_plumbing_uses_no_legacy_binding_forms() {
     }
 }
 
+/// Groups B–D of the panels (eseq-0l17.61) that read host kinds.
+const PORTED_61: [(&str, &str); 5] = [
+    (
+        "ui/effects/sampler-panel.lisp",
+        include_str!("../../../../../../content/ui/effects/sampler-panel.lisp"),
+    ),
+    (
+        "ui/effects/process-panel.lisp",
+        include_str!("../../../../../../content/ui/effects/process-panel.lisp"),
+    ),
+    (
+        "ui/effects/scale-editor.lisp",
+        include_str!("../../../../../../content/ui/effects/scale-editor.lisp"),
+    ),
+    (
+        "ui/effects/builtin/filter-table.lisp",
+        include_str!("../../../../../../content/ui/effects/builtin/filter-table.lisp"),
+    ),
+    (
+        "ui/effects/builtin/phaser-flanger.lisp",
+        include_str!("../../../../../../content/ui/effects/builtin/phaser-flanger.lisp"),
+    ),
+];
+
+/// Groups B–D that read no host kind of their own (values through
+/// eseq.effects.devices / param-controls / the custom-UI runtime, view
+/// state only).
+const PORTED_61_WITHOUT_KINDS: [(&str, &str); 12] = [
+    (
+        "ui/effects/instrument-panel.lisp",
+        include_str!("../../../../../../content/ui/effects/instrument-panel.lisp"),
+    ),
+    (
+        "ui/effects/modulator-panel.lisp",
+        include_str!("../../../../../../content/ui/effects/modulator-panel.lisp"),
+    ),
+    (
+        "ui/effects/instrument-modulation.lisp",
+        include_str!("../../../../../../content/ui/effects/instrument-modulation.lisp"),
+    ),
+    (
+        "ui/effects/instrument-sources.lisp",
+        include_str!("../../../../../../content/ui/effects/instrument-sources.lisp"),
+    ),
+    (
+        "ui/effects/effect-panels.lisp",
+        include_str!("../../../../../../content/ui/effects/effect-panels.lisp"),
+    ),
+    (
+        "ui/effects/effect-modulation.lisp",
+        include_str!("../../../../../../content/ui/effects/effect-modulation.lisp"),
+    ),
+    (
+        "ui/effects/step-buffer.lisp",
+        include_str!("../../../../../../content/ui/effects/step-buffer.lisp"),
+    ),
+    (
+        "ui/effects/drum-surface.lisp",
+        include_str!("../../../../../../content/ui/effects/drum-surface.lisp"),
+    ),
+    (
+        "ui/effects/mnm-surface.lisp",
+        include_str!("../../../../../../content/ui/effects/mnm-surface.lisp"),
+    ),
+    (
+        "ui/effects/identified-drum.lisp",
+        include_str!("../../../../../../content/ui/effects/identified-drum.lisp"),
+    ),
+    (
+        "ui/effects/physical-model-surface.lisp",
+        include_str!("../../../../../../content/ui/effects/physical-model-surface.lisp"),
+    ),
+    (
+        "ui/materials.lisp",
+        include_str!("../../../../../../content/ui/materials.lisp"),
+    ),
+];
+
+#[test]
+fn ported_panels_use_no_legacy_binding_forms() {
+    assert_ported(&PORTED_61);
+    for (file, source) in PORTED_61_WITHOUT_KINDS {
+        assert_eq!(legacy_forms(source), Vec::<&str>::new(), "{file}");
+    }
+    // Every built-in effect panel (their view state is singletons now).
+    let builtin =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/ui/effects/builtin");
+    let mut count = 0;
+    for entry in std::fs::read_dir(&builtin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "lisp") {
+            let source = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                legacy_forms(&source),
+                Vec::<&str>::new(),
+                "{}",
+                path.display()
+            );
+            count += 1;
+        }
+    }
+    assert!(count > 20, "found only {count} built-in panels");
+}
+
+#[test]
+fn panel_layout_and_plock_table_keep_their_compat_reads() {
+    // COMPAT (eseq-0l17.22): the panels lay out from the host's panel dicts
+    // (SEQ.instrument-panel / midi-effects / effects / bus-effects), read by
+    // the *fx* buffer and eseq.effects/device-panel alone; the p-lock table
+    // reads its rows (SEQ.track-plocks, the variant chips) and binds a row's
+    // value field: no kind holds a lock row yet.
+    for (file, source, forms) in [
+        (
+            "ui/effects/buffers.lisp",
+            include_str!("../../../../../../content/ui/effects/buffers.lisp"),
+            vec!["SEQ."],
+        ),
+        (
+            "ui/effects/index.lisp",
+            include_str!("../../../../../../content/ui/effects/index.lisp"),
+            vec!["SEQ."],
+        ),
+        (
+            "ui/effects/track-panels.lisp",
+            include_str!("../../../../../../content/ui/effects/track-panels.lisp"),
+            vec!["bind-seq", "SEQ."],
+        ),
+    ] {
+        assert_eq!(legacy_forms(source), forms, "{file}");
+    }
+}
+
 /// A distro harness showing track 2 (a sampler, with a Filter effect) in
 /// the *fx* buffer, its panels published as the tick does while *fx* shows.
 fn sampler_with_filter() -> Harness {

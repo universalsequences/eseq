@@ -663,17 +663,22 @@
 (def fx-param-option-at (options value)
   (nth options (clamp (round value) 0 (- (len options) 1))))
 
-;; The option label p's dropdown shows. The mods-open depth branch must not
-;; leak into the label, so it reads the param's own value.
+;; The option label p's dropdown shows: on the keys tab the selected key's
+;; lock's; else its param's text, not an index into the dict's :options by
+;; value (they may leave options out: an effect's source types lack env);
+;; the option at its value for a param with no labels of its own. The
+;; mods-open depth branch must not leak into the label, so it reads the
+;; param's own value.
 (def fx-param-text-value-for (fx p)
-  (if (get p :options)
-    (if (and (not fx) (instrument-keys-active?))
-      (fx-param-option-at (get p :options) (fx-param-value-for fx p))
+  (let ((options (get p :options)))
+    (if (and options (not fx) (instrument-keys-active?))
+      (fx-param-option-at options (fx-param-value-for fx p))
       (let ((prm (dv/param-of fx p)))
-        (if prm
-          (fx-param-option-at (get p :options) prm.value)
-          (get p :text-value))))
-    (get p :text-value)))
+        (if (and prm (not (= prm.text "")))
+          prm.text
+          (if (and prm options)
+            (fx-param-option-at options prm.value)
+            (get p :text-value)))))))
 
 (def param-plock-row-target (fx)
   (if fx

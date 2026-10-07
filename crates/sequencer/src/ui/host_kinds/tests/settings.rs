@@ -9,8 +9,8 @@ use sequencer::sequencer::{
 
 const REFER_7I: &str = "(import eseq.kinds :refer (track tracks buses routes transport \
                         selection engine project reset-tuning! justify-tuning! \
-                        randomize-tuning! stretch-tuning! set-bar-transpose! mod-in-level \
-                        mute-group-options accum-mode-options tuning-root-options \
+                        randomize-tuning! stretch-tuning! clear-degree! set-bar-transpose! \
+                        mod-in-level mute-group-options accum-mode-options tuning-root-options \
                         tuning-mode-options voice-priority-options mono-trigger-options \
                         swing-resolution-options roll-rate-options))";
 
@@ -220,57 +220,14 @@ fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     h.eval_7i("(def d2 (nth tn.degrees 2))");
     assert_eq!(h.eval_7i("(= d2.tuning tn)"), Value::Bool(true));
     assert_eq!(h.eval_7i("d2.index"), Value::Number(2.0));
-    // Legacy parity: the current track's SEQ.tp-* fields say the same.
+    // Legacy parity: the step grid's sync labels say the same (the track
+    // settings' SEQ.tp-* fields went with the panels' port, eseq-0l17.61).
     let selected = h.shared.selected_steps.clone();
     let state = h.shared.state.clone();
     sync_track_params(h.editor.runtime_mut(), &h.app, &state, 1, &selected);
-    for (legacy, field) in [
-        ("tp-gate", "t1.gate"),
-        ("tp-poly", "t1.poly"),
-        ("tp-max-polyphony", "t1.max-polyphony"),
-        ("tp-supports-mono-trigger", "t1.supports-mono-trigger"),
-        ("tp-voice-priority", "t1.voice-priority"),
-        ("tp-mono-trigger", "t1.mono-trigger"),
-        ("tp-swing-resolution", "t1.swing-resolution"),
-        ("tp-swing", "t1.swing"),
-        ("tp-fts", "t1.fts"),
-        ("tp-accumulator", "t1.accumulator"),
-        ("tp-accum-mode", "t1.accum-mode"),
-        ("tp-accum-limit", "t1.accum-limit"),
-        ("tp-output", "t1.output.name"),
-        ("accumulator-options", "project.accumulator-options"),
-        ("fts-options", "project.fts-options"),
-        ("sync-labels", "project.sync-options"),
-        ("tp-tuning-on", "tn.on"),
-        ("tp-tuning-scale", "tn.scale"),
-        ("tp-tuning-custom", "tn.custom"),
-        ("tp-tuning-edited", "tn.edited"),
-        ("tp-tuning-root", "tn.root"),
-        ("tp-tuning-mode", "tn.mode"),
-        ("tp-tuning-period", "tn.period"),
-        ("tp-tuning-degree-count", "(len tn.degrees)"),
-        ("tp-tuning-base", "(map (lambda (d) d.base) tn.degrees)"),
-        (
-            "tp-tuning-offsets",
-            "(map (lambda (d) d.offset) tn.degrees)",
-        ),
-        (
-            "tp-tuning-enabled",
-            "(map (lambda (d) d.enabled) tn.degrees)",
-        ),
-        ("tp-tuning-pitches", "(map (lambda (d) d.pitch) tn.degrees)"),
-        ("tp-tuning-labels", "(map (lambda (d) d.label) tn.degrees)"),
-        ("tp-tuning-ratios", "(map (lambda (d) d.ratio) tn.degrees)"),
-    ] {
-        assert_eq!(h.legacy(legacy), h.eval_7i(field), "{legacy} vs {field}");
-    }
-    let morph = h.eval_7i("tn.morph");
-    assert_eq!(
-        h.legacy("tp-tuning-morph"),
-        Value::Number(num(morph) * 100.0)
-    );
-    let label = h.eval_7i("(nth mute-group-options t1.mute-group)");
-    assert_eq!(h.legacy("tp-mute-group"), label);
+    assert_eq!(h.legacy("sync-labels"), h.eval_7i("project.sync-options"));
+    assert_eq!(h.eval_7i("tn.morph"), Value::Number(1.0));
+    assert_eq!(h.eval_7i("(nth mute-group-options t1.mute-group)"), s("3"));
     // The output choices: every bus, the main mix first (nil is sends only).
     let outputs = h.eval_7i("(map (lambda (b) b.name) project.output-options)");
     let names: Vec<String> = h.app.buses.iter().map(|bus| bus.name.clone()).collect();
@@ -612,6 +569,25 @@ fn tuning_fields_set_through_history_and_repaint_only_their_readers() {
     h.eval_7i("(stretch-tuning! tn 10) (reset-tuning! tn)");
     h.drain_and_sync_7i();
     assert_eq!(h.app.history.undo_len() - undo, 2);
+    // Clearing a degree is its own entry, even within a drag on it (the
+    // scale editor's right-click; legacy ClearDegree).
+    let undo = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    h.eval_7i("(set! d2.offset 30)");
+    h.drain_and_sync_7i();
+    h.eval_7i("(clear-degree! d2)");
+    h.drain_and_sync_7i();
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.shared.state.pattern.track_params[1].tuning().offsets[2],
+        0.0
+    );
+    assert_eq!(
+        h.app.history.undo_len() - undo,
+        2,
+        "the drag, then the clear"
+    );
     // A #' binding to morph repaints; a morph drag re-renders only the
     // views reading morph by value, not those reading the root.
     let root_renders = h.render_counter("count-root");
@@ -1073,4 +1049,41 @@ fn new_live_fields_are_computed_only_while_observed() {
     h.sync();
     h.sync();
     assert_eq!(h.computed(f::SELECTION_CURSOR_STEP), moved);
+}
+
+#[test]
+fn setting_locks_show_the_displayed_steps_track_level_locks() {
+    // eseq-0l17.61: the track panel's timebase, swing and swing resolution
+    // show a p-lock at the current track's displayed step (the legacy
+    // tp-timebase / tp-swing / tp-swing-resolution); the fields stay the
+    // track's own.
+    let mut h = Harness::new();
+    h.sync();
+    let pattern = &h.shared.state.pattern;
+    pattern.swing_plocks[0].set(3, 70.0);
+    pattern.timebase_plocks[0].set(3, Timebase::Eighth);
+    pattern.swing_resolution_plocks[0].set(5, SwingResolution::Eighth);
+    h.eval_7i("(def t0 (track 0))");
+    // Nothing displayed: no lock shows.
+    h.shared.current_track.store(0, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(h.eval_7i("t0.setting-locks"), list_value([]));
+    h.shared.selected_steps.lock().unwrap().insert(3);
+    h.sync();
+    assert_eq!(
+        h.eval_7i("(map (lambda (row) (list (get row :name) (get row :value))) t0.setting-locks)"),
+        h.eval_7i(&format!(
+            "(list (list \"timebase\" \"{}\") (list \"swing\" 70))",
+            Timebase::Eighth.label()
+        ))
+    );
+    assert_ne!(
+        h.eval_7i("t0.swing"),
+        Value::Number(70.0),
+        "the field is the track's own"
+    );
+    // Another track shows none (the display step is the current track's).
+    h.shared.current_track.store(1, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(h.eval_7i("t0.setting-locks"), list_value([]));
 }

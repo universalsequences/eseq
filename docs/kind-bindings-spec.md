@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18 and .21 ported, .11, .14, .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18 and .21 ported, .11, .14 (groups A–D: .14, .61), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -1810,6 +1810,147 @@ its instance and field.
      it now reads the param, "0.0" at the knob's one decimal), and a
      multi-track selection's sampler knobs (stray mod dots from the old
      fields are gone).
+   Built (stage 8, eseq-0l17.61): groups B–D of the factory device panels
+   (`ui/effects/instrument-panel`, `sampler-panel`, `modulator-panel`,
+   `instrument-modulation`, `instrument-sources`, `effect-panels`,
+   `effect-modulation`, every `builtin/*`, `process-panel`, `scale-editor`,
+   `buffers`, `step-buffer`, `drum-surface`, `mnm-surface`,
+   `identified-drum`, `physical-model-surface`, `track-panels`;
+   `ui/materials.lisp`):
+   - **Shape.** As group A: the panels lay out from the host's panel dicts
+     and read every value from the kinds through `eseq.effects.devices`
+     (new: `rack-slot-device`). The rack panel's macros are its instrument
+     device's `rack-macro`s (`#'rm.value`, `rm.locked`, `rm.base`,
+     `rm.has-locks`, `(len rm.mappings)`; the name field reads `rm.name` and
+     renames with `(set! rm.name …)`, so `eseq.macro-state/macro-name` and
+     its COMPAT read are gone); a slot row's strip binds the slot device's
+     `*-display` fields and `#'sd.delete-target`, its p-lock dot reads
+     `sd.strip-locks`, its macro dot the rack dict's own `:macros`. The
+     sampler reads `d.sample-buffer`, `sample-duration`, `slices`,
+     `slice-active`, `#'d.start-time` / `end-time` / `playhead`; the
+     modulator `#'d.modulator-phase` / `-level`; a modulation source editor's
+     LFO curve `#'prm.mod-phase` of the section's type param
+     (`im/section-phase`). The Filter Table reads `d.table-*` and its
+     response editor the `table-editor` singleton (shown while `te.open` and
+     `(= te.device d)`; every button is a `table-editor-…!` action); the
+     Convolution Reverb `d.ir-name`; EQ8's spectrum `d.meter`; the
+     Phaser-Flanger `#'transport.bpm`. The process panel lists
+     `selection.track.processes` (its edits `set-process-enabled!`,
+     `remove-process!`, `move-process!`, `clear-port!`, `(set! i.value v)`;
+     the process-map arm keeps its dict addresses: `sequencer.lisp` shares
+     it). The scale editor reads `t.tuning` (`tn.root`, `mode`, `morph`, the
+     degrees' fields) and edits through `set!` / `toggle!` and the tuning
+     actions (`import-scl` stays `seq-tuning`). The track settings strip
+     reads the track's own settings and their p-locks at the displayed step
+     (`track.setting-locks`); the voices follow the selected drum rack
+     slot's `voices` (`tp/poly?`, `tp/voices`); the edits stay the
+     `seq-set-track-param` natives (they p-lock a selection and batch a
+     multi-track one). The step panel binds `selection.edit-step`'s fields,
+     counts `selection.steps` and shows `selection.cursor-step`; its track
+     chip binds `#'t.audible` (the silenced look on the plain props). The
+     surfaces' `bind` / `value` (`mnm-`, `drum-` too) are thin calls to
+     custom-ui-controls' `ui-param-bound-value` / `ui-param-value` (0 for a
+     missing param); the legacy-forms scanner flags the generic `(bind "NS"
+     field)` alone, not a surface's one-argument `bind`. `:bindable` is
+     deleted throughout.
+   - **Kinds.** `param.mod-phase :number` (L: a source param's modulation
+     source's cycle position, device.mod-phases' entry for its mod-slot; -1
+     otherwise; observing it keeps the modulation sample polled),
+     `device.strip-locks (list-of :string)` (L: a rack slot's strip controls
+     some step of its track's pattern locks, in `RackSlotParam` order,
+     cached per slot under the track's `PlockKey` and step count; the last
+     free bit of the device's observed mask, now full: 31 live fields and
+     `params`, 32 of 32), `track.setting-locks
+     (list-of :any)` (L: `(dict :name :value)` per timebase / swing / swing
+     resolution lock at the displayed step). `HostKinds::wants_sampler_playhead`
+     keeps the current track's sampler voices on the watchlist while its
+     `device.playhead` is observed (it replaced the `SEQ.sampler-playhead`
+     consumer check). `param.mod-phase` keeps the modulation sample polled
+     only on a modulation source's setting (a `mod-slot` in 1–4). The
+     print latch shows on the controls it holds while the transport plays
+     and records (`KindsHandles::print_latch`), as `param.printing` reads
+     it: `step.*` of the edit step (the step panel's pickers),
+     `rack-macro.value` (after a take's override) and a rack slot's
+     `device.*-display`; `step_print`'s writers of the legacy
+     `fx-step-value-*` and rack slot value fields are gone (the rack macro
+     value field stays: the p-lock table's rows bind it). New action:
+     `(clear-degree! dg)` (`set-tuning` `clear`: its own undo entry, never
+     merged into a drag on the degree, as the legacy `ClearDegree`).
+   - **View state** (`:key ()` singletons): `sampler-view` (start,
+     duration, cursor-time, active-marker, selected-slice),
+     `polyphony-menu`, `plock-table` (the selected row), `scale-view` (open,
+     selected-degree, rand-amount, stretch-amount; `eseq.seq-layout` sizes
+     the *track* tile by `editor-open?` when it re-lays out), `eq8-view`
+     (the device whose band is picked, and the band), `roar-view`,
+     `chorus-view`. A view singleton is never read
+     through a qualified dotted path (`tp/plock-table.row` is an unknown
+     variable): the owning module exports a function (`clear-plock-row!`,
+     `editor-open?`).
+   - **Fixes.** An effect's modulation source type read its dict's
+     `:options` by value, which leave out `env`: `rand` showed as `drift`
+     (group A); `source-type` and the effect source dropdowns read
+     `prm.text`. `param-grid` imports `eseq.materials` (eseq-0l17.25; the
+     legacy mixer half was .13): `sequencer.lisp` and `step-grid.lisp` (the
+     song lane's) still call `eseq.materials/` in shaders without importing
+     it, so `DefwidgetError::Shader` stays non-fatal. Capture settles the
+     kind fields computed only while observed (a sampler's media): it syncs
+     the host kinds again after the first frame and rebuilds it when that
+     sync pushed anything.
+   - **Kept** (eseq-0l17.22): `SEQ.instrument-panel` / `effects` /
+     `midi-effects` / `bus-effects` as the panels' structure (read by
+     `buffers` and `eseq.effects/device-panel` alone; every test harness and
+     capture fixture publishes them); the p-lock table (`SEQ.track-plocks`
+     rows bound to their `:value-field`, `SEQ.track-plock-variants` chips:
+     no kind holds a lock row, the def chip or a preview); the dicts'
+     `*-field` strings and the param value publishers (the table rows, the
+     test seeds); the rack macro name fields (main's alez.tracker until
+     eseq-0l17.65 lands); `SEQ.tp-num-steps` / `tp-timebase`
+     (seq-grid-mode, seq-core-state, step-grid); the `fx-step-*` fields
+     (seq-core-state); `SEQ.compiling` (unread now); the pad-grid COMPAT
+     shims `buffers` calls in `sequencer.lisp`.
+   - **Legacy removed:** the track settings' `SEQ.tp-*` fields but
+     `tp-num-steps` / `tp-timebase` (`tp-poly`, `-is-rack`,
+     `-rack-slot-idx`, `-max-polyphony`, `-gate`, `-swing`,
+     `-swing-resolution`, `-voice-priority`, `-mono-trigger`,
+     `-supports-mono-trigger`, `-mute-group`, `-fts`, `-accumulator`,
+     `-accum-*`, `-attack`, `-release`, `-send`, `-output`, `-bus-sends`,
+     `tp-bus-N-send`, every `tp-tuning-*`) and the option lists
+     (`fts-options`, `accumulator-options`, `mute-group-options`,
+     `accum-mode-options`, `tuning-root-options`): publishers
+     (`sync_track_polyphony_fields`, the send syncs), registration;
+     `SEQ.track-plock-any` (publisher, registration, the
+     `*plock-any-sync*` and `*plock-sync*` projections, `target-plock-any?`);
+     `SEQ.sampler-playhead`; `SEQ.process-slots`; the
+     `rack-slot-delete-target-*` fields; the `modulator-phase-N` /
+     `-level-N` fields and the source editors' slot phase fields
+     (`fx-mod-slot-phase-*`, `instrument-mod-slot-phase-*`, the rack slot
+     ones); `eseq.macro-state/macro-name`; the compat alias rows of the
+     removed state names; the dead `track-bus-send-control` and
+     `track-accumulator-panel`.
+   - **Tests.** `host_kinds::tests::panels_view` scans the ported files
+     (with kinds, without, every `builtin/*`) and pins the COMPAT reads
+     left (`buffers` and `index`: `SEQ.`; `track-panels`: `bind-seq`,
+     `SEQ.`); `settings` covers `track.setting-locks`, `devices`
+     `device.strip-locks`. The host-less seed (`seed_panel_kinds`) now also
+     mirrors the published `tp-*` / tuning fields, the rack macros and slot
+     strips, the sampler media, the effect tables and the editor session,
+     and the track-level lock rows; the panel tests publish, then seed.
+     Ported: the polyphony header, step panel, track settings, scale
+     editor, sampler waveform, rack macro typing (renames through
+     `set-rack-macro`), rack slot indicators and rack view tests; deleted:
+     the pure parity checks of removed fields.
+   - **Captures.** 268 renders (the port14 and port21 sets: every panel,
+     effect, rack, process, track, step, sequencer and mixer fixture, every
+     factory device UI and `pm-*` fixture, plus scratch states: six built-in
+     effect chains, a Roar stage, a selected scale degree; 4 fixtures that
+     load a missing IR fail at HEAD too): 264 byte-identical. The
+     differences: the Phaser-Flanger's notch display (it animates with
+     wall-clock time; three renders), and the modulator panel's envelope at
+     rest: the legacy `modulator-level-N` field was registered at 1, the
+     kinds read the meter cache (0 with no DSP), so the capture draws a flat
+     envelope; live, both read the meter. A first after-render showed the
+     rack slot sampler's waveform at its defaults (media are computed only
+     while observed): capture now settles them (above) and they match.
    Built (stage 8, eseq-0l17.16): the piano roll (`ui/piano-roll.lisp`;
    `ui/seq-panels.lisp` sets its entry mode):
    - **Kinds.** `note.item :int` (M): the timeline's id for the note
@@ -2431,6 +2572,26 @@ the other port beads follow it):
      position: view state that must follow the item through a delete or a
      reorder keeps the stable ids in a view singleton no render reads, and
      an inert projection writes the field from them (`*seq-expand-sync*`).
+   Learned by the effect panels (.61):
+   - a module's view singleton is not read through a qualified dotted path
+     from another module (`tp/plock-table.row` compiles to an unknown
+     variable): the owner exports a function (`clear-plock-row!`); a
+     test reaches it with `(let ((v mod/singleton)) v.field)`;
+   - a `list-of` field cannot be bound per element: a value a widget draws
+     from one entry (an LFO's phase among `device.mod-phases`) needs a
+     scalar field (`param.mod-phase`) or a by-value read in a small subtree;
+     mind the observed-mask budget: a device's is full (31 live fields and
+     `params`, 32 of 32 bits), so a new device live field widens
+     `host_fields_observed` first;
+   - fields computed only while observed (a sampler's media) read their
+     defaults on the frame that first observes them: capture syncs the host
+     kinds again after its first frame;
+   - a text input reads its own `:value` prop on every key: a host field it
+     shows must be pushed (the frame's sync) before the next key, as the
+     legacy synchronous field was; a host-less test sets the field and runs
+     a cycle and a side-effect refresh after each edit lands;
+   - a panel dict whose `:options` leave entries out is no index by value
+     (an effect's source types without `env`): read the param's `text`.
 4. **Legacy publishers.** For each family the area read, grep every
    reader and mention: `content/` Lisp, all of `crates/` Rust (tests and
    capture fixtures included), `tools/` and `docs/` (the compat alias
@@ -2738,7 +2899,8 @@ Built (7b):
 `voice-priority-options`, `mono-trigger-options`,
 `swing-resolution-options`, `roll-rate-options`. Actions:
 `reset-tuning!`, `justify-tuning!`, `(randomize-tuning! tn cents)`,
-`(stretch-tuning! tn cents)`, `(set-bar-transpose! t bar v)`;
+`(stretch-tuning! tn cents)`, `(clear-degree! dg)`, `(set-bar-transpose! t
+bar v)`;
 `(mod-in-level x i)` is a binding to input `i` (1–4) of a track or bus.
 
 Built (7i):
@@ -4903,11 +5065,11 @@ builds the field name.
 |---|---|---|---|---|---|---|---|
 | `SEQ.<slot-page-active-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.playhead | built (.10) | .11 |
 | `SEQ.<slot-param-field>` | 2 | sequencer | sv/expanded_step.rs | model | step.‹param› | built (.10) | .11 |
-| `SEQ.<track-bus-send-field>` | 2 | effects/track-panels | sv/track_and_mixer.rs | model | send.display (of selection.track) | built (.10) | .14 |
+| `SEQ.<track-bus-send-field>` | 2 | effects/track-panels | sv/track_and_mixer.rs | model | send.display (of selection.track) | built (.10); ported (.61: the track panel's send controls were dead code, deleted), legacy removed (`tp-bus-N-send` and `tp-bus-sends`: publishers, registration; the send controls read send.display) | .14 .61 |
 | `SEQ.<track-pan-field>` | 1 | mixer | sv/track_and_mixer.rs | model | track.pan | built (.10); ported (.13), removed | .13 |
 | `SEQ.<track-volume-field>` | 2 | mixer, sequencer | sv/track_and_mixer.rs | model | track.volume | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22 | .11 .13 |
 | `SEQ.auxas` | 1 | seqv-track-params | reactive_sync.rs | model | step.aux-a | built (.10) | .11 |
-| `SEQ.bpm` | 2 | effects/builtin/phaser-flanger, transport | bounce/job.rs | live | transport.bpm | built (.10); ported (.12), kept: phaser-flanger (.14) | .12 .14 |
+| `SEQ.bpm` | 2 | effects/builtin/phaser-flanger, transport | bounce/job.rs | live | transport.bpm | built (.10); ported (.12), kept: phaser-flanger (.14); ported (.61: phaser-flanger binds #'transport.bpm) | .12 .14 .61 |
 | `SEQ.bus-mutes` | 5 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.muted | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22 | .11 .13 |
 | `SEQ.bus-names` | 25 | mixer, legacy/mixer, seq-core-state +2 | sv/track_and_mixer.rs | model | bus.name | built (.10); ported (.13), kept: seq-core-state; ported (.14 A: panel-widgets) | .11 .13 .14 |
 | `SEQ.bus-peak-*` | 3 | mixer, sequencer | sv/meters_and_modulation.rs | live | bus.peak | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22 | .11 .13 |
@@ -4915,7 +5077,7 @@ builds the field name.
 | `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22 | .11 .13 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15, .20: jaki-builder-demo, .64: the graph demo scripts), no content reader left (its publisher remains) | .12 .13 .15 .20 |
-| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .16, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index); ported (.18: application menus read selection.track) | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
+| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .16, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index); ported (.18: application menus read selection.track); ported (.61: process panel, buffers, convolution-reverb read selection.track / dv/current-track-index) | .11 .13 .14 .15 .16 .17 .18 .19 .20 .61 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10) | .11 |
 | `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17, .20: alez.jaki, .64: the graph demos' route menus), kept: drum-rack-v2, seq-core-state, alez.neural + | .11 .13 .17 .19 .20 .64 |
@@ -4927,11 +5089,11 @@ builds the field name.
 | `SEQ.pans` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.pan | built (.10) | .11 |
 | `SEQ.playhead-active-*` | 1 | step-grid | sv/meters_and_modulation.rs | live | step.playing | built (.10) | .11 |
 | `SEQ.playhead-page` | 1 | seq-core-state | sv/meters_and_modulation.rs | live | track.playhead (page = playhead / 16 in the view) | built (.10) | .11 |
-| `SEQ.playing` | 11 | retrospective, transport, effects/track-panels +4 | sequencer/state/sequencer_state/scene_launch.rs | live | transport.playing | built (.10); ported (.12), kept: track-panels, param-controls, seq-core-state, sequencer; ported (.14 A: param.printing carries the gate) | .11 .12 .14 .20 |
+| `SEQ.playing` | 11 | retrospective, transport, effects/track-panels +4 | sequencer/state/sequencer_state/scene_launch.rs | live | transport.playing | built (.10); ported (.12), kept: track-panels, param-controls, seq-core-state, sequencer; ported (.14 A: param.printing carries the gate); ported (.61: the step panel's print gate reads transport.playing) | .11 .12 .14 .20 .61 |
 | `SEQ.queued-scene` | 2 | transport | event_loop.rs | model | transport.queued | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.record-armed` | 4 | mixer, sequencer, legacy/mixer | event_loop.rs | live | track.armed | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: tracker | .11 .13 |
 | `SEQ.record-quantize` | 1 | transport | host_commands/misc.rs | live | transport.record-quantize | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.recording` | 4 | effects/track-panels, transport, effects/param-controls | reactive_sync.rs | live | transport.recording | built (.10); ported (.12), kept: track-panels, param-controls (.14); ported (.14 A: param.printing carries the gate), kept: track-panels | .12 .14 |
+| `SEQ.recording` | 4 | effects/track-panels, transport, effects/param-controls | reactive_sync.rs | live | transport.recording | built (.10); ported (.12), kept: track-panels, param-controls (.14); ported (.14 A: param.printing carries the gate), kept: track-panels; ported (.61: the step panel's print gate reads transport.recording) | .12 .14 .61 |
 | `SEQ.retrig-rates` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.retrig-rate | built (.10) | .11 |
 | `SEQ.retrigs` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.retrig | built (.10) | .11 |
 | `SEQ.roll-mode` | 2 | transport | reactive_tick.rs | live | transport.roll-mode | built (.10); ported, legacy removed (.12) | .12 |
@@ -4953,9 +5115,9 @@ builds the field name.
 | `SEQ.step-color-r-effective` | 2 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (+ track.governed, 7d) | built (.10); ported (.11), removed | .11 |
 | `SEQ.steps` | 3 | step-grid | lisp_host/eseq/graph_authoring.rs | model | selection.track.steps → step.active | built (.10) | .11 |
 | `SEQ.syncs` | 2 | seqv-track-params, seq-grid-mode | ui_benchmark/ipc.rs | model | step.sync | built (.10) | .11 |
-| `SEQ.tp-is-rack` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.track.rack | built (.10); ported (.13), kept: track-panels | .13 .14 |
-| `SEQ.tp-num-steps` | 8 | seq-grid-mode, seq-core-state, piano-roll +2 | reactive_sync.rs | model | selection.track.num-steps | built (.10); ported (.16), kept: seq-grid-mode, seq-core-state + | .11 .14 .16 |
-| `SEQ.tp-timebase` | 2 | step-grid, effects/track-panels | sv/project_state.rs | model | selection.track.timebase | built (.10) | .11 .14 |
+| `SEQ.tp-is-rack` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.track.rack | built (.10); ported (.13), kept: track-panels; ported (.61: track panels read selection.track.rack / selection.rack-slot), legacy removed (publisher, registration) | .13 .14 .61 |
+| `SEQ.tp-num-steps` | 8 | seq-grid-mode, seq-core-state, piano-roll +2 | reactive_sync.rs | model | selection.track.num-steps | built (.10); ported (.16), kept: seq-grid-mode, seq-core-state +; ported (.61: track panel reads t.num-steps), kept: seq-grid-mode, seq-core-state, step-grid-interactions | .11 .14 .16 .61 |
+| `SEQ.tp-timebase` | 2 | step-grid, effects/track-panels | sv/project_state.rs | model | selection.track.timebase | built (.10); ported (.61: track panel reads t.timebase and its lock in track.setting-locks), kept: step-grid | .11 .14 .61 |
 | `SEQ.track-auxas` | 1 | seqv-track-params | reactive_sync.rs | model | step.aux-a | built (.10) | .11 |
 | `SEQ.track-bus-sends` | 2 | mixer, midi-midimix | reactive_sync.rs | model | track.sends → send.bus, send.display | built (.10); ported (.13), removed | .13 |
 | `SEQ.track-collapsed` | 2 | track-collapse | reactive_sync.rs | live | track.collapsed | built (.10); ported (.11 grid), kept: unread, .22 | .11 |
@@ -4967,9 +5129,9 @@ builds the field name.
 | `SEQ.track-durations` | 1 | seqv-track-params | reactive_sync.rs | model | step.duration | built (.10) | .11 |
 | `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10); ported (.13, .16, .11 grid), kept: track-collapse +; ported (.18: application menus read selection.track.instrument-type) | .11 .13 .18 |
 | `SEQ.track-length-row-*` | 1 | sequencer | sv/expanded_step.rs | model | track.num-steps | built (.10); ported (.11), removed | .11 |
-| `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10); ported (.13, .11 grid), kept: sequencer + | .11 .13 .14 |
+| `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10); ported (.13, .11 grid), kept: sequencer +; ported (.61: the step panel's track chip binds t.audible) | .11 .13 .14 .61 |
 | `SEQ.track-mutes` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.muted | built (.10); ported (.13, .11 grid), kept: sequencer | .11 .13 |
-| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki, .64: the graph demos), kept: many; ported (.18: the scene macro track mask lists (tracks)); ported (.13, .16, .11 grid), kept: many | .11 .13 .14 .16 .18 .19 .20 |
+| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki, .64: the graph demos), kept: many; ported (.18: the scene macro track mask lists (tracks)); ported (.13, .16, .11 grid), kept: many; ported (.61: buffers' rack pad label reads the track) | .11 .13 .14 .16 .18 .19 .20 .61 |
 | `SEQ.track-num-steps` | 5 | sequencer, packages/alez.tracker/src/ui | event_loop.rs | model | track.num-steps | built (.10); ported (.11 grid), kept: tracker | .11 .20 |
 | `SEQ.track-pans` | 1 | seqv-track-params | reactive_sync.rs | model | step.pan (per-step lists, see steps) | built (.10) | .11 |
 | `SEQ.track-peak-*` | 3 | mixer, sequencer, legacy/mixer | sv/meters_and_modulation.rs | live | track.peak | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22 | .11 .13 |
@@ -4990,28 +5152,28 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10); ported (.11), removed | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14); ported (.14 A: param-controls and the custom-UI runtime bind param.value through eseq.effects.devices/param-of; % effect params read display units, the effect dicts too), kept: instrument-panel macros, track-panels lock rows, sampler-panel; ported (.18: the mapping table reads macro-mapping / rack-macro), kept: macro-state's COMPAT macro-name (the rack panel's live `:name-field`, until .61) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14); ported (.14 A: param-controls and the custom-UI runtime bind param.value through eseq.effects.devices/param-of; % effect params read display units, the effect dicts too), kept: instrument-panel macros, track-panels lock rows, sampler-panel; ported (.18: the mapping table reads macro-mapping / rack-macro), kept: macro-state's COMPAT macro-name (the rack panel's live `:name-field`, until .61); ported (.61: rack macros → rack-macro.value / base / locked / has-locks / name, rack slot strip → device.*-display / delete-target, sampler selection → device.start-time / end-time, modulator → device.modulator-phase / -level, the source editors' slot phases → param.mod-phase (new)); legacy removed: the `modulator-phase-N` / `-level-N` fields and the slot phase fields' publishers (`instrument-mod-slot-phase-*`, `fx-mod-slot-phase-*`, rack slot ones); kept (eseq-0l17.22): the dicts' `*-field` strings (the host-less test seeds key on them), the param value publishers (the p-lock table rows' `:value-field`), the rack macro name fields (main's alez.tracker until eseq-0l17.65 merges) | .14 .16 .18 .19 .20 .21 .61 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels); ported (.14 A: param-controls, custom-ui-runtime; mod/process display → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, unconditionally bound: an unmodulated param reads 0 and draws no dot), kept: track-panels (tp-bus-M-send) | .13 .14 |
-| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) → table-editor (its `:band` → band-kind / band-freq / band-gain / band-q; which device: table-editor.device), the `filter-table-editor-*` commands → the `table-editor-…!` actions and `(set! te.selected-frame n)` (built .56) | built (.28, .37, .43, .56); kept as structure (.14 A reads every value from the device; index, buffers, effect-panels read the dicts: B/C); ported (.18: application menus find the armed effect among selection.track.devices and each bus's devices, device.builtin new) | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now); ported (.14 A: param-controls, panel-bodies read key locks, variants and rack macros from the device), kept as structure: index, buffers, instrument-panel, sampler-panel, effect-panels (B/C); ported (.18: the mapping table reads the armed rack-macro of selection.track's instrument device) | .14 .17 .18 |
+| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) → table-editor (its `:band` → band-kind / band-freq / band-gain / band-q; which device: table-editor.device), the `filter-table-editor-*` commands → the `table-editor-…!` actions and `(set! te.selected-frame n)` (built .56) | built (.28, .37, .43, .56); kept as structure (.14 A reads every value from the device; index, buffers, effect-panels read the dicts: B/C); ported (.18: application menus find the armed effect among selection.track.devices and each bus's devices, device.builtin new); ported (.61: Filter Table → device.table-* and the table-editor singleton, Convolution Reverb → device.ir-name, EQ8's spectrum → device.meter), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures | .14 .18 .61 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now); ported (.14 A: param-controls, panel-bodies read key locks, variants and rack macros from the device), kept as structure: index, buffers, instrument-panel, sampler-panel, effect-panels (B/C); ported (.18: the mapping table reads the armed rack-macro of selection.track's instrument device); ported (.61: sampler media → device.sample-*, slices, start/end-time, rack macros → rack-macro, the rack slot macro dot reads the dict's own :macros), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures | .14 .17 .18 .61 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) (built .37); a scene macro's `:target-scene` / `:morph-params` / `:steal-patterns` / `:quantize` / `:track-mask` → macro.target-scene / morph-params / steal-patterns / quantize / tracks, settable (`macro-scene-config` → their `set!`s), `:diff-count` → macro.diff-count (built .43) | built (.37, .43); ported (.14 A: param-controls reads (macros) / mm.target), kept: macros; ported (.18), legacy removed (publisher, registration, the parity test) | .14 .18 |
-| `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
+| `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28); ported (.61: the waveform binds #'d.playhead; the tick keeps the sampler voices watched while it is observed, HostKinds::wants_sampler_playhead), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-plocked-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.plocked | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-variant-b-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-variant-g-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-variant-r-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | built (.28) | .11 |
-| `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks, send.has-locks | built (.28); ported (.14 A: param.has-locks), kept: track-panels (track-level rows, rack macro and slot control targets: tp/target-plock-any?) | .14 |
+| `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks, send.has-locks | built (.28); ported (.14 A: param.has-locks), kept: track-panels (track-level rows, rack macro and slot control targets: tp/target-plock-any?); ported (.61: rack macros → rack-macro.has-locks, rack slot strip → device.strip-locks (new)), legacy removed (publisher, registration, the *plock-any-sync* projection) | .14 .61 |
 | `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | built (.28); ported (.14 A: param.printing); legacy removed (publisher, registration, row test) | .14 |
-| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list → track.variants / variant (built .37); the variant a step plays → step.variant (built .43) | built (.28, .37, .43); ported (.14 A: the p-lock accent is the current track variant's color, the plock-color singleton), kept: track-panels | .14 |
-| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28); ported (.14 A: param.locked / param.base), kept: track-panels | .14 |
+| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list → track.variants / variant (built .37); the variant a step plays → step.variant (built .43) | built (.28, .37, .43); ported (.14 A: the p-lock accent is the current track variant's color, the plock-color singleton), kept: track-panels; kept (.61): the p-lock table's chips (no kind holds the def chip or a preview) | .14 .61 |
+| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28); ported (.14 A: param.locked / param.base), kept: track-panels; ported (.61: track-level rows → track.setting-locks (new); rack macro row names → rack-macro.name; the *plock-sync* projection deleted), kept: the p-lock table (track-panels), filter-core | .14 .61 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | selection.track.lanes → lane | built (.29) | .11 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | process-library.classes → process-class | built (.29) | .11 .20 |
 | `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (live): a track slot's, and a graph node slot's (n.processes, under the slot's id); `lane-patch-run-error` → p.error, `lane-patch-expr-error` → p.compile-error, else the expr buffer's commit error (view state), else p.error | built (.29, .45) | .11 |
 | `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes: state-cell.values of n.processes (live; `process-scope-cells-for` id → p.cells by name, each a history) | built (.45) | .11 .20 |
-| `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29) | .14 |
+| `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29); ported (.61: process panel reads selection.track.processes), legacy removed (publisher, registration; `track-process-slots` kept: sequencer) | .14 .61 |
 | `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | t.processes: p.in-ports, port.target-process / target-inlet, fanout.target-process (cable ids derived in the view) | built (.29) | .11 |
 | `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29) | .11 .20 |
 | `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes → lane | built (.29) | .11 .20 |
@@ -5175,58 +5337,58 @@ builds the field name.
 | `SEQ.track-steps` | 2 | rack-groove-buffer | sv/param_fields_and_sync.rs | model | pad.track.steps → step.active | built (.34) | .19 |
 | `SEQ.<slot-bar-transpose-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes | built (.35) | .11 |
 | `SEQ.<slot-bar-transpose-set-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes (≠ 0; `set-bar-transpose!`) | built (.35) | .11 |
-| `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
-| `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35) | .14 |
+| `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | built (.35) | .11 |
-| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36); ported (.14 A: panel-widgets counts (buses)), kept: buffers, application-menus; ported (.18: application menus read (buses) b.devices), kept: buffers | .14 .18 |
+| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36); ported (.14 A: panel-widgets counts (buses)), kept: buffers, application-menus; ported (.18: application menus read (buses) b.devices), kept: buffers; kept as structure (.61; eseq-0l17.22): buffers | .14 .18 .61 |
 | `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35); ported (.13), removed | .13 |
 | `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35); ported (.13), removed | .13 |
-| `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35) | .14 |
+| `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35); ported (.61: buffers read engine.compiling) | .14 .61 |
 | `SEQ.cpu-overloaded` | 2 | transport | reactive_tick.rs | live | engine.overloaded | built (.35); ported, legacy removed (.12) | .12 |
-| `SEQ.fts-options` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | project.fts-options | built (.35) | .14 |
-| `SEQ.fx-step-cursor-number` | 1 | effects/track-panels | sv/param_fields_and_sync.rs | model | selection.cursor-step (index + 1) | built (.35) | .14 |
+| `SEQ.fts-options` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | project.fts-options | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.fx-step-cursor-number` | 1 | effects/track-panels | sv/param_fields_and_sync.rs | model | selection.cursor-step (index + 1) | built (.35); ported (.61), kept: seq-core-state | .14 .61 |
 | `SEQ.fx-step-parameter-step` | 1 | seq-core-state | sv/topology_and_visualization.rs | model | selection.edit-step | built (.35) | .11 |
-| `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35) | .11 .14 |
-| `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35) | .14 |
-| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36) | .14 |
+| `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35); ported (.61), kept: seq-core-state | .11 .14 .61 |
+| `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35); ported (.61: the pickers bind the edit step's fields, which show the print latch; `step_print`'s latch writers removed), kept: seq-core-state | .14 .61 |
+| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36); kept as structure (.61; eseq-0l17.22): buffers | .14 .61 |
 | `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35); ported (.13), removed | .13 |
 | `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35); ported (.13), removed | .13 |
 | `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35); ported (.13), removed | .13 |
 | `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind, `(routes)` | built (.35); ported (.13), removed | .13 |
-| `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
-| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | built (.36) | .14 |
+| `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | built (.36); ported (.61: the rack slot row binds #'sd.delete-target), legacy removed (publisher `sync_mixer_delete_target_binding_fields`) | .14 .61 |
 | `SEQ.roll-rate` | 1 | transport | reactive_tick.rs | live | transport.roll-rate | built (.35); ported, legacy removed (.12) | .12 |
 | `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | built (.35); ported (.13), removed | .13 |
 | `SEQ.sequence-rolling` | 1 | transport | reactive_tick.rs | live | transport.sequence-rolling | built (.35); ported, legacy removed (.12) | .12 |
 | `SEQ.sync-labels` | 8 | sequencer, step-grid, seqv-track-params +1 | natives.rs | model | project.sync-options | built (.35) | .11 |
-| `SEQ.tp-accum-limit` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-limit | built (.35) | .14 |
-| `SEQ.tp-accum-mode` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-mode | built (.35) | .14 |
-| `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | built (.35) | .14 |
-| `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | built (.35) | .14 |
-| `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | built (.35) | .14 |
-| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: device.voices) | built (.35, .36); ported (.13), kept: track-panels | .13 .14 |
-| `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | built (.35) | .14 |
-| `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group (`:int`; label `(nth mute-group-options g)`) | built (.35) | .14 |
-| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: (> device.voices 1)) | built (.35, .36); ported (.13), kept: track-panels | .13 .14 |
-| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35); ported (.13), kept: track-panels | .13 .14 |
-| `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | built (.35) | .14 |
-| `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | built (.35) | .14 |
-| `SEQ.tp-swing-resolution` | 1 | effects/track-panels | sv/project_state.rs | model | track.swing-resolution | built (.35) | .14 |
-| `SEQ.tp-tuning-base` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.base of track.tuning.degrees | built (.35) | .14 |
-| `SEQ.tp-tuning-enabled` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.enabled [s] of track.tuning.degrees | built (.35) | .14 |
-| `SEQ.tp-tuning-labels` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.label of track.tuning.degrees | built (.35) | .14 |
-| `SEQ.tp-tuning-mode` | 4 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.mode (`set!`) | built (.35) | .14 |
-| `SEQ.tp-tuning-morph` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.morph (`set!`; 0-1; the legacy field is percent) | built (.35) | .14 |
-| `SEQ.tp-tuning-offsets` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.offset (`set!`) | built (.35) | .14 |
-| `SEQ.tp-tuning-on` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.on | built (.35) | .14 |
-| `SEQ.tp-tuning-period` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.period | built (.35) | .14 |
-| `SEQ.tp-tuning-pitches` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.pitch of track.tuning.degrees | built (.35) | .14 |
-| `SEQ.tp-tuning-root` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.root (`set!`) | built (.35) | .14 |
-| `SEQ.tp-voice-priority` | 1 | effects/track-panels | sv/project_state.rs | model | track.voice-priority | built (.35) | .14 |
+| `SEQ.tp-accum-limit` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-limit | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-accum-mode` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-mode | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: device.voices) | built (.35, .36); ported (.13), kept: track-panels; ported (.61), legacy removed (publisher, registration) | .13 .14 .61 |
+| `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group (`:int`; label `(nth mute-group-options g)`) | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: (> device.voices 1)) | built (.35, .36); ported (.13), kept: track-panels; ported (.61), legacy removed (publisher, registration) | .13 .14 .61 |
+| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35); ported (.13), kept: track-panels; ported (.61), legacy removed (publisher, registration) | .13 .14 .61 |
+| `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-swing-resolution` | 1 | effects/track-panels | sv/project_state.rs | model | track.swing-resolution | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-base` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.base of track.tuning.degrees | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-enabled` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.enabled [s] of track.tuning.degrees | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-labels` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.label of track.tuning.degrees | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-mode` | 4 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.mode (`set!`) | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-morph` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.morph (`set!`; 0-1; the legacy field is percent) | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-offsets` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.offset (`set!`) | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-on` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.on | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-period` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.period | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-pitches` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.pitch of track.tuning.degrees | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-tuning-root` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.root (`set!`) | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
+| `SEQ.tp-voice-priority` | 1 | effects/track-panels | sv/project_state.rs | model | track.voice-priority | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.track-mod-output-available` | 2 | mixer | sv/track_and_mixer.rs | model | track.mod-output | built (.35); ported (.13), removed | .13 |
 | `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | project.output-options (bus instances; nil is sends only) | built (.35); ported (.13), removed | .13 |
 | `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35); ported (.13), removed | .13 |
-| `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35) | .14 |
+| `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
 | `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local; ported (.14 A: the adsr-gesture singleton in eseq.effects.custom-ui-sections) | .14 |
 | `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local; ported (.15: arr-select, arr-lanes, arr-drag, with the timeline's lane ownership), removed | .15 |
 | `SEQV.<cursor-highlight-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local; ported (.11), removed | .11 |
@@ -5239,18 +5401,18 @@ builds the field name.
 | `SEQV.cursor-field-*` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local; ported (.11), removed | .11 |
 | `SEQV.cursor-step-*` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local; ported (.11), removed | .11 |
 | `SEQV.piano-roll-arrangement-mode` | 1 | piano-roll | Lisp (reactive-set) | Lisp-owned | piano-roll view singleton | view-local; ported (.16): piano-roll-view.arrangement, removed | .16 |
-| `SEQV.plk-t-*` | 2 | effects/track-panels | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local | .14 |
+| `SEQV.plk-t-*` | 2 | effects/track-panels | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local; removed (.61: track.setting-locks; the *plock-sync* projection deleted) | .14 .61 |
 | `SEQV.plk-var-b` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local; ported (.14 A: plock-color singleton) | .14 |
 | `SEQV.plk-var-g` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local; ported (.14 A: plock-color singleton) | .14 |
 | `SEQV.plk-var-r` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton (:rgb) | view-local; ported (.14 A: plock-color singleton, three :number fields: a float prop reads one component) | .14 |
 | `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local; ported (.13), removed | .13 |
-| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21) | .11 .12 .13 .14 .20 .21 |
+| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21); removed in ui/effects and ui/materials (.61) | .11 .12 .13 .14 .20 .21 .61 |
 | `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove; kept (.18): eseq.bindings' only reader is alez.tracker (.20); delete ui/bindings.lisp (and its imports in ui/main.lisp, ui/noui.lisp and the state_values test) once the tracker stops importing it | .18 |
-| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value); gone from the panel plumbing (.14 A: custom-ui-param-value, fx-param-numeric-value-for); gone from .20's ported files (alez.jaki: generator marks) | .11 .13 .14 .20 .21 |
+| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value); gone from the panel plumbing (.14 A: custom-ui-param-value, fx-param-numeric-value-for); gone from .20's ported files (alez.jaki: generator marks); ported in ui/effects (.61: value twins custom-ui-param-value, comparisons read refs) | .11 .13 .14 .20 .21 .61 |
 | `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state | .11 .13 .19 |
 | `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13, .17: the browser reads slot device.delete-target), kept: application-menus +; ported (.14 A: panel-bodies reads the effect device's delete-target); ported, legacy removed (.18: the last reader; its publishers in the tick, the invalidation apply and the registration) | .13 .14 .17 .18 |
 | `SEQ.num-patterns` | 6 | transport, macros, scene-banks | sv/topology_and_visualization.rs | model | (len (scenes)) | remove; ported (.12), kept: macros (.18); ported, legacy removed (.18: scene macros list (scenes)) | .12 .18 |
-| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13, .17), kept: many; ported (.18: application menus read (tracks)) | .11 .13 .14 .17 .18 .19 |
+| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13, .17), kept: many; ported (.18: application menus read (tracks)); ported (.61: buffers and step-buffer read (tracks)) | .11 .13 .14 .17 .18 .19 .61 |
 | `SEQ.rack-panel-view-generation` | 1 | effects/state | sv/project_state.rs | model | implicit | remove; removed (.14 A: rack panel views live in the rack-panel-view singleton by track id; the host calls eseq.effects.state/reset-rack-panel-views! on a project replacement) | .14 |
 | `SEQ.scene-bank-view-generation` | 1 | scene-banks | sv/project_state.rs | model | implicit (collections re-render) | remove; ported, legacy removed (.12) | .12 |
 | `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13, .15), kept: sequencer +; ported (.11 grid), kept: tracker | .11 .13 .15 .20 |

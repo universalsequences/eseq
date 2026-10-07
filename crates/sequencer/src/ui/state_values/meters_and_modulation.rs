@@ -1164,38 +1164,6 @@ fn read_rack_slot_mod_values(
     })
 }
 
-/// Publish the changed rack slot modulator phases (the source editor's
-/// waveform marker). A slot (or track) change republishes every phase; a
-/// slot no longer sampled settles its phases to none. The per-param display
-/// values reach the panels as eseq.kinds param fields (`mod-offset`,
-/// `mod-value`, `mod-scale`), so no SEQ field carries them.
-pub(crate) fn sync_rack_slot_mod_phase_field_delta(
-    rt: &mut Runtime,
-    previous: Option<&RackSlotModValues>,
-    current: Option<&RackSlotModValues>,
-) -> (bool, usize) {
-    let Some(current) = current else {
-        return match previous {
-            Some(previous) => publish_slot_phases(
-                rt,
-                Some(&previous.slot_phases),
-                &NO_SLOT_PHASES,
-                |slot| rack_slot_mod_slot_phase_field(previous.track, previous.slot_idx, slot),
-            ),
-            None => (false, 0),
-        };
-    };
-    let previous = previous.filter(|previous| {
-        previous.track == current.track && previous.slot_idx == current.slot_idx
-    });
-    publish_slot_phases(
-        rt,
-        previous.map(|previous| &previous.slot_phases),
-        &current.slot_phases,
-        |slot| rack_slot_mod_slot_phase_field(current.track, current.slot_idx, slot),
-    )
-}
-
 /// Everything the UI tick publishes for modulated-value display: per-effect
 /// values keyed by graph node, plus the selected track's instrument. They share
 /// one watchlist reconciliation, so a single pass owns which modulator nodes
@@ -1300,158 +1268,12 @@ fn read_instrument_mod_values_for_track(
     })
 }
 
-/// Publish the slot phases that changed since `previous` (all of them when
-/// `previous` is `None`, i.e. the sampled node changed or sampling started).
-fn publish_slot_phases(
-    rt: &mut Runtime,
-    previous: Option<&[f64; sequencer::instruments::voice_modulator::SLOT_COUNT]>,
-    current: &[f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
-    field: impl Fn(usize) -> String,
-) -> (bool, usize) {
-    let mut effects_dirty = false;
-    let mut published = 0usize;
-    for (slot, &phase) in current.iter().enumerate() {
-        if previous.is_some_and(|previous| previous[slot] == phase) {
-            continue;
-        }
-        published += 1;
-        effects_dirty |= rt
-            .set_reactive("SEQ", &field(slot + 1), Value::Number(phase))
-            .effects_dirty;
-    }
-    (effects_dirty, published)
-}
-
-/// Publish the changed instrument modulator phases, under both the current
-/// track's and the track-keyed fields. Same delta contract as the rack half:
-/// zero writes while nothing moves, a track change republishes every phase.
-pub(crate) fn sync_instrument_mod_phase_field_delta(
-    rt: &mut Runtime,
-    previous: Option<&InstrumentModValues>,
-    current: Option<&InstrumentModValues>,
-) -> (bool, usize) {
-    let (track, was, phases) = match (previous, current) {
-        (_, Some(current)) => {
-            let was = previous
-                .filter(|previous| previous.track == current.track)
-                .map(|previous| &previous.slot_phases);
-            (current.track, was, &current.slot_phases)
-        }
-        (Some(previous), None) => (previous.track, Some(&previous.slot_phases), &NO_SLOT_PHASES),
-        (None, None) => return (false, 0),
-    };
-    let (dirty, count) = publish_slot_phases(rt, was, phases, fx_instrument_mod_slot_phase_field);
-    let (track_dirty, track_count) = publish_slot_phases(rt, was, phases, |slot| {
-        instrument_mod_slot_phase_field(track, slot)
-    });
-    (dirty || track_dirty, count + track_count)
-}
-
-/// Publish the changed effect modulator phases (per sampled node). Returns
-/// `(effects_dirty, published)`: `published` is zero whenever nothing moved,
-/// which is the check that an idle panel dirties no widget. The per-param
-/// display values are eseq.kinds param fields, as for the rack half.
-pub(crate) fn sync_effect_mod_phase_field_delta(
-    rt: &mut Runtime,
-    previous: &[EffectModValues],
-    current: &[EffectModValues],
-) -> (bool, usize) {
-    let mut effects_dirty = false;
-    let mut published = 0usize;
-    for response in current {
-        let prev = previous
-            .iter()
-            .find(|candidate| candidate.node_id == response.node_id);
-        let (dirty, count) = publish_slot_phases(
-            rt,
-            prev.map(|prev| &prev.slot_phases),
-            &response.slot_phases,
-            |slot| effect_mod_slot_phase_field(response.node_id, slot),
-        );
-        effects_dirty |= dirty;
-        published += count;
-    }
-    (effects_dirty, published)
-}
-
 pub(crate) fn build_track_peaks_value(levels: &[f64]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = levels
         .iter()
         .map(|&level| Rc::new(RefCell::new(Value::Number(level))))
         .collect();
     Value::List(items)
-}
-
-pub(crate) fn sync_modulator_phase_fields(rt: &mut Runtime, phases: &[f64]) -> bool {
-    let mut effects_dirty = false;
-    for (idx, &phase) in phases.iter().enumerate() {
-        effects_dirty |= rt
-            .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(phase))
-            .effects_dirty;
-    }
-    effects_dirty
-}
-
-pub(crate) fn sync_modulator_level_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
-    let mut effects_dirty = false;
-    for (idx, &level) in levels.iter().enumerate() {
-        effects_dirty |= rt
-            .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(level))
-            .effects_dirty;
-    }
-    effects_dirty
-}
-
-pub(crate) fn sync_modulator_phase_field_delta(
-    rt: &mut Runtime,
-    previous: &[f64],
-    phases: &[f64],
-) -> bool {
-    let mut effects_dirty = false;
-    if previous.len() != phases.len() {
-        effects_dirty |= sync_modulator_phase_fields(rt, phases);
-        for idx in phases.len()..previous.len() {
-            effects_dirty |= rt
-                .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(0.0))
-                .effects_dirty;
-        }
-        return effects_dirty;
-    }
-
-    for (idx, (&old_phase, &phase)) in previous.iter().zip(phases.iter()).enumerate() {
-        if old_phase != phase {
-            effects_dirty |= rt
-                .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(phase))
-                .effects_dirty;
-        }
-    }
-    effects_dirty
-}
-
-pub(crate) fn sync_modulator_level_field_delta(
-    rt: &mut Runtime,
-    previous: &[f64],
-    levels: &[f64],
-) -> bool {
-    let mut effects_dirty = false;
-    if previous.len() != levels.len() {
-        effects_dirty |= sync_modulator_level_fields(rt, levels);
-        for idx in levels.len()..previous.len() {
-            effects_dirty |= rt
-                .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(0.0))
-                .effects_dirty;
-        }
-        return effects_dirty;
-    }
-
-    for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
-        if old_level != level {
-            effects_dirty |= rt
-                .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(level))
-                .effects_dirty;
-        }
-    }
-    effects_dirty
 }
 
 pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {

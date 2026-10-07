@@ -6,7 +6,9 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
+(import eseq.kinds :refer (tracks engine))
 (import eseq.drum-rack-v2)
+(import eseq.effects.devices :as dv)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.instrument-panel :as ip)
@@ -18,6 +20,7 @@
 (import eseq.effects.track-panels :as tp)
 
 (export empty-track-fallback
+        no-tracks?
         delete-selected-plock-row-key)
 
 ;; Flat callers: step-buffer.lisp calls fx-empty-track-fallback and binds
@@ -29,15 +32,23 @@
   :shader
   (rgba 0.0 0.0 0 1))
 
+(def no-tracks? ()
+  (= (len (tracks)) 0))
+
 (def empty-track-fallback ()
   (box :width :fill :height :fill :padding 1 :h-align :center :v-align :center
     (v-stack :gap 0.4 :align :center
       (label "Instrument and effects appear here"
         :font-size 12 :color :dim :bg :transparent)
       (compile-progress
-        :active (if SEQ.compiling 1 0)
+        :active (if engine.compiling 1 0)
         :width 12 :height 0.3))))
 
+;; COMPAT (eseq-0l17.22): the panels lay out from the host's panel dicts
+;; (SEQ.instrument-panel, SEQ.midi-effects, SEQ.effects, SEQ.bus-effects:
+;; their params, sources, slots); every value they show comes from the
+;; kinds (eseq.effects.devices). This module and eseq.effects/device-panel
+;; are their only readers.
 (def selected-bus-effects ()
   (if (pw/has-selected-bus?)
     (nth SEQ.bus-effects eseq.seq-core-state/selected-bus)
@@ -54,7 +65,7 @@
          (list "audio-effect" "midi-effect" "effect-instance"))
        :drop-meta (dict :kind "fx-append"
                     :chain "append"
-                    :track SEQ.current-track
+                    :track (dv/current-track-index)
                     :bus (if (pw/has-selected-bus?) eseq.seq-core-state/selected-bus -1)
                     :slot -1)
        :drop-hover-border-color :mixer-strip-selected-border
@@ -81,7 +92,7 @@
        :drop-types (list "audio-effect" "midi-effect" "effect-instance")
        :drop-meta (dict :kind "fx-append"
                     :chain "append"
-                    :track SEQ.current-track
+                    :track (dv/current-track-index)
                     :bus -1
                     :slot -1)
        :drop-hover-border-color :mixer-strip-selected-border
@@ -123,10 +134,8 @@
     -1))
 
 (def rack-pad-member-name (gidx pad)
-  (let ((track (if (= pad nil) -1 (get pad :track))))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (nth SEQ.track-names track)
-      "")))
+  (let ((t (if (= pad nil) nil (dv/track-at (get pad :track)))))
+    (if t t.name "")))
 
 ;; Pad focus controls stay beside the grid; rack identity and persistence live
 ;; in the instrument-style header above it.
@@ -242,7 +251,7 @@
       (track-drop-placeholder-panel))))
 
 (effect-buffer "*track*"
-  (if (= SEQ.num-tracks 0)
+  (if (no-tracks?)
     (empty-track-fallback)
     (box :padding 1.0
       (v-stack :gap 0.2
@@ -263,7 +272,7 @@
       (if (>= gidx 0)
         (rack-selection-panel gidx)
         (bus-selection-panel)))
-    (if (= SEQ.num-tracks 0)
+    (if (no-tracks?)
     (empty-track-fallback)
     ;; Mapping changes the wrapper structure of every compatible parameter.
     ;; A distinct root forces those cached parameter subtrees to be rebuilt

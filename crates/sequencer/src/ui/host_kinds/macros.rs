@@ -556,8 +556,9 @@ impl HostKinds {
 }
 
 /// One live field of rack macro `rack_macro` of `track` (read under the
-/// rack lock): its shown value (a take's override, else the displayed
-/// step's p-lock, else its own value under an engaged project macro:
+/// rack lock): its shown value (a take's override, else the print latch's
+/// value while it prints the macro, else the displayed step's p-lock, else
+/// its own value under an engaged project macro:
 /// `app::rack_macro_shown_value`, shared with the panel), its own value,
 /// whether the displayed step locks it, whether some step of the pattern
 /// does.
@@ -572,8 +573,10 @@ fn rack_macro_field(
     Some(match key {
         f::RACK_MACRO_VALUE => {
             let state = &sources.state;
+            let macro_idx = rack_macro.id.index();
+            let take = state.take_rack_macro_override.values_for_track(track)[macro_idx];
             let take =
-                state.take_rack_macro_override.values_for_track(track)[rack_macro.id.index()];
+                take.or_else(|| sources.print_latch(track, PrintTarget::RackMacro { macro_idx }));
             let step = sources.plock_display_step(track);
             let overrides = &shared.borrow().macro_overrides;
             number(app::rack_macro_shown_value(

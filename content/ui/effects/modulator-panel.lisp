@@ -5,6 +5,7 @@
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.panel-frame :as pf)
+(import eseq.effects.devices :as dv)
 
 (export modulator-panel)
 
@@ -31,7 +32,8 @@
 
 (def modulator-panel (inst)
   (let ((rise-p (modulator-param inst "rise"))
-      (fall-p (modulator-param inst "fall")))
+      (fall-p (modulator-param inst "fall"))
+      (d (dv/inst-device inst)))
     (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
       :height st/fx-fixed-panel-height
       :debug-name "modulator-panel"
@@ -72,8 +74,8 @@
                     :width 12.25 :height 5.45
                     :rise (if rise-p (pc/fx-param-value rise-p) 0)
                     :fall (if fall-p (pc/fx-param-value fall-p) 0)
-                    :phase (bind-seq (get inst :phase-field))
-                    :level (bind-seq (get inst :level-field))
+                    :phase (if d #'d.modulator-phase 0)
+                    :level (if d #'d.modulator-level 0)
                     :max-ms (if rise-p (get rise-p :max) 5000)
                     :background-color :instrument-control-bg
                     :grid-color :dim

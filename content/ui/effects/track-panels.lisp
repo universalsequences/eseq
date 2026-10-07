@@ -1,18 +1,19 @@
 ;; Track-level parameter, accumulator, and parameter-lock panels.
 (module eseq.effects.track-panels)
 
+(import eseq.kinds :refer (selection transport project mute-group-options))
 (import eseq.effects.state :as st)
-(import eseq.view-kit :refer (listed?))
+(import eseq.effects.devices :as dv)
 (import eseq.effects.param-controls :as pc)
-(import eseq.macro-state :as ms)
 (import eseq.drum-rack-v2)
 ;; The header pill + chip *step* shares with the *processes* dock.
 (import eseq.panel-header :as header)
 (import eseq.effects.scale-editor :as se)
 
-(export selected-plock-row
-        target-plock-any?
+(export plock-table
+        poly?
         plock-row-selected?
+        clear-plock-row!
         delete-selected-plock-row
         plock-chip-click
         track-plocks-panel
@@ -23,57 +24,71 @@
         apply-polyphony-to-all-scenes
         polyphony-context-menu)
 
-;; Aliases for unconverted lisp callers (effects/panel-frame.lisp,
-;; effects/step-buffer.lisp), the production by-name read of
-;; fx-plock-row-selected? in src/ui/input.rs:133, and Rust tests that eval
-;; the old flat spellings (src/ui/state_values/tests.rs). The buffers.lisp
-;; flat edges (fx-track-parameters-panel, fx-delete-selected-plock-row)
-;; retired with eseq.effects.buffers, which imports this module.
+;; src/ui/input.rs reads plock-row-selected? by its qualified name.
+
+;; The drum rack slot the track settings and the instrument header edit: the
+;; current rack's selected slot (a rack's voices are its slots'), else nil.
+(def settings-rack-slot ()
+  (let ((t selection.track) (i selection.rack-slot))
+    (if (and t t.rack (>= i 0)) (dv/rack-slot-device t.index i) nil)))
+
+;; Whether the edited owner plays polyphonically (a rack slot: more than one
+;; voice), and its voices.
+(def poly? ()
+  (let ((sd (settings-rack-slot)) (t selection.track))
+    (if sd (> sd.voices 1) (if t t.poly false))))
+
+(def voices ()
+  (let ((sd (settings-rack-slot)) (t selection.track))
+    (if sd sd.voices (if t t.max-polyphony 1))))
 
 ;; Both track settings and the instrument header edit the same selected owner.
 ;; Rack playback uses the slot's voice count, not the parent track's poly flag.
 (def toggle-polyphony ()
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (if SEQ.tp-is-rack
+    (if (settings-rack-slot)
       (host-command "set-rack-slot-max-polyphony"
-        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 6)))
-      (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))))
+        (dict :track selection.track.index :slot selection.rack-slot
+              :value (if (poly?) 1 6)))
+      (seq-set-track-param :poly (if (poly?) 0 1)))))
 
 ;; Right-click on the mono/poly button: copy just this choice to every scene.
 ;; The menu is an overlay, so the *fx* buffer renders it once; the button only
-;; sets this state. The target is captured at open time so a selection change
-;; while the menu is up cannot redirect it.
-(defstate polyphony-menu-open false)
-(defstate polyphony-menu-col 0)
-(defstate polyphony-menu-row 0)
-(defstate polyphony-menu-target nil)
+;; sets this state. The target (the track's position, the rack slot or -1) is
+;; captured at open time so a selection change while the menu is up cannot
+;; redirect it.
+(def-kind polyphony-menu
+  :key ()
+  :state ((open false)
+          (col 0)
+          (row 0)
+          (track -1)
+          (rack-slot -1)))
 
 (def open-polyphony-menu (event)
-  (do
-    (set! polyphony-menu-target
-      (if SEQ.tp-is-rack
-        (dict :track SEQ.current-track :rack-slot SEQ.tp-rack-slot-idx)
-        (dict :track SEQ.current-track)))
-    (set! polyphony-menu-col (get event :col))
-    (set! polyphony-menu-row (get event :row))
-    (set! polyphony-menu-open true)))
+  (let ((t selection.track))
+    (set! polyphony-menu.track (if t t.index -1))
+    (set! polyphony-menu.rack-slot (if (settings-rack-slot) selection.rack-slot -1))
+    (set! polyphony-menu.col (get event :col))
+    (set! polyphony-menu.row (get event :row))
+    (set! polyphony-menu.open true)))
 
 (def apply-polyphony-to-all-scenes ()
   (do
-    (set! polyphony-menu-open false)
-    (host-command "apply-polyphony-to-all-scenes" polyphony-menu-target)))
+    (set! polyphony-menu.open false)
+    (host-command "apply-polyphony-to-all-scenes"
+      (if (>= polyphony-menu.rack-slot 0)
+        (dict :track polyphony-menu.track :rack-slot polyphony-menu.rack-slot)
+        (dict :track polyphony-menu.track)))))
 
 (def polyphony-context-menu ()
-  (context-menu :is-open polyphony-menu-open
-    :anchor-col polyphony-menu-col :anchor-row polyphony-menu-row
-    :on-close (lambda () (set! polyphony-menu-open false))
-    (menu-item (str "Apply " (if SEQ.tp-poly "poly" "mono") " to all scenes")
+  (context-menu :is-open polyphony-menu.open
+    :anchor-col polyphony-menu.col :anchor-row polyphony-menu.row
+    :on-close (lambda () (set! polyphony-menu.open false))
+    (menu-item (str "Apply " (if (poly?) "poly" "mono") " to all scenes")
       :key "polyphony-apply-all-scenes"
       :on-select (lambda (event) (apply-polyphony-to-all-scenes)))))
-
-(def track-bus-send-field (bus)
-  (str "tp-bus-" bus "-send"))
 
 (def mute-group-value (label)
   (if (= label "1") 1
@@ -93,133 +108,12 @@
       (seq-plock-timebase label)
       (seq-set-timebase label))))
 
-;; --- P-lock row projection (COMPAT: eseq-0l17.14 group D) -------------------
-;; Device param controls read their p-lock state from eseq.kinds params
-;; (param-controls.lisp). Track-level locks (timebase, swing: rows without a
-;; param index) and the drum rack panel's macro and slot-control targets have
-;; no kind field yet, so this panel and the rack panel keep the legacy fan-out
-;; of SEQ.track-plocks / SEQ.track-plock-any into per-row SEQV fields
-;; ("<key>-on" / "<key>-def" / "<key>-any"): each control subscribes only to
-;; its own field, so a selection change reruns only the controls whose lock
-;; state changed. Ported with this file.
-
-(def plock-projected-key (target slot rack-slot idx)
-  (str "plk-" target "-" slot "-" rack-slot "-" idx))
-
-(def plock-projected-row-key (row)
-  (if (= (get row :param-idx) nil)
-    (str "plk-t-" (get row :target))
-    (plock-projected-key
-      (get row :target)
-      (if (= (get row :target) "instrument") "any" (get row :slot-idx))
-      (if (= (get row :target) "rack-effect") (get row :rack-slot) "x")
-      (get row :param-idx))))
-
-;; The rows the projections publish: the track-level locks
-;; (track-param-plock-active?, -default) and the rack macro and slot-control
-;; locks (target-plock-any?); every device param reads its kinds param.
-(def track-level-row? (row)
-  (= (get row :param-idx) nil))
-
-(def rack-control-row? (row)
-  (listed? (get row :target) '("rack-macro" "rack-slot-param")))
-
-(defstate plock-published-keys '())
-
-;; Runs as a dedicated non-visual effect buffer: a plain (effect ...) treats
-;; its result as the source buffer's widget tree, which would clobber the
-;; buffer that loaded this file. The named target gives the projection its
-;; own inert scratch buffer and keeps it live in every layout.
-(effect-buffer "*plock-sync*"
-  (do
-    (let ((keys
-            (reverse
-              (reduce |acc row|
-                (let ((key (plock-projected-row-key row)))
-                  (do
-                    (reactive-set "SEQV" (str key "-on") 1)
-                    (reactive-set "SEQV" (str key "-def") (get row :default))
-                    (cons key acc)))
-                '()
-                (filter track-level-row? SEQ.track-plocks)))))
-      (do
-        (each plock-published-keys |key idx|
-          (if (listed? key keys)
-            false
-            (do
-              (reactive-set "SEQV" (str key "-on") 0)
-              (reactive-set "SEQV" (str key "-def") false))))
-        (if (= plock-published-keys keys)
-          false
-          (set! plock-published-keys keys))))
-    nil))
-
-(defstate plock-any-published-keys '())
-
-;; Same fan-out over SEQ.track-plock-any: the targets that carry a p-lock on
-;; ANY step of the pattern (bead eseq-yr6w), for the automation dot.
-(effect-buffer "*plock-any-sync*"
-  (do
-    (let ((keys
-            (reverse
-              (reduce |acc row|
-                (let ((key (plock-projected-row-key row)))
-                  (do
-                    (reactive-set "SEQV" (str key "-any") 1)
-                    (cons key acc)))
-                '()
-                (filter rack-control-row? SEQ.track-plock-any)))))
-      (do
-        (each plock-any-published-keys |key idx|
-          (if (listed? key keys)
-            false
-            (reactive-set "SEQV" (str key "-any") 0)))
-        (if (= plock-any-published-keys keys)
-          false
-          (set! plock-any-published-keys keys))))
-    nil))
-
-;; Whether a lock target (a dict as the clear-param-plocks command takes it:
-;; a rack macro, a rack slot control) is locked on any step.
-(def target-plock-any? (target)
-  (= (reactive-get "SEQV" (str (plock-projected-row-key target) "-any")) 1))
-
-;; Track-level lock presence rides the projection above instead of reading
-;; SEQ.track-plocks directly, so a selection change only reruns this panel
-;; when one of these locks actually changed.
-(def track-param-plock-active? (target)
-  (= (reactive-get "SEQV" (str "plk-t-" target "-on")) 1))
-
-(def track-param-plock-default (target fallback)
-  (if (track-param-plock-active? target)
-    (reactive-get "SEQV" (str "plk-t-" target "-def"))
-    fallback))
-
-(def track-bus-send-control (send)
-  (pc/process-send-map-wrapper SEQ.current-track send
-    (str "tp-bus-send-" (get send :bus-idx))
-  (v-stack :align :center :gap 0.25
-    (h-stack :gap 0.25 :align :baseline
-      (label (substring (get send :name) 0 8) :font-size 9 :color :dim :bg :transparent)
-      (number-picker
-        :value (bind-seq (track-bus-send-field (get send :bus-idx)))
-        :min 0 :max 1 :decimals 2
-        :noui true :font-size 9 :text-color :dim
-        :on-change (lambda (v)
-          (do
-            (eseq.seq-core-state/cool-off-follow)
-            (host-command "set-track-bus-send"
-              (dict :bus (get send :bus-idx) :amount v))))
-        :width 4 :height 1))
-    (box :width 8 :height 2
-      (hslider :min 0 :max 1
-        :value (bind-seq (track-bus-send-field (get send :bus-idx)))
-        :material (eseq.materials/slider-material)
-        :on-change (lambda (v)
-          (do
-            (eseq.seq-core-state/cool-off-follow)
-            (host-command "set-track-bus-send"
-              (dict :bus (get send :bus-idx) :amount v)))))))))
+;; A track setting's (timebase, swing, swing-resolution) p-lock at the
+;; displayed step: its `(dict :name :value)` row of t.setting-locks, else
+;; nil. Each lockable control reads it in its own subtree, so a lock coming
+;; or going re-renders that control alone.
+(def setting-lock (t name)
+  (first (filter (lambda (row) (= (get row :name) name)) t.setting-locks)))
 
 (def plock-set-value (p v)
   (do
@@ -254,7 +148,10 @@
           :network-id (get p :network-id)
           :neuron-idx (get p :neuron-idx))))
 
-(defstate selected-plock-row -1)
+;; The p-lock table's selected row (its index in SEQ.track-plocks), -1 none.
+(def-kind plock-table
+  :key ()
+  :state ((row -1)))
 
 (def plock-param-col-width 6.45)
 (def plock-lock-col-width 6.35)
@@ -262,22 +159,26 @@
 (def plock-col-gap 0.22)
 
 (def plock-row-selected? ()
-  (and (>= selected-plock-row 0)
-       (< selected-plock-row (len SEQ.track-plocks))))
+  (and (>= plock-table.row 0)
+       (< plock-table.row (len SEQ.track-plocks))))
+
+;; Deselect the table's row (an effect selection takes the delete key).
+(def clear-plock-row! ()
+  (if (= plock-table.row -1) false (set! plock-table.row -1)))
 
 (def selected-plock-row-preview? ()
   (and (plock-row-selected?)
-       (get (nth SEQ.track-plocks selected-plock-row) :preview)))
+       (get (nth SEQ.track-plocks plock-table.row) :preview)))
 
 (def delete-selected-plock-row ()
   (if (plock-row-selected?)
     (if (selected-plock-row-preview?)
-      (set! selected-plock-row -1)
-      (let ((idx selected-plock-row)
+      (set! plock-table.row -1)
+      (let ((idx plock-table.row)
             (next-count (- (len SEQ.track-plocks) 1)))
         (do
           (plock-clear (nth SEQ.track-plocks idx))
-          (set! selected-plock-row
+          (set! plock-table.row
             (if (<= next-count 0)
               -1
               (min idx (- next-count 1)))))))
@@ -297,7 +198,7 @@
 (def plock-chip-click (chip)
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (set! selected-plock-row -1)
+    (set! plock-table.row -1)
     (if (seq-has-selection?)
       (host-command "stamp-plock-variant"
         (dict :label (get chip :label)
@@ -361,10 +262,19 @@
           "fx"
           "seq")))))
 
+;; A rack macro row is named by the macro's own name (rm.name, live while
+;; it is renamed); any other row by its :name.
+(def plock-row-name (p)
+  (if (= (get p :target) "rack-macro")
+    (let ((rack (dv/instrument-of selection.track))
+          (rm (if rack (nth rack.macros (get p :param-idx)) nil)))
+      (if rm rm.name (get p :name)))
+    (get p :name)))
+
 (def plock-row-title (p)
   (if (= (get p :source) "neuron")
     (str (get p :label) " " (get p :name))
-    (ms/macro-name p)))
+    (plock-row-name p)))
 
 (def plock-row-key (idx suffix)
   (str "track-plock-row-" idx "-" suffix))
@@ -388,19 +298,19 @@
       :height 1.14
       :align :baseline
       :padding 0.07
-      :background-color (if (= selected-plock-row idx)
+      :background-color (if (= plock-table.row idx)
         (rgba 0.27 0.78 0.86 0.18)
         (if (= (mod idx 2) 0) (rgba 1 1 1 0.025) :transparent))
-      :border-width (if (= selected-plock-row idx) 1 0)
+      :border-width (if (= plock-table.row idx) 1 0)
       :border-color (rgba 0.27 0.78 0.86 0.55)
       :corner-radius 2
-      :on-click |x y r| (set! selected-plock-row idx)
+      :on-click |x y r| (set! plock-table.row idx)
       (h-stack :width :fill :gap plock-col-gap :align :center
         (label (substring (plock-row-title p) 0 12)
           :key (plock-row-key idx "param")
           :font-size 9.2 :width plock-param-col-width
           :v-align :center
-          :color (if (= selected-plock-row idx) :white :dim)
+          :color (if (= plock-table.row idx) :white :dim)
           :bg :transparent)
         (if (or (= (get p :source) "neuron") (get p :preview))
           (label (if (get p :text-value) (get p :text-value) (str (get p :value)))
@@ -463,13 +373,6 @@
           (plock-group "neural"))
         ))))
 
-(def step-param-value (mode)
-  (let ((values (eseq.seqv-track-params/seqv-current-param-values mode))
-        (step (eseq.seq-core-state/current-step)))
-    (if (< step (len values))
-      (nth values step)
-      0)))
-
 (def step-set-param-direct (mode value)
   ;; The stopped-transport edit path: cursor step, or the p-lock path for a
   ;; selection.
@@ -491,7 +394,7 @@
   ;; it). No cool-off-follow in that branch: the performer is watching the
   ;; playhead, so auto-follow must stay alive. The cursor step rides along
   ;; as the fallback target if the gate races off before dispatch.
-  (if (and SEQ.playing SEQ.recording)
+  (if (and transport.playing transport.recording)
     (seq-print-step-param
       (eseq.seq-core-state/current-step)
       (eseq.seqv-track-params/seqv-param-keyword mode)
@@ -506,7 +409,7 @@
     (eseq.seqv-track-params/seqv-param-keyword mode)))
 
 (def step-duration-print-context? (mode)
-  (and (= mode 1) SEQ.playing SEQ.recording))
+  (and (= mode 1) transport.playing transport.recording))
 
 (def step-param-min (mode)
   (if (step-duration-print-context? mode) 0.125
@@ -535,7 +438,21 @@
 (def step-param-drag-rows (mode)
   (if (or (= mode 7) (= mode 8)) 24 0))
 
-(def step-param-picker (mode key width)
+;; The value the picker for step param `key` shows: es's (the edited step,
+;; selection.edit-step), 0 without one.
+(def step-param-binding (es key)
+  (if (= es nil)
+    0
+    (match key
+      "transpose" #'es.transpose
+      "velocity" #'es.velocity
+      "duration" #'es.duration
+      "pan" #'es.pan
+      "retrig" #'es.retrig
+      "retrig-rate" #'es.retrig-rate
+      _ 0)))
+
+(def step-param-picker (es mode key width)
   (box 
     :corner-radius 16 :width 12 :padding 0.2 :background-color :mixer-strip-bg 
     (h-stack :align :center :gap 0.24
@@ -543,7 +460,7 @@
       (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 10 :color :dim :bg :transparent :v-align :center :flex 1)
       (number-picker
         :key (str "step-param-" key)
-        :value (bind-seq (str "fx-step-value-" key))
+        :value (step-param-binding es key)
         :min (step-param-min mode)
         :max (step-param-max mode)
         :taper (step-param-taper mode)
@@ -557,27 +474,58 @@
         :width width
         :height 1.15))))
 
-;; The mixer-v2-* names below resolve through eseq.mixer's compat aliases,
-;; NOT an import: importing eseq.mixer would evaluate mixer.lisp, whose
-;; top-level (effect-buffer "*mixer*") / define-mode registrations must not
-;; ride along into every VM that loads the effects family.
+;; The track-colour helpers resolve through eseq.mixer's compat aliases, NOT
+;; an import: importing eseq.mixer would evaluate mixer.lisp, whose top-level
+;; (effect-buffer "*mixer*") / define-mode registrations must not ride along
+;; into every VM that loads the effects family.
+(def track-rgba (i dim)
+  (rgba (eseq.mixer/track-color-r i dim) (eseq.mixer/track-color-g i dim)
+        (eseq.mixer/track-color-b i dim) 1.0))
+
+;; The current track's chip (eseq.panel-header's chip shape). A binding
+;; cannot be negated, so the box binds t.audible as :muted with the silenced
+;; look on its plain props and the heard look as the "muted" one.
 (def step-track-badge ()
-  (let ((track SEQ.current-track)
-      (muted (bind-seq-nth "track-muted-effective" track)))
-    (header/chip "step-track-badge" (eseq.mixer/track-collapsed-label track) 4.55
-      (rgba
-        (eseq.mixer/track-color-r track false)
-        (eseq.mixer/track-color-g track false)
-        (eseq.mixer/track-color-b track false)
-        1.0)
-      muted
-      (rgba
-        (eseq.mixer/track-color-r track true)
-        (eseq.mixer/track-color-g track true)
-        (eseq.mixer/track-color-b track true)
-        1.0))))
+  (let ((t selection.track))
+    (if t
+      (box
+        :key "step-track-badge"
+        :width 4.55 :height 1.0
+        :padding 0
+        :corner-radius 8
+        :v-align :center
+        :muted #'t.audible
+        :background-color (track-rgba t.index true)
+        :muted-background-color (track-rgba t.index false)
+        (label (eseq.mixer/track-collapsed-label t.index)
+          :width 4.55
+          :font-size 10
+          :v-align :center
+          :h-align :center
+          :active #'t.audible
+          :color :dim
+          :active-color :black
+          :bg :transparent))
+      (box :width 4.55 :height 1.0))))
+
+;; "step N · M selected": the cursor step and the selection's size, in
+;; their own subtree (the step panel reads the edit step alone).
+(def step-selection-summary ()
+  (subtree :key "step-selection-summary-subtree"
+    (let ((cursor selection.cursor-step))
+      (h-stack :key "step-selection-summary" :gap 0.15 :align :center
+        (number-label :key "step-cursor-label"
+          :value (if cursor (+ cursor.index 1) 1)
+          :prefix "step " :decimals 0 :width 3.3
+          :font-size 8 :color :dim :bg :transparent)
+        (label "·" :font-size 8 :color :dim :bg :transparent)
+        (number-label :key "step-selection-count-label"
+          :value (len selection.steps)
+          :suffix " selected" :decimals 0 :width 5.0
+          :font-size 8 :color :dim :bg :transparent)))))
 
 (def step-parameters-panel ()
+  (let ((es selection.edit-step))
   (box :debug-name "step-parameters-panel" :padding 0.5
     (box :padding 0.0
       :background-color :transparent ;:mixer-strip-bg
@@ -586,64 +534,24 @@
       (v-stack :gap 0.55
         (header/pill
             (step-track-badge)
-            (h-stack :key "step-selection-summary" :gap 0.15 :align :center
-              (number-label :key "step-cursor-label"
-                :value (bind-seq "fx-step-cursor-number")
-                :prefix "step " :decimals 0 :width 3.3
-                :font-size 8 :color :dim :bg :transparent)
-              (label "·" :font-size 8 :color :dim :bg :transparent)
-              (number-label :key "step-selection-count-label"
-                :value (bind-seq "fx-step-selection-count")
-                :suffix " selected" :decimals 0 :width 5.0
-                :font-size 8 :color :dim :bg :transparent)))
+            (step-selection-summary))
           (v-stack :gap 0.25 
             (h-stack :gap 0.55 :align :center
-              (step-param-picker 3 "transpose" 4.2)
-              (step-param-picker 0 "velocity" 4.2)
+              (step-param-picker es 3 "transpose" 4.2)
+              (step-param-picker es 0 "velocity" 4.2)
               )
             (h-stack :gap 0.55 :align :center
-              (step-param-picker 1 "duration" 4.2)
-              (step-param-picker 4 "pan" 4.2)
+              (step-param-picker es 1 "duration" 4.2)
+              (step-param-picker es 4 "pan" 4.2)
               )
             (h-stack :gap 0.55 :align :center
-              (step-param-picker 7 "retrig" 4.2)
-              (step-param-picker 8 "retrig-rate" 4.2)
+              (step-param-picker es 7 "retrig" 4.2)
+              (step-param-picker es 8 "retrig-rate" 4.2)
               ))
         
         
         )
-      )))
-
-(def track-accumulator-panel ()
-  (h-stack :debug-name "track-accumulator-panel" :padding 0.00
-    (box :padding 0.5
-      :background-color :mixer-strip-bg
-      :corner-radius 16
-      :border-color :mixer-strip-border
-      (h-stack :gap 0.55 :align :center
-        (v-stack :align :center :gap 0.40
-          (label "acc fn" :font-size 8 :color :dim :bg :transparent)
-          (dropdown :key "track-accumulator-function"
-            :value SEQ.tp-accumulator
-            :options SEQ.accumulator-options
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accumulator v)))
-            :width 7.0 :height 1.25 :font-size 9))
-        (v-stack :align :center :gap 0.40
-          (label "acc mode" :font-size 8 :color :dim :bg :transparent)
-          (dropdown :key "track-accumulator-mode"
-            :value SEQ.tp-accum-mode
-            :options SEQ.accum-mode-options
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-mode v)))
-            :width 6.0 :height 1.25 :font-size 9))
-        (v-stack :align :center :gap 0.22
-          (v-stack :gap 0.5 :align :center
-            (label "acc lim" :font-size 8 :color :dim :bg :transparent)
-            (number-picker :key "track-accumulator-limit"
-              :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
-              :noui false :font-size 8 :text-color :dim
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-limit v)))
-              :width 5.2 :height 1.15)))))))
-
+      ))))
 
 ;; A member of a drum rack playing a groove: the scheduler replaces track
 ;; swing with the rack's groove (docs/rack-groove-spec.md, "UI"), so the
@@ -664,18 +572,74 @@
       (label (substring (if groove (get groove :active-label) "") 0 12)
         :font-size 6.5 :color :dim :bg :transparent :v-align :center))))
 
+;; The lockable settings: each shows its lock at the displayed step (the
+;; p-lock accent) over the track's own value.
+(def swing-resolution-control (t)
+  (subtree :key "track-swing-resolution-control"
+    (let ((lock (setting-lock t "swing-resolution")))
+      (v-stack :align :center :gap 0.15
+        (label "swg res" :font-size 8 :color :dim :bg :transparent :v-align :center)
+        (dropdown :value (if lock (get lock :value) t.swing-resolution)
+          :key "track-swing-resolution"
+          :options '("1/16" "1/8" "1/4" "1/2")
+          :on-change (lambda (v) (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v))
+          :plock-active (if lock 1 0)
+          :plock-color-r (pc/param-plock-color-r)
+          :plock-color-g (pc/param-plock-color-g)
+          :plock-color-b (pc/param-plock-color-b)
+          :width 5.0 :height 1.0 :font-size 9)))))
+
+(def swing-control (t)
+  (subtree :key "track-swing-control"
+    (let ((lock (setting-lock t "swing")))
+      (v-stack :gap 0.15 :align :center
+        (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
+        (number-picker :value (if lock (get lock :value) #'t.swing) :min 50 :max 75 :decimals 1
+          :key "track-swing"
+          :border-color :none
+          :noui false :font-size 8 :text-color :dim
+          :plock-active (if lock 1 0)
+          :plock-default t.swing
+          :plock-color-r (pc/param-plock-color-r)
+          :plock-color-g (pc/param-plock-color-g)
+          :plock-color-b (pc/param-plock-color-b)
+          :on-change (lambda (v) (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v))
+          :width 5.2 :height 1.0)))))
+
+(def timebase-control (t)
+  (subtree :key "track-timebase-control"
+    (let ((lock (setting-lock t "timebase")))
+      (v-stack :align :center :gap 0.15
+        (label "timebase" :font-size 8 :color :dim :bg :transparent :v-align :center)
+        (dropdown :value (if lock (get lock :value) t.timebase)
+          :key "track-timebase"
+          :options st/seq-timebase-options
+          :on-change (lambda (v) (set-timebase v))
+          :plock-active (if lock 1 0)
+          :plock-color-r (pc/param-plock-color-r)
+          :plock-color-g (pc/param-plock-color-g)
+          :plock-color-b (pc/param-plock-color-b)
+          :width 6.0 :height 1.0 :font-size 9)))))
+
 (def track-parameters-panel ()
-  (if se/scale-editor-open
+  (if (se/editor-open?)
     (se/scale-editor-panel)
     (track-settings-strip)))
 
 (def track-settings-strip ()
+  (let ((t selection.track))
+    (if t
+      (settings-strip t)
+      (box :width 0 :height 0))))
+
+(def settings-strip (t)
+  (let ((poly (poly?)))
   (box :debug-name "track-parameters-strip" :padding 0.0
     (v-stack :gap 0.25
       (h-stack :gap 1.05 :align :center
         (v-stack :gap 0.15 :align :center
           (label "steps" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+          (number-picker :value #'t.num-steps :min 1 :max 256 :decimals 0
             :border-color :none
             :noui false :font-size 8 :text-color :white
             :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
@@ -683,38 +647,38 @@
         
         (v-stack :align :center :gap 0.15
           (label "poly" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (button  (if SEQ.tp-poly "ON" "OFF") :width 3.0 :height 1.0
-            :background-color (if SEQ.tp-poly :control-on-bg :poly-off-bg)
+          (button  (if poly "ON" "OFF") :width 3.0 :height 1.0
+            :background-color (if poly :control-on-bg :poly-off-bg)
             :border-color :none
             :font-size 10
-            :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
+            :color (if poly :control-on-fg :poly-off-fg)
             :on-click |x y r| (toggle-polyphony)
             )
           )
         (v-stack :gap 0.15 :align :center
           (label "voices" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+          (number-picker :value (voices) :min 1 :max 12 :decimals 0
             :border-color :none
             :noui false :font-size 8 :text-color :white
             :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
-                (if SEQ.tp-is-rack
+                (if (settings-rack-slot)
                   (host-command "set-rack-slot-max-polyphony"
-                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                    (dict :track t.index :slot selection.rack-slot :value v))
                   (seq-set-track-param :voices v))))
             :width 3.4 :height 1.0)
           )
-        (if SEQ.tp-supports-mono-trigger
+        (if t.supports-mono-trigger
           (v-stack :align :center :gap 0.15
             (label "priority"  :font-size 8 :color :dim :bg :transparent :v-align :center)
-            (dropdown :value SEQ.tp-voice-priority :options '("Last" "High" "Low")
+            (dropdown :value t.voice-priority :options '("Last" "High" "Low")
               :on-change (lambda (v)
                 (seq-set-track-param :voice-priority
                   (if (= v "High") 1 (if (= v "Low") 2 0))))
               :width 6.0 :height 1.0 :font-size 9)))
-        (if SEQ.tp-supports-mono-trigger
+        (if t.supports-mono-trigger
           (v-stack :align :center :gap 0.15
             (label "trigger"  :font-size 8 :color :dim :bg :transparent :v-align :center)
-            (dropdown :value SEQ.tp-mono-trigger :options '("retrig" "legato")
+            (dropdown :value t.mono-trigger :options '("retrig" "legato")
               :on-change (lambda (v)
                 (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
               :width 6.0 :height 1.0 :font-size 9)))
@@ -722,51 +686,17 @@
         
         )
       (h-stack :gap 1.05 :align :center
-        (v-stack :align :center :gap 0.15
-          (label "swg res" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (dropdown :value SEQ.tp-swing-resolution
-            :key "track-swing-resolution"
-            :options '("1/16" "1/8" "1/4" "1/2")
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v)))
-            :plock-active (if (track-param-plock-active? "swing-resolution") 1 0)
-            :plock-color-r (pc/param-plock-color-r)
-            :plock-color-g (pc/param-plock-color-g)
-            :plock-color-b (pc/param-plock-color-b)
-            :width 5.0 :height 1.0 :font-size 9))
+        (swing-resolution-control t)
         (v-stack :align :center :gap 0.22
-          (if (eseq.drum-rack-v2/groove-active-for-track? SEQ.current-track)
-            (groove-swing-hint SEQ.current-track)
-          (v-stack :gap 0.15 :align :center
-            (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
-            (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
-              :key "track-swing"
-              :border-color :none
-              :noui false :font-size 8 :text-color :dim
-              :plock-active (if (track-param-plock-active? "swing") 1 0)
-              :plock-default (track-param-plock-default "swing" SEQ.tp-swing)
-              :plock-color-r (pc/param-plock-color-r)
-              :plock-color-g (pc/param-plock-color-g)
-              :plock-color-b (pc/param-plock-color-b)
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
-              :width 5.2 :height 1.0)))
-          )
-        
-        (v-stack :align :center :gap 0.15
-          (label "timebase" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (dropdown :value SEQ.tp-timebase
-            :key "track-timebase"
-            :options st/seq-timebase-options
-            :on-change (lambda (v) (set-timebase v))
-            :plock-active (if (track-param-plock-active? "timebase") 1 0)
-            :plock-color-r (pc/param-plock-color-r)
-            :plock-color-g (pc/param-plock-color-g)
-            :plock-color-b (pc/param-plock-color-b)
-            :width 6.0 :height 1.0 :font-size 9))
+          (if (eseq.drum-rack-v2/groove-active-for-track? t.index)
+            (groove-swing-hint t.index)
+            (swing-control t)))
+        (timebase-control t)
         
         (v-stack :align :center :gap 0.15
           (label "mute grp" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (dropdown :value SEQ.tp-mute-group
-            :options SEQ.mute-group-options
+          (dropdown :value (nth mute-group-options t.mute-group)
+            :options mute-group-options
             :on-change (lambda (v)
               (do
                 (eseq.seq-core-state/cool-off-follow)
@@ -777,11 +707,11 @@
   	(v-stack :align :left :gap 0.15
           (label "   scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
           (h-stack :gap 0.3 :align :center
-            (dropdown :value SEQ.tp-fts
-              :options SEQ.fts-options
+            (dropdown :value t.fts
+              :options project.fts-options
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
               :width 8.6 :height 1.0 :font-size 9)
             (se/scale-settings-button)))        )
       )
     )
-  )
+  ))

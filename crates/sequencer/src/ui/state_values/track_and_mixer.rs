@@ -290,24 +290,6 @@ pub(crate) fn sync_track_volume_binding_fields(rt: &mut Runtime, state: &Arc<Seq
     }
 }
 
-pub(crate) fn current_track_bus_send_field(bus_idx: usize) -> String {
-    format!("tp-bus-{bus_idx}-send")
-}
-
-pub(crate) fn track_bus_send_amount(
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    bus_idx: usize,
-) -> Option<f32> {
-    let bus = app.buses.get(bus_idx)?;
-    if bus.id == sequencer::sequencer::BusId::MIX {
-        return None;
-    }
-    state.pattern.track_params.get(track)?;
-    Some(track_send_base(state, track, bus.id))
-}
-
 /// The track's own send level to `bus` (0 without a send). `track` is in
 /// range.
 pub(crate) fn track_send_base(
@@ -330,9 +312,8 @@ pub(crate) fn track_send_lock(
     display_step.and_then(|step| state.pattern.track_send_plocks[track].get(step, bus))
 }
 
-/// The send level shown at `display_step` (see
-/// [`sync_selected_track_bus_send_binding_fields`]): its p-lock, else the
-/// base.
+/// The send level shown at `display_step` (the host kinds' `send.display`):
+/// its p-lock, else the base.
 pub(crate) fn displayed_track_send_amount(
     state: &SequencerState,
     track: usize,
@@ -341,70 +322,6 @@ pub(crate) fn displayed_track_send_amount(
 ) -> f32 {
     track_send_lock(state, track, bus, display_step)
         .unwrap_or_else(|| track_send_base(state, track, bus))
-}
-
-/// Publish the current track's `tp-bus-N-send`; returns whether a reader
-/// needs the reactive cycle.
-pub(crate) fn sync_current_track_bus_send_binding_field(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    bus_idx: usize,
-) -> bool {
-    track_bus_send_amount(app, state, track, bus_idx).is_some_and(|amount| {
-        rt.set_reactive(
-            "SEQ",
-            &current_track_bus_send_field(bus_idx),
-            Value::Number(amount as f64),
-        )
-        .effects_dirty
-    })
-}
-
-pub(crate) fn sync_current_track_bus_send_binding_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-) {
-    for (bus_idx, bus) in app.buses.iter().enumerate() {
-        if bus.id != sequencer::sequencer::BusId::MIX {
-            sync_current_track_bus_send_binding_field(rt, app, state, track, bus_idx);
-        }
-    }
-}
-
-/// Synchronize the current track's send controls (`tp-bus-N-send`) to the
-/// same display step used by synth/effect parameters: selection first, then
-/// the playback step, then the pattern baseline. (The mixer's send knobs
-/// bind `send.display`, which the host kinds compute the same way.)
-pub(crate) fn sync_selected_track_bus_send_binding_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) -> bool {
-    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
-    let mut dirty = false;
-    for (bus_idx, bus) in app.buses.iter().enumerate() {
-        if bus.id == sequencer::sequencer::BusId::MIX {
-            continue;
-        }
-        if track >= state.pattern.track_params.len() {
-            continue;
-        }
-        let amount = displayed_track_send_amount(state, track, bus.id, display_step);
-        dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &current_track_bus_send_field(bus_idx),
-                Value::Number(amount as f64),
-            )
-            .effects_dirty;
-    }
-    dirty
 }
 
 pub(crate) fn build_track_mutes(state: &Arc<SequencerState>) -> Value {

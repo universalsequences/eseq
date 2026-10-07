@@ -43,9 +43,9 @@ const START: usize = 2;
 #[test]
 fn ported_patching_views_use_no_legacy_binding_forms() {
     assert_ported(&PORTED);
-    // The arm state is a singleton; one COMPAT read stays, the rack panel's
-    // live macro name field, until the effects port (eseq-0l17.61).
-    assert_eq!(legacy_forms(MACRO_STATE), vec!["reactive-get"]);
+    // The arm state is a singleton (the rack macro name COMPAT read went
+    // with the effects port, eseq-0l17.61: the rack panel reads rm.name).
+    assert_eq!(legacy_forms(MACRO_STATE), Vec::<&str>::new());
 }
 
 impl Harness {

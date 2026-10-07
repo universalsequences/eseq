@@ -329,6 +329,27 @@ fn param_mod_display(
     .flatten()
 }
 
+/// The modulation source (1-based) a modulation source's setting `pdesc`
+/// sets; `None` for any other param.
+pub(super) fn param_source_slot(pdesc: &ParamDescriptor) -> Option<usize> {
+    let slot = PanelSection::of(pdesc).mod_slot(pdesc);
+    (1..=SLOT_COUNT).contains(&slot).then_some(slot)
+}
+
+/// `param.mod-phase`: a modulation source's setting's source's cycle
+/// position (its `mod-slot`'s entry of [`device_mod_phases`]); -1 for any
+/// other param.
+fn param_mod_phase(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    device: &DeviceSource,
+    pdesc: &ParamDescriptor,
+) -> f64 {
+    param_source_slot(pdesc).map_or(-1.0, |slot| {
+        device_mod_phases(sources, shared, device)[slot - 1]
+    })
+}
+
 /// `device.mod-phases`: each modulation source's cycle position, -1 when
 /// it has none or nothing samples the device.
 pub(super) fn device_mod_phases(
@@ -495,7 +516,7 @@ pub(super) fn param_panel_fields(
         let on = visible.visible(sources, device, pdesc, index);
         emit(f::PARAM_VISIBLE, Value::Bool(on));
     }
-    if mask & bits.mod_display() != 0 {
+    if mask & bits.mod_values() != 0 {
         let (offset, value, scale) =
             param_mod_display(sources, shared, device, pdesc, index).unwrap_or((0.0, shown, 1.0));
         if mask & bits.mod_offset != 0 {
@@ -515,6 +536,12 @@ pub(super) fn param_panel_fields(
             };
             emit(f::PARAM_MOD_RATIO, number(ratio));
         }
+    }
+    if mask & bits.mod_phase != 0 {
+        emit(
+            f::PARAM_MOD_PHASE,
+            number(param_mod_phase(sources, shared, device, pdesc)),
+        );
     }
     if mask & bits.process() != 0 {
         let instrument =
@@ -560,6 +587,9 @@ pub(crate) struct PanelState {
     /// `-level` was observed at the last sync
     /// (`HostKinds::wants_modulator_meters`).
     pub(super) modulator_meters_observed: bool,
+    /// Whether a sampler's `device.playhead` was observed at the last sync
+    /// (`HostKinds::wants_sampler_playhead`).
+    pub(super) sampler_playhead_observed: bool,
     /// Per device observing `table-options`, the cache key of the list
     /// last pushed (`None`: the empty list of a device that is no Filter
     /// Table).
@@ -577,6 +607,13 @@ impl HostKinds {
     /// keeps polling it with the fx panel hidden.
     pub(crate) fn wants_mod_display(&self) -> bool {
         self.panel.mod_display_observed
+    }
+
+    /// Whether a sampler's `device.playhead` is observed (the sampler
+    /// panel's waveform): the tick then keeps the current track's sampler
+    /// voices on the audio graph's watchlist, which the playhead reads.
+    pub(crate) fn wants_sampler_playhead(&self) -> bool {
+        self.panel.sampler_playhead_observed
     }
 
     /// The observed cells of every tensor ([`ObservedList`] over the

@@ -1,6 +1,7 @@
 ;; Generic parameter-grid rows used by instruments and effects.
 (module eseq.effects.param-grid)
 
+(import eseq.materials)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.state :refer (instrument-view section-of select-section!))

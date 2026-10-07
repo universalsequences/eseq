@@ -33,6 +33,12 @@ fn ported_transport_views_use_no_legacy_binding_forms() {
         legacy_forms("(defwidget w :state (a) :bindable (a))"),
         [":bindable"]
     );
+    // The generic `(bind "NS" field)`, not a surface's `(bind name)`.
+    assert_eq!(legacy_forms("(bind \"SEQV\" (field gid))"), ["(bind "]);
+    assert_eq!(
+        legacy_forms("(def bind (name) 0) (knob :value (bind \"x\") :y (bind name))"),
+        Vec::<&str>::new()
+    );
 }
 
 #[test]

@@ -16,8 +16,8 @@
 
 (import eseq.kinds :refer (track buses selection))
 
-(export track-at current-track-index instrument-of inst-device fx-device param-device
-        param-of with-prm tensor-of base-note-param? param-stored-value)
+(export track-at current-track-index instrument-of inst-device rack-slot-device fx-device
+        param-device param-of with-prm tensor-of base-note-param? param-stored-value)
 
 ;; The device of `devices` at chain position `slot` (-1: the instrument), or
 ;; nil.
@@ -36,12 +36,18 @@
 (def instrument-of (t)
   (if t (device-at t.devices -1) nil))
 
+;; Slot `slot` of the drum rack on track `track` (positions), or nil.
+(def rack-slot-device (track slot)
+  (let ((rack (instrument-of (track-at track))))
+    (if (and rack (number? slot)) (device-at rack.devices slot) nil)))
+
 ;; The device an instrument panel dict shows: its track's instrument, or the
 ;; drum rack slot it names (`:rack-slot`).
 (def inst-device (inst)
-  (let ((d (instrument-of (track-at (get inst :track))))
-        (slot (get inst :rack-slot)))
-    (if (and d (not (= slot nil))) (device-at d.devices slot) d)))
+  (let ((slot (get inst :rack-slot)))
+    (if (= slot nil)
+      (instrument-of (track-at (get inst :track)))
+      (rack-slot-device (get inst :track) slot))))
 
 ;; The device an effect panel dict (`fx`) shows: a bus effect, a drum rack
 ;; slot's effect, a MIDI effect or a chain effect of its track (the current
@@ -74,8 +80,7 @@
   (let ((rack-track (get p :rack-track)))
     (if (= rack-track nil)
       (instrument-of selection.track)
-      (let ((rack (instrument-of (track-at rack-track))))
-        (if rack (device-at rack.devices (get p :rack-slot)) nil)))))
+      (rack-slot-device rack-track (get p :rack-slot)))))
 
 ;; The device of param dict p: fx's (an effect panel's), else the
 ;; instrument's (fx false).

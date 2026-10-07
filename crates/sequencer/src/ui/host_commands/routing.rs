@@ -369,21 +369,9 @@ pub(super) fn handle(
                         });
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                     }
+                    // The send controls read eseq.kinds `send.display` (the
+                    // edited lock at the selected step, else the base).
                     let rt = editor.runtime_mut();
-                    if has_selection {
-                        // The persisted baseline intentionally did not change. Publish
-                        // the edited lock value instead of immediately snapping the
-                        // control back to that baseline.
-                        if track == current {
-                            rt.set_reactive(
-                                "SEQ",
-                                &current_track_bus_send_field(bus_idx),
-                                Value::Number(amount as f64),
-                            );
-                        }
-                    } else if track == current {
-                        sync_current_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
-                    }
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                 }
@@ -416,16 +404,6 @@ pub(super) fn handle(
             }
             set_track_send_base(app, track, bus_id, amount.clamp(0.0, 1.0) as f32);
             let rt = editor.runtime_mut();
-            if track == current_track.load(Ordering::Relaxed) {
-                // The current track's controls show the displayed level.
-                sync_selected_track_bus_send_binding_fields(
-                    rt,
-                    app,
-                    &state,
-                    track,
-                    &selected_steps,
-                );
-            }
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
         }
