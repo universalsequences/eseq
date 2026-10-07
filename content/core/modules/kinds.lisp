@@ -59,7 +59,7 @@
         apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
         learn-method-options learn-refine-mode-options
         piano-roll add-note! delete-notes! pitch-min pitch-max
-        focus-step-params focus-step-value set-focus-step!
+        focus-step-params focus-step-value set-focus-step! set-step-param!
         graph graphs graph-of graph-param-named graph-edge-to set-group-gain!
         set-group-coupling! set-graph-params! gate-generator! graph-timebase-options
         graph-quantize-options
@@ -1027,6 +1027,8 @@
          (playhead  :int    :doc "The playing step, -1 while stopped")
          (playhead-page :int :doc "The 16-step page the playhead is on (playhead / 16), -1 while stopped")
          (length-step :int  :doc "The step a length lane (length!) last set the pattern length to, while playing; -1 when none")
+         (playhead-row :int :doc "The row the playhead lights on a grid as tall as the longest pattern, where a shorter track repeats (a tracker's): the transport's step modulo the grid's height when that repeat plays, else playhead; -1 while stopped")
+         (step-params-in-use (list-of :string) :doc "The step params (focus-step-params' :name, in their order) some active step holds off its default")
          (timebase  :string :doc "Step timebase: 1/16, 1/8T, …")
          (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
          (instrument-id :string :doc "The instrument it plays, as the browser's Instruments tab names it (builtin:sampler, …); empty for an empty track or a drum rack")
@@ -1422,7 +1424,8 @@
                       :doc "The step under the step cursor (current track); setting it selects the step's track")
          (edit-step step :doc "The step the step panel edits: the first selected step, else cursor-step")
          (rack-slot :int :doc "The current drum rack's selected slot, -1 when the current track is no rack")
-         (auto-follow :bool :doc "The view follows the playhead (paused for a while after an edit)")))
+         (auto-follow :bool :doc "The view follows the playhead (paused for a while after an edit)")
+         (playhead-row :int :doc "The current track's playhead-row (-1 while stopped or without a current track): bind it to follow the current track without reading selection.track")))
 
 ;; ── The browser, the sound palette, the editor and the app's views ──
 
@@ -2151,13 +2154,22 @@
         (list "retrig-rate" (lambda (fs) fs.retrig-rate))))
 
 ;; Focus step fs's param name (one of focus-step-params' :name; any other is
-;; an error); set it with (set-focus-step! fs name v).
+;; an error); set it with (set-focus-step! fs name v). A step has the same
+;; fields, so this reads a step's too; set it with (set-step-param! s name v).
 (def focus-step-value (fs name)
   (let ((row (first (filter (lambda (r) (= (first r) name)) focus-step-readers))))
     (if (= row nil)
       (seq-error (str "a focus step has no param " name))
       (let ((reader (nth row 1)))
         (reader fs)))))
+
+;; Step s's param name (one of focus-step-params' :name) to v on its track's
+;; live pattern (what t.steps shows, whatever the piano roll is pinned to):
+;; the value rule (§14.2c), one undo entry. `:activate true` turns s on in
+;; that same entry (a note typed into an empty step).
+(def set-step-param! (s name v &key (activate false))
+  (host-command "set-step"
+    (dict :track-id s.track.tid :index s.index :field name :value v :activate activate)))
 
 ;; ── The sound palette and Patch Learn ──
 

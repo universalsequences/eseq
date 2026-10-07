@@ -4289,7 +4289,6 @@
                 epoch_seq_state_ms: f64,
                 epoch_track_params_ms: f64,
                 epoch_fx_bindings_ms: f64,
-                epoch_piano_ms: f64,
                 epoch_fx_values_ms: f64,
                 // reactive sub-phases
                 reactive_cycle_ms: f64,
@@ -4346,7 +4345,6 @@
                 let mut epoch_seq_state_ms = 0.0;
                 let mut epoch_track_params_ms = 0.0;
                 let mut epoch_fx_bindings_ms = 0.0;
-                let mut epoch_piano_ms = 0.0;
                 let mut epoch_fx_values_ms = 0.0;
 
                 // --- reactive_tick.rs ui_epoch / fx_epoch branches ---------
@@ -4431,9 +4429,6 @@
                             "selected-steps",
                             build_selection_value(&selected_steps),
                         );
-                        let phase = Instant::now();
-                        sync_track_automation_state(rt, app, &state);
-                        epoch_piano_ms = duration_ms(phase.elapsed());
                         rt.set_reactive(
                             "SEQ",
                             "step-has-plocks",
@@ -4578,7 +4573,6 @@
                     epoch_seq_state_ms,
                     epoch_track_params_ms,
                     epoch_fx_bindings_ms,
-                    epoch_piano_ms,
                     epoch_fx_values_ms,
                     reactive_cycle_ms: duration_ms(cycle_done - epoch_sync_done),
                     side_effects_ms: duration_ms(side_effects_done - cycle_done),
@@ -4610,7 +4604,6 @@
                 epoch_seq_state: Vec<f64>,
                 epoch_track_params: Vec<f64>,
                 epoch_fx_bindings: Vec<f64>,
-                epoch_piano: Vec<f64>,
                 epoch_fx_values: Vec<f64>,
                 reactive_cycle: Vec<f64>,
                 side_effects: Vec<f64>,
@@ -4638,7 +4631,6 @@
                         epoch_seq_state: Vec::new(),
                         epoch_track_params: Vec::new(),
                         epoch_fx_bindings: Vec::new(),
-                        epoch_piano: Vec::new(),
                         epoch_fx_values: Vec::new(),
                         reactive_cycle: Vec::new(),
                         side_effects: Vec::new(),
@@ -4671,7 +4663,6 @@
                     self.epoch_seq_state.push(update.epoch_seq_state_ms);
                     self.epoch_track_params.push(update.epoch_track_params_ms);
                     self.epoch_fx_bindings.push(update.epoch_fx_bindings_ms);
-                    self.epoch_piano.push(update.epoch_piano_ms);
                     self.epoch_fx_values.push(update.epoch_fx_values_ms);
                     self.reactive_cycle.push(update.reactive_cycle_ms);
                     self.side_effects.push(update.side_effects_ms);
@@ -5209,11 +5200,10 @@
                     percentile(&mut samples.retained, 0.50),
                 );
                 eprintln!(
-                    "[{probe_prefix}-{label}-epoch-detail] seq_state_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} piano_ms={:.3} fx_values_ms={:.3}",
+                    "[{probe_prefix}-{label}-epoch-detail] seq_state_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} fx_values_ms={:.3}",
                     percentile(&mut samples.epoch_seq_state, 0.50),
                     percentile(&mut samples.epoch_track_params, 0.50),
                     percentile(&mut samples.epoch_fx_bindings, 0.50),
-                    percentile(&mut samples.epoch_piano, 0.50),
                     percentile(&mut samples.epoch_fx_values, 0.50),
                 );
                 eprintln!(
@@ -5803,7 +5793,6 @@
                             "selected-steps",
                             build_selection_value(&selected_steps),
                         );
-                        sync_track_automation_state(rt, app, &state);
                         rt.set_reactive(
                             "SEQ",
                             "step-has-plocks",
@@ -8334,7 +8323,6 @@
                 epoch_seq_state_ms: f64,
                 epoch_track_params_ms: f64,
                 epoch_fx_bindings_ms: f64,
-                epoch_piano_ms: f64,
                 epoch_fx_values_ms: f64,
                 reactive_cycle_ms: f64,
                 side_effects_ms: f64,
@@ -8386,7 +8374,6 @@
                 let mut epoch_seq_state_ms = 0.0;
                 let mut epoch_track_params_ms = 0.0;
                 let mut epoch_fx_bindings_ms = 0.0;
-                let mut epoch_piano_ms = 0.0;
                 let mut epoch_fx_values_ms = 0.0;
 
                 // reactive_tick.rs: `SEQ.auto-follow` delta write. This is the
@@ -8483,9 +8470,6 @@
                             "selected-steps",
                             build_selection_value(&selected_steps),
                         );
-                        let phase = Instant::now();
-                        sync_track_automation_state(rt, app, &state);
-                        epoch_piano_ms = duration_ms(phase.elapsed());
                         rt.set_reactive(
                             "SEQ",
                             "step-has-plocks",
@@ -8622,7 +8606,6 @@
                     epoch_seq_state_ms,
                     epoch_track_params_ms,
                     epoch_fx_bindings_ms,
-                    epoch_piano_ms,
                     epoch_fx_values_ms,
                     reactive_cycle_ms: duration_ms(cycle_done - epoch_sync_done),
                     side_effects_ms: duration_ms(side_effects_done - cycle_done),
@@ -8654,7 +8637,6 @@
                 epoch_seq_state: Vec<f64>,
                 epoch_track_params: Vec<f64>,
                 epoch_fx_bindings: Vec<f64>,
-                epoch_piano: Vec<f64>,
                 epoch_fx_values: Vec<f64>,
                 reactive_cycle: Vec<f64>,
                 side_effects: Vec<f64>,
@@ -8682,7 +8664,6 @@
                         epoch_seq_state: Vec::new(),
                         epoch_track_params: Vec::new(),
                         epoch_fx_bindings: Vec::new(),
-                        epoch_piano: Vec::new(),
                         epoch_fx_values: Vec::new(),
                         reactive_cycle: Vec::new(),
                         side_effects: Vec::new(),
@@ -8715,7 +8696,6 @@
                     self.epoch_seq_state.push(update.epoch_seq_state_ms);
                     self.epoch_track_params.push(update.epoch_track_params_ms);
                     self.epoch_fx_bindings.push(update.epoch_fx_bindings_ms);
-                    self.epoch_piano.push(update.epoch_piano_ms);
                     self.epoch_fx_values.push(update.epoch_fx_values_ms);
                     self.reactive_cycle.push(update.reactive_cycle_ms);
                     self.side_effects.push(update.side_effects_ms);
@@ -9056,11 +9036,10 @@
                     percentile(&mut samples.retained, 0.50),
                 );
                 eprintln!(
-                    "[{probe_prefix}-{label}-epoch-detail] seq_state_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} piano_ms={:.3} fx_values_ms={:.3}",
+                    "[{probe_prefix}-{label}-epoch-detail] seq_state_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} fx_values_ms={:.3}",
                     percentile(&mut samples.epoch_seq_state, 0.50),
                     percentile(&mut samples.epoch_track_params, 0.50),
                     percentile(&mut samples.epoch_fx_bindings, 0.50),
-                    percentile(&mut samples.epoch_piano, 0.50),
                     percentile(&mut samples.epoch_fx_values, 0.50),
                 );
                 eprintln!(
@@ -9526,7 +9505,6 @@
                     sync_pattern_state(rt, &state);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_all_track_sequencer_state(rt, &state, app);
-                    sync_track_automation_state(rt, app, &state);
                     sync_step_param_lists(rt, &state, ct);
                     sync_track_mixer_state(rt, app, &state);
                     sync_bus_mixer_state(rt, app);
@@ -9648,7 +9626,6 @@
                         "selected-steps",
                         build_selection_value(&selected_steps),
                     );
-                    sync_track_automation_state(rt, app, &state);
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",
@@ -10819,7 +10796,6 @@
                     let rt = editor.runtime_mut();
                     set_current_track_reactive(rt, ct);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_track_automation_state(rt, app, &state);
                     sync_step_param_lists(rt, &state, ct);
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.track_param_sync_revision,
@@ -10965,7 +10941,6 @@
                         "selected-steps",
                         build_selection_value(&selected_steps),
                     );
-                    sync_track_automation_state(rt, app, &state);
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",

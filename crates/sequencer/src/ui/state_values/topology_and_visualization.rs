@@ -110,7 +110,6 @@ pub(crate) fn sync_track_topology_state(
         state.pattern.track_params[current_track_idx].get_num_steps(),
     );
     rt.set_reactive("SEQ", "steps", build_steps_value(state, current_track_idx));
-    sync_track_automation_state(rt, app, state);
     sync_step_param_lists(rt, state, current_track_idx);
     sync_track_mixer_state(rt, app, state);
     sync_bus_mixer_state(rt, app);

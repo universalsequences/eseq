@@ -280,6 +280,8 @@ pub(crate) mod f {
     pub(crate) const TRACK_PLAYHEAD: FieldKey = (TRACK, "playhead");
     pub(crate) const TRACK_PLAYHEAD_PAGE: FieldKey = (TRACK, "playhead-page");
     pub(crate) const TRACK_LENGTH_STEP: FieldKey = (TRACK, "length-step");
+    pub(crate) const TRACK_PLAYHEAD_ROW: FieldKey = (TRACK, "playhead-row");
+    pub(crate) const TRACK_STEP_PARAMS_IN_USE: FieldKey = (TRACK, "step-params-in-use");
     pub(crate) const TRACK_TIMEBASE: FieldKey = (TRACK, "timebase");
     pub(crate) const TRACK_INSTRUMENT_TYPE: FieldKey = (TRACK, "instrument-type");
     pub(crate) const TRACK_RACK: FieldKey = (TRACK, "rack");
@@ -1194,6 +1196,7 @@ pub(crate) mod f {
     pub(crate) const SELECTION_EDIT_STEP: FieldKey = (SELECTION, "edit-step");
     pub(crate) const SELECTION_RACK_SLOT: FieldKey = (SELECTION, "rack-slot");
     pub(crate) const SELECTION_AUTO_FOLLOW: FieldKey = (SELECTION, "auto-follow");
+    pub(crate) const SELECTION_PLAYHEAD_ROW: FieldKey = (SELECTION, "playhead-row");
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
@@ -1250,6 +1253,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_PLAYHEAD, ":int", Live),
     (f::TRACK_PLAYHEAD_PAGE, ":int", Live),
     (f::TRACK_LENGTH_STEP, ":int", Live),
+    (f::TRACK_PLAYHEAD_ROW, ":int", Live),
+    (f::TRACK_STEP_PARAMS_IN_USE, "(list-of :string)", Live),
     (f::TRACK_TIMEBASE, ":string", Live),
     (f::TRACK_INSTRUMENT_TYPE, ":string", Model),
     (f::TRACK_RACK, ":bool", Model),
@@ -1753,6 +1758,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SELECTION_EDIT_STEP, "step", Live),
     (f::SELECTION_RACK_SLOT, ":int", Model),
     (f::SELECTION_AUTO_FOLLOW, ":bool", Live),
+    (f::SELECTION_PLAYHEAD_ROW, ":int", Live),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
@@ -2592,6 +2598,9 @@ pub(crate) struct HostKinds {
     project_options: ProjectOptions,
     /// `t.bar-transposes` last pushed, per observing track.
     bar_transposes: HashMap<InstanceId, Vec<f64>>,
+    /// `t.step-params-in-use` last pushed (a bit per [`FOCUS_STEP_PARAMS`]
+    /// entry), per observing track.
+    step_params_in_use: HashMap<InstanceId, u32>,
     /// Route id → instance; the ids are allocated per [`RouteKey`] while
     /// the route exists (never reused), and forgotten on a project load
     /// (track ids restart).
@@ -2967,7 +2976,8 @@ impl HostKinds {
         self.track_generation = Some(generation);
     }
 
-    /// `selection.track` and `auto-follow` when observed; `selection.tracks`
+    /// `selection.track`, `auto-follow` and `playhead-row` when observed;
+    /// `selection.tracks`
     /// when observed and the sorted selection changed since the last push;
     /// the step fields (`steps`, `cursor-step`, `edit-step`) when observed
     /// and the step selection (`selection_changed`), the current track, its
@@ -2977,7 +2987,11 @@ impl HostKinds {
             return;
         };
         let mask = pusher.rt.host_fields_observed(id, &SELECTION_LIVE.names);
-        let always = SELECTION_LIVE.bits(&[f::SELECTION_TRACK, f::SELECTION_AUTO_FOLLOW]);
+        let always = SELECTION_LIVE.bits(&[
+            f::SELECTION_TRACK,
+            f::SELECTION_AUTO_FOLLOW,
+            f::SELECTION_PLAYHEAD_ROW,
+        ]);
         pusher.push_live_masked(id, &SELECTION_LIVE, mask & always);
         let step_bits = SELECTION_LIVE.bits(&[
             f::SELECTION_STEPS,

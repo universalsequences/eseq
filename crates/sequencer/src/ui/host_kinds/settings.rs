@@ -312,4 +312,20 @@ impl HostKinds {
         let value = || list_value(last.iter().map(|semitones| number(*semitones)));
         pusher.push_computed_if(id, f::TRACK_BAR_TRANSPOSES, changed, value);
     }
+
+    /// `t.step-params-in-use` of an observing track, pushed when the set
+    /// moved since the last push: a scan of its active steps, allocating
+    /// only on a change (a step edit that keeps the set pushes nothing).
+    pub(super) fn sync_step_params_in_use(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        track: usize,
+        id: InstanceId,
+    ) {
+        let sources = pusher.sources;
+        let mask = live::step_params_in_use(&sources.state, track, sources.num_steps(track));
+        let changed = self.step_params_in_use.insert(id, mask) != Some(mask);
+        let value = || live::step_param_names(mask);
+        pusher.push_computed_if(id, f::TRACK_STEP_PARAMS_IN_USE, changed, value);
+    }
 }

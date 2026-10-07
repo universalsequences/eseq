@@ -69,11 +69,6 @@
           (macro rack-macro :default nil)
           (edit-value :number :default nil)))
 
-;; PINNED (hazard m), read flat by Rust: set true by any UI that shows
-;; SEQ.track-automation (per-track p-lock columns, e.g. the tracker package)
-;; so the host only builds that value while someone is looking at it.
-(def eseq.vanilla/track-automation-wanted false)
-
 (def piano-roll-arrangement-mode? () piano-roll-view.arrangement)
 
 ;; Entered from arrangement clip gestures (true) or from anywhere else.

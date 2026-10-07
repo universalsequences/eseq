@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .21, .66 and .67 ported, .11, .14 (groups A–D: .14, .61), .20 and .64 in part, .74 open) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .21, .65, .66 and .67 ported, .11, .14 (groups A–D: .14, .61), .20 and .64 in part, .74 open) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -2052,10 +2052,11 @@ its instance and field.
      `defstate`s. The callers of `sync_piano_roll_state` now call
      `sync_track_automation_state` (the tracker's columns, which rode on
      it). Kept for the tracker (`alez.tracker`, eseq-0l17.20 /
-     eseq-0l17.22): the `piano-roll-automation-refresh` host command (it
-     republishes `SEQ.track-automation`), the `set-automation-step-param`
-     action of `piano-roll-history-action`, the pinned
-     `eseq.vanilla/track-automation-wanted` (defined in this file),
+     eseq-0l17.22), all since removed by its port (.65, with
+     `sync_track_automation_state`): the `piano-roll-automation-refresh`
+     host command (it republished `SEQ.track-automation`), the
+     `set-automation-step-param` action of `piano-roll-history-action`, the
+     pinned `eseq.vanilla/track-automation-wanted` (defined in this file),
      `SEQ.track-automation`, `track-lock-targets`, `tracker-rows`,
      `track-grid-playhead-*`.
    - **Captures.** Every piano roll fixture (notes, velocity, step param,
@@ -2185,7 +2186,7 @@ its instance and field.
      `eseq.bindings` SEQV channels) are per-row bindings no kind field
      gives; a Lisp derivation re-renders every row each step. It needs a
      live per-track field (the grid row the playhead lights) compared in a
-     row `defwidget`, or the like.
+     row `defwidget`, or the like (built and ported by .65, below).
    - **Tests.** `host_kinds::tests::packages_view` (bare root): the files
      use no legacy form; the jaki panel binds a sounding row's `:lit` to its
      mark, and a later hit repaints without re-rendering; the event views
@@ -2703,6 +2704,173 @@ its instance and field.
      on three cards) render byte-identical outside the auto-rotating event
      view (which differs run to run); the sequencer's lane and bay fixtures
      match .66's.
+   Built (stage 8, eseq-0l17.65): the tracker package, `alez.tracker`
+   (`packages/alez.tracker/src/ui.lisp`):
+   - **Kinds.** `track.playhead-row` (live, `:int`): the row the playhead
+     lights on a grid as tall as the longest pattern, where a shorter
+     track repeats down its column: the transport's sixteenth modulo the
+     grid's height when that repeat is the one playing (its row modulo the
+     track's length is the track's playing step), else the track's own
+     step (another timebase, an off-grid launch); -1 while stopped
+     (`KindsHandles::playhead_row`, the legacy
+     `sync_tracker_grid_playhead_fields` derivation), computed per tick
+     only while observed, the grid's height once per tick (`TickMemo`);
+     `selection.playhead-row` (live, `:int`): the current track's (-1
+     without one), a scalar a view binds without reading
+     `selection.track`; `track.step-params-in-use` (live,
+     `(list-of :string)`): the step params (`focus-step-params`' names, in
+     their order) some active step holds off its default, a scan of the
+     active steps per tick while observed, pushed only when the set moved
+     (`sync_step_params_in_use`, compared as a bit mask). The cells are
+     `t.steps`' fields, the columns `param.step-locks` /
+     `rack-macro.step-locks` / `has-locks` (7e), `lane.values` and
+     `project.focus-step-params`. `eseq.kinds` gained
+     `(set-step-param! s name v &key activate)`: a step's param on its
+     track's live pattern (the `set-step` host command: the value rule,
+     one undo entry, `set-step-param-history`'s recorded step mutation;
+     `:activate true` turns the step on in that entry).
+   - **Per-row live state.** A track row's box takes the `tracker-row-lamp`
+     background (`:track t :row r`), whose shader compares
+     `track.playhead-row` with its row; the row numbers'
+     `tracker-gutter-lamp` compares the current track's
+     (`:playhead-row #'selection.playhead-row`) and the cursor's row. The
+     cursor is the view singleton `tracker-cursor` (track position, row,
+     sub-column): every cell's `tracker-cursor-lamp` binds its fields to
+     scalar states (`:cursor-track #'tracker-cursor.track`, …) and compares
+     them with its own (`:cell-track :cell-row :cell-col`). So playback
+     and a cursor move within a track repaint and re-render nothing (a
+     cursor move repaints every cell, which parses nothing); a move to
+     another track (the host's current track follows the cursor)
+     re-renders the two track headers (`t.selected`, their highlight) and
+     nothing else. The scroll follows `#'selection.playhead-row` while
+     playing, `#'tracker-cursor.row` while stopped (only play and stop
+     re-run the body). A key first clamps the cursor to the tracks, the
+     grid's rows and the track's sub-columns and writes it back, so its
+     lamp always shows the cell the key edits; placing the cursor
+     (`set-cursor`) clamps the same way and drops a pending hex digit.
+   - **Columns** are dicts over instances (`:kind` step, param, macro or
+     lane; `:src` the step param's name, the param, the rack macro or the
+     lane); the view computes each track's shown columns once a render
+     (`track-layout`, from `has-locks` and `t.step-params-in-use`: it
+     reads no step) and hands them to the header and row subtrees. Each
+     grid row is a subtree holding one subtree per track (keyed as the
+     track's row box, `tracker-row-<t>-<r>`), so a step edit re-renders
+     that track's cells on the rows showing the step (a ghost row's too),
+     a lock or lane edit that track's cells; the view re-runs only when a
+     track's set of columns moves. Shown: the step params an active step
+     holds off their default, the locked instrument and effect params,
+     rack macros and MIDI effect params, in the legacy order, then the
+     picker's added ones. Header spellings (`compact-label`, the legacy
+     host's `compact_param_label`, now Lisp) are computed for the shown
+     columns only (`track-layout`); the picker builds its items only while
+     open, listing every param of the track's devices (`t.devices`,
+     `t.midi-devices`, `device.macros`) and its lanes, checked against one
+     `track-columns` read. The grid is as tall as the longest pattern, up
+     to 256 rows (`MAX_STEPS`): the grid `track.playhead-row` lights.
+     Keys: `step:<name>`,
+     `param:<role>:<did>:<index>`, `macro:<index>`, `lane:<proc-id>:<inlet>`.
+   - **Writes**, one undo entry each: a step's active, transpose and
+     velocity through the step setters (`toggle!`, `set!`); a note through
+     `set-step-param!` (`transpose`, clamped to its range, `:activate
+     true`: a note typed into an empty step is one entry); a step param
+     column through `set-step-param!` on the live step the cell shows (the
+     legacy `set-automation-step-param` wrote the track's edit focus: a
+     pinned take's or pattern's step, not the cell's); a device param
+     `lock-param!` / `unlock-param!`, a rack macro `lock-rack-macro!` /
+     `unlock-rack-macro!`, a lane `set-lane-steps!`. Vol is 00–7F, as the
+     cells print it (`hex2` of `127 × velocity`): typing stores
+     `(min 1 (/ n 127))`.
+   - **View state:** `tracker-cursor`; `tracker-view` (added and hidden
+     columns by track id, collapsed track ids, the pending hex digit, the
+     octave and step advance); `tracker-menu` (the picker: open, at, its
+     track, checked against `(tracks)` before it lists anything).
+   - **Behaviour changes.** An added column shows its values (legacy: an
+     added column was empty until it was a locked one); the gutter's
+     playing row lights by its lamp (legacy: white text); an edit leaves
+     the step selection alone (the step setters, where
+     `seq-set-step-param` cleared it); a playing row's lamp tops the row's
+     tint up to the playhead's (exact over the white bar and beat tints,
+     near over a ghost row's color); a step param column writes the live
+     step even with a take or pattern pinned (legacy: the edit focus's);
+     typed Vol is n/127, as the cells print it (legacy: n/255, so typing
+     `40` showed `1F`); the grid runs to the longest pattern, up to 256
+     rows (legacy: at most 64); a note typed into an empty step is one
+     undo entry (legacy: two); the column picker builds its items only
+     while open.
+   - **Learned:**
+     - an `sdf/fill` of a translucent color shows at its alpha squared
+       (the fill's output is premultiplied and the widget pipeline blends
+       by source alpha): a wash returns its color with the shape's
+       coverage as alpha;
+     - a box draws its `:background` widget over its `background-color`,
+       so a lamp lit only sometimes leaves the box's own fill
+       pixel-exact; a box's rounded fill sits inside its one-pixel border
+       (inset a lamp's shape by `(fwidth y)`);
+     - the first key after a buffer is activated re-renders it, so a
+       repaint-only test measures after one;
+     - a shader reads a view's own singleton through a scalar state bound
+       to it (`#'`), never by name: the WGSL corpus test
+       (`content_shader_corpus_emits_valid_wgsl`) plans content shaders
+       with only the host kinds loaded;
+     - a parent subtree's re-run reuses its keyed children's renders but
+       splices them in anew (a replacement is deep-copied), so a choice
+       that must leave the rows alone binds a scalar
+       (`selection.playhead-row`) rather than wrapping them in a subtree;
+       a test tells a re-rendered widget from a kept one by its prop
+       cells' identity (the global re-run counters count every buffer).
+   - **Legacy removed:** `SEQ.track-automation`, `track-lock-targets`,
+     `tracker-rows`, `track-grid-playhead-<t>`, `-row-<t>`, `-current` and
+     `-row-current`, and `track-<t>-rack-macro-<k>-short-name`, with their
+     publishers (`sync_track_automation_state` and its callers in the
+     tick, pattern switch, step and piano roll invalidation paths,
+     `sync_tracker_grid_playhead_fields`, `build_track_automation_value`,
+     `build_tracker_rows_value`, `build_track_lock_targets_value`, the
+     `PianoRollAutomationTarget` column model, `compact_param_label`); the
+     `piano-roll-automation-refresh` command; the `set-automation-step-param`
+     piano roll action; the pinned `eseq.vanilla/track-automation-wanted`
+     (piano-roll.lisp); the tracker's SEQV channels; the perf probes'
+     piano phase timing. The legacy tests (the publisher and package tests
+     in `state_values::tests`, the tracker half of the rack macro name
+     test, the piano roll step-locks parity check) moved to the Harness
+     tests.
+   - **Kept** (eseq-0l17.22): `eseq.bindings` (no content reader left; the
+     roots import it, its own test stands), `SEQ.track-num-steps` and
+     `track-ids` (sequencer), `track-process-lanes` and
+     `track-process-lane-values` (seqv-track-params), `track-names`,
+     `track-colors`, `current-track`, `playing` (many), the
+     `set-track-plock-entry` / `clear-track-plock-entry` commands
+     (effects/track-panels), `seq-set-process-lane-step`
+     (step-grid-interactions) and the `track-<t>-rack-macro-<k>-name`
+     fields (macro-state, track-panels).
+   - **Tests.** `host_kinds::tests::tracker_view` (Distro root): the file
+     uses no legacy form and no SEQV channel; the import installs and
+     selects the tab, the cells read the steps (a ghost row its real step)
+     and hide drops it; `track.playhead-row` (the repeat that plays, the
+     real row when the clock disagrees, -1 stopped), which the row lamps
+     bind and the gutter's and the scroll through
+     `selection.playhead-row`, playback only repainting; the keys (a real
+     key through the mode) edit the cursor's step, one entry each (a note
+     into an empty step included), Vol as 00–7F, a pending digit dropped
+     by a move or a click, a cursor left off the grid clamped back, and a
+     cursor move only repaints; the columns (a step param off its default,
+     a lock, added targets, hiding, typing, a clear, a nudge from the
+     base, a collapse, no picker item while closed); a lane column; a rack
+     macro column titled by its renamed macro; a step param column
+     writing the live step while a take is pinned (one entry, the take
+     untouched, the value rule); what re-renders (a toggle: that track's
+     cells on that row; a lock: that track's cells; a new column: the
+     view; a cross-track move: the two headers); the compact labels (the
+     Rust test's cases).
+   - **Captures.** `tracker`, `tracker-lengths` and scratch fixtures (the
+     cursor, an added step param column, a collapsed track, a pending
+     digit at octave 6) match but for the antialiased edges of the cursor
+     cell and the cursor row's number (about 190 pixels: the shader's
+     rounded rect against the box's), and the added Pan column, which now
+     shows each active step's value (a dim 0, its default) where the
+     legacy column showed `..`. The Seq tab renders byte-identical. The
+     repo fixture `tracker.lisp` addresses tracks as instances
+     (`(eseq.kinds/track 3)`, its first `t.lanes`) and opens the picker
+     with an event's `:at`.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -4513,7 +4681,7 @@ Built (7e):
   (`notes::cancel_note_drag`: the steps, the notes' ids and the selection
   as the drag found them; "Note drag canceled"). With the pointer up each
   `set!` is its own entry.
-- **The tracker** (`alez.tracker`, port .20) needs no kind of its own:
+- **The tracker** (`alez.tracker`, port .65) needs no kind of its own:
   `tracker-rows` is the steps' fields (`active`, `transpose`, `velocity`,
   the step params) and, per device param column, `param.step-locks` /
   `rack-macro.step-locks` (the pattern's locks, `(step value)` rows,
@@ -4523,10 +4691,14 @@ Built (7e):
   `rack-macro.has-locks` and the step params a step holds off their
   default; `track-lock-targets` is the track's devices' params
   (`t.devices`, `t.midi-devices`, a rack's `device.macros`) and lanes; the
-  grid playheads are a view derivation from `track.playhead` and
-  `transport.position` (which copy of a repeating step lights: the
-  transport's sixteenth modulo the grid height, confirmed against the
-  track's own step), `-current` with `selection.track`.
+  grid playheads derive from `track.playhead` and `transport.position`
+  (which copy of a repeating step lights: the transport's sixteenth modulo
+  the grid height, confirmed against the track's own step), `-current`
+  with `selection.track`. The port (.65) made that derivation the live
+  field `track.playhead-row` (and the current track's,
+  `selection.playhead-row`), which a row's shader compares, so playback
+  re-renders nothing, and the step params off their default the live
+  field `track.step-params-in-use`, so the view reads no step.
 - **Not covered:** the automation lane under the piano roll
   (`SEQ.piano-roll-automation`, `-automation-params`): the focus axis's step
   params (a pinned source's steps, which `step` does not reach) and the
@@ -5023,7 +5195,8 @@ Built (7e-2):
   step param). The lane's selected parameter is view state (built by the
   port, .16: `lane-view`, replacing the pinned
   `eseq.vanilla/piano-roll-automation-param`; the
-  `piano-roll-automation-refresh` command stays for the tracker).
+  `piano-roll-automation-refresh` command stayed for the tracker until its
+  port, .65, removed it).
   `piano_roll_step_span` (a step's span over its notes) was shared by the
   legacy lane and `focus-step.start` / `end`; the tests held the derivation
   to the legacy lane's points for step and effect params (since .16 they
@@ -5419,7 +5592,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7c-2 | eseq-0l17.45 (built) | graph-node process slot probes and run errors (the node bay's scopes): `process.error`, `state-cell.values` of `n.processes` | .11 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7d-2 | eseq-0l17.39 (built) | `song.pending` (the provisional capture surface) as positional sub-kinds: `pending-lane`, `pending-scene`, `pending-launch` | .15 |
-| 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation) | .16 .20 |
+| 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation; a live field since .65, `track.playhead-row`) | .16 .20 .65 |
 | 7e-2 | eseq-0l17.47 (built) | the piano roll's automation lane: `focus-step` (focus-axis step params, `piano-roll.steps`), the lane a view | .16 |
 | 7e-3 | eseq-0l17.48 (built) | model note ids (handles kept through undo and legacy edits; a grid step's id-less single note keeps a host id until its first setter edit) | — |
 | 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
@@ -5455,8 +5628,8 @@ builds the field name.
 | `SEQ.bus-solos` | 4 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.soloed | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22; removed (.66) | .11 .13 .66 |
 | `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22; removed (.66) | .11 .13 .66 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15, .20: jaki-builder-demo, .64: the graph demo scripts), no content reader left (its publisher remains); ported (.12, .13, .15), kept: macros, scripts | .12 .13 .15 .20 |
-| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .16, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index); ported (.18: application menus read selection.track); ported (.61: process panel, buffers, convolution-reverb read selection.track / dv/current-track-index) | .11 .13 .14 .15 .16 .17 .18 .19 .20 .61 |
+| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15, .20: jaki-builder-demo, .64: the graph demo scripts), no content reader left (its publisher remains); ported (.12, .13, .15), kept: macros, scripts | .12 .13 .15 .20 .64 |
+| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .16, .17, .65: alez.tracker), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index); ported (.18: application menus read selection.track); ported (.61: process panel, buffers, convolution-reverb read selection.track / dv/current-track-index) | .11 .13 .14 .15 .16 .17 .18 .19 .20 .61 .65 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10); ported (.66), kept: unread, .22 | .11 .66 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10); ported (.66), kept: seq-core-state COMPAT (.14) | .11 .66 |
 | `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17, .20: alez.jaki, .64: the graph demos' route menus), kept: drum-rack-v2, seq-core-state, alez.neural +; ported (.13, .17), kept: drum-rack-v2, seq-core-state +; ported (.67: alez.neural), kept: drum-rack-v2, effects/buffers + | .11 .13 .17 .19 .20 .64 .67 |
@@ -5468,7 +5641,7 @@ builds the field name.
 | `SEQ.pans` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.pan | built (.10); ported (.66), kept: seq-core-state COMPAT (.14) | .11 .66 |
 | `SEQ.playhead-active-*` | 1 | step-grid | sv/meters_and_modulation.rs | live | step.playing | built (.10); kept (.66): step-grid (unloaded), .22 | .11 .66 |
 | `SEQ.playhead-page` | 1 | seq-core-state | sv/meters_and_modulation.rs | live | track.playhead (page = playhead / 16 in the view) | built (.10); ported (.66), kept: unread, .22 | .11 .66 |
-| `SEQ.playing` | 11 | retrospective, transport, effects/track-panels +4 | sequencer/state/sequencer_state/scene_launch.rs | live | transport.playing | built (.10); ported (.12), kept: track-panels, param-controls, seq-core-state, sequencer; ported (.14 A: param.printing carries the gate); ported (.61: the step panel's print gate reads transport.playing) | .11 .12 .14 .20 .61 |
+| `SEQ.playing` | 11 | retrospective, transport, effects/track-panels +4 | sequencer/state/sequencer_state/scene_launch.rs | live | transport.playing | built (.10); ported (.12), kept: track-panels, param-controls, seq-core-state, sequencer; ported (.14 A: param.printing carries the gate); ported (.61: the step panel's print gate reads transport.playing); ported (.12, .65: alez.tracker), kept: track-panels, param-controls, seq-core-state, sequencer | .11 .12 .14 .20 .61 .65 |
 | `SEQ.queued-scene` | 2 | transport | event_loop.rs | model | transport.queued | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.record-armed` | 4 | mixer, sequencer, legacy/mixer | event_loop.rs | live | track.armed | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: tracker | .11 .13 |
 | `SEQ.record-quantize` | 1 | transport | host_commands/misc.rs | live | transport.record-quantize | built (.10); ported, legacy removed (.12) | .12 |
@@ -5503,15 +5676,15 @@ builds the field name.
 | `SEQ.track-color-b-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10); ported (.11), removed | .11 |
 | `SEQ.track-color-g-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10); ported (.11), removed | .11 |
 | `SEQ.track-color-r-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (dim in the shader) | built (.10); ported (.11), removed | .11 |
-| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13, .15, .16, .20: alez.jaki, the event-view demos, .64: the graph demos), kept: sequencer, alez.neural +; ported (.14 A: panel-bodies); ported (.13, .15), kept: sequencer +; ported (.67: alez.neural), kept: rack-groove-buffer, step-grid, tracker | .11 .13 .14 .15 .16 .19 .20 .64 .67 |
+| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13, .15, .16, .20: alez.jaki, the event-view demos, .64: the graph demos, .65: alez.tracker), kept: sequencer, alez.neural +; ported (.14 A: panel-bodies); ported (.13, .15), kept: sequencer +; ported (.67: alez.neural), kept: rack-groove-buffer, step-grid, tracker | .11 .13 .14 .15 .16 .19 .20 .64 .65 .67 |
 | `SEQ.track-delays` | 1 | seqv-track-params | reactive_sync.rs | model | step.delay | built (.10); ported (.66), kept: unread, .22 | .11 .66 |
 | `SEQ.track-durations` | 1 | seqv-track-params | reactive_sync.rs | model | step.duration | built (.10); ported (.66), kept: unread, .22 | .11 .66 |
 | `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10); ported (.13, .16, .11 grid), kept: track-collapse +; ported (.18: application menus read selection.track.instrument-type); ported (.13, .16), kept: track-collapse +; ported (.11 grid), kept: application-menus | .11 .13 .18 |
 | `SEQ.track-length-row-*` | 1 | sequencer | sv/expanded_step.rs | model | track.num-steps | built (.10); ported (.11), removed | .11 |
 | `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10); ported (.13, .11 grid), kept: sequencer +; ported (.61: the step panel's track chip binds t.audible) | .11 .13 .14 .61 |
 | `SEQ.track-mutes` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.muted | built (.10); ported (.13, .11 grid), kept: sequencer; removed (.66) | .11 .13 .66 |
-| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki, .64: the graph demos), kept: many; ported (.18: the scene macro track mask lists (tracks)); ported (.13, .16, .11 grid), kept: many; ported (.61: buffers' rack pad label reads the track); ported (.67: alez.neural), kept: rack-groove-buffer, effects/buffers, tracker | .11 .13 .14 .16 .18 .19 .20 .61 .67 |
-| `SEQ.track-num-steps` | 5 | sequencer, packages/alez.tracker/src/ui | event_loop.rs | model | track.num-steps | built (.10); ported (.11 grid), kept: tracker | .11 .20 |
+| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13, .16, .20: alez.jaki, .64: the graph demos, .65: alez.tracker), kept: many; ported (.18: the scene macro track mask lists (tracks)); ported (.13, .16, .11 grid), kept: many; ported (.61: buffers' rack pad label reads the track); ported (.67: alez.neural), kept: rack-groove-buffer, effects/buffers, tracker | .11 .13 .14 .16 .18 .19 .20 .61 .64 .65 .67 |
+| `SEQ.track-num-steps` | 5 | sequencer, packages/alez.tracker/src/ui | event_loop.rs | model | track.num-steps | built (.10); ported (.11 grid, .65: alez.tracker), kept: unread, .22 | .11 .20 .65 |
 | `SEQ.track-pans` | 1 | seqv-track-params | reactive_sync.rs | model | step.pan (per-step lists, see steps) | built (.10); ported (.66), kept: unread, .22 | .11 .66 |
 | `SEQ.track-peak-*` | 3 | mixer, sequencer, legacy/mixer | sv/meters_and_modulation.rs | live | track.peak | built (.10); ported (.13), kept: sequencer; ported (.11 grid), kept: unread, .22; kept (.66): unread, .22 | .11 .13 .66 |
 | `SEQ.track-playhead-page-*` | 1 | sequencer | sv/expanded_step.rs | live | track.playhead | built (.10); ported (.11), removed | .11 |
@@ -5554,8 +5727,8 @@ builds the field name.
 | `SEQ.process-scope-cells` | 1 | sequencer | ui_replay_probe.rs | live | graph node slot scopes: state-cell.values of n.processes (live; `process-scope-cells-for` id → p.cells by name, each a history) | built (.45); ported (.66), removed | .11 .20 .66 |
 | `SEQ.process-slots` | 2 | effects/process-panel | input.rs | model | selection.track.processes → process (inlets, ports) | built (.29); ported (.61: process panel reads selection.track.processes), legacy removed (publisher, registration; `track-process-slots` kept: sequencer) | .14 .61 |
 | `SEQ.track-lane-patch` | 2 | sequencer | input.rs | model | t.processes: p.in-ports, port.target-process / target-inlet, fanout.target-process (cable ids derived in the view) | built (.29); ported (.66), removed | .11 .66 |
-| `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29); ported (.66), kept: tracker | .11 .20 .66 |
-| `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes → lane | built (.29); ported (.66), kept: tracker | .11 .20 .66 |
+| `SEQ.track-process-lane-values` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/param_fields_and_sync.rs | model | lane.values | built (.29); ported (.66), kept: tracker; ported (.65: alez.tracker), kept: seqv-track-params | .11 .20 .65 .66 |
+| `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes → lane | built (.29); ported (.66), kept: tracker; ported (.65: alez.tracker), kept: seqv-track-params | .11 .20 .65 .66 |
 | `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process.cells → state-cell.values (live) | built (.29); ported (.66), removed | .11 .66 |
 | `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes → process | built (.29); ported (.20: band-coupling-matrix-demo), kept: sequencer, seqv-track-params; ported (.66), kept: band-coupling-matrix-demo | .11 .20 .66 |
 | `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30); ported (.13), removed | .13 |
@@ -5596,12 +5769,12 @@ builds the field name.
 | `SEQ.piano-roll-lanes` | 2 | piano-roll | natives.rs | model | view derivation from pitch-min / pitch-max (lane = pitch-max − note.pitch) | built (.31); ported (.16), removed | .16 |
 | `SEQ.piano-roll-playhead` | 1 | piano-roll | piano_roll.rs | live | piano-roll.playhead (live) | built (.31); ported (.16), removed | .16 |
 | `SEQ.piano-roll-selection` | 1 | piano-roll | piano_roll.rs | model | note.selected | built (.31); ported (.16), removed | .16 |
-| `SEQ.track-automation` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | param.has-locks / rack-macro.has-locks (+ step params off their default, in the view) | built (.31) | .20 |
-| `SEQ.track-grid-playhead-*` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | view derivation from track.playhead and transport.position (live) | built (.31) | .20 |
-| `SEQ.track-grid-playhead-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | the same, of selection.track | built (.31) | .20 |
-| `SEQ.track-grid-playhead-row-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | the same, of selection.track | built (.31) | .20 |
-| `SEQ.track-lock-targets` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | t.devices / t.midi-devices → d.params, device.macros (rack-macro) | built (.31) | .20 |
-| `SEQ.tracker-rows` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | step.active / transpose / velocity / ‹param› + param.step-locks / rack-macro.step-locks | built (.31) | .20 |
+| `SEQ.track-automation` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | param.has-locks / rack-macro.has-locks, track.step-params-in-use (the step params off their default) | built (.31); ported (.65), removed | .65 |
+| `SEQ.track-grid-playhead-*` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | track.playhead-row (live, compared in the row's shader) | built (.65); ported (.65), removed | .65 |
+| `SEQ.track-grid-playhead-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | selection.playhead-row (the current track's; the gutter's lamp binds it) | built (.65); ported (.65), removed | .65 |
+| `SEQ.track-grid-playhead-row-current` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | live | `#'selection.playhead-row` (the scroll's follow) | built (.65); ported (.65), removed | .65 |
+| `SEQ.track-lock-targets` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | t.devices / t.midi-devices → d.params, device.macros (rack-macro) | built (.31); ported (.65), removed | .65 |
+| `SEQ.tracker-rows` | 1 | packages/alez.tracker/src/ui | piano_roll.rs | model | step.active / transpose / velocity / ‹param› + param.step-locks / rack-macro.step-locks | built (.31); ported (.65), removed | .65 |
 | `AGENT.generation` | 2 | agent | browser.rs | model | agent.generation | built (.32) | — |
 | `AUDIO.workers-choice` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-choice | built (.32); ported, legacy removed (.18: all of `AUDIO`) | .18 |
 | `AUDIO.workers-note` | 1 | settings | host_commands/audio_settings.rs | model | settings.audio-workers-note | built (.32); ported, legacy removed (.18) | .18 |
@@ -5774,6 +5947,7 @@ builds the field name.
 | `SEQV.<expanded-track-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (expanded tracks) | view-local; ported (.11), removed | .11 |
 | `SEQV.<sel-bus-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | bus selection (view singleton) | view-local | .11 |
 | `SEQV.<sel-group-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | group selection (view singleton) | view-local | .11 |
+| `SEQV.alez.tracker/*` | 4 | packages/alez.tracker/src/ui | Lisp (eseq.bindings channels) | Lisp-owned | tracker view singleton (`tracker-cursor`, compared in the cells' shaders) | view-local; ported (.65), removed (eseq.bindings has no reader left; .22) | .65 |
 | `SEQV.arr-content-length` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
 | `SEQV.arr-view-duration` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
 | `SEQV.arr-view-start` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
@@ -5794,7 +5968,7 @@ builds the field name.
 | `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13, .17), kept: many; ported (.18: application menus read (tracks)); ported (.61: buffers and step-buffer read (tracks)) | .11 .13 .14 .17 .18 .19 .61 |
 | `SEQ.rack-panel-view-generation` | 1 | effects/state | sv/project_state.rs | model | implicit | remove; removed (.14 A: rack panel views live in the rack-panel-view singleton by track id; the host calls eseq.effects.state/reset-rack-panel-views! on a project replacement) | .14 |
 | `SEQ.scene-bank-view-generation` | 1 | scene-banks | sv/project_state.rs | model | implicit (collections re-render) | remove; ported, legacy removed (.12) | .12 |
-| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13, .15), kept: sequencer +; ported (.11 grid), kept: tracker | .11 .13 .15 .20 |
+| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13, .15), kept: sequencer +; ported (.11 grid, .65: alez.tracker), kept: unread, .22 | .11 .13 .15 .20 .65 |
 | `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances); project.instances (.17) | keep; ported (.13, .17: the Packages tree reads project.instances), kept: alez.neural; ported (.67: alez.neural reads (generators) and the instance records), kept: unread, .22 (the Packages host commands parse it) | .13 .17 .20 .67 |
 | `THEME.buffer_bg` | 1 | sequencer | - | model | THEME stays (theme namespace, not host state) | keep | .11 |
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |

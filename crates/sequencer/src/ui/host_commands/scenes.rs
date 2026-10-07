@@ -745,7 +745,6 @@ pub(super) fn handle(
             set_current_track_reactive(rt, ct);
             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
             sync_all_track_sequencer_state(rt, &state, &app);
-            sync_track_automation_state(rt, app, &state);
             sync_step_param_lists(rt, &state, ct);
             sync_track_mixer_state(rt, &app, &state);
             sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
@@ -872,7 +871,6 @@ pub(super) fn handle(
                     let mut sync_names_pattern_elapsed = Duration::ZERO;
                     let mut sync_current_steps_elapsed = Duration::ZERO;
                     let mut sync_sequencer_elapsed = Duration::ZERO;
-                    let mut sync_track_automation_elapsed = Duration::ZERO;
                     let mut sync_step_params_elapsed = Duration::ZERO;
                     let mut sync_mixer_elapsed = Duration::ZERO;
                     let mut sync_fx_lists_elapsed = Duration::ZERO;
@@ -908,9 +906,6 @@ pub(super) fn handle(
                         let started = Instant::now();
                         sync_all_track_sequencer_state(rt, &state, &app);
                         sync_sequencer_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        sync_track_automation_state(rt, app, &state);
-                        sync_track_automation_elapsed = started.elapsed();
                         let started = Instant::now();
                         // The all-track pass above already published its parameter lists.
                         sync_current_track_step_param_lists(rt, &state, ct);
@@ -1011,7 +1006,7 @@ pub(super) fn handle(
                     }
                     if profile_switch {
                         eprintln!(
-                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
                             idx,
                             pattern_changed,
                             duration_ms(profile_total_started.elapsed()),
@@ -1022,7 +1017,6 @@ pub(super) fn handle(
                             duration_ms(sync_names_pattern_elapsed),
                             duration_ms(sync_current_steps_elapsed),
                             duration_ms(sync_sequencer_elapsed),
-                            duration_ms(sync_track_automation_elapsed),
                             duration_ms(sync_step_params_elapsed),
                             duration_ms(sync_mixer_elapsed),
                             duration_ms(sync_fx_lists_elapsed),

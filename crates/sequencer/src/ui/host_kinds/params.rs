@@ -506,7 +506,7 @@ pub(super) fn param_live_fields<'a>(
     }
     if let Some(locks) = &reading.step_locks {
         // `(step value)` rows, the value in display units (the tracker's
-        // cells, legacy `SEQ.tracker-rows`).
+        // lock cells).
         let rows = (locks.iter())
             .map(|(step, stored)| list_value([number(*step as f64), number(user(*stored))]));
         emit(f::PARAM_STEP_LOCKS, ParamField::Value(list_value(rows)));

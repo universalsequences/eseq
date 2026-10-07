@@ -160,14 +160,9 @@ pub(crate) fn sync_fx_instrument_tensor_value_field(
 }
 
 fn set_rack_macro_name_fields(rt: &mut Runtime, track: usize, id: usize, name: String) -> bool {
-    let short = super::super::piano_roll::compact_param_label(&name);
-    let mut dirty = reactive_set_needs_ui(rt.set_reactive(
+    reactive_set_needs_ui(rt.set_reactive(
         "SEQ", &rack_macro_name_field(track, id), Value::String(name),
-    ));
-    dirty |= reactive_set_needs_ui(rt.set_reactive(
-        "SEQ", &rack_macro_short_name_field(track, id), Value::String(short),
-    ));
-    dirty
+    ))
 }
 
 pub(crate) fn sync_rack_macro_name_field(
@@ -1048,24 +1043,6 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
     needs_ui
 }
 
-/// Follow the track playheads: when any moved, republish the tracker
-/// grid's playhead rows. Returns whether a field with readers changed.
-pub(crate) fn sync_tracker_grid_playhead_delta(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    previous: &mut Vec<u32>,
-) -> bool {
-    let current: Vec<u32> = (0..app.tracks.len())
-        .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
-        .collect();
-    if *previous == current {
-        return false;
-    }
-    *previous = current;
-    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app)
-}
-
 pub(crate) fn sync_all_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1243,10 +1220,8 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         "track-process-lanes",
         build_all_track_process_lanes_value(state, app.tracks.len()),
     );
-    super::super::piano_roll::sync_track_automation_state(rt, app, state);
 
     let started = profile.as_ref().map(|_| Instant::now());
-    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.playhead_fields = started.expect("profile timer").elapsed();
         profile.elapsed = total_started.expect("profile timer").elapsed();

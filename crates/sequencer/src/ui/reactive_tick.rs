@@ -553,7 +553,6 @@ pub(crate) fn sync_reactive_tick(
                 );
             }
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
-            sync_track_automation_state(rt, &app, &ctx.shared.state);
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             // A track switch changes only track-addressed publication. Global
             // topology, mixer, meter, modulator, and accumulator snapshots are
@@ -683,13 +682,6 @@ pub(crate) fn sync_reactive_tick(
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
-            if sequencer_visible {
-                if playing {
-                    piano_roll::sync_tracker_grid_playhead_fields(rt, &ctx.shared.state, &app);
-                } else {
-                    clear_tracker_grid_playhead_fields(rt, &app);
-                }
-            }
             ctx.frame.prev_playing = playing;
             needs_reactive_cycle = true;
             if (fx_visible || step_visible) && !app.tracks.is_empty() {
@@ -875,18 +867,10 @@ pub(crate) fn sync_reactive_tick(
         // The modulator envelopes and the modulation sources' phases reach
         // the panels as eseq.kinds fields (device.modulator-phase / -level,
         // param.mod-phase), which read the meter cache themselves.
-        if sequencer_visible {
-            if sync_tracker_grid_playhead_delta(
-                editor.runtime_mut(),
-                &ctx.shared.state,
-                &app,
-                &mut ctx.frame.prev_track_playheads,
-            ) {
-                needs_reactive_cycle = true;
-            }
-        } else {
-            ctx.frame.prev_track_playheads = track_playheads_snapshot(&ctx.shared.state, &app);
-        }
+        // The tracker and the expanded editors light their playing steps
+        // from the kinds (track.playhead-row, step.playing); only the
+        // snapshot the host commands compare against is kept here.
+        ctx.frame.prev_track_playheads = track_playheads_snapshot(&ctx.shared.state, &app);
         if current_track_playhead_visible
             && (!ctx.frame.prev_current_track_playhead_visible || playhead != ctx.frame.prev_playhead)
             && !app.tracks.is_empty()
@@ -1102,7 +1086,6 @@ pub(crate) fn sync_reactive_tick(
             let mut sync_playhead_elapsed = Duration::ZERO;
             let sync_current_steps_elapsed;
             let sync_sequencer_elapsed;
-            let sync_track_automation_elapsed;
             let sync_step_params_elapsed;
             let sync_mixer_elapsed;
             let sync_track_params_elapsed;
@@ -1134,9 +1117,6 @@ pub(crate) fn sync_reactive_tick(
             let started = Instant::now();
             sync_all_track_sequencer_state(rt, &ctx.shared.state, &app);
             sync_sequencer_elapsed = started.elapsed();
-            let started = Instant::now();
-            sync_track_automation_state(rt, &app, &ctx.shared.state);
-            sync_track_automation_elapsed = started.elapsed();
             let started = Instant::now();
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             sync_step_params_elapsed = started.elapsed();
@@ -1198,7 +1178,7 @@ pub(crate) fn sync_reactive_tick(
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
                 eprintln!(
-                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms track_automation={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
                     duration_ms(profile_total_started.elapsed()),
                     old_pattern_epoch,
                     epoch,
@@ -1206,7 +1186,6 @@ pub(crate) fn sync_reactive_tick(
                     duration_ms(sync_playhead_elapsed),
                     duration_ms(sync_current_steps_elapsed),
                     duration_ms(sync_sequencer_elapsed),
-                    duration_ms(sync_track_automation_elapsed),
                     duration_ms(sync_step_params_elapsed),
                     duration_ms(sync_mixer_elapsed),
                     duration_ms(sync_track_params_elapsed),
@@ -1353,7 +1332,6 @@ pub(crate) fn sync_reactive_tick(
                     "selected-steps",
                     build_selection_value(&ctx.shared.selected_steps),
                 );
-                sync_track_automation_state(rt, &app, &ctx.shared.state);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",

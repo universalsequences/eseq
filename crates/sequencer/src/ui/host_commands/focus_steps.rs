@@ -10,13 +10,19 @@
 //! and changes nothing; anything else, an index past the source's length or
 //! a field a focus step does not set, is an error that changes nothing. The
 //! setter goes through the piano roll's focus-aware history
-//! (`app::edit::apply_recorded_focus_step_mutation`, as the tracker's
-//! `set-automation-step-param`: one undo entry, undo restores; a transpose
-//! or duration moves the step's chord notes with it) and lands like the
-//! piano roll's edits ([`piano_roll_edit_landed`]). A transpose or delay
-//! moves the step's notes (their keys: step, transpose, offset); their note
-//! ids move with them ([`move_step_notes`]), so note handles follow, as
-//! through the note setters.
+//! (`app::edit::apply_recorded_focus_step_mutation`: one undo entry, undo
+//! restores; a transpose or duration moves the step's chord notes with it)
+//! and lands like the piano roll's edits ([`piano_roll_edit_landed`]). A
+//! transpose or delay moves the step's notes (their keys: step, transpose,
+//! offset); their note ids move with them ([`move_step_notes`]), so note
+//! handles follow, as through the note setters.
+//!
+//! `set-step` (`set-step-param!`) is its live pattern twin: step `index` of
+//! the track's live pattern (the `step` instances, what `t.steps` shows),
+//! whatever its edit focus is pinned to, under the same value rule, as one
+//! undo entry (`set-step-param-history`'s recorded step mutation); its
+//! `:activate` turns the step on in that same entry (a note typed into an
+//! empty step).
 //!
 //! Script drags ([`super::ScriptEdit`]): while the pointer is down every
 //! focus step `set!` of one focus (any field, any step) joins ONE undo entry
@@ -31,7 +37,7 @@ use crate::host_kinds::{focus_step_param, NoteKey, NoteSource};
 use crate::*;
 use std::collections::HashMap;
 
-pub(super) const COMMANDS: &[&str] = &["set-focus-step"];
+pub(super) const COMMANDS: &[&str] = &["set-focus-step", "set-step"];
 
 type Payload = HashMap<String, Rc<RefCell<Value>>>;
 
@@ -88,6 +94,63 @@ fn set_focus_step(app: &mut app::App, ctx: &mut LoopCtx<'_>, map: &Payload) -> R
     Ok(())
 }
 
+/// The label of a live step edit's undo entry (`set-step-param-history`'s).
+const STEP_LABEL: &str = "Set step parameter";
+
+/// `set-step`: `{:track-id :index :field :value}`, `:activate` optional.
+fn set_step(app: &mut app::App, ctx: &mut LoopCtx<'_>, map: &Payload) -> Result<(), String> {
+    let track = command_track(app, map)?;
+    let (field, value) = SetValue::field(map)?;
+    let param =
+        focus_step_param(&field).ok_or_else(|| format!("a step has no settable field {field}"))?;
+    let num_steps = app.state.pattern.track_params[track].get_num_steps();
+    let last = num_steps.clamp(1, MAX_STEPS) - 1;
+    let step = SetValue::of(map, "index", "index").integer(0, last)?;
+    let activate = SetValue::of(map, "activate", "activate").flag_or(false)?;
+    let pattern = &app.state.pattern;
+    let turn_on = activate && !pattern.patterns[track].is_active(step);
+    let current = pattern.step_data[track].get(step, param);
+    if !turn_on && matches!(value.value(), Value::Number(v) if *v == f64::from(current)) {
+        return Ok(());
+    }
+    let next = value.number(param.min().into(), param.max().into())? as f32;
+    let outcome = app::edit::apply_recorded_step_mutation(app, track, &[step], STEP_LABEL, |app| {
+        if turn_on {
+            app.state.pattern.patterns[track].set_step_active(step, true);
+        }
+        app.state
+            .set_step_param_no_publish(track, step, param, next);
+        Ok(())
+    });
+    let outcome = outcome.map_err(|error| format!("{error:?}"))?;
+    if !matches!(outcome, app::edit::EditOutcome::Applied(_)) {
+        return Ok(());
+    }
+    let shared = ctx.shared;
+    *shared.auto_follow_override_until.lock().unwrap() =
+        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+    let invalidations = &shared.ui_invalidations;
+    if turn_on {
+        invalidations.push(UiInvalidation::StepBatch {
+            track,
+            steps: vec![step],
+        });
+    }
+    invalidations.push(UiInvalidation::Step {
+        track,
+        step,
+        change: StepInvalidation::Param(param.into()),
+    });
+    if param == StepParam::Duration {
+        invalidations.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::DurationSpan,
+        });
+    }
+    Ok(())
+}
+
 /// The notes of a step a focus step edit moved (`before` → `after`, by
 /// voice: a step param moves every voice alike, keeping their order) keep
 /// their note ids, while the host kinds know them under this source.
@@ -127,6 +190,7 @@ pub(super) fn handle(
 ) {
     let result = match (name, &payload) {
         ("set-focus-step", Value::Map(map)) => set_focus_step(app, ctx, map),
+        ("set-step", Value::Map(map)) => set_step(app, ctx, map),
         _ => Err("the payload is not a dict".to_string()),
     };
     if let Err(message) = result {

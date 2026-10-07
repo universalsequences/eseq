@@ -1,5 +1,5 @@
-//! Stage 7e: the piano roll (`piano-roll`, `note`) and the tracker's lock
-//! cells (`param.step-locks`, `rack-macro.step-locks`).
+//! Stage 7e: the piano roll (`piano-roll`, `note`) and the lock cells
+//! (`param.step-locks`, `rack-macro.step-locks`).
 
 use super::*;
 use sequencer::sequencer::{LaneSource, PatternId, StepParam};
@@ -141,13 +141,6 @@ fn entry(value: &Value, key: &str) -> Value {
             .get(key)
             .map_or(Value::Nil, |cell| cell.borrow().clone()),
         other => panic!("not a map: {other:?}"),
-    }
-}
-
-fn list(value: Value) -> Vec<Value> {
-    match value {
-        Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
-        other => panic!("not a list: {other:?}"),
     }
 }
 
@@ -576,12 +569,6 @@ fn param_step_locks_list_the_patterns_locks_while_observed() {
     h.sync();
     let locks = h.eval_all("cutoff.step-locks");
     assert_eq!(locks, h.eval_all("(list (list 3 800) (list 7 800))"));
-    // Parity with the tracker's legacy cells: the column's values.
-    let state = h.shared.state.clone();
-    let rows = list(build_tracker_rows_value(&h.app, &state));
-    let cell = |step: usize| list(list(rows[step].clone())[0].clone());
-    assert_eq!(cell(3).last().cloned(), Some(Value::Number(800.0)));
-    assert_eq!(cell(4).last().cloned(), Some(Value::Nil));
     assert_eq!(h.filter_slot(slot).plocks.get(3, 2), Some(800.0));
     // Computed only while observed, then when the track's p-locks moved.
     let cold = h.computed(f::PARAM_STEP_LOCKS);

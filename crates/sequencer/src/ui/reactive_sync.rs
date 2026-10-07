@@ -1432,10 +1432,6 @@ pub(super) fn apply_ui_invalidations(
     // them by bumping ui_epoch, which resynced every track instead.
     let mut step_param_track_lists: Vec<(usize, StepParam)> = Vec::new();
     let mut duration_span_tracks: Vec<usize> = Vec::new();
-    // The piano roll renders notes from transpose/velocity/duration, so a
-    // step-param edit on the current track moves them. One sync per apply,
-    // never one per step.
-    let mut piano_roll_step_params_dirty = false;
     let active_track_count = state.active_track_count().min(app.tracks.len());
     let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
@@ -1546,9 +1542,6 @@ pub(super) fn apply_ui_invalidations(
                     if !step_param_track_lists.contains(&(track, param)) {
                         step_param_track_lists.push((track, param));
                     }
-                    if track == current_track_idx {
-                        piano_roll_step_params_dirty = true;
-                    }
                 }
                 StepInvalidation::DurationSpan => {
                     if !duration_span_tracks.contains(&track) {
@@ -1591,9 +1584,6 @@ pub(super) fn apply_ui_invalidations(
                     if !step_param_track_lists.contains(&(track, param)) {
                         step_param_track_lists.push((track, param));
                     }
-                    if track == current_track_idx {
-                        piano_roll_step_params_dirty = true;
-                    }
                 }
                 StepInvalidation::DurationSpan => {
                     if !duration_span_tracks.contains(&track) {
@@ -1631,11 +1621,6 @@ pub(super) fn apply_ui_invalidations(
                 if sequencer_visible {
                     needs_reactive_cycle |= sync_track_step_list_publishes(rt, state, track);
                 }
-                // The tracker's step-major cell matrix (gated on its opt-in).
-                // With the tracker replacing the Seq tab nothing else in this
-                // branch publishes, so its dirtiness must drive the cycle.
-                needs_reactive_cycle |=
-                    super::piano_roll::sync_track_automation_state(rt, &*app, state);
             }
             UiInvalidation::StepSelection {
                 track,
@@ -1998,9 +1983,6 @@ pub(super) fn apply_ui_invalidations(
                 }
             },
             UiInvalidation::PianoRoll { track, change } => {
-                if track == current_track_idx {
-                    needs_reactive_cycle |= sync_track_automation_state(rt, app, state);
-                }
                 if matches!(change, PianoRollInvalidation::Items) {
                     needs_reactive_cycle |=
                         sync_single_track_sequencer_state(rt, state, app, track, current_track_idx);
@@ -2056,10 +2038,6 @@ pub(super) fn apply_ui_invalidations(
     for track in duration_span_tracks {
         needs_reactive_cycle |= sync_track_duration_spans_list_binding(rt, state, track);
     }
-    if piano_roll_step_params_dirty {
-        needs_reactive_cycle |= sync_track_automation_state(rt, app, state);
-    }
-
     if needs_reactive_cycle {
         *accumulator_names.lock().unwrap() = build_accumulator_names(app);
         sync_track_peak_fields(rt, cached_track_peak_levels);

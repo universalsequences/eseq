@@ -148,6 +148,8 @@ pub(super) struct TickMemo {
     /// Per track position, the step its p-locks show (`send.display`,
     /// `locked`, `process-value`).
     display_steps: HashMap<usize, Option<usize>>,
+    /// The longest pattern's length, the grid `track.playhead-row` lights.
+    grid_rows: Option<usize>,
 }
 
 /// A per-track cache under its [`PlockKey`] and the descriptor it read
@@ -411,6 +413,29 @@ impl KindsHandles {
             .then(|| track_active_playhead_step(&self.state, track))
     }
 
+    /// The longest pattern's length (at least 1): the height of a grid
+    /// where a shorter track repeats down its column (a tracker's).
+    fn grid_rows(&self) -> usize {
+        (0..self.state.active_track_count())
+            .map(|track| self.num_steps(track).max(1))
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// The row `track`'s playhead lights on a grid `rows` tall
+    /// ([`Self::grid_rows`]): the transport's step modulo the grid height
+    /// when that copy is the one playing (its row modulo the track's length
+    /// is the track's own step), else the track's own step (another
+    /// timebase, an off-grid launch). None while stopped.
+    fn playhead_row(&self, track: usize, rows: usize) -> Option<usize> {
+        let step = self.playing_step(track)?;
+        let row = self.state.transport.playhead.load(Ordering::Relaxed) as usize % rows;
+        Some(match row % self.num_steps(track).max(1) == step {
+            true => row,
+            false => step,
+        })
+    }
+
     /// Whether the step selection applies to `track`: the current track,
     /// or one of a rack-wide selection's tracks while its delete target is
     /// armed (like the legacy step-selection publish).
@@ -437,6 +462,24 @@ fn in_selection(sources: &KindsHandles, shared: &RefCell<KindsShared>, track: us
             .contains(&track),
         None => sources.selected_tracks.lock().unwrap().contains(&track),
     }
+}
+
+/// [`KindsHandles::grid_rows`], once per tick (every observing track's
+/// `playhead-row` shares it).
+fn grid_rows(sources: &KindsHandles, shared: &RefCell<KindsShared>) -> usize {
+    let memo = shared
+        .borrow()
+        .tick
+        .as_ref()
+        .and_then(|tick| tick.grid_rows);
+    if let Some(rows) = memo {
+        return rows;
+    }
+    let rows = sources.grid_rows();
+    if let Some(tick) = shared.borrow_mut().tick.as_mut() {
+        tick.grid_rows = Some(rows);
+    }
+    rows
 }
 
 /// [`KindsHandles::plock_display_step`], once per track per tick.
@@ -597,6 +640,19 @@ pub(super) fn live_value<S: KindStore>(
                     track_process_length_step(&sources.state, track)
                         .map_or(-1.0, |step| step as f64),
                 ),
+                f::TRACK_PLAYHEAD_ROW => {
+                    let rows = grid_rows(sources, shared);
+                    number(
+                        sources
+                            .playhead_row(track, rows)
+                            .map_or(-1.0, |row| row as f64),
+                    )
+                }
+                f::TRACK_STEP_PARAMS_IN_USE => step_param_names(step_params_in_use(
+                    &sources.state,
+                    track,
+                    sources.num_steps(track),
+                )),
                 f::TRACK_TIMEBASE => Value::String(params.get_timebase().label().to_string()),
                 f::TRACK_MOD_OUT_LEVEL => {
                     let shared = shared.borrow();
@@ -892,6 +948,15 @@ pub(super) fn live_value<S: KindStore>(
                 let track = sources.current_track.load(Ordering::Relaxed) as u64;
                 instance_or_nil(store.keyed(TRACK, &[track]))
             }
+            // The current track's `playhead-row` (-1 without one): a scalar
+            // a view binds without reading `selection.track`.
+            f::SELECTION_PLAYHEAD_ROW => {
+                let track = sources.current_track.load(Ordering::Relaxed);
+                let row = (sources.track_exists(track))
+                    .then(|| sources.playhead_row(track, grid_rows(sources, shared)))
+                    .flatten();
+                number(row.map_or(-1.0, |row| row as f64))
+            }
             f::PIANO_ROLL_PLAYHEAD => number(piano_roll_playhead(sources, shared)),
             f::SELECTION_TRACKS => {
                 let tracks = sorted_selected_tracks(&sources.selected_tracks.lock().unwrap());
@@ -919,6 +984,37 @@ fn track_bar_transposes(state: &SequencerState, track: usize, num_steps: usize) 
     (0..bar_count(num_steps))
         .map(|bar| state.bar_transpose(track, bar) as f64)
         .collect()
+}
+
+/// The step params some active step of `track` holds off their default
+/// (`t.step-params-in-use`): a bit per [`FOCUS_STEP_PARAMS`] entry.
+pub(super) fn step_params_in_use(state: &SequencerState, track: usize, num_steps: usize) -> u32 {
+    let (pattern, data) = (
+        &state.pattern.patterns[track],
+        &state.pattern.step_data[track],
+    );
+    let all = (1u32 << FOCUS_STEP_PARAMS.len()) - 1;
+    let mut mask = 0;
+    for step in (0..num_steps).filter(|step| pattern.is_active(*step)) {
+        for (bit, (_, param)) in FOCUS_STEP_PARAMS.iter().enumerate() {
+            if (data.get(step, *param) - param.default_value()).abs() > 1e-6 {
+                mask |= 1 << bit;
+            }
+        }
+        if mask == all {
+            break;
+        }
+    }
+    mask
+}
+
+/// The focus-step field names of the [`FOCUS_STEP_PARAMS`] entries in
+/// `mask`, in its order.
+pub(super) fn step_param_names(mask: u32) -> Value {
+    let names = (FOCUS_STEP_PARAMS.iter().enumerate())
+        .filter(|(bit, _)| mask & (1 << bit) != 0)
+        .map(|(_, ((_, name), _))| text(name));
+    list_value(names)
 }
 
 /// The current track's instance and its length, while it exists.

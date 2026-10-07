@@ -50,6 +50,8 @@ impl HostKinds {
             self.settings.retain(|id, _| rt.instance_is_live(*id));
             self.tunings.retain(|id, _| rt.instance_is_live(*id));
             self.bar_transposes.retain(|id, _| rt.instance_is_live(*id));
+            self.step_params_in_use
+                .retain(|id, _| rt.instance_is_live(*id));
             self.panel
                 .track_variants
                 .retain(|id, _| rt.instance_is_live(*id));
@@ -115,6 +117,7 @@ impl HostKinds {
         let peak_bit = TRACK_LIVE.bit(f::TRACK_PEAK);
         let steps_bit = TRACK_LIVE.bit(f::TRACK_STEPS);
         let bars_bit = TRACK_LIVE.bit(f::TRACK_BAR_TRANSPOSES);
+        let in_use_bit = TRACK_LIVE.bit(f::TRACK_STEP_PARAMS_IN_USE);
         let variants_bit = TRACK_LIVE.bit(f::TRACK_VARIANTS);
         let notes_bit = TRACK_LIVE.bit(f::TRACK_ACTIVE_NOTES);
         let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN) | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
@@ -127,14 +130,22 @@ impl HostKinds {
             if !pusher.sources.track_exists(track) {
                 continue;
             }
-            let observed =
-                pusher.push_live_except(id, &TRACK_LIVE, bars_bit | variants_bit | notes_bit);
+            let observed = pusher.push_live_except(
+                id,
+                &TRACK_LIVE,
+                bars_bit | in_use_bit | variants_bit | notes_bit,
+            );
             peaks_observed |= observed & peak_bit != 0;
             mod_levels_observed |= observed & mod_bits != 0;
             if observed & bars_bit != 0 {
                 self.sync_bar_transposes(pusher, track, id);
             } else {
                 self.bar_transposes.remove(&id);
+            }
+            if observed & in_use_bit != 0 {
+                self.sync_step_params_in_use(pusher, track, id);
+            } else {
+                self.step_params_in_use.remove(&id);
             }
             if observed & variants_bit != 0 {
                 self.sync_track_variants(pusher, track, id);

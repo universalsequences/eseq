@@ -99,23 +99,3 @@ pub(crate) fn displayed_plock_step(
             .then(|| track_active_playhead_step(state, track))
     })
 }
-
-/// The tracker's grid lists go dark while the transport is stopped (the step
-/// grid's playheads are `track.playhead` and `step.playing`, eseq.kinds).
-pub(crate) fn clear_tracker_grid_playhead_fields(rt: &mut Runtime, app: &app::App) {
-    if !super::super::piano_roll::track_automation_wanted(rt) {
-        return;
-    }
-    for track in 0..app.tracks.len() {
-        rt.set_reactive(
-            "SEQ",
-            &super::super::piano_roll::tracker_grid_playhead_field(track),
-            Value::List(vec![]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            &super::super::piano_roll::tracker_grid_playhead_row_field(track),
-            Value::Number(-1.0),
-        );
-    }
-}

@@ -8,7 +8,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "piano-roll-gesture-update",
     "piano-roll-gesture-finish",
     "piano-roll-history-action",
-    "piano-roll-automation-refresh",
     "delete-selected-steps",
     "paste-steps",
     "set-step-param-history",
@@ -335,14 +334,6 @@ pub(super) fn handle(
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
-        }
-        // The tracker package opened: publish `SEQ.track-automation` (its
-        // p-lock columns) now rather than on the next edit.
-        "piano-roll-automation-refresh" => {
-            ui_invalidations.push(UiInvalidation::PianoRoll {
-                track: current_track.load(Ordering::Relaxed),
-                change: PianoRollInvalidation::Selection,
-            });
         }
         "delete-selected-steps" => {
             let (track, tracks) = match &payload {

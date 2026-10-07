@@ -156,11 +156,12 @@ schema on every route or chain change. Instead:
 ### 5.2 The `param` source (sequencer)
 
 Registered by the sequencer UI. Context = destination track index (or `nil`).
-Items come from the same data as `SEQ.track-lock-targets`
-(`build_track_lock_targets_value`, `ui/piano_roll.rs`): Step, instrument, FX,
-MIDI FX, and rack macro groups for that track, with each item's `word` set
-to its `process_param_target_label` and `detail` set to its display label and
-range. The epoch is the one that already invalidates `track-lock-targets`.
+Items are the targets the tracker's "+" picker lists (its legacy
+`SEQ.track-lock-targets`, now the track's devices' params and rack macros
+read through the kinds): Step, instrument, FX, MIDI FX, and rack macro
+groups for that track, with each item's `word` set to its
+`process_param_target_label` and `detail` set to its display label and
+range.
 
 *Built (eseq-jplk.5, `crates/sequencer/src/ui/param_words.rs`):* words are
 read from the latest scheduler snapshot (the descriptors the engine resolves
