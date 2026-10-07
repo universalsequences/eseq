@@ -6,17 +6,17 @@ use super::*;
 /// The observed-mask bits (in `STEP_LIVE` order) the per-tick step diff
 /// uses, computed once.
 struct StepBits {
-    active: u32,
-    playing: u32,
-    selected: u32,
+    active: ObservedMask,
+    playing: ObservedMask,
+    selected: ObservedMask,
     /// Per [`STEP_VALUES`] field: its bit and its parameter (`None` for
     /// `held`).
-    values: [(u32, Option<StepParam>); STEP_VALUES.len()],
+    values: [(ObservedMask, Option<StepParam>); STEP_VALUES.len()],
     /// `plocked`, `lock-kind`, `variant-color` and `variant`.
-    plocked: u32,
-    lock_kind: u32,
-    variant_color: u32,
-    variant: u32,
+    plocked: ObservedMask,
+    lock_kind: ObservedMask,
+    variant_color: ObservedMask,
+    variant: ObservedMask,
 }
 
 static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
@@ -116,7 +116,7 @@ pub(super) struct StepDiff {
     plock_key: Option<PlockKey>,
     /// The union of the step instances' observed fields (bit `i` is
     /// `STEP_LIVE.keys[i]`), as of `Runtime::instance_observer_epoch`.
-    observers: Option<(u64, u32)>,
+    observers: Option<(u64, ObservedMask)>,
 }
 
 /// Step fields of one track. Steps are dropped only when the track's
@@ -130,7 +130,7 @@ pub(super) fn sync_steps(
     pusher: &mut Pusher<'_>,
     diff: &mut StepDiff,
     selection: &StepSelection,
-    changes: &mut Vec<u32>,
+    changes: &mut Vec<ObservedMask>,
     track: usize,
     track_id: InstanceId,
     steps_observed: bool,

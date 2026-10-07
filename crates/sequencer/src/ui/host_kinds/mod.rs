@@ -96,7 +96,7 @@
 //! syncs.
 
 use crate::*;
-use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
+use eseqlisp::vm::{HostFieldReader, InstanceId, ObservedMask, MAX_OBSERVED_FIELDS, VM};
 use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 
@@ -2245,20 +2245,28 @@ impl LiveFields {
             .filter(|((published, _), _, feed)| *published == kind && *feed == Live)
             .map(|(key, _, _)| *key)
             .collect();
-        // Observed masks are `u32`s.
-        assert!(keys.len() <= 32, "{kind} has more than 32 live fields");
+        Self::from_keys(kind, keys)
+    }
+
+    /// The live fields `keys` of `kind`, in mask-bit order.
+    pub(super) fn from_keys(kind: &str, keys: Vec<FieldKey>) -> Self {
+        // Observed masks are `ObservedMask`s: one bit per live field.
+        assert!(
+            keys.len() <= MAX_OBSERVED_FIELDS,
+            "{kind} has more than {MAX_OBSERVED_FIELDS} live fields: widen ObservedMask"
+        );
         let names = keys.iter().map(|(_, name)| *name).collect();
         Self { keys, names }
     }
 
     /// The observed-mask bit of `key`.
-    pub(super) fn bit(&self, key: FieldKey) -> u32 {
+    pub(super) fn bit(&self, key: FieldKey) -> ObservedMask {
         let index = self.keys.iter().position(|live| *live == key);
         index.map_or(0, |index| 1 << index)
     }
 
     /// The observed-mask bits of `keys`.
-    pub(super) fn bits(&self, keys: &[FieldKey]) -> u32 {
+    pub(super) fn bits(&self, keys: &[FieldKey]) -> ObservedMask {
         keys.iter().fold(0, |bits, key| bits | self.bit(*key))
     }
 }
@@ -2567,8 +2575,8 @@ pub(crate) struct HostKinds {
     param_observed: ObservedList,
     /// The union of the send (bus) instances' observed live fields, as of
     /// `Runtime::instance_observer_epoch` ([`observed_union`]).
-    send_observers: Option<(u64, u32)>,
-    bus_observers: Option<(u64, u32)>,
+    send_observers: Option<(u64, ObservedMask)>,
+    bus_observers: Option<(u64, ObservedMask)>,
     /// Bus (volume, mute, solo) last pushed, by bus position.
     bus_mixer: Vec<Option<(f32, bool, bool)>>,
     /// `selection.tracks` (sorted track positions) last pushed; `None`
@@ -2577,7 +2585,7 @@ pub(crate) struct HostKinds {
     steps: HashMap<InstanceId, StepDiff>,
     selection: StepSelection,
     /// Per-step changed-field masks, reused across tracks and ticks.
-    step_changes: Vec<u32>,
+    step_changes: Vec<ObservedMask>,
     /// The transport's queued scene and launch quantization last pushed.
     queued: Option<Option<usize>>,
     launch_quantize: Option<String>,

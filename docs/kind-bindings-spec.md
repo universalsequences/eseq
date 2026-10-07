@@ -912,9 +912,13 @@ Built (stage 4):
   has dependents, or its bound slot's `Arc` strong count exceeds the store's
   own (`ReactiveBindingStore::binding_slots_held`). A hidden buffer's
   deferred effect still counts as a reader. The batched
-  `host_fields_observed(id, &[fields]) -> u32` (bit `i` = `fields[i]`)
-  formats the namespace once and locks the slot store once; the tick asks
-  it once per instance. `instance_observer_epoch` moves whenever a field
+  `host_fields_observed(id, &[fields]) -> ObservedMask` (bit `i` =
+  `fields[i]`; `ObservedMask = u64` since eseq-0l17.71, so at most
+  `MAX_OBSERVED_FIELDS` = 64 fields per call, asserted) formats the
+  namespace once and locks the slot store once; the tick asks it once per
+  instance. The host's `LiveFields`, `ObservedList` entries, observer
+  caches and per-kind bit tables are `ObservedMask`s too, and
+  `LiveFields::of` asserts a kind has at most 64 live fields. `instance_observer_epoch` moves whenever a field
   may have gained an observer (a tracked read, a handed-out `#'`), so a host
   can cache "nothing observes these" until it moves.
 - **Cold reads.** The host skips unobserved fields, so a by-value read of
@@ -2035,8 +2039,9 @@ its instance and field.
      `device.strip-locks (list-of :string)` (L: a rack slot's strip controls
      some step of its track's pattern locks, in `RackSlotParam` order,
      cached per slot under the track's `PlockKey` and step count; the last
-     free bit of the device's observed mask, now full: 31 live fields and
-     `params`, 32 of 32), `track.setting-locks
+     free bit of the device's then-`u32` observed mask: 31 live fields and
+     `params`, 32 of 32; eseq-0l17.71 widened it to a 64-bit
+     `ObservedMask`), `track.setting-locks
      (list-of :any)` (L: `(dict :name :value)` per timebase / swing / swing
      resolution lock at the displayed step). `HostKinds::wants_sampler_playhead`
      keeps the current track's sampler voices on the watchlist while its
@@ -3192,9 +3197,9 @@ the other port beads follow it):
    - a `list-of` field cannot be bound per element: a value a widget draws
      from one entry (an LFO's phase among `device.mod-phases`) needs a
      scalar field (`param.mod-phase`) or a by-value read in a small subtree;
-     mind the observed-mask budget: a device's is full (31 live fields and
-     `params`, 32 of 32 bits), so a new device live field widens
-     `host_fields_observed` first;
+     mind the observed-mask budget: a device's holds 31 live fields and
+     `params` (32 of the 64 bits of `ObservedMask` since eseq-0l17.71;
+     `LiveFields::of` and `DEVICE_PARAMS_BIT` assert the limit);
    - fields computed only while observed (a sampler's media) read their
      defaults on the frame that first observes them: capture syncs the host
      kinds again after its first frame;
@@ -3539,19 +3544,51 @@ Built (7b):
   continuous (and `end` no longer does). A non-continuous script edit
   (a flag: `(set! rs.muted true)`, voices, choke, enabled) landing during
   the script's *own* drag is applied beside it, the drag staying open, when
-  `app::edit::command_is_disjoint_from_active_gesture` says its command
-  touches another device than the drag's pending device-value entry (a
-  filter param drag with a rack slot's mute toggled mid-drag: one entry
-  for the drag, one for the mute). Device values are recorded as
-  whole-device snapshots (`DeviceValuesPatch`; a rack slot's covers its
-  strip, p-locks, instrument and effects), so an entry of the *same*
-  device beside the open drag would undo to states nobody saw (undoing the
-  drag drops the flag, undoing the flag restores mid-drag values). Those
-  edits, and any edit without a command to check (`apply_with`) or during
-  a drag whose pending entry is not a device-value snapshot, keep the
-  earlier behaviour: the flag ends the drag's entry and the drag's later
-  frames start another. The same overlap applies to the user-drag case
-  above (pre-existing, not changed here).
+  `app::edit::command_can_land_beside_active_gesture` says its command is a
+  device-value edit of another device than the drag's pending device-value
+  entry (eseq-0l17.55: a filter param drag with a rack slot's mute toggled
+  mid-drag, one entry for the drag, one for the mute) or of the dragged
+  device itself (eseq-0l17.72). Device values are recorded as whole-device
+  snapshots (`DeviceValuesPatch`; a rack slot's covers its strip, p-locks,
+  instrument and effects), so a same-device entry beside the open drag
+  would, left alone, undo to states nobody saw (undoing the drag drops the
+  flag, undoing the flag restores mid-drag values). Since eseq-0l17.72
+  `app::edit::apply_beside_gesture` — the path script edits beside a
+  *user's* knob drag take too — rebases the two after the beside edit
+  commits (`rebase_device_drag_beside`): with the drag's entry at `B → C`
+  and the beside entry at `C → C'`, the beside entry becomes `B → B'` and
+  the drag's `B' → C'`, where `B'` is `B` with the components the edit
+  moved (`DeviceValueSnapshot::rebase_edit`, a three-way merge per
+  component: strip fields one by one, params' base values one by one,
+  p-locks (slot and rack-slot) cell by cell, key locks note by note,
+  tensors one by one, IR, table and slice edits each whole; RackSlot and
+  RackInstrument targets of one slot are one device). The sound state
+  keeps `B`'s engine and preset while the edit kept them, and its dirty
+  flag is `B`'s or set when the edit dirtied the preset (turned the flag
+  on, or moved a sound component: the instrument, base note, key-lock
+  variants or slot p-locks), so undoing the drag beside a param edit
+  still shows the preset dirty. The drag closes last and undoes first, keeping the flag; the
+  flag's undo then lands on `B`; redo walks back up. When the edit moved a
+  component the drag moved too (a script setting the dragged gain during
+  a user's gain drag), the snapshots are of different kinds, the drag's
+  `after` is not the edit's `before`, or the beside edits are several
+  overlapping snapshots, the drag's entry so far is committed *below* the
+  beside entries instead (`UndoManager::insert_undo_entry_before`, a fresh
+  revision between them) and its later frames stage a new one: the
+  pre-eseq-0l17.72 split, still on states that existed. A sampler slice
+  drag (merge key prefix `sampler-slice-gesture:`) is ended there instead
+  of resumed: its frames reapply the marker index it started from to the
+  gesture's original snapshot (which a rebase keeps), so after a split its
+  next frame starts a new gesture on the list as the edit left it. The
+  undo budget evicts the undo stack's front by position (revisions need
+  not increase along the stack after an insert). Edits that cover
+  the dragged device without being it (a track instrument's beside a rack
+  slot's), and any script edit without a command to check (`apply_with`)
+  or during a drag whose pending entry is not a device-value snapshot,
+  keep the earlier behaviour: the edit ends the drag's entry and the
+  drag's later frames start another. Not covered: an edit beside a user
+  drag whose entry *covers* the dragged device (the user-drag path checks
+  no scope; pre-existing).
 - **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
   (eseq-0l17.36, built: §14.2f); modulation display, process mapping, tensors, base
   note, key locks, rack and project macros, the variant chip list, the
@@ -4170,10 +4207,11 @@ Built (7b-2):
   `content/ui/effects/instrument-panel.lisp`), not the base;
   `voices-locked` is not: the panel's p-lock marker is the slot
   wrapper's `plock-any` over its targets (any step), never the shown
-  step's lock, and the device's observed mask is a `u32` with the
-  params bit last (30 live fields + `params` = 31 of 32 bits; the mask
-  stays `u32`, one bit left: the next live device field past that
-  widens `host_fields_observed` and the observed lists to `u64`).
+  step's lock, and the device's observed mask has the params bit last
+  (30 live fields + `params` = 31 bits then, 32 after eseq-0l17.61's
+  `strip-locks`; eseq-0l17.71 widened the masks from `u32` to
+  `ObservedMask` = `u64`, so the device kind has room for 63 live fields
+  plus `params`).
 - **Not covered:** the rest of the panel extras
   (eseq-0l17.37, built: §14.2g), rack slot sampler playheads
   (`device.playhead` is a track instrument's).

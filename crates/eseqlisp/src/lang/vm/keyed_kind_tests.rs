@@ -952,6 +952,44 @@ fn reserved_kind_names_belong_to_their_module() {
     assert!(vm.instance_kind_schema("eseq.kinds:track").is_some());
 }
 
+/// A kind with more than 32 `:host` fields: the observed mask is a `u64`
+/// (eseq-0l17.71), so bits past 31 come back like the low ones, and asking
+/// about more than [`MAX_OBSERVED_FIELDS`] fields is a clear panic.
+#[test]
+fn observed_bits_cover_more_than_32_fields() {
+    let (mut vm, _) = vm();
+    let names: Vec<String> = (0..40).map(|i| format!("f{i}")).collect();
+    let host = names
+        .iter()
+        .map(|name| format!("({name} :number)"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eval(
+        &mut vm,
+        &format!("(def-kind wide :key (index) :host ({host}))"),
+    );
+    let id = vm.register_keyed_instance("wide", &[0]).expect("register");
+    eval(&mut vm, "(def w0 (wide 0))");
+    eval(
+        &mut vm,
+        r#"(effect-buffer "*wide*" (label (+ w0.f2 w0.f35)))"#,
+    );
+    rendered_targets(&mut vm);
+    eval(&mut vm, "(def held #'w0.f39)");
+    let fields: Vec<&str> = names.iter().map(String::as_str).collect();
+    let expected: super::ObservedMask = (1 << 2) | (1 << 35) | (1 << 39);
+    assert_eq!(vm.host_fields_observed(id, &fields), expected);
+    assert!(vm.host_field_observed(id, "f39"));
+    assert!(!vm.host_field_observed(id, "f38"));
+    let too_many: Vec<&str> = std::iter::repeat_n("f0", super::MAX_OBSERVED_FIELDS + 1).collect();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vm.host_fields_observed(id, &too_many)
+    }))
+    .expect_err("more than MAX_OBSERVED_FIELDS fields panics");
+    let message = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(message.contains("at most 64 fields"), "{message}");
+}
+
 #[test]
 fn observed_bits_batch_children_by_kind_and_the_schema_generation() {
     let (mut vm, _) = vm();

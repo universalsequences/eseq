@@ -212,7 +212,7 @@ impl HostKinds {
         pusher: &mut Pusher<'_>,
         id: InstanceId,
         source: &DeviceSource,
-        mask: u32,
+        mask: ObservedMask,
     ) {
         let (sources, shared) = (pusher.sources, pusher.shared);
         let fields = device_table_fields(sources, source);
@@ -260,15 +260,15 @@ static MEDIA_NAMES: LazyLock<Vec<&'static str>> =
 /// The media fields by what they derive from (bits of [`MEDIA_KEYS`]): the
 /// sample, the selection (compared every tick), the slices and the
 /// analysis.
-const SAMPLE_BUFFER_BIT: u32 = 1 << 0;
-const SAMPLE_DURATION_BIT: u32 = 1 << 1;
-const SAMPLE_BITS: u32 = SAMPLE_BUFFER_BIT | SAMPLE_DURATION_BIT;
-const SELECTION_BITS: u32 = 1 << 2 | 1 << 3;
-const SLICES_BIT: u32 = 1 << 4;
-const SLICE_ACTIVE_BIT: u32 = 1 << 5;
-const SLICE_BITS: u32 = SLICES_BIT | SLICE_ACTIVE_BIT;
-const ANALYSIS_BITS: u32 = 1 << 6 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 11;
-const ALL_MEDIA_BITS: u32 = SAMPLE_BITS | SELECTION_BITS | SLICE_BITS | ANALYSIS_BITS;
+const SAMPLE_BUFFER_BIT: ObservedMask = 1 << 0;
+const SAMPLE_DURATION_BIT: ObservedMask = 1 << 1;
+const SAMPLE_BITS: ObservedMask = SAMPLE_BUFFER_BIT | SAMPLE_DURATION_BIT;
+const SELECTION_BITS: ObservedMask = 1 << 2 | 1 << 3;
+const SLICES_BIT: ObservedMask = 1 << 4;
+const SLICE_ACTIVE_BIT: ObservedMask = 1 << 5;
+const SLICE_BITS: ObservedMask = SLICES_BIT | SLICE_ACTIVE_BIT;
+const ANALYSIS_BITS: ObservedMask = 1 << 6 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 11;
+const ALL_MEDIA_BITS: ObservedMask = SAMPLE_BITS | SELECTION_BITS | SLICE_BITS | ANALYSIS_BITS;
 
 /// The sampler media pass's state (in [`HostKinds`]).
 #[derive(Default)]
@@ -295,7 +295,7 @@ impl MediaState {
 #[derive(Default)]
 struct MediaSeen {
     /// The observed fields when they were pushed (0 before the first push).
-    mask: u32,
+    mask: ObservedMask,
     /// `None`: no sampler (its fields read the defaults).
     sampler: Option<SamplerSeen>,
 }
@@ -506,10 +506,10 @@ impl HostKinds {
 
 /// What one tick pushes of one observed device's media.
 struct MediaChanges {
-    mask: u32,
+    mask: ObservedMask,
     /// The observed fields to recompute and push (a moved group's or a
     /// newly observed one).
-    push: u32,
+    push: ObservedMask,
     /// The analysis key re-read this tick (`None`: the cache did not move).
     analysis: Option<AnalysisKey>,
     sample_moved: bool,
@@ -522,7 +522,7 @@ impl MediaChanges {
     fn of(
         app: &app::App,
         seen: &MediaSeen,
-        mask: u32,
+        mask: ObservedMask,
         read: Option<&MediaRead<'_>>,
         generation: u64,
     ) -> Self {
@@ -677,7 +677,7 @@ struct SampleAndSelection {
     /// fields moved or the selection needs its duration.
     load: Option<Option<PathBuf>>,
     /// The sample fields to push.
-    push: u32,
+    push: ObservedMask,
     /// The stored start and end, when observed.
     selection: Option<(f32, f32)>,
 }
@@ -722,7 +722,7 @@ fn push_sample_and_selection(
 /// Push the no-sampler media of device `id` in `mask`: what a device that
 /// is no sampler (or one never observed) reads. Pushed to every device when
 /// it registers, so an unobserved read is the documented default.
-pub(super) fn push_media_defaults(pusher: &mut Pusher<'_>, id: InstanceId, mask: u32) {
+pub(super) fn push_media_defaults(pusher: &mut Pusher<'_>, id: InstanceId, mask: ObservedMask) {
     for (bit, key) in MEDIA_KEYS.iter().enumerate() {
         if mask & (1 << bit) == 0 {
             continue;

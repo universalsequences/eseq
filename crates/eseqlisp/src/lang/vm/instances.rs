@@ -80,6 +80,14 @@ use super::{
 /// Host-assigned instance id, stable within a project.
 pub type InstanceId = u64;
 
+/// The observed mask [`VM::host_fields_observed`] returns: bit `i` is the
+/// `i`th field asked about (kind-bindings spec §9, D3).
+pub type ObservedMask = u64;
+
+/// How many fields one [`VM::host_fields_observed`] call (and so one kind's
+/// live field list on the host) can cover: the bits of [`ObservedMask`].
+pub const MAX_OBSERVED_FIELDS: usize = ObservedMask::BITS as usize;
+
 /// Receives a Lisp `(set! x.label v)` when the host wants renames routed
 /// through its own (undoable) edit path. The host is expected to push the
 /// accepted label back with `VM::set_instance_builtin_field`.
@@ -2771,16 +2779,17 @@ impl VM {
     /// [`Self::host_field_observed`] for several fields of one instance at
     /// once: bit `i` of the result is set when `fields[i]` is observed. The
     /// namespace is formatted once and the slot store locked once. At most
-    /// 32 fields.
-    pub fn host_fields_observed(&self, id: InstanceId, fields: &[&str]) -> u32 {
-        debug_assert!(
-            fields.len() <= 32,
-            "host_fields_observed takes at most 32 fields"
+    /// [`MAX_OBSERVED_FIELDS`] fields.
+    pub fn host_fields_observed(&self, id: InstanceId, fields: &[&str]) -> ObservedMask {
+        assert!(
+            fields.len() <= MAX_OBSERVED_FIELDS,
+            "host_fields_observed takes at most {MAX_OBSERVED_FIELDS} fields, got {}",
+            fields.len()
         );
         let namespace = instance_namespace(id);
         let sources = self.dag.namespace_field_sources.get(&namespace);
-        let mut mask = 0u32;
-        for (bit, field) in fields.iter().enumerate().take(32) {
+        let mut mask: ObservedMask = 0;
+        for (bit, field) in fields.iter().enumerate() {
             let read = sources
                 .and_then(|sources| sources.get(*field))
                 .is_some_and(|node| {
@@ -2797,7 +2806,6 @@ impl VM {
             let unread = fields
                 .iter()
                 .enumerate()
-                .take(32)
                 .filter_map(|(bit, field)| {
                     (mask & (1 << bit) == 0)
                         .then(|| bound.get(*field).map(|kind| (bit, *field, *kind)))

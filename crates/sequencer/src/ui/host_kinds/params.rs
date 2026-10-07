@@ -257,51 +257,51 @@ fn param_text(pdesc: &ParamDescriptor, stored: f32) -> &str {
 
 /// The observed-mask bits of the param live fields.
 pub(super) struct ParamBits {
-    pub(super) value: u32,
-    pub(super) base: u32,
-    pub(super) locked: u32,
-    pub(super) overridden: u32,
-    pub(super) has_locks: u32,
-    pub(super) text: u32,
-    pub(super) printing: u32,
-    pub(super) visible: u32,
-    pub(super) mod_offset: u32,
-    pub(super) mod_value: u32,
-    pub(super) mod_scale: u32,
-    pub(super) mod_ratio: u32,
-    pub(super) mod_phase: u32,
-    pub(super) process_mapped: u32,
-    pub(super) process_value: u32,
-    pub(super) process_clamped: u32,
-    pub(super) key_locks: u32,
-    pub(super) step_locks: u32,
+    pub(super) value: ObservedMask,
+    pub(super) base: ObservedMask,
+    pub(super) locked: ObservedMask,
+    pub(super) overridden: ObservedMask,
+    pub(super) has_locks: ObservedMask,
+    pub(super) text: ObservedMask,
+    pub(super) printing: ObservedMask,
+    pub(super) visible: ObservedMask,
+    pub(super) mod_offset: ObservedMask,
+    pub(super) mod_value: ObservedMask,
+    pub(super) mod_scale: ObservedMask,
+    pub(super) mod_ratio: ObservedMask,
+    pub(super) mod_phase: ObservedMask,
+    pub(super) process_mapped: ObservedMask,
+    pub(super) process_value: ObservedMask,
+    pub(super) process_clamped: ObservedMask,
+    pub(super) key_locks: ObservedMask,
+    pub(super) step_locks: ObservedMask,
 }
 
 impl ParamBits {
     /// The fields that need the displayed value.
-    fn shown(&self) -> u32 {
+    fn shown(&self) -> ObservedMask {
         self.value | self.locked | self.overridden | self.text | self.mod_value | self.process_value
     }
 
     /// The modulation display fields: what the tick's modulation sample
     /// feeds (observing one keeps it polled; `mod-phase` only on a
     /// modulation source's setting).
-    pub(super) fn mod_display(&self) -> u32 {
+    pub(super) fn mod_display(&self) -> ObservedMask {
         self.mod_values() | self.mod_phase
     }
 
     /// The modulation display fields that read the param's own modulation.
-    pub(super) fn mod_values(&self) -> u32 {
+    pub(super) fn mod_values(&self) -> ObservedMask {
         self.mod_offset | self.mod_value | self.mod_scale | self.mod_ratio
     }
 
-    pub(super) fn process(&self) -> u32 {
+    pub(super) fn process(&self) -> ObservedMask {
         self.process_mapped | self.process_value | self.process_clamped
     }
 
     /// The fields that move only with their track's [`PlockKey`]: the tick
     /// recomputes them only when it moved.
-    pub(super) fn plock_keyed(&self) -> u32 {
+    pub(super) fn plock_keyed(&self) -> ObservedMask {
         self.has_locks | self.process_mapped | self.key_locks | self.step_locks
     }
 }
@@ -374,7 +374,7 @@ fn read_param(
     device: &DeviceSource,
     pdesc: &ParamDescriptor,
     index: usize,
-    mask: u32,
+    mask: ObservedMask,
 ) -> Option<ParamReading> {
     let bits = &*PARAM_BITS;
     let shown = mask & bits.shown() != 0;
@@ -472,7 +472,7 @@ pub(super) fn param_live_fields<'a>(
     shared: &RefCell<KindsShared>,
     device: &'a DeviceSource,
     index: usize,
-    mask: u32,
+    mask: ObservedMask,
     visible: &mut VisibleCache,
     mut emit: impl FnMut(FieldKey, ParamField<'a>),
 ) {
@@ -552,10 +552,11 @@ static DEVICE_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     names.push(f::DEVICE_PARAMS.1);
     names
 });
-static DEVICE_PARAMS_BIT: LazyLock<u32> = LazyLock::new(|| {
+static DEVICE_PARAMS_BIT: LazyLock<ObservedMask> = LazyLock::new(|| {
     assert!(
-        DEVICE_LIVE.keys.len() < 32,
-        "device live fields + params exceed the u32 observed mask: widen host_fields_observed"
+        DEVICE_LIVE.keys.len() < MAX_OBSERVED_FIELDS,
+        "device live fields + params exceed the {MAX_OBSERVED_FIELDS}-bit observed mask: \
+         widen ObservedMask"
     );
     1 << DEVICE_LIVE.keys.len()
 });
@@ -667,7 +668,7 @@ pub(super) struct ObservedList {
     epoch: Option<u64>,
     /// (instance, observed mask, the [`PlockKey`] its `has-locks` was last
     /// computed under).
-    pub(super) entries: Vec<(InstanceId, u32, Option<PlockKey>)>,
+    pub(super) entries: Vec<(InstanceId, ObservedMask, Option<PlockKey>)>,
 }
 
 impl ObservedList {
@@ -961,7 +962,7 @@ impl HostKinds {
         pusher: &mut Pusher<'_>,
         id: InstanceId,
         source: &DeviceSource,
-        mask: u32,
+        mask: ObservedMask,
     ) {
         let bits = DeviceBits::get();
         let (sources, shared) = (pusher.sources, pusher.shared);
@@ -1007,19 +1008,19 @@ impl HostKinds {
 
 /// The observed-mask bits of the device live fields.
 struct DeviceBits {
-    playhead: u32,
-    delete_target: u32,
-    mod_phases: u32,
-    key_locked_notes: u32,
-    variants: u32,
-    plock_keyed: u32,
+    playhead: ObservedMask,
+    delete_target: ObservedMask,
+    mod_phases: ObservedMask,
+    key_locked_notes: ObservedMask,
+    variants: ObservedMask,
+    plock_keyed: ObservedMask,
     /// The strip fields' ([`strip_keys`]).
-    strips: u32,
-    modulator_phase: u32,
-    modulator_level: u32,
+    strips: ObservedMask,
+    modulator_phase: ObservedMask,
+    modulator_level: ObservedMask,
     /// The effect table fields' ([`table_keys`]), `table-options`'s.
-    tables: u32,
-    table_options: u32,
+    tables: ObservedMask,
+    table_options: ObservedMask,
 }
 
 impl DeviceBits {

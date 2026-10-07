@@ -1248,9 +1248,9 @@ fn rack_slot_strip_setters_follow_the_value_rule_through_history() {
 /// eseq-0l17.55: a flag `set!` landing during a script drag (the pointer
 /// down) of another device is an undo entry of its own beside the drag,
 /// which stays open: a param drag with a rack slot's mute toggled mid-drag
-/// is one entry for the drag and one for the mute. A flag of the dragged
-/// device itself still ends the drag's entry (whole-device undo snapshots
-/// cannot interleave), so every undo lands on a state the user saw.
+/// is one entry for the drag and one for the mute. Since eseq-0l17.72 a
+/// flag of the dragged device itself lands beside the drag too: the two
+/// whole-device snapshots are rebased so each undoes only what it changed.
 #[test]
 fn a_flag_set_mid_script_drag_lands_beside_the_drag() {
     let mut h = Harness::new();
@@ -1297,29 +1297,157 @@ fn a_flag_set_mid_script_drag_lands_beside_the_drag() {
     h.sync();
     assert_eq!((cutoff(&mut h), h.rack_slot().mute), (base, false));
 
-    // A flag of the dragged device: the drag's entry ends at the flag and
-    // its later frames start another, so undo walks back through states
-    // that existed.
+    // A flag of the dragged device (eseq-0l17.72): one entry for the drag
+    // and one for the mute, the drag staying open. The drag closed last and
+    // undoes first, keeping the mute; the mute's undo restores the state
+    // before both (not the mid-drag gain it saw).
     let before = h.app.history.undo_len();
     h.gesture.pointer_down = true;
     h.eval_all("(set! rs.gain 0.3)");
     h.drain();
     h.eval_all("(toggle! rs.muted)");
     h.drain();
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
     h.eval_all("(set! rs.gain 0.4)");
     h.drain();
     h.gesture.pointer_down = false;
     h.eval_all("(set! rs.gain 0.45)");
     h.drain_and_sync();
-    assert_eq!(h.app.history.undo_len(), before + 3);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the mute"
+    );
     let state = |h: &Harness| (h.rack_slot().gain, h.rack_slot().mute);
     assert_eq!(state(&h), (0.45, true));
     app::edit::undo(&mut h.app);
-    assert_eq!(state(&h), (0.3, true));
-    app::edit::undo(&mut h.app);
-    assert_eq!(state(&h), (0.3, false));
+    assert_eq!(state(&h), (gain, true), "the drag's undo keeps the mute");
     app::edit::undo(&mut h.app);
     assert_eq!(state(&h), (gain, false));
+    // Redo walks forward the same way.
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (gain, true));
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (0.45, true));
+}
+
+/// eseq-0l17.72: during a script `rs.gain` drag, toggling `rs.muted` is an
+/// entry of its own and the drag's entry absorbs it: undoing the mute alone
+/// (once the drag's entry is gone) unmutes at the original gain, undoing
+/// the drag keeps whatever the mute's state is, and a release with no frame
+/// after the mute still records the mute in the drag's `after`.
+#[test]
+fn a_flag_of_the_script_dragged_device_rebases_the_drag() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    let gain = h.rack_slot().gain;
+    let state = |h: &Harness| (h.rack_slot().gain, h.rack_slot().mute);
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in ["0.6", "0.7"] {
+        h.eval_all(&format!("(set! rs.gain {value})"));
+        h.drain();
+    }
+    h.eval_all("(set! rs.muted true)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1, "the mute's entry");
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    // Released without another frame: the drag's entry still ends muted.
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the mute"
+    );
+    assert_eq!(state(&h), (0.7, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(
+        state(&h),
+        (gain, true),
+        "undo the drag: original gain, still muted"
+    );
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, false), "undo the mute: unmuted");
+    app::edit::redo(&mut h.app);
+    app::edit::redo(&mut h.app);
+    assert_eq!(state(&h), (0.7, true));
+}
+
+/// eseq-0l17.72: a script edit of the device a *user* is dragging (the
+/// shared beside-gesture path) is rebased the same way; a script edit of
+/// the very field being dragged conflicts, so the drag's entry is split at
+/// it (as before), and undo still walks back through states that existed.
+#[test]
+fn a_script_edit_of_the_user_dragged_device_rebases_or_splits_the_drag() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    let gain = h.rack_slot().gain;
+    let state = |h: &Harness| (h.rack_slot().gain, h.rack_slot().mute);
+    let drag = |value| app::AppCommand::SetRackSlotGain {
+        track: 2,
+        slot_idx: 0,
+        value,
+    };
+    // The user drags the slot's gain knob; a script mutes the slot.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(0.6)).expect("drag");
+    let gesture = h.app.history.active_gesture().map(|g| g.id);
+    assert!(gesture.is_some(), "the drag's gesture");
+    h.eval_all("(set! rs.muted true)");
+    h.drain();
+    assert_eq!(h.app.history.active_gesture().map(|g| g.id), gesture);
+    assert_eq!(h.app.history.undo_len(), before + 1, "the mute's entry");
+    app::try_apply_command(&mut h.app, drag(0.8)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    assert_eq!(state(&h), (0.8, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, false));
+
+    // The script sets the dragged gain itself: a conflict, so the drag's
+    // entry so far is committed below the script's and the drag's later
+    // frames start another.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(0.6)).expect("drag");
+    h.eval_all("(set! rs.gain 0.2)");
+    h.drain();
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag so far, the script's"
+    );
+    app::try_apply_command(&mut h.app, drag(0.9)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 3);
+    let gain_now = |h: &Harness| h.rack_slot().gain;
+    assert_eq!(gain_now(&h), 0.9);
+    app::edit::undo(&mut h.app);
+    assert_eq!(gain_now(&h), 0.2);
+    app::edit::undo(&mut h.app);
+    assert_eq!(gain_now(&h), 0.6);
+    app::edit::undo(&mut h.app);
+    assert_eq!(gain_now(&h), gain);
 }
 
 #[test]
@@ -1736,4 +1864,50 @@ fn the_held_rack_controls_and_step_pickers_show_the_print_latch() {
     h.shared.step_print.lock().unwrap().disarm();
     h.sync();
     assert_eq!(shown(&mut h), rest);
+}
+
+/// eseq-0l17.72 review: a beside edit that changes the sound keeps the
+/// preset's dirty flag through the drag's undo. The drag dirtied the preset
+/// (false → true) and a beside param edit changed it too: undoing the drag
+/// leaves the beside edit's param, so the preset still shows dirty; undoing
+/// the edit restores the clean state.
+#[test]
+fn a_beside_sound_edit_keeps_the_preset_dirty_through_the_drags_undo() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.shared
+        .state
+        .update_live_rack_slot(2, 0, |slot| slot.track_sound_state.dirty = false);
+    let dirty = |h: &Harness| h.rack_slot().track_sound_state.dirty;
+    assert!(!dirty(&h));
+    let param = |h: &Harness, index: usize| h.rack_slot().instrument_slot.defaults[index];
+    let (a, b) = (2, 3);
+    let (a_base, b_base) = (param(&h, a), param(&h, b));
+    let set = |param_idx, value| app::AppCommand::SetRackSlotInstrumentParam {
+        track: 2,
+        slot_idx: 0,
+        param_idx,
+        value,
+    };
+    let a_value = if a_base < 0.5 { 0.6 } else { 0.2 };
+    let b_value = if b_base < 0.5 { 0.7 } else { 0.1 };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, set(a, a_value)).expect("drag");
+    assert!(dirty(&h), "the drag dirtied the preset");
+    app::edit::apply_command_beside_gesture(&mut h.app, set(b, b_value)).expect("beside");
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    app::edit::undo(&mut h.app);
+    assert_eq!((param(&h, a), param(&h, b)), (a_base, b_value));
+    assert!(dirty(&h), "the beside edit still dirties the preset");
+    app::edit::undo(&mut h.app);
+    assert_eq!((param(&h, a), param(&h, b)), (a_base, b_base));
+    assert!(!dirty(&h));
 }

@@ -539,8 +539,15 @@ static PIANO_ROLL_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     names.extend([f::PIANO_ROLL_NOTES.1, f::PIANO_ROLL_STEPS.1]);
     names
 });
-static NOTES_BIT: LazyLock<u32> = LazyLock::new(|| 1 << PIANO_ROLL_LIVE.keys.len());
-static STEPS_BIT: LazyLock<u32> = LazyLock::new(|| 1 << (PIANO_ROLL_LIVE.keys.len() + 1));
+static NOTES_BIT: LazyLock<ObservedMask> = LazyLock::new(|| {
+    assert!(
+        PIANO_ROLL_LIVE.keys.len() + 2 <= MAX_OBSERVED_FIELDS,
+        "piano-roll live fields + notes + steps exceed the {MAX_OBSERVED_FIELDS}-bit observed \
+         mask: widen ObservedMask"
+    );
+    1 << PIANO_ROLL_LIVE.keys.len()
+});
+static STEPS_BIT: LazyLock<ObservedMask> = LazyLock::new(|| *NOTES_BIT << 1);
 
 impl HostKinds {
     /// The piano roll: its focus fields when [`FocusKey`] moved, its notes

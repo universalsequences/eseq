@@ -88,10 +88,11 @@ use super::{map_number, map_string, map_u32, map_usize};
 /// entry, ended by the release), and any other edit ends its entry at once.
 /// A non-continuous edit during the script's own drag (a flag toggled
 /// mid-drag) is an entry beside that drag, which stays open, when its
-/// command is known to touch another device than the drag's
-/// ([`app::edit::command_is_disjoint_from_active_gesture`], eseq-0l17.55);
-/// otherwise it still ends the drag's entry, since whole-device undo
-/// snapshots of one device cannot interleave.
+/// command is a device-value edit of another device (eseq-0l17.55) or of the
+/// dragged device itself, whose entry and the drag's are then rebased so
+/// each undoes only what it changed (eseq-0l17.72;
+/// [`app::edit::command_can_land_beside_active_gesture`]); otherwise it
+/// still ends the drag's entry.
 pub(super) struct ScriptEdit {
     beside: std::cell::Cell<bool>,
     continuous: bool,
@@ -113,10 +114,9 @@ impl ScriptEdit {
     }
 
     /// Apply `command`; returns whether the model changed. During the
-    /// script's own drag, a command of another device lands beside it.
+    /// script's own drag, a device-value command lands beside it.
     pub(super) fn apply(&self, app: &mut app::App, command: app::AppCommand) -> bool {
-        if self.in_script_drag && app::edit::command_is_disjoint_from_active_gesture(app, &command)
-        {
+        if self.in_script_drag && app::edit::command_can_land_beside_active_gesture(app, &command) {
             self.beside.set(true);
         }
         self.apply_with(app, |app| app::try_apply_command(app, command))

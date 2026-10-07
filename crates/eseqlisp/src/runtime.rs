@@ -3042,7 +3042,11 @@ impl Runtime {
 
     /// [`Self::host_field_observed`] for several fields at once: bit `i` is
     /// `fields[i]` ([`crate::vm::VM::host_fields_observed`]).
-    pub fn host_fields_observed(&self, id: crate::vm::InstanceId, fields: &[&str]) -> u32 {
+    pub fn host_fields_observed(
+        &self,
+        id: crate::vm::InstanceId,
+        fields: &[&str],
+    ) -> crate::vm::ObservedMask {
         self.vm.host_fields_observed(id, fields)
     }
 

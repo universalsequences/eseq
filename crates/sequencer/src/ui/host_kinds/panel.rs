@@ -504,7 +504,7 @@ pub(super) fn param_panel_fields(
     device: &DeviceSource,
     pdesc: &ParamDescriptor,
     index: usize,
-    mask: u32,
+    mask: ObservedMask,
     shown: Option<f32>,
     visible: &mut VisibleCache,
     emit: &mut dyn FnMut(FieldKey, Value),

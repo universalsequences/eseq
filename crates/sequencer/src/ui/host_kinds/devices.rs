@@ -95,7 +95,7 @@ struct StripWork {
     /// The track's pattern length (`strip-locks` scans its steps).
     num_steps: usize,
     /// The observed strip bits.
-    mask: u32,
+    mask: ObservedMask,
     /// A rack slot's: the key its `strip-locks` is cached under.
     locks_key: Option<StripLocksKey>,
 }
@@ -104,7 +104,8 @@ struct StripWork {
 /// [`PlockKey`] and step count.
 type StripLocksKey = (PlockKey, usize);
 
-static STRIP_LOCKS_BIT: LazyLock<u32> = LazyLock::new(|| DEVICE_LIVE.bit(f::DEVICE_STRIP_LOCKS));
+static STRIP_LOCKS_BIT: LazyLock<ObservedMask> =
+    LazyLock::new(|| DEVICE_LIVE.bit(f::DEVICE_STRIP_LOCKS));
 
 /// Rack slot `slot_idx` of `track`'s `strip-locks` as last read under
 /// `key`, if it was.
@@ -973,7 +974,7 @@ impl DeviceState {
         shared: &RefCell<KindsShared>,
         id: InstanceId,
         device: &DeviceSource,
-        mask: u32,
+        mask: ObservedMask,
     ) {
         let track = device.owner;
         let mut mask = mask;

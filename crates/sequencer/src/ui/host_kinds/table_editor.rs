@@ -27,7 +27,7 @@ use sequencer::effects::filter_table_editor::{self as fte, SessionUiState};
 pub(crate) struct TableEditorState {
     /// (session revision, device sources' generation, observed mask) at the
     /// last read; `None` forces one.
-    seen: Option<(u64, u64, u32)>,
+    seen: Option<(u64, u64, ObservedMask)>,
     /// The session's node and the device instance that read resolved.
     node: Option<i32>,
     device: Option<InstanceId>,

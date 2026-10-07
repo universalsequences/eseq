@@ -206,12 +206,12 @@ impl ReactiveBindingStore {
         &self,
         namespace: &str,
         fields: impl IntoIterator<Item = (usize, &'f str, BindingKind)>,
-    ) -> u32 {
+    ) -> crate::vm::ObservedMask {
         let slots = self
             .slots
             .lock()
             .expect("reactive float store lock poisoned");
-        let mut mask = 0u32;
+        let mut mask: crate::vm::ObservedMask = 0;
         for (bit, field, kind) in fields {
             let key = match kind {
                 BindingKind::Float | BindingKind::InstanceFloat(_) => {

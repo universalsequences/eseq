@@ -981,6 +981,40 @@ mod tests {
         assert_eq!(slot.resolve_node_idx(149), 1_149);
     }
 
+    /// eseq-0l17.72: a three-way rebase takes p-locks cell by cell and key
+    /// locks note by note, so disjoint lock edits rebase; one cell moved on
+    /// both sides is a conflict.
+    #[test]
+    fn slot_value_rebase_merges_lock_cells_and_key_lock_notes() {
+        let descriptor = EffectDescriptor::builtin_sampler();
+        let slot = EffectSlotState::new(&descriptor, 7);
+        let mut base = EffectSlotSnapshot::capture_authoring_values(&slot);
+        base.plocks = vec![vec![None; 4]; 2];
+        // The drag moved cell (0, 1) and added key locks on note 60.
+        let mut from = base.clone();
+        from.plocks[0][1] = Some(1.0);
+        from.key_locks.insert(60, vec![Some(0.5); base.num_params]);
+        // The edit moved cell (0, 2) and added key locks on note 62.
+        let mut to = from.clone();
+        to.plocks[0][2] = Some(2.0);
+        to.key_locks.insert(62, vec![Some(0.25); base.num_params]);
+        let rebased =
+            super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &to).expect("disjoint");
+        assert_eq!(
+            rebased.plocks[0][1], None,
+            "the drag's cell stays the base's"
+        );
+        assert_eq!(rebased.plocks[0][2], Some(2.0), "the edit's cell");
+        assert_eq!(
+            rebased.key_locks.keys().copied().collect::<Vec<_>>(),
+            vec![62]
+        );
+        // The edit moved the drag's own cell: a conflict.
+        let mut clash = from.clone();
+        clash.plocks[0][1] = Some(3.0);
+        assert!(super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &clash).is_none());
+    }
+
     #[test]
     fn sampler_slice_edits_participate_in_device_history_snapshots() {
         let descriptor = EffectDescriptor::builtin_sampler();
@@ -10903,6 +10937,163 @@ impl EffectSlotValuesSnapshot {
                     + edits.user_deleted.capacity() * std::mem::size_of::<u32>()
                     + edits.user_moved.capacity() * std::mem::size_of::<crate::analysis::SliceMove>()
             })
+    }
+}
+
+/// One component of a three-way undo-snapshot rebase (eseq-0l17.72): an
+/// edit moved the component from `from` to `to` while an open drag's entry
+/// starts at `base`. The edit's value when it moved the component, `base`'s
+/// when it did not; `None` when both the edit and the drag moved it (the
+/// drag's `base` differs from the `from` the edit started at), a conflict
+/// the caller resolves another way.
+pub fn rebase_snapshot_component<T: Clone>(
+    base: &T,
+    from: &T,
+    to: &T,
+    eq: impl Fn(&T, &T) -> bool,
+) -> Option<T> {
+    if eq(from, to) {
+        Some(base.clone())
+    } else if eq(base, from) {
+        Some(to.clone())
+    } else {
+        None
+    }
+}
+
+/// [`rebase_snapshot_component`] element by element when the three lists
+/// have one length (`None` on a conflicting element), else as a whole.
+pub fn rebase_snapshot_elements<T: Clone>(
+    base: &[T],
+    from: &[T],
+    to: &[T],
+    eq: impl Fn(&T, &T) -> bool,
+) -> Option<Vec<T>> {
+    if base.len() == from.len() && from.len() == to.len() {
+        return base
+            .iter()
+            .zip(from)
+            .zip(to)
+            .map(|((base, from), to)| rebase_snapshot_component(base, from, to, &eq))
+            .collect();
+    }
+    let all_eq = |left: &[T], right: &[T]| {
+        left.len() == right.len() && left.iter().zip(right).all(|(l, r)| eq(l, r))
+    };
+    if all_eq(from, to) {
+        Some(base.to_vec())
+    } else if all_eq(base, from) {
+        Some(to.to_vec())
+    } else {
+        None
+    }
+}
+
+fn optional_f32_bits_eq(left: &Option<f32>, right: &Option<f32>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// P-lock rows (one row of steps per param) rebased cell by cell when the
+/// shapes match, a row as a whole when only its length differs, all of them
+/// as a whole when the row count differs.
+pub fn rebase_optional_f32_rows(
+    base: &[Vec<Option<f32>>],
+    from: &[Vec<Option<f32>>],
+    to: &[Vec<Option<f32>>],
+) -> Option<Vec<Vec<Option<f32>>>> {
+    if base.len() == from.len() && from.len() == to.len() {
+        return base
+            .iter()
+            .zip(from)
+            .zip(to)
+            .map(|((base, from), to)| {
+                rebase_snapshot_elements(base, from, to, optional_f32_bits_eq)
+            })
+            .collect();
+    }
+    rebase_snapshot_component(&base.to_vec(), &from.to_vec(), &to.to_vec(), |l, r| {
+        optional_f32_rows_bits_eq(l, r)
+    })
+}
+
+impl EffectSlotValuesSnapshot {
+    /// `base` with the components an edit moved from `from` to `to`
+    /// ([`rebase_snapshot_component`]): param base values one by one,
+    /// p-locks cell by cell, key locks note by note, tensors one by one, the
+    /// rest (IR, table, slice edits) each as a whole. `None` when the param
+    /// count differs or a component moved on both sides.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        if base.num_params != from.num_params || from.num_params != to.num_params {
+            return None;
+        }
+        let defaults =
+            rebase_snapshot_elements(&base.defaults, &from.defaults, &to.defaults, |l, r| {
+                l.to_bits() == r.to_bits()
+            })?;
+        let plocks = rebase_optional_f32_rows(&base.plocks, &from.plocks, &to.plocks)?;
+        let mut key_locks = BTreeMap::new();
+        let notes: std::collections::BTreeSet<u8> = base
+            .key_locks
+            .keys()
+            .chain(from.key_locks.keys())
+            .chain(to.key_locks.keys())
+            .copied()
+            .collect();
+        for note in notes {
+            let locks = rebase_snapshot_component(
+                &base.key_locks.get(&note),
+                &from.key_locks.get(&note),
+                &to.key_locks.get(&note),
+                |l, r| match (l, r) {
+                    (Some(l), Some(r)) => optional_f32_slice_bits_eq(l, r),
+                    (None, None) => true,
+                    _ => false,
+                },
+            )?;
+            if let Some(locks) = locks {
+                key_locks.insert(note, locks.clone());
+            }
+        }
+        let tensor_params = rebase_snapshot_elements(
+            &base.tensor_params,
+            &from.tensor_params,
+            &to.tensor_params,
+            |l, r| tensor_snapshots_bits_eq(std::slice::from_ref(l), std::slice::from_ref(r)),
+        )?;
+        let (ir, prepared_ir) = rebase_snapshot_component(
+            &(base.ir.clone(), base.prepared_ir.clone()),
+            &(from.ir.clone(), from.prepared_ir.clone()),
+            &(to.ir.clone(), to.prepared_ir.clone()),
+            |l, r| l.0 == r.0 && prepared_ir_bits_eq(l.1.as_deref(), r.1.as_deref()),
+        )?;
+        let (table, prepared_table) = rebase_snapshot_component(
+            &(base.table.clone(), base.prepared_table.clone()),
+            &(from.table.clone(), from.prepared_table.clone()),
+            &(to.table.clone(), to.prepared_table.clone()),
+            |l, r| l.0 == r.0 && prepared_table_bits_eq(l.1.as_deref(), r.1.as_deref()),
+        )?;
+        let sampler_slice_edits = rebase_snapshot_component(
+            &base.sampler_slice_edits,
+            &from.sampler_slice_edits,
+            &to.sampler_slice_edits,
+            |l, r| l == r,
+        )?;
+        Some(Self {
+            num_params: base.num_params,
+            defaults,
+            plocks,
+            key_locks,
+            tensor_params,
+            ir,
+            prepared_ir,
+            table,
+            prepared_table,
+            sampler_slice_edits,
+        })
     }
 }
 

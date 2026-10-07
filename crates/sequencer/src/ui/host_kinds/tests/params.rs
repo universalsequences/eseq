@@ -918,3 +918,182 @@ fn param_printing_follows_the_print_latch_while_recording() {
     h.sync();
     assert_eq!(h.slot("printing"), 0.0);
 }
+
+/// A kind with more than 32 live fields (eseq-0l17.71): the observed masks
+/// are `ObservedMask`s (`u64`), so `LiveFields` bits, the batched observed
+/// query and an [`ObservedList`] entry all carry the high bits.
+#[test]
+fn observed_masks_cover_a_kind_with_more_than_32_live_fields() {
+    let mut h = Harness::new();
+    let names: Vec<&'static str> = (0..40)
+        .map(|i| &*Box::leak(format!("f{i}").into_boxed_str()))
+        .collect();
+    let fields = LiveFields::from_keys("wide", names.iter().map(|name| ("wide", *name)).collect());
+    assert_eq!(fields.bit(("wide", "f39")), 1 << 39);
+    assert_eq!(
+        fields.bits(&[("wide", "f0"), ("wide", "f33")]),
+        1 | (1 << 33)
+    );
+    let host = names
+        .iter()
+        .map(|name| format!("({name} :number)"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    h.eval_all(&format!("(def-kind wide :key (index) :host ({host}))"));
+    let id = h
+        .editor
+        .runtime_mut()
+        .register_keyed_instance("wide", &[0])
+        .expect("register");
+    let mut observed = ObservedList::default();
+    observed.refresh(h.rt(), &fields.names, || vec![id]);
+    assert!(observed.entries.is_empty(), "nothing observes yet");
+    h.eval_all("(def w0 (wide 0)) (def held-a #'w0.f1) (def held-b #'w0.f35)");
+    observed.refresh(h.rt(), &fields.names, || vec![id]);
+    let masks: Vec<ObservedMask> = observed.entries.iter().map(|(_, mask, _)| *mask).collect();
+    assert_eq!(masks, vec![(1 << 1) | (1 << 35)]);
+}
+
+/// eseq-0l17.72 review: a step-held p-lock drag (a user's knob with a step
+/// held) and a script lock on another step are an entry each. Step p-locks
+/// are recorded as step-cell patches of the touched steps only (not device
+/// snapshots), so disjoint steps undo independently without a rebase.
+#[test]
+fn a_script_lock_beside_a_step_held_plock_drag_is_an_entry_of_its_own() {
+    let (mut h, slot) = Harness::with_devices();
+    h.eval_all(DEVICES);
+    let lock = |h: &Harness, step| h.filter_slot(slot).plocks.get(step, CUTOFF);
+    let drag = |value| app::AppCommand::SetEffectPlock {
+        track: 0,
+        step: 2,
+        slot_idx: slot,
+        param_idx: CUTOFF,
+        value,
+    };
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    app::try_apply_command(&mut h.app, drag(500.0)).expect("drag");
+    assert!(h.app.history.active_gesture().is_some());
+    h.eval_all("(lock-param! cutoff (list (nth t0.steps 5)) 800)");
+    h.drain();
+    app::try_apply_command(&mut h.app, drag(600.0)).expect("drag");
+    h.gesture.pointer_down = false;
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag and the lock"
+    );
+    assert_eq!((lock(&h, 2), lock(&h, 5)), (Some(600.0), Some(800.0)));
+    app::edit::undo(&mut h.app);
+    assert_eq!((lock(&h, 2), lock(&h, 5)), (None, Some(800.0)));
+    app::edit::undo(&mut h.app);
+    assert_eq!((lock(&h, 2), lock(&h, 5)), (None, None));
+}
+
+/// eseq-0l17.72 review: a sampler slice drag reapplies each frame to its
+/// gesture's original snapshot. A beside edit of another component rebases
+/// it, keeping the original slice edits under the gesture; a beside edit of
+/// the slice edits themselves ends the drag (its entry so far committed
+/// below the edit) rather than leaving it open on a fresh snapshot.
+#[test]
+fn a_sampler_slice_drag_keeps_its_original_snapshot_beside_an_edit() {
+    let (mut h, _) = Harness::with_devices();
+    let edits = |added: u32| {
+        let mut edits = sequencer::analysis::SamplerSliceEdits::for_sample_hash("h".repeat(64));
+        edits.user_added.push(added);
+        edits
+    };
+    let stored = |h: &Harness| {
+        h.shared.state.pattern.instrument_slots[2]
+            .sampler_slice_edits
+            .read()
+            .unwrap()
+            .clone()
+    };
+    let frame = |app: &mut app::App, gesture: &str, added: u32, seen: &mut Vec<Option<u32>>| {
+        app::edit::apply_coalesced_sampler_slice_mutation(app, 2, None, gesture, "Slice", |s| {
+            seen.push(s.as_ref().map(|edits| edits.user_added[0]));
+            *s = Some(edits(added));
+            app::edit::SamplerSliceMutation::Applied
+        })
+        .expect("slice frame");
+    };
+    let start = h.shared.state.pattern.instrument_slots[2]
+        .defaults
+        .get(START);
+    let moved = if start < 0.5 { 0.7 } else { 0.2 };
+    let before = h.app.history.undo_len();
+    let mut seen = Vec::new();
+    frame(&mut h.app, "sampler-slice", 100, &mut seen);
+    let set_start = app::AppCommand::SetInstrumentParam {
+        track: 2,
+        param_idx: START,
+        value: moved,
+    };
+    app::edit::apply_command_beside_gesture(&mut h.app, set_start).expect("beside");
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "rebased: the drag stays open"
+    );
+    frame(&mut h.app, "sampler-slice", 200, &mut seen);
+    assert_eq!(
+        seen,
+        vec![None, None],
+        "each frame sees the original slice edits"
+    );
+    assert_eq!(
+        h.shared.state.pattern.instrument_slots[2]
+            .defaults
+            .get(START),
+        moved
+    );
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 2);
+    app::edit::undo(&mut h.app);
+    assert_eq!(stored(&h), None);
+    assert_eq!(
+        h.shared.state.pattern.instrument_slots[2]
+            .defaults
+            .get(START),
+        moved
+    );
+    app::edit::undo(&mut h.app);
+    assert_eq!(
+        h.shared.state.pattern.instrument_slots[2]
+            .defaults
+            .get(START),
+        start
+    );
+
+    // A beside edit of the slice edits: the drag ends at it.
+    let before = h.app.history.undo_len();
+    let mut seen = Vec::new();
+    frame(&mut h.app, "sampler-slice", 300, &mut seen);
+    app::edit::apply_beside_gesture(&mut h.app, |app| {
+        frame(app, "other-slice", 400, &mut Vec::new())
+    });
+    assert!(
+        h.app.history.active_gesture().is_none(),
+        "the slice drag ended"
+    );
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "the drag so far, the edit"
+    );
+    frame(&mut h.app, "sampler-slice", 500, &mut seen);
+    assert_eq!(
+        seen,
+        vec![None, Some(400)],
+        "a new gesture on the edited list"
+    );
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.app.history.undo_len(), before + 3);
+    app::edit::undo(&mut h.app);
+    assert_eq!(stored(&h).map(|edits| edits.user_added[0]), Some(400));
+    app::edit::undo(&mut h.app);
+    assert_eq!(stored(&h).map(|edits| edits.user_added[0]), Some(300));
+    app::edit::undo(&mut h.app);
+    assert_eq!(stored(&h), None);
+}

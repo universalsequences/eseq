@@ -7117,13 +7117,15 @@ impl DeviceScope {
 }
 
 /// Whether `cmd` can be recorded as an undo entry beside the active gesture
-/// without overlapping it (eseq-0l17.55): the gesture's pending entry is a
-/// device-value drag (a param or strip drag) and `cmd` a device-value edit
-/// of another device. Device values are recorded as whole-device snapshots,
-/// so an entry of the same device landing beside the open drag would undo
-/// to a mixed state (the drag's undo dropping the flag, the flag's undo
-/// restoring mid-drag values). Anything else is not known to be disjoint.
-pub fn command_is_disjoint_from_active_gesture(app: &App, cmd: &AppCommand) -> bool {
+/// (eseq-0l17.55, .72): the gesture's pending entry is a device-value drag
+/// (a param or strip drag) and `cmd` a device-value edit of another device
+/// (eseq-0l17.55) or of the dragged device itself (eseq-0l17.72: the
+/// beside entry and the drag's are rebased by [`apply_beside_gesture`], so
+/// each undoes only what it changed). Device values are recorded as
+/// whole-device snapshots, so an edit whose snapshot covers the dragged one
+/// without being it (a track instrument's beside a rack slot's) is not
+/// known to be safe beside the drag.
+pub fn command_can_land_beside_active_gesture(app: &App, cmd: &AppCommand) -> bool {
     let Some(gesture) = app.history.active_gesture() else {
         return false;
     };
@@ -7135,9 +7137,122 @@ pub fn command_is_disjoint_from_active_gesture(app: &App, cmd: &AppCommand) -> b
         DeviceScope::of_device(app, patch.target),
         DeviceScope::of_command(app, cmd),
     ) {
-        (Some(drag), Some(edit)) => !drag.overlaps(edit),
+        (Some(drag), Some(edit)) => drag == edit || !drag.overlaps(edit),
         _ => false,
     }
+}
+
+/// Keep a device-value drag's open entry and an entry committed beside it
+/// (since `revision`) consistent when the beside entry snapshots the same
+/// device (eseq-0l17.72). Both are whole-device snapshots, so left alone
+/// the drag's undo would drop the beside edit and the beside entry's undo
+/// would restore mid-drag values. Instead the beside entry is rebased to
+/// apply to the drag's starting state (`before` = the drag's `before`,
+/// `after` = that plus the components the edit moved) and the drag's entry
+/// to start there: undoing the drag then keeps the edit, and undoing the
+/// edit lands on the state before both. When the edit moved a component
+/// the drag moved too (a script setting the dragged param), or the beside
+/// entries are not one same-device snapshot, the drag's entry is split at
+/// the edit instead (committed below it; the drag's later frames stage a
+/// new one), as before eseq-0l17.72.
+fn rebase_device_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    revision: u64,
+) -> BesideDrag {
+    let Some(EditPatch::DeviceValues(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let Some(first) = app.history.undo_index_since(revision) else {
+        return BesideDrag::Resume;
+    };
+    let Some(drag_scope) = DeviceScope::of_device(app, drag.target) else {
+        return BesideDrag::Resume;
+    };
+    let scope_of = |patch: &DeviceValuesPatch| DeviceScope::of_device(app, patch.target);
+    let beside: Vec<usize> = (first..app.history.undo_len())
+        .filter(|index| match app.history.undo_patch_at(*index) {
+            Some(EditPatch::DeviceValues(patch)) => {
+                patch.pattern == drag.pattern
+                    && scope_of(patch).is_none_or(|scope| scope.overlaps(drag_scope))
+            }
+            _ => false,
+        })
+        .collect();
+    let index = match beside.as_slice() {
+        [] => return BesideDrag::Resume,
+        [index] => *index,
+        _ => return split_device_drag_beside(app, suspended, first),
+    };
+    let Some(EditPatch::DeviceValues(edit)) = app.history.undo_patch_at(index) else {
+        return BesideDrag::Resume;
+    };
+    let rebased = (scope_of(edit) == Some(drag_scope) && drag.after.bit_exact_eq(&edit.before))
+        .then(|| DeviceValueSnapshot::rebase_edit(&drag.before, &edit.before, &edit.after))
+        .flatten();
+    let Some(rebased) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let edit_patch = DeviceValuesPatch {
+        target: edit.target,
+        pattern: edit.pattern,
+        before: drag.before.clone(),
+        after: rebased.clone(),
+    };
+    let drag_patch = DeviceValuesPatch {
+        target: drag.target,
+        pattern: drag.pattern,
+        before: rebased,
+        after: edit.after.clone(),
+    };
+    let (edit_bytes, drag_bytes) = (edit_patch.retained_bytes(), drag_patch.retained_bytes());
+    app.history
+        .replace_undo_patch(index, EditPatch::DeviceValues(edit_patch), edit_bytes);
+    suspended.replace_pending_patch(EditPatch::DeviceValues(drag_patch), drag_bytes);
+    BesideDrag::Resume
+}
+
+/// What becomes of a gesture an edit landed beside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BesideDrag {
+    /// It resumes (its entry rebased, split, or untouched).
+    Resume,
+    /// It ends: a split sampler slice drag, whose frames reapply the
+    /// gesture-start marker index to the gesture's original snapshot.
+    End,
+}
+
+/// [`rebase_device_drag_beside`]'s fallback: commit the drag's entry so far
+/// below the beside entries (from undo index `first`), as if the edit had
+/// ended it; the resumed drag stages a fresh entry on its next frame. A
+/// sampler slice drag is ended instead: its frames reapply the marker index
+/// it started from to the gesture's original snapshot, which a fresh entry
+/// under the same gesture would no longer hold, so its next frame starts a
+/// new gesture on the list as the edit left it.
+fn split_device_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    first: usize,
+) -> BesideDrag {
+    let end = if suspended
+        .merge_key()
+        .as_str()
+        .starts_with(SAMPLER_SLICE_KEY_PREFIX)
+    {
+        BesideDrag::End
+    } else {
+        BesideDrag::Resume
+    };
+    let Some((label, merge_key, patch, retained_bytes)) = suspended.take_pending() else {
+        return end;
+    };
+    let unchanged =
+        matches!(&patch, EditPatch::DeviceValues(drag) if drag.before.bit_exact_eq(&drag.after));
+    if !unchanged {
+        app.history
+            .insert_undo_entry_before(first, label, Some(merge_key), patch, retained_bytes);
+    }
+    end
 }
 
 /// Effective pattern id for `track`, lazily materializing one when the
@@ -7706,6 +7821,22 @@ pub fn apply_coalesced_device_value_batch(
     )
 }
 
+/// Sampler slice gestures' merge keys carry this prefix, so a slice drag is
+/// recognised when an edit lands beside it ([`rebase_device_drag_beside`]).
+const SAMPLER_SLICE_KEY_PREFIX: &str = "sampler-slice-gesture:";
+
+fn sampler_slice_merge_key(
+    gesture: &str,
+    id: DeviceId,
+    pattern: crate::sequencer::PatternId,
+) -> MergeKey {
+    MergeKey::new(format!(
+        "{SAMPLER_SLICE_KEY_PREFIX}{gesture}:{}:{}",
+        device_id_merge_component(id),
+        pattern.0,
+    ))
+}
+
 pub fn finish_sampler_slice_gesture(
     app: &mut App,
     track: usize,
@@ -7727,11 +7858,7 @@ pub fn finish_sampler_slice_gesture(
     let id = rack_slot.map_or(DeviceId::TrackInstrument(track_id), |slot| {
         DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot))
     });
-    let key = MergeKey::new(format!(
-        "{gesture}:{}:{}",
-        device_id_merge_component(id),
-        pattern.0,
-    ));
+    let key = sampler_slice_merge_key(gesture, id, pattern);
     if app.history.active_gesture().map(|active| &active.merge_key) == Some(&key) {
         finish_active_gesture(app);
     }
@@ -7772,11 +7899,7 @@ pub fn apply_coalesced_sampler_slice_mutation(
         slot_idx: rack_slot,
     };
     let current_before = capture_device_value_snapshot(app, target)?;
-    let key = MergeKey::new(format!(
-        "{gesture}:{}:{}",
-        device_id_merge_component(id),
-        pattern.0,
-    ));
+    let key = sampler_slice_merge_key(gesture, id, pattern);
     if app.history.active_gesture().map(|active| &active.merge_key) != Some(&key) {
         finish_active_gesture(app);
     }
@@ -11336,14 +11459,20 @@ pub fn apply_command_beside_gesture(
 
 /// [`apply_command_beside_gesture`] for an edit `apply` makes (one that is
 /// not a single `AppCommand`, such as a bar transpose).
+///
+/// An edit of the device a device-value drag is dragging is rebased against
+/// the drag's open entry ([`rebase_device_drag_beside`], eseq-0l17.72).
 pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T) -> T {
     let suspended = app.history.suspend_gesture();
     let pending_drag = app.pending_drag.take();
+    let revision = app.history.current_revision();
     let outcome = apply(app);
     finish_gesture_entry(app);
     app.pending_drag = pending_drag;
-    if let Some(suspended) = suspended {
-        app.history.resume_gesture(suspended);
+    if let Some(mut suspended) = suspended {
+        if rebase_device_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume {
+            app.history.resume_gesture(suspended);
+        }
     }
     outcome
 }

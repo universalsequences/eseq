@@ -929,6 +929,25 @@ impl DeviceValueSnapshot {
         }
     }
 
+    /// `base` with the components an edit of the same device moved from
+    /// `from` to `to` (eseq-0l17.72): how an open drag's entry absorbs an
+    /// edit landing beside it. `None` when the snapshots are of different
+    /// kinds or the edit moved a component the drag moved too.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        Some(match (base, from, to) {
+            (Self::Instrument(base), Self::Instrument(from), Self::Instrument(to)) => {
+                Self::Instrument(InstrumentDeviceValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            (Self::Slot(base), Self::Slot(from), Self::Slot(to)) => {
+                Self::Slot(EffectSlotValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            (Self::RackSlot(base), Self::RackSlot(from), Self::RackSlot(to)) => {
+                Self::RackSlot(RackSlotValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            _ => return None,
+        })
+    }
+
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + match self {
@@ -1104,6 +1123,10 @@ impl MergeKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1129,6 +1152,39 @@ pub struct SuspendedGesture<P> {
     gesture: ActiveGesture,
     updated_at: Option<Instant>,
     pending: Option<PendingGesture<P>>,
+}
+
+impl<P> SuspendedGesture<P> {
+    /// The suspended gesture's merge key.
+    pub fn merge_key(&self) -> &MergeKey {
+        &self.gesture.merge_key
+    }
+
+    /// The suspended gesture's staged entry, if it staged one.
+    pub fn pending_patch(&self) -> Option<&P> {
+        self.pending.as_ref().map(|pending| &pending.patch)
+    }
+
+    /// Replace the staged entry's patch (and its retained bytes).
+    pub fn replace_pending_patch(&mut self, patch: P, retained_bytes: usize) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.patch = patch;
+            pending.retained_bytes = retained_bytes;
+        }
+    }
+
+    /// Take the staged entry (label, merge key, patch, retained bytes): the
+    /// gesture resumes with nothing staged, so its next edit stages afresh.
+    pub fn take_pending(&mut self) -> Option<(String, MergeKey, P, usize)> {
+        self.pending.take().map(|pending| {
+            (
+                pending.label,
+                pending.merge_key,
+                pending.patch,
+                pending.retained_bytes,
+            )
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1338,6 +1394,65 @@ impl<P> UndoManager<P> {
         self.pending_gesture = suspended.pending;
     }
 
+    /// The index of the oldest undo entry committed since `revision` was
+    /// current (its `revision_before`), if one is still held.
+    pub fn undo_index_since(&self, revision: u64) -> Option<usize> {
+        self.undo
+            .iter()
+            .position(|entry| entry.revision_before == revision)
+    }
+
+    pub fn undo_patch_at(&self, index: usize) -> Option<&P> {
+        self.undo.get(index).map(|entry| &entry.patch)
+    }
+
+    /// Replace the patch of undo entry `index` (and its retained bytes).
+    pub fn replace_undo_patch(&mut self, index: usize, patch: P, retained_bytes: usize) {
+        let Some(entry) = self.undo.get_mut(index) else {
+            return;
+        };
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(entry.retained_bytes)
+            .saturating_add(retained_bytes);
+        entry.patch = patch;
+        entry.retained_bytes = retained_bytes;
+        self.enforce_budget(Some(self.current_revision));
+    }
+
+    /// Insert an entry just below undo entry `index`: it takes that entry's
+    /// `revision_before` and a fresh revision becomes the boundary between
+    /// them, so undoing walks back through the inserted entry after it.
+    pub fn insert_undo_entry_before(
+        &mut self,
+        index: usize,
+        label: impl Into<String>,
+        merge_key: Option<MergeKey>,
+        patch: P,
+        retained_bytes: usize,
+    ) -> bool {
+        if index >= self.undo.len() {
+            return false;
+        }
+        let between = self.take_revision();
+        let entry = &mut self.undo[index];
+        let revision_before = std::mem::replace(&mut entry.revision_before, between);
+        self.undo.insert(
+            index,
+            HistoryEntry {
+                revision_before,
+                revision_after: between,
+                label: label.into(),
+                merge_key,
+                patch,
+                retained_bytes,
+            },
+        );
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.enforce_budget(Some(self.current_revision));
+        true
+    }
+
     pub fn finish_gesture(&mut self, id: GestureId) -> Option<ActiveGesture> {
         if self.active_gesture.as_ref().map(|gesture| gesture.id) != Some(id) {
             return None;
@@ -1540,18 +1655,20 @@ impl<P> UndoManager<P> {
         while self.undo.len() + self.redo.len() > self.budget.max_entries
             || self.retained_bytes > self.budget.max_bytes
         {
-            let undo_revision = self.undo.front().map(|entry| entry.revision_after);
-            let redo_revision = self.redo.last().map(|entry| entry.revision_after);
-            let remove_undo = match (undo_revision, redo_revision) {
-                (Some(undo_revision), Some(redo_revision)) => undo_revision <= redo_revision,
-                (Some(_), None) => true,
+            // The oldest entry goes first: the undo stack's front while it
+            // holds any (every redo entry was committed after it), by
+            // position rather than revision number, since revisions need not
+            // increase along the stack (`insert_undo_entry_before` gives the
+            // inserted entry a fresh one).
+            let remove_undo = match (self.undo.front(), self.redo.last()) {
+                (Some(_), _) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
             let candidate_revision = if remove_undo {
-                undo_revision
+                self.undo.front().map(|entry| entry.revision_after)
             } else {
-                redo_revision
+                self.redo.last().map(|entry| entry.revision_after)
             };
             if candidate_revision == protected_revision {
                 break;
@@ -1838,6 +1955,58 @@ mod tests {
         assert_eq!((history.undo_len(), history.redo_len()), (2, 0));
         assert_eq!(history.retained_bytes(), 40);
         assert_eq!(history.redo(|_| Ok::<_, ()>(())), HistoryReplay::Unavailable);
+    }
+
+    /// eseq-0l17.72: an entry inserted below a newer one undoes after it
+    /// and keeps the revision chain (the saved revision included) intact;
+    /// replacing a patch moves the retained bytes.
+    #[test]
+    fn inserted_and_replaced_entries_keep_the_revision_chain() {
+        let mut history = manager(8, 1024);
+        history.commit("one", None, 1, 10);
+        history.mark_saved();
+        let since = history.current_revision();
+        history.commit("beside", None, 3, 30);
+        let index = history.undo_index_since(since).expect("the beside entry");
+        assert_eq!(history.undo_patch_at(index), Some(&3));
+        assert!(history.insert_undo_entry_before(index, "drag", None, 2, 20));
+        history.replace_undo_patch(index + 1, 4, 40);
+        assert_eq!(history.retained_bytes(), 70);
+        let mut undone = Vec::new();
+        while let HistoryReplay::Applied(_) = history.undo(|patch| {
+            undone.push(*patch);
+            Ok::<_, ()>(())
+        }) {}
+        assert_eq!(undone, vec![4, 2, 1]);
+        assert_eq!(history.current_revision(), 0);
+        history.redo(|_| Ok::<_, ()>(()));
+        assert!(history.is_at_saved_revision());
+        history.redo(|_| Ok::<_, ()>(()));
+        history.redo(|_| Ok::<_, ()>(()));
+        assert_eq!(history.undo_len(), 3);
+        assert!(!history.is_at_saved_revision());
+    }
+
+    /// The budget evicts the undo stack's oldest entry by position, even
+    /// when an inserted entry there has a newer revision number than the
+    /// redo stack's next entry.
+    #[test]
+    fn budget_eviction_takes_the_undo_front_whatever_its_revision() {
+        let mut history = manager(8, 100);
+        history.commit("a", None, 1, 10);
+        history.commit("b", None, 2, 10);
+        assert!(history.insert_undo_entry_before(0, "inserted", None, 3, 10));
+        assert!(matches!(
+            history.undo(|_| Ok::<_, ()>(())),
+            HistoryReplay::Applied(_)
+        ));
+        assert_eq!((history.undo_len(), history.redo_len()), (2, 1));
+        // Grow `a` past the byte budget: the inserted front entry goes, the
+        // redo entry stays.
+        history.replace_undo_patch(1, 4, 85);
+        assert_eq!((history.undo_len(), history.redo_len()), (1, 1));
+        assert_eq!(history.next_undo_patch(), Some(&4));
+        assert_eq!(history.next_redo_patch(), Some(&2));
     }
 
     #[test]

@@ -284,7 +284,67 @@ pub struct InstrumentDeviceValuesSnapshot {
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
 
+fn sound_states_eq(left: &TrackSoundState, right: &TrackSoundState) -> bool {
+    left.engine_id == right.engine_id
+        && left.loaded_preset == right.loaded_preset
+        && left.dirty == right.dirty
+}
+
+/// The sound state of a rebased snapshot (eseq-0l17.72). While the edit kept
+/// the engine and preset, those are `base`'s and the preset's dirty flag is
+/// `base`'s, set when the edit dirtied it: it turned the flag on, or (the
+/// flag already on from the drag) it moved a component that dirties the
+/// preset (`edit_moved_sound`). Otherwise (a preset load) the state is
+/// rebased as a whole.
+fn rebase_sound_state(
+    base: &TrackSoundState,
+    from: &TrackSoundState,
+    to: &TrackSoundState,
+    edit_moved_sound: bool,
+) -> Option<TrackSoundState> {
+    if from.engine_id == to.engine_id && from.loaded_preset == to.loaded_preset {
+        return Some(TrackSoundState {
+            engine_id: base.engine_id,
+            loaded_preset: base.loaded_preset.clone(),
+            dirty: base.dirty || (to.dirty && (!from.dirty || edit_moved_sound)),
+        });
+    }
+    crate::effects::rebase_snapshot_component(base, from, to, sound_states_eq)
+}
+
 impl InstrumentDeviceValuesSnapshot {
+    /// `base` with the components an edit moved from `from` to `to`
+    /// ([`crate::effects::rebase_snapshot_component`], eseq-0l17.72);
+    /// `None` on a conflict.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        use crate::effects::rebase_snapshot_component as rebase;
+        Some(Self {
+            slot: crate::effects::EffectSlotValuesSnapshot::rebase_edit(
+                &base.slot, &from.slot, &to.slot,
+            )?,
+            base_note_offset_bits: rebase(
+                &base.base_note_offset_bits,
+                &from.base_note_offset_bits,
+                &to.base_note_offset_bits,
+                |l, r| l == r,
+            )?,
+            sound_state: rebase_sound_state(
+                &base.sound_state,
+                &from.sound_state,
+                &to.sound_state,
+                !from.slot.bit_exact_eq(&to.slot)
+                    || from.base_note_offset_bits != to.base_note_offset_bits
+                    || from.key_lock_variant_registry != to.key_lock_variant_registry,
+            )?,
+            key_lock_variant_registry: rebase(
+                &base.key_lock_variant_registry,
+                &from.key_lock_variant_registry,
+                &to.key_lock_variant_registry,
+                |l, r| l == r,
+            )?,
+        })
+    }
+
     pub fn bit_exact_eq(&self, other: &Self) -> bool {
         self.slot.bit_exact_eq(&other.slot)
             && self.base_note_offset_bits == other.base_note_offset_bits
@@ -322,6 +382,76 @@ pub struct RackSlotValuesSnapshot {
 }
 
 impl RackSlotValuesSnapshot {
+    /// `base` with the components an edit moved from `from` to `to`
+    /// ([`crate::effects::rebase_snapshot_component`], eseq-0l17.72): the
+    /// strip fields one by one, the slot's instrument and each of its
+    /// effects as [`crate::effects::EffectSlotValuesSnapshot::rebase_edit`],
+    /// the slot p-locks cell by cell, the sound state by
+    /// [`rebase_sound_state`]. `None` on a conflict or when the effect count
+    /// differs.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        use crate::effects::rebase_snapshot_component as rebase;
+        use crate::effects::EffectSlotValuesSnapshot as Slot;
+        fn eq<T: PartialEq>(left: &T, right: &T) -> bool {
+            left == right
+        }
+        if base.effect_slots.len() != from.effect_slots.len()
+            || from.effect_slots.len() != to.effect_slots.len()
+        {
+            return None;
+        }
+        Some(Self {
+            base_note_offset_bits: rebase(
+                &base.base_note_offset_bits,
+                &from.base_note_offset_bits,
+                &to.base_note_offset_bits,
+                eq,
+            )?,
+            choke_group: rebase(&base.choke_group, &from.choke_group, &to.choke_group, eq)?,
+            gain_bits: rebase(&base.gain_bits, &from.gain_bits, &to.gain_bits, eq)?,
+            pan_bits: rebase(&base.pan_bits, &from.pan_bits, &to.pan_bits, eq)?,
+            mute: rebase(&base.mute, &from.mute, &to.mute, eq)?,
+            solo: rebase(&base.solo, &from.solo, &to.solo, eq)?,
+            enabled: rebase(&base.enabled, &from.enabled, &to.enabled, eq)?,
+            max_polyphony: rebase(
+                &base.max_polyphony,
+                &from.max_polyphony,
+                &to.max_polyphony,
+                eq,
+            )?,
+            param_plocks: RackSlotParamPlocks {
+                rows: crate::effects::rebase_optional_f32_rows(
+                    &base.param_plocks.rows,
+                    &from.param_plocks.rows,
+                    &to.param_plocks.rows,
+                )?,
+            },
+            instrument_slot: Slot::rebase_edit(
+                &base.instrument_slot,
+                &from.instrument_slot,
+                &to.instrument_slot,
+            )?,
+            effect_slots: base
+                .effect_slots
+                .iter()
+                .zip(&from.effect_slots)
+                .zip(&to.effect_slots)
+                .map(|((base, from), to)| Slot::rebase_edit(base, from, to))
+                .collect::<Option<Vec<_>>>()?,
+            sound_state: rebase_sound_state(
+                &base.sound_state,
+                &from.sound_state,
+                &to.sound_state,
+                !from.instrument_slot.bit_exact_eq(&to.instrument_slot)
+                    || from.base_note_offset_bits != to.base_note_offset_bits
+                    || !optional_f32_rows_bit_exact_eq(
+                        &from.param_plocks.rows,
+                        &to.param_plocks.rows,
+                    ),
+            )?,
+        })
+    }
+
     pub fn bit_exact_eq(&self, other: &Self) -> bool {
         self.base_note_offset_bits == other.base_note_offset_bits
             && self.choke_group == other.choke_group

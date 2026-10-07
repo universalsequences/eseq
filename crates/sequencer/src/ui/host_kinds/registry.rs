@@ -263,7 +263,7 @@ impl Pusher<'_> {
     /// The observed → compute → push pattern for one instance's live
     /// fields: one batched observed query, then the observed fields only.
     /// Returns the observed mask (bit `i` is `fields.keys[i]`).
-    pub(super) fn push_live(&mut self, id: InstanceId, fields: &LiveFields) -> u32 {
+    pub(super) fn push_live(&mut self, id: InstanceId, fields: &LiveFields) -> ObservedMask {
         self.push_live_except(id, fields, 0)
     }
 
@@ -273,8 +273,8 @@ impl Pusher<'_> {
         &mut self,
         id: InstanceId,
         fields: &LiveFields,
-        except: u32,
-    ) -> u32 {
+        except: ObservedMask,
+    ) -> ObservedMask {
         let mask = self.rt.host_fields_observed(id, &fields.names);
         self.push_live_masked(id, fields, mask & !except);
         mask
@@ -282,7 +282,12 @@ impl Pusher<'_> {
 
     /// Compute and push the live fields of `id` in `mask` (bit `i` is
     /// `fields.keys[i]`).
-    pub(super) fn push_live_masked(&mut self, id: InstanceId, fields: &LiveFields, mask: u32) {
+    pub(super) fn push_live_masked(
+        &mut self,
+        id: InstanceId,
+        fields: &LiveFields,
+        mask: ObservedMask,
+    ) {
         for (bit, key) in fields.keys.iter().enumerate() {
             if mask & (1 << bit) != 0 {
                 self.push_live_field(id, *key);
@@ -297,8 +302,8 @@ impl Pusher<'_> {
         &mut self,
         ids: impl Iterator<Item = InstanceId> + Clone,
         fields: &LiveFields,
-        cache: &mut Option<(u64, u32)>,
-    ) -> u32 {
+        cache: &mut Option<(u64, ObservedMask)>,
+    ) -> ObservedMask {
         if observed_union(self.rt, cache, ids.clone(), fields) == 0 {
             return 0;
         }
@@ -318,10 +323,10 @@ impl Pusher<'_> {
 /// over-approximate but never misses a new observer.
 pub(super) fn observed_union(
     rt: &Runtime,
-    cache: &mut Option<(u64, u32)>,
+    cache: &mut Option<(u64, ObservedMask)>,
     ids: impl Iterator<Item = InstanceId>,
     fields: &LiveFields,
-) -> u32 {
+) -> ObservedMask {
     if let Some(union) = cached_union(rt, *cache) {
         return union;
     }
@@ -335,7 +340,10 @@ pub(super) fn observed_union(
 
 /// The union a cache (see [`observed_union`]) holds, while it is of the
 /// current observer epoch.
-pub(super) fn cached_union(rt: &Runtime, cache: Option<(u64, u32)>) -> Option<u32> {
+pub(super) fn cached_union(
+    rt: &Runtime,
+    cache: Option<(u64, ObservedMask)>,
+) -> Option<ObservedMask> {
     let (seen, union) = cache?;
     (seen == rt.instance_observer_epoch()).then_some(union)
 }

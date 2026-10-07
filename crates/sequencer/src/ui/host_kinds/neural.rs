@@ -63,7 +63,7 @@ pub(crate) struct NeuralState {
     /// Live values as last pushed, per observing network and neuron (a
     /// neuron's with the observed mask they were pushed under).
     active: HashMap<InstanceId, bool>,
-    live: HashMap<InstanceId, (u32, NeuronLive)>,
+    live: HashMap<InstanceId, (ObservedMask, NeuronLive)>,
     /// Network model syncs, and networks pushed (tests: a step edit pushes
     /// none).
     pub(crate) syncs: u64,
