@@ -2171,8 +2171,7 @@ mod tests {
     /// expand at render time, after `ui/main.lisp` has loaded the materials;
     /// no `defwidget` shader is among them. Delete an entry once the file
     /// imports the module (the corpus test then insists).
-    const PENDING_MACRO_IMPORTS: &[&str] =
-        &["ui/effects/param-grid.lisp", "ui/effects/track-panels.lisp"];
+    const PENDING_MACRO_IMPORTS: &[&str] = &["ui/effects/track-panels.lisp"];
 
     /// Every authored widget shader must survive the whole pipeline: parse,
     /// macro expansion, and both emitters, agreeing on region count and

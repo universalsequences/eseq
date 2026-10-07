@@ -116,25 +116,8 @@
 ;; module's own `eseq.seq-core-state/cursor-step`, a different slot.
 (def cursor-step-value () eseq.vanilla/cursor-step)
 
-;; COMPAT(eseq-0l17.14): the *step* panel (ui/effects/track-panels.lisp) binds
-;; the legacy `fx-step-*` fields, which the host republishes only on a step
-;; selection or a `set-cursor-step` command: a Lisp cursor move echoes them
-;; here until the panel reads selection.cursor-step / edit-step.
 (def set-cursor-step-value (step)
-  (let ((parameter-step
-          (if (> (or SEQ.fx-step-selection-count 0) 0)
-            (or SEQ.fx-step-parameter-step step)
-            step)))
-    (do
-      (set! eseq.vanilla/cursor-step step)
-      (reactive-set "SEQ" "fx-step-cursor-number" (+ step 1))
-      (reactive-set "SEQ" "fx-step-parameter-step" parameter-step)
-      (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
-      (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
-      (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step))
-      (reactive-set "SEQ" "fx-step-value-pan" (nth SEQ.pans parameter-step))
-      (reactive-set "SEQ" "fx-step-value-retrig" (nth SEQ.retrigs parameter-step))
-      (reactive-set "SEQ" "fx-step-value-retrig-rate" (nth SEQ.retrig-rates parameter-step)))))
+  (set! eseq.vanilla/cursor-step step))
 
 ;; The step cursor always tracks the current track's pattern length.  The old
 ;; bus-gate step sequencer (and its `SEQ.bus-num-steps` reactive list) is gone,

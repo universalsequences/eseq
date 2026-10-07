@@ -2656,9 +2656,10 @@ its instance and field.
      `rack-pad-grid` / `rack-pad-map` / `selected-pad` /
      `open-pad-member-fx` take the group position `effects/buffers.lisp`
      passes; `map-slot` / `map-port` hand `eseq.effects.param-controls`'
-     process map its legacy dict shapes and `armed-port` reads it back;
-     `seq-core-state/set-cursor-step-value` still echoes the `fx-step-*`
-     fields the *step* panel binds.
+     process map its legacy dict shapes and `armed-port` reads it back.
+     (`seq-core-state/set-cursor-step-value` echoed the `fx-step-*` fields
+     the *step* panel bound; the panel reads the kinds since .61, so it only
+     moves the cursor.)
    - **Behaviour changes.** A following editor shows the playhead's page
      without moving the cursor (legacy moved the cursor frame with it); a
      focused pad is the pad instance, not its note (a pad moved to another
