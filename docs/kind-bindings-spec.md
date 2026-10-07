@@ -632,18 +632,21 @@ Built (stage 5):
   'name' of kind 'eseq.kinds:track' is :string, which is not bindable;
   bindable fields: …` (also built-ins, and `:document` fields while the
   host stores them).
-- **Errors.** The plan's, the budget's and a name collision are evaluation
-  errors (`VMError::Instance`). A shader codegen error (`<widget>: shader
-  error: …`) stays non-fatal: a `[defwidget] warning:` on stderr and the
-  form's string value, as before. `rec-arm-dot` in `ui/legacy/mixer.lisp`
-  calls `eseq.materials/color`; since stage 8 (.13, eseq-0l17.25) that file
-  imports `eseq.materials`, so the widget registers when it loads on its
-  own (`legacy_mixer_definitions_are_top_level_and_source_loads`). Making
-  the error fatal still breaks a boot: `ui/sequencer.lisp`,
-  `ui/step-grid.lisp`, `ui/effects/param-grid.lisp` and
-  `ui/effects/track-panels.lisp` call `eseq.materials/` in shaders without
-  importing it, and `metal_seq_main_import_block_boots_in_reverse_order`
-  loads the sequencer before the materials (`seqv-rec-arm-dot`).
+- **Errors.** The plan's, the budget's, a name collision and a shader
+  codegen error (`<widget>: shader error: …`) are evaluation errors
+  (`VMError::Instance`); the widget is not registered (eseq-0l17.25,
+  `a_shader_that_does_not_compile_is_a_defwidget_error`). The usual cause is
+  a material macro whose module is not loaded yet (`eseq.materials/color`):
+  `:shader` and `:material` bodies expand outside their module, so a file
+  that calls another module's macro must `(import …)` it.
+  `ui/sequencer.lisp`, `ui/step-grid.lisp` and `ui/legacy/mixer.lisp`
+  (and `ui/effects/param-grid.lisp`, eseq-0l17.61) import `eseq.materials`, so
+  `rec-arm-dot` and `seqv-rec-arm-dot` compile in any boot order
+  (`legacy_mixer_definitions_are_top_level_and_source_loads`,
+  `metal_seq_main_import_block_boots_in_reverse_order`).
+  `content_shader_corpus_emits_valid_wgsl` checks every content file that
+  calls a corpus macro of another module imports it (its
+  `PENDING_MACRO_IMPORTS` lists the `:material`-only stragglers).
 - **Uniform layout.** `SdfWidgetDef::state_uniforms` stays one float name per
   slot, in slot order: scalar states first (as `collect_state_symbols`
   finds them, captured `defstate`s included), then fields in first-read

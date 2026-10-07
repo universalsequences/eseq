@@ -16,10 +16,11 @@
 ;;   * `metal-track-tick` keeps its flat, unrenamed name (hazard e —
 ;;     `defwidget` is its own flat keyspace). ui/sequencer.lisp carries a
 ;;     verbatim copy under the same name on purpose; see the comment there.
-;;   * The `:material` props below call ui/materials.lisp macros through
-;;     their compat aliases (`aqua-slider-track-material`, …). Those bodies
-;;     are auto-quoted and expand outside this module, so they must stay
-;;     flat — do not requalify them and do not import eseq.materials.
+;;   * The `:material` props and the `defwidget` shader below call
+;;     ui/materials.lisp macros by their qualified `eseq.materials/` names
+;;     (the bodies are auto-quoted and expand outside this module), and
+;;     eseq.materials is imported so those macros exist when the shader
+;;     compiles (a missing one is a defwidget evaluation error).
 ;;   * `param-mode` stays bare: it is eseq.seq-core-state's `defstate`, and
 ;;     `defstate` resolves on the flat key through `state_bindings`.
 ;;   * `(set-buffer-mode-for "*metal*" "eseq.seq-grid-mode/seq-grid-mode")` at the bottom keeps
@@ -35,6 +36,7 @@
 
 (module eseq.step-grid)
 
+(import eseq.materials)
 (import eseq.seq-core-state :as core)
 (import eseq.seq-grid-mode :as gm)
 (import eseq.effects.state :as st)

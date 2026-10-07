@@ -2145,9 +2145,43 @@ mod tests {
         true
     }
 
+    /// Every qualified symbol (`module/name`) in `expression`, quoted or not.
+    fn qualified_symbols(expression: &Expression, out: &mut Vec<String>) {
+        match expression {
+            Expression::Symbol(name) | Expression::QuoteSymbol(name)
+                if name.len() > 1 && name.contains('/') && !name.starts_with('/') =>
+            {
+                out.push(name.clone());
+            }
+            Expression::List(items) | Expression::QuoteList(items) => {
+                for item in items {
+                    qualified_symbols(item, out);
+                }
+            }
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => qualified_symbols(inner, out),
+            _ => {}
+        }
+    }
+
+    /// Content files that call `eseq.materials/` macros without importing
+    /// the module, on purpose, until the effects-panel lane lands its imports
+    /// (eseq-0l17.25 / .61). They only use them in `:material` props, which
+    /// expand at render time, after `ui/main.lisp` has loaded the materials;
+    /// no `defwidget` shader is among them. Delete an entry once the file
+    /// imports the module (the corpus test then insists).
+    const PENDING_MACRO_IMPORTS: &[&str] =
+        &["ui/effects/param-grid.lisp", "ui/effects/track-panels.lisp"];
+
     /// Every authored widget shader must survive the whole pipeline: parse,
     /// macro expansion, and both emitters, agreeing on region count and
     /// producing WGSL that naga accepts.
+    ///
+    /// The test registers every corpus macro up front, so it also checks what
+    /// that hides: a file that calls another module's macro (`eseq.materials/
+    /// color`) must import that module, or the call is unknown when the file
+    /// loads first and its `defwidget` is an evaluation error (eseq-0l17.25).
     ///
     /// This deliberately does not digest the corpus. Hashing the live authored
     /// content made every ordinary widget edit fail a test that could only
@@ -2174,11 +2208,25 @@ mod tests {
             .eval_str(&std::fs::read_to_string(content.join("core/modules/kinds.lisp")).unwrap())
             .expect("host kinds");
         let mut shader_count = 0;
+        let mut corpus_macros = std::collections::HashSet::new();
+        // (file, its module, the modules it imports, its qualified symbols)
+        let mut references = Vec::new();
         for path in files {
             let source = std::fs::read_to_string(&path).unwrap();
             let tokens = crate::parser::Parser::new(source).parse().unwrap();
             let expressions = crate::parser::ASTParser::new(tokens).parse().unwrap();
             let mut module_name = None;
+            let mut imports = Vec::new();
+            let mut symbols = Vec::new();
+            for expression in &expressions {
+                qualified_symbols(expression, &mut symbols);
+                if let Expression::List(items) = expression
+                    && matches!(items.first(), Some(Expression::Symbol(head)) if head == "import")
+                    && let Some(Expression::Symbol(module)) = items.get(1)
+                {
+                    imports.push(module.clone());
+                }
+            }
             for expression in expressions {
                 if let Expression::List(items) = &expression
                     && matches!(items.first(), Some(Expression::Symbol(head)) if head == "module")
@@ -2195,6 +2243,9 @@ mod tests {
                         (module_name.as_ref(), qualified.get_mut(1))
                     {
                         *name = format!("{module}/{name}");
+                    }
+                    if let Some(Expression::Symbol(name)) = qualified.get(1) {
+                        corpus_macros.insert(name.clone());
                     }
                     let qualified = Expression::List(qualified);
                     runtime
@@ -2213,7 +2264,45 @@ mod tests {
                     shader_count += 1;
                 }
             }
+            let file = path
+                .strip_prefix(&content)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            references.push((file, module_name, imports, symbols));
         }
+        let mut missing = Vec::new();
+        for (file, module_name, imports, symbols) in &references {
+            let pending = PENDING_MACRO_IMPORTS.contains(&file.as_str());
+            let mut needs = Vec::new();
+            for symbol in symbols
+                .iter()
+                .filter(|symbol| corpus_macros.contains(*symbol))
+            {
+                let (module, _) = symbol.rsplit_once('/').unwrap();
+                // `sdf` is the core stdlib, loaded before any content.
+                if module == "sdf"
+                    || module_name.as_deref() == Some(module)
+                    || imports.iter().any(|import| import == module)
+                    || needs.contains(&module)
+                {
+                    continue;
+                }
+                needs.push(module);
+            }
+            match (pending, needs.is_empty()) {
+                (false, false) => missing.push(format!("{file} calls {needs:?} without importing")),
+                (true, true) => missing.push(format!(
+                    "{file} imports its macros' modules now; drop it from PENDING_MACRO_IMPORTS"
+                )),
+                _ => {}
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "content macro imports (eseq-0l17.25):\n{}",
+            missing.join("\n")
+        );
         // A widget with instance state (kind-bindings spec §7.3) over the
         // host kinds: a keyed step and track, and the transport singleton.
         let instance_state = parse_one_expr(

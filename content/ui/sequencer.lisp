@@ -17,6 +17,10 @@
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
+;; Load-order edge: the `defwidget` shaders below call `eseq.materials/color`,
+;; a macro that must exist when the shader compiles (a missing one is a
+;; defwidget evaluation error, kind-bindings spec §7.3).
+(import eseq.materials)
 
 (import eseq.track-collapse)
 

@@ -561,32 +561,23 @@ fn compile_sdf_value(value: &Value, vm: &mut VM) -> Result<SdfCompileResult, Str
     })
 }
 
-/// Why a `defwidget` did not compile.
-enum DefwidgetError {
-    /// The shader itself (`<widget>: shader error: …`): a warning, and the
-    /// form's string value, as before kind-bindings stage 5; some content
-    /// `defwidget`s hit one (`rec-arm-dot` in `ui/legacy/mixer.lisp` when its
-    /// material macros are not loaded).
-    Shader(String),
-    /// Its state (kind-bindings spec §7.3): an evaluation error.
-    State(String),
-}
-
 /// Compile a `defwidget` shader against its `:state` names (kind-bindings
 /// spec §7.3): scalar states and the instance fields the shader reads become
 /// uniforms ([`VM::plan_sdf_widget_state`]). Over the uniform budget is an
-/// error listing the allocation; so is a bad instance field.
+/// error listing the allocation; so is a bad instance field, and so is a
+/// shader that does not compile (`<widget>: shader error: …`, e.g. a call to
+/// a material macro whose module is not imported).
 fn compile_defwidget_shader(
     widget: &str,
     value: &Value,
     vm: &mut VM,
     state_names: &[String],
-) -> Result<(SdfCompileResult, crate::vm::SdfStatePlan), DefwidgetError> {
-    let shader_error = |e: String| DefwidgetError::Shader(format!("{widget}: shader error: {e}"));
+) -> Result<(SdfCompileResult, crate::vm::SdfStatePlan), String> {
+    let shader_error = |e: String| format!("{widget}: shader error: {e}");
     let expr = crate::lang::sdf_codegen::value_to_expression(value)
         .map_err(|e| shader_error(e.to_string()))?;
     let expanded = expand_sdf_expression(&expr, vm).map_err(shader_error)?;
-    let plan = plan_sdf_state(widget, vm, state_names, &expanded).map_err(DefwidgetError::State)?;
+    let plan = plan_sdf_state(widget, vm, state_names, &expanded)?;
     let state_symbols = plan.uniforms();
     let output = compile_expanded_sdf(&expanded, &state_symbols).map_err(shader_error)?;
     Ok((
@@ -1777,11 +1768,7 @@ impl Runtime {
                 let (compiled, plan) =
                     match compile_defwidget_shader(&name, &shader_val, vm, &widget_state_names) {
                         Ok(compiled) => compiled,
-                        Err(DefwidgetError::Shader(error)) => {
-                            eprintln!("[defwidget] warning: {error}");
-                            return Value::String(format!("defwidget shader error: {error}"));
-                        }
-                        Err(DefwidgetError::State(error)) => {
+                        Err(error) => {
                             vm.fail_native_call(crate::vm::VMError::Instance(error));
                             return Value::Nil;
                         }

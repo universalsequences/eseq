@@ -547,6 +547,31 @@ fn colliding_shader_uniform_names_are_an_error() {
 }
 
 #[test]
+fn a_shader_that_does_not_compile_is_a_defwidget_error() {
+    // A material macro whose module is not loaded is left as a call the
+    // shader compiler does not know (eseq-0l17.25: `rec-arm-dot` before
+    // `eseq.materials`): an evaluation error naming the widget, nothing
+    // registered. Once the macro exists the same form compiles.
+    let mut host = host();
+    let code =
+        "(defwidget dot :shader (sdf/fill (sdf/circle 0.4) (shade.materials/color 0.5 0.2)))";
+    let message = error(&mut host.runtime, code);
+    assert!(
+        message.starts_with("dot: shader error: "),
+        "unexpected message: {message}"
+    );
+    assert!(message.contains("shade.materials/color"), "{message}");
+    assert!(sdf_widget_def("dot").is_none());
+    host.runtime
+        .eval_str("(defmacro shade.materials/color (a b) `(rgba ,a ,b ,a 1))")
+        .expect("macro");
+    host.runtime
+        .eval_str(code)
+        .expect("compiles once the macro exists");
+    assert!(sdf_widget_def("dot").is_some());
+}
+
+#[test]
 fn only_scalar_states_accept_a_binding_ref() {
     let mut host = host();
     host.runtime.eval_str(STEP_CELL).expect("defwidget");
