@@ -302,6 +302,14 @@ and is a key-shape change, "restart to change its :key"):
   (`InstanceError::LocalKind`, `adsr-gesture instances are view-local;
   create them with (adsr-gesture key …)`). `VM::local_instances(kind)`
   lists the live ones.
+- First user (eseq-0l17.73): `eseq.effects.custom-ui-sections`' ADSR stage
+  flags, one `(adsr-gesture scope-name section)` per custom-UI envelope
+  editor (§13 stage 8, .14 group A). A readout's render calls the
+  constructor (creating the instance before any drag) and binds
+  `#'g.attack` …; it reads no field by value, so a drag repaints only the
+  readouts it lights. Nothing drops these instances: a scope is a stable
+  name and the module hears of no scope going away (the same as
+  `section-choice`'s entries).
 
 ### 3.2 `:host`
 
@@ -1907,8 +1915,8 @@ its instance and field.
      clear command's target) and `plock-color` (the current step variant's
      color, three bindable components, one effect follows
      `selection.track.variants`); `custom-ui-sections`' `section-view` and
-     `adsr-gesture` (the dragged editor's scope and section, by value, and
-     one bound flag per stage: a drag only repaints its readouts);
+     `adsr-gesture` (view-local, keyed by the editor's scope name and
+     section, one bound flag per stage: a drag only repaints its readouts);
      `param-grid`'s `grid-sections`. Fixtures and tests reach them through a
      local (`(let ((v eseq.effects.state/effect-mods)) (set! v.open true))`).
      An `effect-mods.track` of a dict naming no track (a MIDI effect's) is -1
@@ -1950,16 +1958,14 @@ its instance and field.
      `param.mod-ratio` (new) instead of reading a % param by value. View
      state: one section choice per scope (`eseq.effects.state`'s
      `section-of` / `select-section!`, for the param grid and the custom
-     UIs); an ADSR drag's stage flags live in one of eight gesture singletons
-     picked by the editor's section (`adsr-gesture-0` … `-7`), so a readout
-     binds its flags and reads nothing by value (no first-drag re-render;
-     two custom UIs on screen whose dragged editors share a section number
-     light each other's readouts during that drag: keyed `:state` instances
-     could not be created from Lisp). eseq-0l17.62 added view-local keyed
-     kinds (§3.1), so the pool can now be replaced by one
-     `(def-kind adsr-gesture :key (scope section) :state …)` and
-     `(adsr-gesture scope section)` per editor (follow-up for the panels
-     lane, in `effects/custom-ui-sections.lisp`). The keys tab resolves the instrument's
+     UIs); an ADSR drag's stage flags live in a view-local
+     `(def-kind adsr-gesture :key (scope section) :state …)` instance per
+     editor (§3.1; eseq-0l17.73 replaced the eight per-section singletons
+     `adsr-gesture-0` … `-7`, which lit the readouts of two custom UIs on
+     screen sharing a section number), so a readout binds its flags and
+     reads nothing by value (no first-drag re-render; its render creates
+     the instance). Test: `host_kinds::tests::panels_view::
+     adsr_gesture_flags_are_per_scope_and_a_drag_only_repaints`. The keys tab resolves the instrument's
      key locks once per render (`key-locks-of`). The p-lock projections
      publish only the rows their COMPAT readers use (track-level `-on` /
      `-def`, rack macro and slot-control `-any`). The tick no longer
@@ -6155,7 +6161,7 @@ builds the field name.
 | `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | project.output-options (bus instances; nil is sends only) | built (.35); ported (.13), removed | .13 |
 | `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35); ported (.13), removed | .13 |
 | `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
-| `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local; ported (.14 A: the adsr-gesture singleton in eseq.effects.custom-ui-sections) | .14 |
+| `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local; ported (.14 A: the view-local adsr-gesture kind, keyed by scope and section, in eseq.effects.custom-ui-sections; .73) | .14 |
 | `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local; ported (.15: arr-select, arr-lanes, arr-drag, with the timeline's lane ownership), removed | .15 |
 | `SEQV.<cursor-highlight-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local; ported (.11), removed | .11 |
 | `SEQV.<expanded-track-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (expanded tracks) | view-local; ported (.11), removed | .11 |

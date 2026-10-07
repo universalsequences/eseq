@@ -3,7 +3,7 @@
 //! state), ported to the kinds (kind-bindings spec §13 stage 8,
 //! eseq-0l17.14).
 
-use super::views::{assert_ported, distro, instance_bindings, legacy_forms};
+use super::views::{assert_ported, distro, instance_bindings, legacy_forms, widgets_with_prop};
 use super::*;
 
 /// The ported files that read host kinds.
@@ -373,4 +373,90 @@ fn a_percent_lane_with_a_plain_depth_shows_it_times_100() {
     );
     set_effect_mods(&mut h, true);
     assert_eq!(scale(&mut h), Value::Number(100.0), "its depth: a fraction");
+}
+
+/// A custom UI's ADSR readouts bind their editor's stage flags, one
+/// view-local `adsr-gesture` per (scope, section) (eseq-0l17.73): two
+/// custom UIs sharing a section number keep their own flags, and a drag
+/// repaints its readouts without re-rendering any buffer (eseq-eeng).
+#[test]
+fn adsr_gesture_flags_are_per_scope_and_a_drag_only_repaints() {
+    let mut h = distro();
+    // As the generated custom-UI functions do: name the scope, then render
+    // the readouts (section -1, the panel's own envelope).
+    h.eval_all(
+        r#"(def adsr-readouts (scope stages)
+             (do (set! eseq.vanilla/custom-ui-current-kind "instrument")
+                 (set! eseq.vanilla/synth-ui-current-name scope)
+                 (h-stack
+                   (map (lambda (stage)
+                          (number-picker :value 0 :min 0 :max 1 :noui true
+                            :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding -1 stage)))
+                        stages))))
+           (effect-buffer "*adsr-core*" (adsr-readouts "core" (list :attack :decay)))
+           (effect-buffer "*adsr-triton*" (adsr-readouts "triton" (list :attack)))"#,
+    );
+    h.show_all();
+    let bound = |h: &Harness, buffer: &str| {
+        let (tree, revision) = h.buffer_tree(buffer);
+        let mut bound = Vec::new();
+        let mut legacy = Vec::new();
+        instance_bindings(&tree, &mut bound, &mut legacy);
+        assert!(legacy.is_empty(), "{buffer}: {legacy:?}");
+        (bound, revision)
+    };
+    let (core, core_revision) = bound(&h, "*adsr-core*");
+    let (triton, triton_revision) = bound(&h, "*adsr-triton*");
+    assert_eq!(core.len(), 2, "{core:?}");
+    assert_eq!(core[0].0, core[1].0, "one gesture per editor");
+    assert_eq!(
+        [core[0].1.as_str(), core[1].1.as_str()],
+        ["attack", "decay"]
+    );
+    assert_eq!(triton.len(), 1, "{triton:?}");
+    assert_ne!(triton[0].0, core[0].0, "same section, another scope");
+    assert!(h
+        .rt()
+        .instance_kind(core[0].0)
+        .is_some_and(|kind| kind.ends_with(":adsr-gesture")));
+
+    // The readouts' flags, read from their bound slots.
+    let flags = |h: &Harness, buffer: &str| {
+        let (tree, _) = h.buffer_tree(buffer);
+        let mut widgets = Vec::new();
+        widgets_with_prop(&tree, "active", &mut widgets);
+        widgets
+            .iter()
+            .map(|widget| match &widget["active"] {
+                Value::ReactiveRef { slot, .. } => read_float_slot(slot),
+                other => panic!("not a binding: {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let drag = |h: &mut Harness, scope: &str, active: &str| {
+        let before = h.rt().ui_work_counters();
+        h.eval_all(&format!(
+            "(eseq.effects.custom-ui-sections/custom-ui-set-active-adsr (dict :name \"{scope}\") -1 {active})"
+        ));
+        h.show_all();
+        let after = h.rt().ui_work_counters();
+        (
+            after.full_buffer_reruns - before.full_buffer_reruns,
+            after.subtree_reruns - before.subtree_reruns,
+        )
+    };
+    assert_eq!(flags(&h, "*adsr-core*"), [0.0, 0.0]);
+    assert_eq!(drag(&mut h, "core", ":attack"), (0, 0), "the first drag");
+    assert_eq!(flags(&h, "*adsr-core*"), [1.0, 0.0]);
+    assert_eq!(flags(&h, "*adsr-triton*"), [0.0], "triton's own flags");
+    assert_eq!(drag(&mut h, "core", ":decay"), (0, 0));
+    assert_eq!(flags(&h, "*adsr-core*"), [0.0, 1.0]);
+    // A drag elsewhere clears the held editor's flags.
+    assert_eq!(drag(&mut h, "triton", ":attack"), (0, 0));
+    assert_eq!(flags(&h, "*adsr-core*"), [0.0, 0.0]);
+    assert_eq!(flags(&h, "*adsr-triton*"), [1.0]);
+    assert_eq!(drag(&mut h, "triton", "false"), (0, 0), "the drag ends");
+    assert_eq!(flags(&h, "*adsr-triton*"), [0.0]);
+    assert_eq!(h.buffer_tree("*adsr-core*").1, core_revision);
+    assert_eq!(h.buffer_tree("*adsr-triton*").1, triton_revision);
 }
