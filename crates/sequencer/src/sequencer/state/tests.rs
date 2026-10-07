@@ -3101,6 +3101,110 @@
         assert_eq!(snapshot.effect_slots[1][0].plocks[0][0], Some(0.0));
     }
 
+    /// Note ids (kind-bindings spec §14.2j): each chord note gets its own
+    /// on creation; a removal, a step move, a parameter edit, a history
+    /// snapshot and a pattern snapshot carry them; a copy beside its
+    /// original (a doubled pattern, a paste, a copied step) gets fresh ones.
+    #[test]
+    fn note_ids_follow_their_notes_and_copies_get_fresh_ones() {
+        let state = SequencerState::new(1, vec![Vec::new()]);
+        state.pattern.track_params[0].set_num_steps(8);
+        let chords = &state.pattern.chord_data[0];
+        state.pattern.patterns[0].toggle_step(1);
+        chords.add_note(1, 0.0);
+        chords.add_note(1, 4.0);
+        chords.add_note(1, 7.0);
+        let ids = |step: usize| -> Vec<crate::sequencer::NoteId> {
+            let chords = &state.pattern.chord_data[0];
+            (0..chords.count(step)).map(|n| chords.get_id(step, n)).collect()
+        };
+        let [a, b, c] = ids(1)[..] else { panic!("three notes") };
+        assert!(a != 0 && a != b && b != c && a != c, "distinct ids");
+        // A removal shifts the later notes, ids and all.
+        assert!(!chords.toggle_note(1, 4.0));
+        assert_eq!(ids(1), vec![a, c]);
+        // A transpose edit rewrites the chord in place.
+        state.set_step_param(0, 1, StepParam::Transpose, 2.0);
+        assert_eq!(ids(1), vec![a, c]);
+        // A step move and its history snapshot carry them.
+        let snapshot = state.capture_step_snapshot(0, 1);
+        assert_eq!(snapshot.chord_ids, vec![a, c]);
+        state.move_step_range(0, 1, 1, 3);
+        assert_eq!(ids(3), vec![a, c]);
+        state.clear_step_payload_inner(0, 3);
+        state.restore_step_snapshot(0, 3, &snapshot);
+        assert_eq!(ids(3), vec![a, c]);
+        // A pattern snapshot round trip carries them.
+        let chord = ChordSnapshot::capture(chords);
+        assert_eq!(chord.step_ids(3), vec![a, c]);
+        chords.clear_step(3);
+        chord.restore(chords);
+        assert_eq!(ids(3), vec![a, c]);
+        // Copies are other notes.
+        let pasted = snapshot.with_fresh_note_ids();
+        state.restore_step_snapshot(0, 5, &pasted);
+        let copy = ids(5);
+        assert_eq!(copy.len(), 2);
+        assert!(copy.iter().all(|id| *id != 0 && *id != a && *id != c));
+        chords.copy_step(3, 6);
+        assert!(ids(6).iter().all(|id| *id != a && *id != c));
+        state.duplicate_track_pattern_no_publish(0);
+        assert_eq!(ids(3), vec![a, c]);
+        assert!(ids(11).iter().all(|id| *id != 0 && *id != a && *id != c));
+    }
+
+    /// A step cell replay onto the effective pattern resolves an id-less
+    /// note's fresh id once: the pool and the live mirror hold one note.
+    #[test]
+    fn pattern_step_cell_replay_gives_pool_and_live_the_same_ids() {
+        let state = SequencerState::new(1, vec![Vec::new()]);
+        let pattern = (state.pattern.scenes.lock().unwrap().effective_pattern_id(0))
+            .expect("an effective pattern");
+        let mut snapshot = state.capture_step_snapshot(0, 2);
+        snapshot.active = true;
+        snapshot.chord = vec![0.0, 5.0];
+        snapshot.chord_durations = vec![0.0; 2];
+        snapshot.chord_delays = vec![0.0; 2];
+        snapshot.chord_ids = Vec::new();
+        let registry = crate::plock_variants::PlockVariantRegistry::default();
+        state
+            .restore_pattern_step_cells_no_publish(0, pattern, &[(2, snapshot)], &registry)
+            .expect("replay");
+        let live: Vec<_> = (0..2).map(|n| state.pattern.chord_data[0].get_id(2, n)).collect();
+        let pool = state
+            .with_pool_pattern(0, pattern, |data| data.chord_snapshot.step_ids(2))
+            .expect("pool pattern");
+        assert!(live.iter().all(|id| *id != 0));
+        assert_eq!(pool, live);
+    }
+
+    /// A chord snapshot's id lane read beside notes it does not match (a
+    /// writer that pushed notes alone) names no note; loaded notes get
+    /// fresh ids, never saved ones.
+    #[test]
+    fn chord_snapshot_ids_never_name_another_note() {
+        let mut steps = vec![Vec::new(); MAX_STEPS];
+        steps[0] = vec![0.0, 4.0];
+        let mut chord = crate::project::chord_snapshot_from_steps(steps);
+        let loaded = chord.step_ids(0);
+        assert!(loaded.iter().all(|id| *id != 0) && loaded[0] != loaded[1]);
+        let again = crate::project::chord_snapshot_from_steps(vec![vec![0.0, 4.0]]);
+        assert_ne!(again.step_ids(0), loaded, "a load gives fresh ids");
+        // A recording writer's push keeps the lane beside the notes.
+        chord.push_note(0, 9.0, 1.0, 0.0);
+        let pushed = chord.step_ids(0);
+        assert_eq!(pushed[..2], loaded[..]);
+        assert!(pushed[2] != 0 && !loaded.contains(&pushed[2]));
+        chord.steps[0].push(7.0);
+        assert_eq!(chord.step_ids(0), vec![0, 0, 0, 0]);
+        chord.steps[1].push(2.0);
+        assert_eq!(chord.id(1, 0), 0);
+        // A restore gives an id-less note a fresh id.
+        let data = ChordData::new();
+        chord.restore(&data);
+        assert!((0..4).all(|n| data.get_id(0, n) != 0));
+    }
+
     #[test]
     fn move_step_range_preserves_chords_and_step_plocks() {
         let state = SequencerState::new(

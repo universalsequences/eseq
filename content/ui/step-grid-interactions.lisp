@@ -53,11 +53,13 @@
         selection-click?
         cmd-click?
         set-track-cursor-step
+        set-cursor-step-for-track
         step-clear-drag-state
         step-shift-anchor
         step-hold-select-maybe-engage
         step-selected?
         step-select-drag-start
+        step-select-drag-start-for-track
         step-select-drag-over-for-track
         step-select-drag-over-for-track-no-cursor
         step-select-drag-over
@@ -193,10 +195,18 @@
 (def eseq.vanilla/sequencer-cursor-step-changed (track step)
   nil)
 
-(def set-track-cursor-step (step)
+;; Put the shared step cursor on `step` of the track at position `track`. A
+;; gesture names its own track: right after a handler selects a track for edit,
+;; `current-track-index` still reads the previous one until the host pushes the
+;; new selection, and that track's cursor and page would move instead.
+(def set-cursor-step-for-track (track step)
   (do
     (eseq.seq-core-state/set-cursor-step-value step)
-    (eseq.vanilla/sequencer-cursor-step-changed (eseq.seq-core-state/current-track-index) step)))
+    (eseq.vanilla/sequencer-cursor-step-changed track step)))
+
+;; The keyboard/legacy form: the cursor of the current track.
+(def set-track-cursor-step (step)
+  (set-cursor-step-for-track (eseq.seq-core-state/current-track-index) step))
 
 ;; PINNED (hazard m): the shared drag-gesture state, read and `set!` flat by
 ;; vanilla callers. See the file header.
@@ -253,7 +263,7 @@
 (def step-selected? (step)
   (seq-step-selected? step))
 
-(def step-select-drag-start (step evt)
+(def step-select-drag-start-for-track (track step evt)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (set! eseq.vanilla/step-click-pending nil)
@@ -264,21 +274,24 @@
     (if (cmd-click? evt)
       (do
         (set! eseq.vanilla/step-key-select-anchor nil)
-        (set-track-cursor-step step)
+        (set-cursor-step-for-track track step)
         (set! eseq.vanilla/step-drag-anchor nil)
         (set! eseq.vanilla/step-cmd-drag-last step)
         (seq-select-step step))
       (let ((anchor (step-shift-anchor step)))
         (do
           (set! eseq.vanilla/step-key-select-anchor anchor)
-          (set-track-cursor-step step)
+          (set-cursor-step-for-track track step)
           (set! eseq.vanilla/step-drag-anchor anchor)
           (set! eseq.vanilla/step-cmd-drag-last nil)
           (seq-select-step-range anchor step))))))
 
-(def step-set-cursor-if (update-cursor step)
+(def step-select-drag-start (step evt)
+  (step-select-drag-start-for-track (eseq.seq-core-state/current-track-index) step evt))
+
+(def step-set-cursor-if (track update-cursor step)
   (if update-cursor
-    (set-track-cursor-step step)
+    (set-cursor-step-for-track track step)
     nil))
 
 (def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
@@ -290,7 +303,7 @@
         (set! eseq.vanilla/step-move-last nil)
         (set! eseq.vanilla/step-toggle-drag-value nil)
         (eseq.seq-core-state/cool-off-follow)
-        (step-set-cursor-if update-cursor step)
+        (step-set-cursor-if track update-cursor step)
         (if (and (cmd-click? evt) (not eseq.vanilla/step-hold-select))
           (if (= step eseq.vanilla/step-cmd-drag-last)
             nil
@@ -306,7 +319,7 @@
           (do
             (set! eseq.vanilla/step-click-pending nil)
             (eseq.seq-core-state/cool-off-follow)
-            (step-set-cursor-if update-cursor step)
+            (step-set-cursor-if track update-cursor step)
             (if (= (seq-track-step-active? track step) eseq.vanilla/step-toggle-drag-value)
               nil
               (seq-toggle-step step)))
@@ -319,7 +332,7 @@
                 (eseq.seq-core-state/cool-off-follow)
                 (seq-move-step-drag eseq.vanilla/step-move-last step)
                 (set! eseq.vanilla/step-move-last step)
-                (step-set-cursor-if update-cursor step)))))))))
+                (step-set-cursor-if track update-cursor step)))))))))
 
 (def step-select-drag-over-for-track (track step evt)
   (step-select-drag-over-for-track-with-cursor track step evt true))
@@ -332,10 +345,10 @@
 
 (def step-pointer-down-for-track (track step evt use-selection)
   (if (selection-click? evt)
-    (step-select-drag-start step evt)
+    (step-select-drag-start-for-track track step evt)
     (do
       (eseq.seq-core-state/cool-off-follow)
-      (set-track-cursor-step step)
+      (set-cursor-step-for-track track step)
       (set! eseq.vanilla/step-drag-anchor nil)
       (set! eseq.vanilla/step-press-ms (now-ms))
       (set! eseq.vanilla/step-press-step step)

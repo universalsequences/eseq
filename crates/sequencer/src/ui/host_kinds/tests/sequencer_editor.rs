@@ -952,3 +952,46 @@ fn arming_an_out_port_only_repaints() {
     assert_eq!(port["slot-key"], other["slot-key"], "one place in two bays");
     assert_ne!(port["bay-key"], other["bay-key"]);
 }
+
+/// A step gesture on a track that is not current moves that track's cursor
+/// and page only: the compact grid's press (plain, shift and its duration
+/// edge) and the expanded row's press and shift-click name the gesture's
+/// track, not the stale current one (eseq-0l17.69).
+#[test]
+fn a_step_gesture_on_another_track_moves_only_its_cursor_and_page() {
+    let mut h = editor_harness();
+    for track in 0..2 {
+        h.shared.state.pattern.track_params[track].set_num_steps(32);
+    }
+    h.sync();
+    let gestures = [
+        "(eseq.sequencer/grid-step-pointer-down (nth t1.steps 20) (dict))",
+        "(eseq.sequencer/grid-step-pointer-down (nth t1.steps 20) (dict :shift true))",
+        "(eseq.sequencer/expanded-step-pointer-down t1 (nth t1.steps 20) (dict))",
+        "(eseq.sequencer/expanded-step-click t1 (nth t1.steps 20) (dict :shift true))",
+    ];
+    for gesture in gestures {
+        h.run_editor(
+            "(eseq.sequencer/select-track-for-edit t0)
+             (eseq.sequencer/set-track-cursor t0 3)
+             (eseq.sequencer/set-track-cursor t1 0)",
+        );
+        h.run_editor("(eseq.step-grid-interactions/step-pointer-up 20 (dict))");
+        h.run_editor(gesture);
+        h.run_editor("(eseq.step-grid-interactions/step-pointer-up 20 (dict))");
+        let current = h.shared.current_track.load(Ordering::Relaxed);
+        assert_eq!(current, 1, "{gesture}");
+        assert_eq!(
+            h.eval_editor("(eseq.sequencer/track-cursor t1)"),
+            Value::Number(20.0),
+            "{gesture}"
+        );
+        assert_eq!(h.track_field(1, "page"), Value::Number(1.0), "{gesture}");
+        assert_eq!(
+            h.eval_editor("(eseq.sequencer/track-cursor t0)"),
+            Value::Number(3.0),
+            "{gesture}"
+        );
+        assert_eq!(h.track_field(0, "page"), Value::Number(0.0), "{gesture}");
+    }
+}

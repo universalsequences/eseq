@@ -6,7 +6,7 @@ use eseqlisp::Runtime;
 
 use sequencer::app::focus::EditFocus;
 use sequencer::sequencer::{
-    PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS, NUM_PARAMS,
+    NoteId, PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS, NUM_PARAMS,
 };
 
 use super::state_values::{rack_macro_name_field, rack_macro_short_name_field};
@@ -23,18 +23,30 @@ pub(crate) type StepValues = [f32; NUM_PARAMS];
 /// One step's notes and parameters ([`PianoRollLanes::step_rows_batch`]).
 pub(crate) type StepRow = (Vec<PianoRollNote>, StepValues);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct PianoRollNote {
     pub(crate) transpose: f32,
     pub(crate) duration: f32,
     pub(crate) delay: f32,
+    /// The note's model id ([`NoteId`]); `0`: none (a step's single note
+    /// held by its step parameters, or a new note: the writers give it a
+    /// fresh one).
+    pub(crate) id: NoteId,
+}
+
+/// Notes compare by their values; `id` is identity, not content.
+impl PartialEq for PianoRollNote {
+    fn eq(&self, other: &Self) -> bool {
+        (self.transpose, self.duration, self.delay)
+            == (other.transpose, other.duration, other.delay)
+    }
 }
 
 /// Which note storage the piano roll is pointed at (clip-edit-target spec 3),
 /// the UI projection of `sequencer::app::focus::EditFocus`. Shared with the
 /// `seq-piano-roll-action` native through a cell the reactive tick refreshes;
 /// the host-command layer re-resolves from `App` authoritatively.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PianoRollFocusSpec {
     /// The live mirror lanes (follow mode / effective pattern) — today's path.
     Live,
@@ -84,6 +96,52 @@ pub(crate) type SharedPianoRollFocus = Arc<Mutex<PianoRollFocusSpec>>;
 
 pub(crate) fn new_shared_piano_roll_focus() -> SharedPianoRollFocus {
     Arc::new(Mutex::new(PianoRollFocusSpec::Live))
+}
+
+/// Where an implicit note's host id is registered: its track, focus and
+/// key (step, transpose and offset bits, `-0.0` as `0.0`).
+type ImplicitNoteKey = (usize, PianoRollFocusSpec, usize, u32, u32);
+
+thread_local! {
+    /// The ids the host kinds gave notes the model holds no id for (a step's
+    /// single note held by its step parameters, spec §14.2j), for the
+    /// piano roll's source. Every reader of [`PianoRollLanes`] reports such
+    /// a note with its id, so every writer that rewrites its step (a note
+    /// added beside it, the legacy piano roll's edits) stores it in the
+    /// model: its handle keeps naming it.
+    static IMPLICIT_NOTE_IDS: std::cell::RefCell<HashMap<ImplicitNoteKey, NoteId>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn implicit_note_key(
+    track: usize,
+    focus: PianoRollFocusSpec,
+    step: usize,
+    note: &PianoRollNote,
+) -> ImplicitNoteKey {
+    let bits = |value: f32| (value + 0.0).to_bits();
+    (track, focus, step, bits(note.transpose), bits(note.delay))
+}
+
+/// Register the host ids of `track`'s (with `focus`) id-less notes: each
+/// (step, note, id); replaces every earlier registration.
+pub(crate) fn set_implicit_note_ids(
+    track: usize,
+    focus: PianoRollFocusSpec,
+    notes: impl IntoIterator<Item = (usize, PianoRollNote, NoteId)>,
+) {
+    IMPLICIT_NOTE_IDS.with(|ids| {
+        let mut ids = ids.borrow_mut();
+        ids.clear();
+        for (step, note, id) in notes {
+            ids.insert(implicit_note_key(track, focus, step, &note), id);
+        }
+    });
+}
+
+/// Forget every registered implicit note id.
+pub(crate) fn clear_implicit_note_ids() {
+    IMPLICIT_NOTE_IDS.with(|ids| ids.borrow_mut().clear());
 }
 
 /// The ONE reader/writer for piano-roll note entries (spec 3.4, locked
@@ -206,13 +264,29 @@ impl PianoRollLanes {
         let Some((address, local)) = self.resolve_step(step) else {
             return Vec::new();
         };
-        match address {
+        let mut notes = match address {
             PianoRollStepAddress::Live => live_note_entries(&self.state, self.track, local),
             PianoRollStepAddress::Pool(pattern) => self
                 .state
                 .with_pool_pattern(self.track, pattern, |data| data_note_entries(data, local))
                 .unwrap_or_default(),
+        };
+        self.seed_implicit_ids(step, &mut notes);
+        notes
+    }
+
+    /// Give `step`'s id-less notes the ids the host registered for them.
+    fn seed_implicit_ids(&self, step: usize, notes: &mut [PianoRollNote]) {
+        if notes.iter().all(|note| note.id != 0) {
+            return;
         }
+        IMPLICIT_NOTE_IDS.with(|ids| {
+            let ids = ids.borrow();
+            for note in notes.iter_mut().filter(|note| note.id == 0) {
+                let key = implicit_note_key(self.track, self.focus, step, note);
+                note.id = ids.get(&key).copied().unwrap_or(0);
+            }
+        });
     }
 
     /// Notes for `0..num_steps` in one pass. Unlike per-step `note_entries`,
@@ -220,15 +294,20 @@ impl PianoRollLanes {
     /// for a pool focus, once per chunk for a take) instead of once per step —
     /// the items build walks the whole axis on every sync.
     pub(crate) fn note_entries_batch(&self, num_steps: usize) -> Vec<Vec<PianoRollNote>> {
-        self.steps_batch(
+        let mut steps = self.steps_batch(
             num_steps,
             |step| live_note_entries(&self.state, self.track, step),
             data_note_entries,
-        )
+        );
+        for (step, notes) in steps.iter_mut().enumerate() {
+            self.seed_implicit_ids(step, notes);
+        }
+        steps
     }
 
     /// [`Self::note_entries_batch`] with each step's parameters (by
-    /// `StepParam::index`), read under the same lock.
+    /// `StepParam::index`), read under the same lock. The host kinds' read:
+    /// the model's ids as they are (no registered implicit ids).
     pub(crate) fn step_rows_batch(&self, num_steps: usize) -> Vec<StepRow> {
         self.steps_batch(
             num_steps,
@@ -379,6 +458,7 @@ fn live_note_entries(state: &Arc<SequencerState>, track: usize, step: usize) -> 
                 transpose: state.pattern.step_data[track].get(step, StepParam::Transpose),
                 duration: step_duration,
                 delay: step_delay,
+                id: 0,
             }]
         } else {
             Vec::new()
@@ -395,6 +475,7 @@ fn live_note_entries(state: &Arc<SequencerState>, track: usize, step: usize) -> 
                         step_duration
                     },
                     delay: state.pattern.chord_data[track].get_delay(step, idx),
+                    id: state.pattern.chord_data[track].get_id(step, idx),
                 }
             })
             .collect()
@@ -416,6 +497,7 @@ fn data_note_entries(data: &TrackPatternData, step: usize) -> Vec<PianoRollNote>
                 transpose: params[StepParam::Transpose.index()],
                 duration: step_duration,
                 delay: step_delay,
+                id: 0,
             }]
         } else {
             Vec::new()
@@ -444,6 +526,7 @@ fn data_note_entries(data: &TrackPatternData, step: usize) -> Vec<PianoRollNote>
                         .and_then(|lane| lane.get(idx))
                         .copied()
                         .unwrap_or(0.0),
+                    id: chord.id(step, idx),
                 }
             })
             .collect()
@@ -460,6 +543,7 @@ pub(crate) fn normalized_piano_roll_note(note: &PianoRollNote) -> PianoRollNote 
             .clamp(StepParam::Transpose.min(), StepParam::Transpose.max()),
         duration: piano_roll_sanitize_duration(note.duration),
         delay: piano_roll_sanitize_delay(note.delay),
+        id: note.id,
     }
 }
 
@@ -505,11 +589,12 @@ fn live_set_note_entries(
                 .map(|note| note.duration)
                 .fold(PIANO_ROLL_MIN_DURATION, f32::max);
             for note in notes {
-                state.pattern.chord_data[track].add_note_with_timing(
+                state.pattern.chord_data[track].add_note_with_id(
                     step,
                     note.transpose,
                     note.duration,
                     note.delay,
+                    note.id,
                 );
             }
             state.pattern.step_data[track].set(step, StepParam::Transpose, notes[0].transpose);
@@ -538,6 +623,14 @@ fn data_set_note_entries(data: &mut TrackPatternData, step: usize, notes: &[Pian
     let Some(params) = data.step_data.get_mut(step) else {
         return;
     };
+    let ids = if data.chord_snapshot.steps.get(step).is_some() {
+        (notes.iter())
+            .map(|note| sequencer::sequencer::note_id_or_new(note.id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    data.chord_snapshot.set_step_ids(step, ids);
     match notes {
         [] => data.track_bits[word] &= !mask,
         notes => {
@@ -590,6 +683,8 @@ struct PianoRollMoveItem {
     transpose: f32,
     duration: f32,
     delay: f32,
+    /// The note's model id, which the move carries.
+    note_id: NoteId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1636,6 +1731,7 @@ pub(crate) fn piano_roll_gesture_touched_steps(
                         transpose: note.transpose,
                         duration: note.duration,
                         delay: note.delay,
+                        note_id: note.id,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1797,6 +1893,7 @@ fn paste_piano_roll_items(
             transpose: note.transpose,
             duration: note.duration,
             delay,
+            id: 0,
         });
         lanes.set_note_entries(step, &step_notes);
         if let Some(voice_idx) =
@@ -1944,6 +2041,7 @@ pub(crate) fn apply_piano_roll_action_with_clipboard(
                 transpose,
                 duration,
                 delay,
+                id: 0,
             });
             lanes.set_note_entries(step, &notes);
             let id = lanes
@@ -2041,11 +2139,12 @@ fn move_piano_roll_items_by_delta(
                 note.transpose,
                 note.duration,
                 note.delay,
+                note.id,
             ))
         })
         .collect::<Vec<_>>();
     let mut removals_by_step: HashMap<usize, Vec<usize>> = HashMap::new();
-    for &(_, step, voice_idx, _, _, _) in &originals {
+    for &(_, step, voice_idx, ..) in &originals {
         removals_by_step.entry(step).or_default().push(voice_idx);
     }
     for (step, mut voice_indices) in removals_by_step {
@@ -2067,7 +2166,7 @@ fn move_piano_roll_items_by_delta(
     }
 
     let mut next_ids = Vec::with_capacity(originals.len());
-    for &(_, step, _, transpose, duration, delay) in &originals {
+    for &(_, step, _, transpose, duration, delay, note_id) in &originals {
         let next_step = (step as isize + delta_time).clamp(0, (num_steps - 1) as isize) as usize;
         let lane = piano_roll_transpose_to_lane(transpose) as isize + delta_lane;
         let next_transpose = piano_roll_lane_to_transpose(lane.max(0) as usize);
@@ -2076,6 +2175,7 @@ fn move_piano_roll_items_by_delta(
             transpose: next_transpose,
             duration,
             delay,
+            id: note_id,
         });
         lanes.set_note_entries(next_step, &notes);
         if let Some(next_voice_idx) =
@@ -2121,6 +2221,7 @@ fn resize_piano_roll_items_absolute(
                     transpose: note.transpose,
                     duration: note.duration,
                     delay: note.delay,
+                    note_id: note.id,
                 })
             })
             .collect::<Vec<_>>();
@@ -2172,6 +2273,7 @@ fn resize_piano_roll_items_absolute(
                             transpose: original.transpose,
                             duration: original.duration,
                             delay: original.delay,
+                            id: note.id,
                         })
                         .unwrap_or(note)
                 })
@@ -2245,6 +2347,7 @@ fn move_piano_roll_items_absolute(
                     transpose: note.transpose,
                     duration: note.duration,
                     delay: note.delay,
+                    note_id: note.id,
                 })
             })
             .collect::<Vec<_>>();
@@ -2292,6 +2395,7 @@ fn move_piano_roll_items_absolute(
             transpose: next_transpose,
             duration: item.duration,
             delay: next_delay,
+            id: item.note_id,
         });
         lanes.set_note_entries(next_step, &notes);
         let next_voice_idx =
@@ -2303,6 +2407,7 @@ fn move_piano_roll_items_absolute(
             transpose: next_transpose,
             duration: item.duration,
             delay: next_delay,
+            note_id: item.note_id,
         });
     }
     move_state.last_positions = next_positions;
@@ -2334,7 +2439,7 @@ mod resize_tests {
                 state.pattern.step_data[0].set(step, StepParam::Delay, 0.75);
             }
             lanes.set_note_entries(5, &[PianoRollNote {
-                transpose: 7.0, duration: 0.5, delay: 0.25,
+                transpose: 7.0, duration: 0.5, delay: 0.25, id: 0,
             }]);
 
             // First press without movement, then shorten repeatedly. The

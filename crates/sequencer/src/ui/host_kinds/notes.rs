@@ -2,22 +2,30 @@
 //! current track's edit focus, its pinned clip, loop window and playhead)
 //! and its `note`s (the timeline's items and their selection).
 //!
-//! **Identity.** The model gives a note no id: a step holds its notes as
-//! (transpose, duration, offset) entries, at most one per (transpose,
-//! offset) ([`NoteKey`]). The host allocates each key a note id (`nid`, never
-//! reused) while a note sits there, and keys the note instance (track
-//! instance id, nid). The note setters move a note's id with it
-//! ([`NoteShared::rekey`]), so a handle follows its note through a `set!` or
-//! a script drag; a note moved onto another replaces it (the model keeps one
-//! note per key), and the other's handle goes stale. An edit made any other
-//! way (the legacy piano roll, the step grid, recording) keeps a note's
-//! instance while it stays at its key and otherwise replaces it: a held
-//! handle never names another note, it goes stale. An undo or redo that
-//! changes the notes makes every handle of the source stale (the ids moved
-//! with the edits it reverts are not tracked back). The notes are those
-//! of the piano roll's source ([`NoteSource`]: the current track's resolved
-//! focus, the effective pattern for a live focus); another source (a track
-//! switch, a clip pinned, a scene launch, a project load) replaces them all.
+//! **Identity.** A chord note carries a model id ([`NoteId`], spec §14.2j)
+//! beside its lanes (live `ChordData`, a pattern's `chord_snapshot`, the
+//! step snapshots history restores; never saved: a project load gives fresh
+//! ones), allocated when the note is created and carried by every edit that
+//! moves or rewrites it: the note setters and script drags, the legacy piano
+//! roll's moves, the step grid's step moves, a recording beside it, an undo
+//! or redo. A copy beside its original (a paste, a doubled pattern) is
+//! another note, a fresh id. The note instance is keyed (track instance id,
+//! nid), the nid being the model id, so a held handle follows its note
+//! through all of those, and an undo brings a replaced note back under its
+//! own id (a new instance: its handle was dropped with it). A step's single
+//! note held by its step parameters (a step turned on in the grid) has no
+//! model id: the host gives it one by its [`NoteKey`] (step, transpose,
+//! offset) from the model's allocator, keeps it while the note stays at its
+//! key, and a setter writes it into the model with the note (from then on
+//! the note is a chord note with that id); such a note's handle goes stale
+//! when another path moves it, and on an undo or redo that changes the
+//! notes. A repeat of a model id in one source (a writer that copied lanes
+//! whole) is treated as id-less. The key table ([`NoteShared`]) is where
+//! each id sits as of the last sync (and the setters' moves since). The
+//! notes are those of the piano roll's source ([`NoteSource`]: the current
+//! track's resolved focus, the effective pattern for a live focus); another
+//! source (a track switch, a clip pinned, a scene launch, a project load)
+//! replaces them all.
 //!
 //! **Feeds.** The focus fields are model fields behind [`FocusKey`] (the
 //! source, the pinned clip, the committed song and scenes revisions, the
@@ -40,7 +48,7 @@
 //! focus sees -1 while stopped, else the last one computed.
 
 use super::*;
-use sequencer::sequencer::{PatternId, SequencerTrackSnapshot};
+use sequencer::sequencer::{NoteId, PatternId, SequencerTrackSnapshot};
 
 /// A note's place in its source: its step, and its transpose and offset as
 /// the model holds them (bit-exact). A step holds one note per key.
@@ -138,10 +146,13 @@ pub(crate) struct NoteShared {
     /// cold read registers against it, the focus steps' too).
     pub(crate) source: Option<NoteSource>,
     pub(super) focus: Option<NoteSource>,
-    /// Each note's id by its key, while it sits there, and the reverse.
+    /// Each note's id by its key, while it sits there, and the reverse
+    /// (as of the last sync, and the setters' and drags' moves since).
     ids: HashMap<NoteKey, u64>,
     keys: HashMap<u64, NoteKey>,
-    next: u64,
+    /// The ids the host gave notes with no model id (a step's single note
+    /// held by its step parameters), as of the last sync.
+    fallback: HashSet<u64>,
     /// The listed notes in order (step, then voice).
     pub(crate) rows: Vec<NoteRow>,
     /// The notes a script drag lies over: kept registered (unlisted,
@@ -210,14 +221,41 @@ impl NoteShared {
         self.held = held;
     }
 
-    fn id_for(&mut self, key: NoteKey) -> u64 {
-        if let Some(nid) = self.ids.get(&key) {
-            return *nid;
+    /// The id of the note at `key` with model id `model` (`0`: none), not
+    /// one of `used` (the ids this listing gave already): its model id; else
+    /// (none, or a copy's repeat of one) the host id this key's id-less note
+    /// had; else a fresh one, from the model's allocator (a setter writes it
+    /// into the model with the note). A host id given is added to `given`.
+    fn id_for(
+        &mut self,
+        key: NoteKey,
+        model: NoteId,
+        used: &mut HashSet<u64>,
+        given: &mut HashSet<u64>,
+    ) -> u64 {
+        let model = u64::from(model);
+        let nid = if model != 0 && used.insert(model) {
+            model
+        } else {
+            let known = (self.ids.get(&key).copied())
+                .filter(|nid| self.fallback.contains(nid) && used.insert(*nid));
+            let nid = known.unwrap_or_else(|| {
+                let nid = u64::from(sequencer::sequencer::new_note_id());
+                used.insert(nid);
+                nid
+            });
+            given.insert(nid);
+            nid
+        };
+        if let Some(other) = self.ids.insert(key, nid).filter(|other| *other != nid) {
+            self.keys.remove(&other);
         }
-        self.next += 1;
-        self.ids.insert(key, self.next);
-        self.keys.insert(self.next, key);
-        self.next
+        if let Some(from) = self.keys.insert(nid, key).filter(|from| *from != key) {
+            if self.ids.get(&from) == Some(&nid) {
+                self.ids.remove(&from);
+            }
+        }
+        nid
     }
 
     /// Forget every note's id but `kept`'s.
@@ -229,8 +267,10 @@ impl NoteShared {
     /// Forget every note (another source); returns the source they were
     /// of (its note instances are to be dropped).
     fn reset(&mut self) -> Option<NoteSource> {
+        crate::piano_roll::clear_implicit_note_ids();
         self.ids.clear();
         self.keys.clear();
+        self.fallback.clear();
         self.rows.clear();
         self.held.clear();
         self.pushed = false;
@@ -242,9 +282,9 @@ impl NoteShared {
 /// docs): register the new ones, push every field (each compared with its
 /// cell), drop the gone ones but those a script drag lies over while
 /// `keep_held` (`hidden`). After an undo or redo (`replayed`) that changed
-/// the notes, every note gets a fresh id. `steps` is the source's
-/// ([`source_rows`]). Returns the listed instances and whether anything
-/// changed.
+/// the notes, every note without a model id gets a fresh id. `steps` is
+/// the source's ([`source_rows`]). Returns the listed instances and whether
+/// anything changed.
 pub(super) fn sync_notes<S: KindStore>(
     store: &mut S,
     sources: &KindsHandles,
@@ -282,15 +322,27 @@ pub(super) fn sync_notes<S: KindStore>(
             (*key, note.duration.to_bits(), velocity.to_bits())
         };
         if replayed && !(notes.rows.iter().map(NoteRow::content)).eq(listed.iter().map(content)) {
-            notes.ids.clear();
-            notes.keys.clear();
+            // The model's ids came back with the notes; the host's did not.
+            let fallback = std::mem::take(&mut notes.fallback);
+            notes.ids.retain(|_, nid| !fallback.contains(nid));
+            notes.keys.retain(|nid, _| !fallback.contains(nid));
         }
         if !keep_held {
             notes.held.clear();
         }
+        let (mut used, mut given) = (HashSet::new(), HashSet::new());
         let nids: Vec<u64> = (listed.iter())
-            .map(|(key, ..)| notes.id_for(*key))
+            .map(|(key, _, note, _)| notes.id_for(*key, note.id, &mut used, &mut given))
             .collect();
+        // The lanes' readers report these notes with their host ids, so a
+        // writer that rewrites their step stores them in the model.
+        let implicit = (listed.iter().zip(&nids))
+            .filter(|(_, nid)| given.contains(nid))
+            .filter_map(|((key, _, note, _), nid)| {
+                Some((key.step, *note, NoteId::try_from(*nid).ok()?))
+            });
+        crate::piano_roll::set_implicit_note_ids(source.track, source.focus, implicit);
+        notes.fallback = given;
         let held: Vec<u64> = (notes.held.iter())
             .filter(|nid| !notes.keys.contains_key(nid))
             .copied()

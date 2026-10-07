@@ -4324,6 +4324,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
     }
 }
 
+/// Note ids are not saved: each loaded note gets a fresh one.
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
     let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
     let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
@@ -4331,7 +4332,9 @@ pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
         steps,
         durations,
         delays,
+        ids: Vec::new(),
     }
+    .with_fresh_ids()
 }
 
 pub fn chord_snapshot_from_steps_durations_and_delays(
@@ -4355,7 +4358,9 @@ pub fn chord_snapshot_from_steps_durations_and_delays(
         steps,
         durations,
         delays,
+        ids: Vec::new(),
     }
+    .with_fresh_ids()
 }
 
 pub fn chord_snapshot_from_steps_and_durations(

@@ -222,6 +222,7 @@ fn a_pinned_sources_steps_are_the_pool_patterns() {
             transpose: 3.0,
             duration: 1.0,
             delay: 0.0,
+            id: 0,
         }],
     );
     pool.set_step_param(1, StepParam::Pan, -0.5);
@@ -384,6 +385,7 @@ fn a_pinned_sources_notes_and_steps_follow_each_others_edits() {
         transpose: 3.0,
         duration: 1.0,
         delay: 0.0,
+        id: 0,
     };
     pool_lanes(&h).set_note_entries(1, &[note]);
     h.pin_pool_clip();

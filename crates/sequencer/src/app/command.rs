@@ -228,12 +228,15 @@ fn sync_effect_mod_active_plock(
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
+/// A pasted step: its notes are new notes (fresh ids), its audio p-locks
+/// kept only on the track they were copied from.
 pub(crate) fn sanitize_pasted_step_snapshot(
     snapshot: &StepSnapshot,
     preserve_audio_plocks: bool,
 ) -> StepSnapshot {
+    let snapshot = snapshot.with_fresh_note_ids();
     if preserve_audio_plocks {
-        snapshot.clone()
+        snapshot
     } else {
         snapshot.without_audio_plocks()
     }
@@ -1949,6 +1952,7 @@ mod tests {
             chord: vec![0.0, 7.0],
             chord_durations: vec![1.0, 1.0],
             chord_delays: vec![0.0, 0.25],
+            chord_ids: vec![],
             timebase: Some(Timebase::Eighth),
             swing: Some(62.0),
             swing_resolution: Some(SwingResolution::Eighth),
@@ -2034,6 +2038,7 @@ mod tests {
             chord: vec![],
             chord_durations: vec![],
             chord_delays: vec![],
+            chord_ids: vec![],
             timebase: None,
             swing: None,
             swing_resolution: None,

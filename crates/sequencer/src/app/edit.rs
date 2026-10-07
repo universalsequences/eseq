@@ -6485,6 +6485,9 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                 if !added {
                     match pattern.chord_data[track].count(*step) {
                         0 => pattern.patterns[track].set_step_active(*step, false),
+                        // The last note stays a chord entry, so it keeps
+                        // its id (its handle survives); the step's
+                        // transpose follows it.
                         1 => {
                             let remaining = pattern.chord_data[track].get(*step, 0);
                             pattern.step_data[track].set(
@@ -6492,7 +6495,6 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                                 crate::sequencer::StepParam::Transpose,
                                 remaining,
                             );
-                            pattern.chord_data[track].clear_step(*step);
                         }
                         _ => {}
                     }
@@ -6982,6 +6984,9 @@ fn ensure_effective_track_pattern(
     }
     for delays in &mut data.chord_snapshot.delays {
         delays.clear();
+    }
+    for ids in &mut data.chord_snapshot.ids {
+        ids.clear();
     }
     app.state.materialize_current_scene_pattern(track, data)
 }
@@ -13854,6 +13859,8 @@ mod tests {
         ));
         assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
         assert_eq!(app.history.undo_len(), 2);
+        let kept = app.state.pattern.chord_data[0].get_id(step, 1);
+        assert_ne!(kept, 0);
 
         assert!(matches!(
             try_apply_command(
@@ -13866,7 +13873,10 @@ mod tests {
             ),
             Ok(EditOutcome::Applied(_))
         ));
-        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+        // The remaining note stays a chord entry with its id.
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 1);
+        assert_eq!(app.state.pattern.chord_data[0].get(step, 0), 7.0);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 0), kept);
         assert_eq!(
             app.state.pattern.step_data[0]
                 .get(step, crate::sequencer::StepParam::Transpose),
@@ -13878,8 +13888,10 @@ mod tests {
         assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
         assert_eq!(app.state.pattern.chord_data[0].get(step, 0), 4.0);
         assert_eq!(app.state.pattern.chord_data[0].get(step, 1), 7.0);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 1), kept);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
-        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 1);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 0), kept);
     }
 
     #[test]

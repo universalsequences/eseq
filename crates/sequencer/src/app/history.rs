@@ -1624,6 +1624,9 @@ pub fn step_snapshot_bit_exact_eq(
         chord: left_chord,
         chord_durations: left_chord_durations,
         chord_delays: left_chord_delays,
+        // Identity, not content: a step whose notes only got other ids is
+        // unchanged.
+        chord_ids: _,
         timebase: left_timebase,
         swing: left_swing,
         swing_resolution: left_swing_resolution,
@@ -1643,6 +1646,9 @@ pub fn step_snapshot_bit_exact_eq(
         chord: right_chord,
         chord_durations: right_chord_durations,
         chord_delays: right_chord_delays,
+        // Identity, not content: a step whose notes only got other ids is
+        // unchanged.
+        chord_ids: _,
         timebase: right_timebase,
         swing: right_swing,
         swing_resolution: right_swing_resolution,
@@ -1746,7 +1752,7 @@ fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
 
 fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
     let crate::sequencer::StepSnapshot {
-        active: _, neural_reset: _, params: _, chord, chord_durations, chord_delays,
+        active: _, neural_reset: _, params: _, chord, chord_durations, chord_delays, chord_ids,
         timebase: _, swing: _, swing_resolution: _, track_send_plocks, midi_fx_plocks,
         effect_plocks, instrument_plocks, rack_macro_plocks, rack_slot_param_plocks,
         rack_slot_instrument_plocks, rack_slot_effect_plocks,
@@ -1758,6 +1764,7 @@ fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
     chord.capacity() * std::mem::size_of::<f32>()
         + chord_durations.capacity() * std::mem::size_of::<f32>()
         + chord_delays.capacity() * std::mem::size_of::<f32>()
+        + chord_ids.capacity() * std::mem::size_of::<crate::sequencer::NoteId>()
         + track_send_plocks.capacity()
             * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
         + slot_slice_bytes(midi_fx_plocks)

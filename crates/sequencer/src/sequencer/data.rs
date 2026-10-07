@@ -1573,10 +1573,39 @@ pub struct TrackSoundState {
     pub dirty: bool,
 }
 
+/// A chord note's identity: stable while the note exists, carried through
+/// its edits, moves, history and pattern copies (never written to a project:
+/// a load allocates fresh ones). `0` is no id. Allocated process-wide by
+/// [`new_note_id`], so ids never collide across tracks or sources.
+pub type NoteId = u32;
+
+static NEXT_NOTE_ID: AtomicU32 = AtomicU32::new(1);
+
+/// A fresh note id (never `0`, never handed out before).
+pub fn new_note_id() -> NoteId {
+    loop {
+        let id = NEXT_NOTE_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
+/// `id`, or a fresh one for `0`.
+pub fn note_id_or_new(id: NoteId) -> NoteId {
+    if id == 0 {
+        new_note_id()
+    } else {
+        id
+    }
+}
+
 pub struct ChordData {
     transposes: [AtomicU32; MAX_STEPS * MAX_VOICES],
     durations: [AtomicU32; MAX_STEPS * MAX_VOICES],
     delays: [AtomicU32; MAX_STEPS * MAX_VOICES],
+    /// Each note's [`NoteId`] (the scheduler never reads it).
+    ids: [AtomicU32; MAX_STEPS * MAX_VOICES],
     counts: [AtomicU32; MAX_STEPS],
 }
 
@@ -1586,8 +1615,14 @@ impl ChordData {
             transposes: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             durations: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             delays: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+            ids: std::array::from_fn(|_| AtomicU32::new(0)),
             counts: std::array::from_fn(|_| AtomicU32::new(0)),
         }
+    }
+
+    /// Note `n` of `step`'s [`NoteId`].
+    pub fn get_id(&self, step: usize, n: usize) -> NoteId {
+        self.ids[step * MAX_VOICES + n].load(Ordering::Relaxed)
     }
 
     pub fn count(&self, step: usize) -> usize {
@@ -1628,12 +1663,26 @@ impl ChordData {
         self.add_note_with_timing(step, transpose, duration, 0.0)
     }
 
+    /// A new note (a fresh id).
     pub fn add_note_with_timing(
         &self,
         step: usize,
         transpose: f32,
         duration: f32,
         delay: f32,
+    ) -> bool {
+        self.add_note_with_id(step, transpose, duration, delay, 0)
+    }
+
+    /// A note with its id `id` (`0`: a fresh one), as an edit, a move or a
+    /// restore puts a note back.
+    pub fn add_note_with_id(
+        &self,
+        step: usize,
+        transpose: f32,
+        duration: f32,
+        delay: f32,
+        id: NoteId,
     ) -> bool {
         let c = self.counts[step].load(Ordering::Relaxed) as usize;
         if c >= MAX_VOICES {
@@ -1647,6 +1696,7 @@ impl ChordData {
                 .to_bits(),
             Ordering::Relaxed,
         );
+        self.ids[step * MAX_VOICES + c].store(note_id_or_new(id), Ordering::Relaxed);
         self.counts[step].store((c + 1) as u32, Ordering::Relaxed);
         true
     }
@@ -1669,6 +1719,8 @@ impl ChordData {
                     self.durations[step * MAX_VOICES + j].store(next_duration, Ordering::Relaxed);
                     let next_delay = self.delays[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
                     self.delays[step * MAX_VOICES + j].store(next_delay, Ordering::Relaxed);
+                    let next_id = self.ids[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
+                    self.ids[step * MAX_VOICES + j].store(next_id, Ordering::Relaxed);
                 }
                 self.counts[step].store((c - 1) as u32, Ordering::Relaxed);
                 return false;
@@ -1687,6 +1739,8 @@ impl ChordData {
             self.durations[dst * MAX_VOICES + n].store(duration, Ordering::Relaxed);
             let delay = self.delays[src * MAX_VOICES + n].load(Ordering::Relaxed);
             self.delays[dst * MAX_VOICES + n].store(delay, Ordering::Relaxed);
+            // A copy is another note.
+            self.ids[dst * MAX_VOICES + n].store(new_note_id(), Ordering::Relaxed);
         }
     }
 }
@@ -1696,6 +1750,10 @@ pub struct ChordSnapshot {
     pub steps: Vec<Vec<f32>>,
     pub durations: Vec<Vec<f32>>,
     pub delays: Vec<Vec<f32>>,
+    /// Each note's [`NoteId`], beside `steps`; a missing or `0` entry is a
+    /// note with no id yet (a reader treats it so; [`Self::restore`] gives
+    /// it a fresh one). Not serialized.
+    pub ids: Vec<Vec<NoteId>>,
 }
 
 impl ChordSnapshot {
@@ -1703,25 +1761,76 @@ impl ChordSnapshot {
         let mut steps = Vec::with_capacity(MAX_STEPS);
         let mut durations = Vec::with_capacity(MAX_STEPS);
         let mut delays = Vec::with_capacity(MAX_STEPS);
+        let mut ids = Vec::with_capacity(MAX_STEPS);
         for s in 0..MAX_STEPS {
             let c = cd.count(s);
             let mut notes = Vec::with_capacity(c);
             let mut note_durations = Vec::with_capacity(c);
             let mut note_delays = Vec::with_capacity(c);
+            let mut note_ids = Vec::with_capacity(c);
             for n in 0..c {
                 notes.push(cd.get(s, n));
                 note_durations.push(cd.get_duration(s, n));
                 note_delays.push(cd.get_delay(s, n));
+                note_ids.push(cd.get_id(s, n));
             }
             steps.push(notes);
             durations.push(note_durations);
             delays.push(note_delays);
+            ids.push(note_ids);
         }
         Self {
             steps,
             durations,
             delays,
+            ids,
         }
+    }
+
+    /// Step `step`'s note ids, beside its notes (`0`: none).
+    pub fn step_ids(&self, step: usize) -> Vec<NoteId> {
+        let count = self.steps.get(step).map_or(0, Vec::len);
+        (0..count).map(|n| self.id(step, n)).collect()
+    }
+
+    /// Add a new note (a fresh id) to step `step`, keeping the id lane
+    /// beside the notes.
+    pub fn push_note(&mut self, step: usize, transpose: f32, duration: f32, delay: f32) {
+        let mut ids = self.step_ids(step);
+        self.steps[step].push(transpose);
+        self.durations[step].push(duration);
+        self.delays[step].push(delay);
+        ids.push(new_note_id());
+        self.set_step_ids(step, ids);
+    }
+
+    /// Set step `step`'s note ids (the lane grows to hold it).
+    pub fn set_step_ids(&mut self, step: usize, ids: Vec<NoteId>) {
+        if self.ids.len() <= step {
+            self.ids.resize_with(step + 1, Vec::new);
+        }
+        self.ids[step] = ids;
+    }
+
+    /// Note `n` of `step`'s id (`0`: none). A step whose id lane is not
+    /// beside its notes (a writer that pushed or cleared the notes alone)
+    /// has none: an id is never read off another note.
+    pub fn id(&self, step: usize, n: usize) -> NoteId {
+        let notes = self.steps.get(step).map_or(0, Vec::len);
+        (self.ids.get(step))
+            .filter(|ids| ids.len() == notes)
+            .and_then(|ids| ids.get(n))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Give every note a fresh id: a snapshot built from serialized notes
+    /// (a project load) or copied to stand beside its original.
+    pub fn with_fresh_ids(mut self) -> Self {
+        self.ids = (self.steps.iter())
+            .map(|notes| notes.iter().map(|_| new_note_id()).collect())
+            .collect();
+        self
     }
 
     pub fn restore(&self, cd: &ChordData) {
@@ -1747,6 +1856,8 @@ impl ChordSnapshot {
                         .unwrap_or(0.0)
                         .clamp(StepParam::Delay.min(), StepParam::Delay.max());
                     cd.delays[s * MAX_VOICES + n].store(delay.to_bits(), Ordering::Relaxed);
+                    cd.ids[s * MAX_VOICES + n]
+                        .store(note_id_or_new(self.id(s, n)), Ordering::Relaxed);
                 }
             }
         }
@@ -1757,6 +1868,7 @@ impl ChordSnapshot {
             steps: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             durations: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             delays: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
         }
     }
 }

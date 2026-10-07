@@ -24,14 +24,36 @@ fn explicit_cols(node: &Value) -> Option<f32> {
     }
 }
 
-fn layout_cols(node: &Value, area_width: f32, col_width: f32) -> f32 {
+/// A grid's column and row gaps: `:col-gap` / `:row-gap`, each falling back
+/// to `:gap`, else 0. A gap sits between slots only, never after the last.
+fn grid_gaps(node: &Value) -> (f32, f32) {
+    let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(0.0);
+    let axis = |key| {
+        get_prop_num(node, key)
+            .map(f64_to_f32)
+            .unwrap_or(gap)
+            .max(0.0)
+    };
+    (axis("col-gap"), axis("row-gap"))
+}
+
+/// The columns of a grid `area_width` wide: `:cols`, or as many
+/// `col_width` columns (with their gaps) as fit.
+fn layout_cols(node: &Value, area_width: f32, col_width: f32, col_gap: f32) -> f32 {
     explicit_cols(node).unwrap_or_else(|| {
-        if col_width <= 0.0 {
+        if col_width + col_gap <= 0.0 {
             1.0
         } else {
-            (area_width / col_width).floor().max(1.0)
+            ((area_width + col_gap) / (col_width + col_gap))
+                .floor()
+                .max(1.0)
         }
     })
+}
+
+/// The extent of `count` slots of `size` with `gap` between them.
+fn span(count: f32, size: f32, gap: f32) -> f32 {
+    count * size + (count - 1.0).max(0.0) * gap
 }
 
 fn prop_usize(node: &Value, key: &str) -> Option<usize> {
@@ -148,6 +170,9 @@ impl WidgetDefinition for GridWidget {
             "cols",
             "col-width",
             "row-height",
+            "gap",
+            "col-gap",
+            "row-gap",
             "align",
             "h-align",
             "v-align",
@@ -186,20 +211,15 @@ impl WidgetDefinition for GridWidget {
                 .fold(0.0_f32, f32::max)
                 .max(1.0)
         };
+        let (col_gap, row_gap) = grid_gaps(node);
         let col_width = explicit_col_width.unwrap_or_else(widest_child);
-        let cols = explicit_cols(node).unwrap_or_else(|| {
-            if col_width <= 0.0 {
-                1.0
-            } else {
-                (constraints.max_width / col_width).floor().max(1.0)
-            }
-        });
+        let cols = layout_cols(node, constraints.max_width, col_width, col_gap);
         let cols_int = cols as usize;
         let row_height = explicit_row_height.unwrap_or_else(tallest_child);
         let rows = ((children.len() + cols_int - 1) / cols_int) as f32;
         Some(Size {
-            width: cols * col_width,
-            height: rows * row_height,
+            width: span(cols, col_width, col_gap),
+            height: span(rows, row_height, row_gap),
         })
     }
 
@@ -234,8 +254,9 @@ impl WidgetDefinition for GridWidget {
                 .fold(0.0_f32, f32::max)
                 .max(1.0)
         };
+        let (col_gap, row_gap) = grid_gaps(node);
         let col_width = explicit_col_width.unwrap_or_else(widest_child);
-        let cols = layout_cols(node, area.width, col_width);
+        let cols = layout_cols(node, area.width, col_width, col_gap);
         let cols_int = cols as usize;
         let measure_constraints = constraints_for_slot(col_width, area.height);
         let explicit_row_height = get_prop_num(node, "row-height").map(f64_to_f32);
@@ -287,8 +308,8 @@ impl WidgetDefinition for GridWidget {
                 } else {
                     size.height.min(row_height)
                 };
-                let slot_col = area.col + col * col_width;
-                let slot_row = area.row + row * row_height;
+                let slot_col = area.col + col * (col_width + col_gap);
+                let slot_row = area.row + row * (row_height + row_gap);
                 let child_col = match h_align {
                     Align::Start | Align::Stretch | Align::Baseline => slot_col,
                     Align::Center => slot_col + (col_width - child_width) / 2.0,

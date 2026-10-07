@@ -11,8 +11,9 @@
 //! (`app::edit::apply_recorded_focus_step_mutation`, the legacy piano
 //! roll's, one undo entry each; undo restores), landing like the legacy
 //! piano roll's actions ([`piano_roll_edit_landed`]). A moved note keeps its
-//! id, so its handle follows it; one moved onto another replaces it (the
-//! other's handle goes stale). A note keeps its velocity (its step's) when
+//! id, written into the model with it (spec §14.2j: a note without a model
+//! id takes its host one), so its handle follows it, through an undo too;
+//! one moved onto another replaces it (the other's handle goes stale). A note keeps its velocity (its step's) when
 //! it moves to a step holding no other note; chord notes share their step's.
 //! The selection is the piano roll's (no history); an edit keeps the
 //! selected notes selected where they land.
@@ -487,7 +488,10 @@ fn set_note(
             ((key, note, velocity), (key.step, note), None)
         }
     };
-    let (to, velocity) = edited(&lanes, &field, &value, to, velocity)?;
+    let (mut to, velocity) = edited(&lanes, &field, &value, to, velocity)?;
+    // The note keeps its id in the model wherever it lands (a note with no
+    // model id takes its host one).
+    to.1.id = sequencer::sequencer::NoteId::try_from(nid).map_err(|_| "the note is gone")?;
     let edit = NoteEdit {
         from: Some(from),
         to: Some(to),
@@ -537,6 +541,7 @@ fn add_note(app: &mut app::App, ctx: &mut LoopCtx<'_>, map: &Payload) -> Result<
         transpose: 0.0,
         duration: 1.0,
         delay: 0.0,
+        id: 0,
     };
     let mut to = (0, blank);
     for field in ["start", "pitch", "length"] {

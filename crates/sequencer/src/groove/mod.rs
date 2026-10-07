@@ -1150,6 +1150,10 @@ pub fn quantize_groove_source(
             }
             targeted[target] = true;
             pattern.copy_step_content_from(target, &source, step);
+            // A move, not a copy: the notes keep their ids.
+            pattern
+                .chord_snapshot
+                .set_step_ids(target, source.chord_snapshot.step_ids(step));
             pattern.clear_step_content_at(step);
             changed = true;
         }

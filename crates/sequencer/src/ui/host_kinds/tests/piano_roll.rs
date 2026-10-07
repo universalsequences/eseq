@@ -41,14 +41,20 @@ impl Harness {
     }
 
     /// Write `notes` (transpose, duration, offset) on `step` of `track`'s
-    /// live pattern and publish the track, as an edit does.
+    /// live pattern and publish the track, as an edit does: a note where
+    /// one sits (its pitch and offset) keeps that one's id, the others are
+    /// new notes.
     pub(super) fn write_notes(&mut self, track: usize, step: usize, notes: &[(f32, f32, f32)]) {
         let lanes = PianoRollLanes::live(&self.shared.state, track);
+        let before = lanes.note_entries(step);
         let notes: Vec<PianoRollNote> = (notes.iter())
             .map(|&(transpose, duration, delay)| PianoRollNote {
                 transpose,
                 duration,
                 delay,
+                id: (before.iter())
+                    .find(|note| (note.transpose, note.delay) == (transpose, delay))
+                    .map_or(0, |note| note.id),
             })
             .collect();
         lanes.set_note_entries(step, &notes);
@@ -633,51 +639,52 @@ fn rack_macro_step_locks_list_the_patterns_locks() {
     assert_eq!(h.eval_7e("rm.has-locks"), Value::Bool(true));
 }
 
+/// The model's note ids come back with an undo or redo (spec §14.2j), so a
+/// handle follows its note through them: a moved note's back where it was,
+/// a note it replaced back under its own id (a new instance: its handle was
+/// dropped with it), a drag undone and redone.
 #[test]
-fn undo_and_redo_make_note_handles_stale() {
+fn undo_and_redo_keep_note_handles() {
     let mut h = Harness::new();
     h.write_notes(0, 2, &[(0.0, 1.0, 0.0)]);
     h.write_notes(0, 7, &[(0.0, 2.0, 0.0)]);
     h.sync();
-    h.eval_7e("(def a (note-at 0)) (def c (note-at 1))");
+    h.eval_7e("(def a (note-at 0)) (def c (note-at 1)) (def c-nid c.nid)");
     h.sync();
     let (a, c) = (h.instance_7e("a"), h.instance_7e("c"));
     h.run_7e("(set! a.start 7)");
     assert!(!h.live(c), "a replaced c");
     assert_eq!(h.instance_7e("(note-at 0)"), a);
-    // Undo puts c back at a's key: a goes stale, never showing c's data.
+    // Undo puts a back at its step, and c back under its id.
     app::edit::undo(&mut h.app);
     h.sync();
-    assert!(!h.live(a), "undo made a stale");
+    assert!(h.live(a), "a's handle follows it back");
+    assert_eq!(h.instance_7e("(note-at 0)"), a);
+    assert_eq!(h.eval_7e("a.start"), Value::Number(2.0));
     assert_eq!(h.eval_7e("(len (notes))"), Value::Number(2.0));
-    let restored = h.instance_7e("(note-at 1)");
-    assert_ne!(restored, a);
     assert_eq!(
-        h.eval_7e("(let ((n (note-at 1))) n.length)"),
-        Value::Number(2.0)
+        h.eval_7e("(let ((n (note-at 1))) (list n.nid n.length))"),
+        h.eval_7e("(list c-nid 2)")
     );
-    // Redo: every handle of the source is fresh again.
-    let before = h.instance_7e("(note-at 0)");
+    // Redo: a moves on again, keeping its handle.
+    let restored = h.instance_7e("(note-at 1)");
     app::edit::redo(&mut h.app);
     h.sync();
-    assert!(!h.live(before) && !h.live(restored));
+    assert!(h.live(a) && !h.live(restored));
     assert_eq!(h.all_notes(0), vec![(7, (0.0, 1.0, 0.0))]);
-    assert_eq!(
-        h.eval_7e("(let ((n (note-at 0))) n.start)"),
-        Value::Number(7.0)
-    );
+    assert_eq!(h.eval_7e("a.start"), Value::Number(7.0));
     // An undo that changes no note keeps the handles.
-    let kept = h.instance_7e("(note-at 0)");
     h.shared.state.pattern.track_params[0].set_volume(0.3);
     app::edit::undo(&mut h.app);
     app::edit::redo(&mut h.app);
     h.sync();
-    assert!(h.live(kept), "the notes are as they were");
+    assert!(h.live(a), "the notes are as they were");
     // A drag ending on another note, undone and redone.
     app::edit::undo(&mut h.app);
     h.sync();
     h.eval_7e("(def x (note-at 0)) (def y (note-at 1))");
     let (x, y) = (h.instance_7e("x"), h.instance_7e("y"));
+    assert_eq!(x, a);
     h.gesture.pointer_down = true;
     h.run_7e("(set! x.start 4)");
     h.run_7e("(set! x.start 7)");
@@ -688,21 +695,127 @@ fn undo_and_redo_make_note_handles_stale() {
     assert_eq!(h.instance_7e("(note-at 0)"), x);
     app::edit::undo(&mut h.app);
     h.sync();
-    assert!(!h.live(x), "undo made the dragged note stale");
+    assert!(h.live(x), "undo moved the dragged note back");
     assert_eq!(
         h.all_notes(0),
         vec![(2, (0.0, 1.0, 0.0)), (7, (0.0, 2.0, 0.0))]
     );
-    let undone = h.instance_7e("(note-at 1)");
-    assert_eq!(
-        h.eval_7e("(let ((n (note-at 1))) n.length)"),
-        Value::Number(2.0)
-    );
+    assert_eq!(h.eval_7e("x.start"), Value::Number(2.0));
     app::edit::redo(&mut h.app);
     h.sync();
-    assert!(!h.live(undone));
+    assert!(h.live(x));
     assert_eq!(h.all_notes(0), vec![(7, (0.0, 1.0, 0.0))]);
-    h.rejects_7e("(delete-notes! (list x))", STALE);
+    h.run_7e("(set! x.pitch 3)");
+    assert_eq!(h.all_notes(0), vec![(7, (3.0, 1.0, 0.0))]);
+}
+
+/// A note's handle follows it through every edit that carries its model id
+/// (spec §14.2j): the legacy piano roll's nudge, the step grid's step move,
+/// a recording onto its step (the recorded note is another). A step's single
+/// note held by its step parameters has no model id: its host id goes into
+/// the model with its first setter edit, and follows it from there.
+#[test]
+fn note_handles_follow_legacy_moves_step_moves_and_recording() {
+    let mut h = Harness::new();
+    h.write_notes(0, 1, &[(0.0, 1.0, 0.0), (4.0, 1.0, 0.0)]);
+    h.sync();
+    h.eval_7e("(def a (note-at 0)) (def b (note-at 1))");
+    h.sync();
+    let (a, b) = (h.instance_7e("a"), h.instance_7e("b"));
+    // The legacy piano roll nudges b two steps on.
+    let id = piano_roll_item_id(1, 1);
+    h.run_7e(&format!(
+        "(host-command \"piano-roll-history-action\"
+           (dict :track 0 :action (dict :type :nudge-selection :ids (list {id})
+                                        :delta-time 2 :delta-lane 0)))"
+    ));
+    assert_eq!(h.live_notes(0, 3), vec![(4.0, 1.0, 0.0)]);
+    assert!(h.live(a) && h.live(b));
+    assert_eq!(h.eval_7e("(list a.start b.start)"), h.eval_7e("(list 1 3)"));
+    // The step grid moves a's step.
+    h.shared.state.move_step_range(0, 1, 1, 5);
+    h.sync();
+    assert!(h.live(a));
+    assert_eq!(h.eval_7e("a.start"), Value::Number(5.0));
+    // A recording onto a's step adds another note beside it.
+    let hit = sequencer::sequencer::RollHitRecorded {
+        track: 0,
+        step: 5,
+        delay: 0.0,
+        transpose: 7.0,
+        velocity: 1.0,
+        duration_steps: 1.0,
+        beat: 0.0,
+    };
+    crate::roll_record::write_rolled_hit_to_pattern(&h.shared.state, &hit);
+    h.shared.state.publish_scheduler_track(0);
+    h.sync();
+    assert_eq!(h.eval_7e("(len (notes))"), Value::Number(3.0));
+    assert!(h.live(a) && h.live(b));
+    assert_eq!(h.instance_7e("(note-at 1)"), a);
+    assert_eq!(
+        h.eval_7e("(let ((n (note-at 2))) n.pitch)"),
+        Value::Number(7.0)
+    );
+    // A step turned on in the grid: its note has a host id, which its
+    // first setter edit writes into the model.
+    h.shared.state.pattern.patterns[0].set_step_active(9, true);
+    h.shared.state.publish_scheduler_track(0);
+    h.sync();
+    h.eval_7e("(def i (note-at 3))");
+    let i = h.instance_7e("i");
+    assert_eq!(h.eval_7e("i.start"), Value::Number(9.0));
+    h.run_7e("(set! i.pitch 5)");
+    assert!(h.live(i));
+    let nid = h.eval_7e("i.nid");
+    assert_eq!(
+        Value::Number(f64::from(h.shared.state.pattern.chord_data[0].get_id(9, 0))),
+        nid
+    );
+    h.shared.state.move_step_range(0, 9, 9, 11);
+    h.sync();
+    assert!(h.live(i));
+    assert_eq!(
+        h.eval_7e("(list i.start i.pitch)"),
+        h.eval_7e("(list 11 5)")
+    );
+}
+
+/// A grid step's single note (no model id) keeps its handle when another
+/// note joins its step, through `add-note!` and through the legacy piano
+/// roll's add: the writer stores it in the model under its host id.
+#[test]
+fn an_implicit_note_keeps_its_handle_when_a_note_joins_its_step() {
+    let mut h = Harness::new();
+    for step in [2, 6] {
+        h.shared.state.pattern.patterns[0].set_step_active(step, true);
+    }
+    h.shared.state.publish_scheduler_track(0);
+    h.sync();
+    h.eval_7e("(def i (note-at 0)) (def j (note-at 1))");
+    h.sync();
+    let (i, j) = (h.instance_7e("i"), h.instance_7e("j"));
+    let chords = |h: &Harness, step: usize| h.shared.state.pattern.chord_data[0].count(step);
+    let held = (chords(&h, 2), chords(&h, 6));
+    assert_eq!(held, (0, 0), "held by step params");
+    h.run_7e("(add-note! 2 7 1)");
+    assert_eq!(chords(&h, 2), 2);
+    assert!(h.live(i));
+    assert_eq!(h.instance_7e("(note-at 0)"), i);
+    assert_eq!(
+        Value::Number(f64::from(h.shared.state.pattern.chord_data[0].get_id(2, 0))),
+        h.eval_7e("i.nid")
+    );
+    // The legacy piano roll draws a note on j's step (lane 41: pitch 7).
+    h.run_7e(
+        "(host-command \"piano-roll-history-action\"
+           (dict :track 0 :action (dict :type :finish-create-item
+                                        :start 6 :end 7 :lane 41)))",
+    );
+    assert_eq!(chords(&h, 6), 2);
+    assert!(h.live(j));
+    assert_eq!(h.eval_7e("(list j.start j.pitch)"), h.eval_7e("(list 6 0)"));
+    assert_eq!(h.eval_7e("(len (notes))"), Value::Number(4.0));
 }
 
 #[test]
@@ -856,6 +969,7 @@ fn note_keys_are_bit_exact_but_for_negative_zero() {
         transpose,
         duration: 1.0,
         delay,
+        id: 0,
     };
     assert_eq!(
         NoteKey::of(3, &note(-0.0, -0.0)),

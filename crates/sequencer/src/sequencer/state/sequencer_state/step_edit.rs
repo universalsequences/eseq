@@ -31,10 +31,12 @@ impl SequencerState {
         let mut chord = Vec::with_capacity(chord_count);
         let mut chord_durations = Vec::with_capacity(chord_count);
         let mut chord_delays = Vec::with_capacity(chord_count);
+        let mut chord_ids = Vec::with_capacity(chord_count);
         for note_idx in 0..chord_count {
             chord.push(self.pattern.chord_data[track].get(step, note_idx));
             chord_durations.push(self.pattern.chord_data[track].get_duration(step, note_idx));
             chord_delays.push(self.pattern.chord_data[track].get_delay(step, note_idx));
+            chord_ids.push(self.pattern.chord_data[track].get_id(step, note_idx));
         }
 
         let midi_fx_plocks = self.pattern.midi_fx_slots[track]
@@ -105,6 +107,7 @@ impl SequencerState {
             chord,
             chord_durations,
             chord_delays,
+            chord_ids,
             timebase: self.pattern.timebase_plocks[track].get(step),
             swing: self.pattern.swing_plocks[track].get(step),
             swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
@@ -1459,6 +1462,16 @@ impl SequencerState {
         if cells.iter().any(|(step, _)| *step >= MAX_STEPS) {
             return Err("step target is out of range".to_string());
         }
+        // Resolve the notes' ids once (an id-less note's fresh one too), so
+        // the pool and the live mirror hold the same notes.
+        let cells: Vec<(usize, StepSnapshot)> = (cells.iter())
+            .map(|(step, snapshot)| {
+                let mut snapshot = snapshot.clone();
+                snapshot.chord_ids = snapshot.note_ids();
+                (*step, snapshot)
+            })
+            .collect();
+        let cells = cells.as_slice();
         let initially_effective = {
             let scenes = self.pattern.scenes.lock().unwrap();
             if scenes
@@ -1982,11 +1995,12 @@ impl SequencerState {
                     duration
                 },
                 self.pattern.chord_data[track].get_delay(step, note_idx),
+                self.pattern.chord_data[track].get_id(step, note_idx),
             ));
         }
         self.pattern.chord_data[track].clear_step(step);
-        for (transpose, duration, delay) in notes {
-            self.pattern.chord_data[track].add_note_with_timing(step, transpose, duration, delay);
+        for (transpose, duration, delay, id) in notes {
+            self.pattern.chord_data[track].add_note_with_id(step, transpose, duration, delay, id);
         }
     }
 
@@ -2015,11 +2029,12 @@ impl SequencerState {
 
         self.pattern.chord_data[track].clear_step(step);
         for (idx, &transpose) in snapshot.chord.iter().enumerate() {
-            self.pattern.chord_data[track].add_note_with_timing(
+            self.pattern.chord_data[track].add_note_with_id(
                 step,
                 transpose,
                 snapshot.chord_durations.get(idx).copied().unwrap_or(0.0),
                 snapshot.chord_delays.get(idx).copied().unwrap_or(0.0),
+                snapshot.chord_ids.get(idx).copied().unwrap_or(0),
             );
         }
 
@@ -2194,7 +2209,7 @@ impl SequencerState {
 
         for step in num_steps..new_len {
             let src = step - num_steps;
-            let snapshot = self.capture_step_snapshot(track, src);
+            let snapshot = self.capture_step_snapshot(track, src).with_fresh_note_ids();
             self.restore_step_snapshot_inner(track, step, &snapshot);
         }
 

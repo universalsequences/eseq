@@ -984,6 +984,18 @@ its instance and field.
      parts (`(list :preset t)`); `context-menu :anchor` takes a point
      (`e.at`; nil keeps the menu hidden); `label` / `number-label` `:active`
      accept a Lisp bool.
+   - eseqlisp (eseq-0l17.26): `grid` takes `:gap`, and `:col-gap` /
+     `:row-gap` overriding it per axis (default 0): a gap sits between
+     slots only, so a grid measures `cols * col-width + (cols - 1) *
+     col-gap` wide (likewise in rows), and an auto-`:cols` grid fits
+     columns with their gaps. The example's step grid is `(grid :cols 8
+     :col-width (sc 8) :col-gap 1 :row-height (sc 4) …)` and a `(sc 3)`
+     spacer, not a `(+ (sc 8) 1)` column and a `(- (sc 3) 1)` spacer; its
+     layout is the same cell for cell (only the grid's own rect loses the
+     trailing gap, which the spacer now holds). `:col-gap`, not `:gap`: a
+     `:gap 1` would also part its two rows, which touched. No factory view
+     outside `ui/effects/*` hand-compensated a grid gap (`ui/mixer.lisp`'s
+     pattern cells are inset in their columns, not gapped).
    - `metal_seq capture --noui` (bare root) with a host-kinds sync
      (`HostKinds::sync_with` over `KindsHandles`), so kinds views render
      headlessly.
@@ -2871,8 +2883,14 @@ the other port beads follow it):
    - a shader compares floats: an id past 2^24 (a node bay's port ids)
      rounds onto its neighbours, so compare small parts of it;
    - `sgi/set-track-cursor-step` hooks the cursor to the current track,
-     which reads stale right after `select-track-for-edit`: an editor that
-     knows its track calls `cursor-step-changed` with it.
+     which reads stale right after `select-track-for-edit`: a gesture that
+     knows its track names it, `sgi/set-cursor-step-for-track` (since
+     eseq-0l17.69 the shared gesture paths do: `step-pointer-down-for-track`,
+     the drag-over paths and `step-select-drag-start-for-track` pass their
+     track, so a press, shift-click or duration-edge drag on another track's
+     row moves that track's cursor and page only; `set-track-cursor-step`
+     and `step-select-drag-start` remain the current-track forms the keyboard
+     and the legacy `step-grid.lisp` use).
    Learned by alez.neural (.67):
    - a Harness test's `drain` takes every queued host command, the
      editor's own (a `set-layout`, a buffer switch) included: run the
@@ -4360,12 +4378,67 @@ Built (7e):
   (`App::history_replays`) that changed the source's notes (key, length or
   velocity, compared with the rows last read) forgets every id of the
   source, so every note gets a fresh handle (the ids a setter moved are not
-  tracked back through history; an undo that changes no note keeps them). The notes are those of the piano roll's source
+  tracked back through history; an undo that changes no note keeps them).
+  Since eseq-0l17.48 that holds only for notes without a model id (below). The notes are those of the piano roll's source
   (`NoteSource`: the current track's resolved edit focus, the effective
   pattern for a live focus): another source (a track switch, a clip pinned,
   a scene launch, a project load) replaces them all; a track reorder keeps
   them (keyed under the track instance). Model note ids, which would keep
-  handles through every path: eseq-0l17.48.
+  handles through every path: eseq-0l17.48 (below).
+- **Model note ids (eseq-0l17.48).** A chord note now carries a `NoteId`
+  (u32, `0` none; process-wide, `sequencer::new_note_id`) beside its lanes:
+  live `ChordData` (an `ids` lane the scheduler never reads),
+  `ChordSnapshot::ids` (so `TrackPatternData.chord_snapshot` and pattern
+  snapshots), `StepSnapshot::chord_ids` (the step cells history and the
+  step grid's moves restore; `step_snapshot_bit_exact_eq` ignores it: ids
+  are identity, not content), and `PianoRollNote::id` (both writers store
+  it, `0` taking a fresh one). It is allocated when a note is created
+  (`add_note*`, a writer's new note, a recording) and carried by a chord
+  removal (`toggle_note` shifts it), a transpose / duration edit, a step
+  move or rotate, a snapshot capture / restore (scene switch, undo, redo),
+  the legacy piano roll's nudge / move / resize and the setters. A copy
+  beside its original gets a fresh one: a paste
+  (`sanitize_pasted_step_snapshot`), a doubled pattern, `copy_step`, a
+  take flattened from clips (`copy_step_content_from`; the groove's
+  late-step move restores the source step's ids after it). A step cell
+  replay resolves an id-less note's fresh id once, so the pool and the
+  live mirror hold the same one. The chord editor's toggle that leaves one
+  note keeps it a chord entry, with its id. Ids are not saved
+  (a project file has no lane for them; a load gives fresh ones,
+  `chord_snapshot_from_steps*`): handles never outlive a source anyway. A
+  lane not beside its notes (a writer that pushed or cleared the notes
+  alone) reads as no id, never another note's; take recording and
+  retrospective capture push through `ChordSnapshot::push_note`, a fresh
+  id beside each note. The `note` kind's `nid` is the model id: a handle follows
+  its note through every path above, and an undo brings a replaced note
+  back under its id (as a new instance: the old handle was dropped with
+  the note). What keeps a host id: a step's single note held by its step
+  parameters (a step turned on in the grid, which the model gives no chord
+  entry): the host gives it an id by its `NoteKey` from the same allocator
+  and registers it with the piano roll lanes (`set_implicit_note_ids`, the
+  source's id-less notes by track, focus and key; cleared with the
+  source). Every `PianoRollLanes` reader but the host's own
+  (`step_rows_batch`) reports such a note with that id, so any writer that
+  rewrites its step (a setter, `add-note!` beside it, the legacy piano
+  roll's add, paste, delete, nudge, move or resize) stores it in the model:
+  from then on it is a chord note with that id. A step move before that,
+  and a replay that changes the notes, still make its handle stale. A model id repeated in one source is id-less from its
+  second occurrence. So the key table stays, as where each id sits (the
+  setters resolve through it) and the id-less notes' identity. `note.item`
+  stays: the factory piano roll addresses the legacy timeline actions by
+  item id (step and voice), not by note id. Behaviour changes: undo and
+  redo keep note handles (`undo_and_redo_keep_note_handles`, replacing
+  `undo_and_redo_make_note_handles_stale`); a legacy nudge / move, a step
+  move and a recording keep them
+  (`note_handles_follow_legacy_moves_step_moves_and_recording`); a note
+  joining an id-less note's step keeps its handle
+  (`an_implicit_note_keeps_its_handle_when_a_note_joins_its_step`); the
+  chord toggle's last note keeps its id
+  (`piano_note_toggle_is_one_lossless_history_entry`, which now expects one
+  chord entry, not a collapse to the step parameters);
+  `pattern_step_cell_replay_gives_pool_and_live_the_same_ids`; model
+  tests `note_ids_follow_their_notes_and_copies_get_fresh_ones`,
+  `chord_snapshot_ids_never_name_another_note`.
 - **Feeds.** The focus fields are model fields behind one key compared
   every tick without allocating (the source, the pinned clip and its source
   kind, the committed song and scenes revisions, the pattern epoch, the live
@@ -5345,7 +5418,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7d-2 | eseq-0l17.39 (built) | `song.pending` (the provisional capture surface) as positional sub-kinds: `pending-lane`, `pending-scene`, `pending-launch` | .15 |
 | 7e | eseq-0l17.31 (built) | `note`, `piano-roll` singleton, tracker rows (`param.step-locks`, `rack-macro.step-locks`) and grid playheads (view derivation) | .16 .20 |
 | 7e-2 | eseq-0l17.47 (built) | the piano roll's automation lane: `focus-step` (focus-axis step params, `piano-roll.steps`), the lane a view | .16 |
-| 7e-3 | eseq-0l17.48 | model note ids (handles kept through undo and legacy edits) | — |
+| 7e-3 | eseq-0l17.48 (built) | model note ids (handles kept through undo and legacy edits; a grid step's id-less single note keeps a host id until its first setter edit) | — |
 | 7f | eseq-0l17.32 (built) | `browser`, `sound-palette` / `sound`, `editor`, `learn`, `retro`, `song-export`, `settings` and `agent` singletons and their rows, `project.name`, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 (built) | `graph`, `graph-node`, `graph-edge`, `graph-param` (the GRAPH namespace, graph playback), `project.graphs`, `track.active-notes` | .13 .14 .20 |
 | 7g-2 | eseq-0l17.49 (built) | a graph node's process patch as `process` instances (`graph-node.processes`), its setters through `edit-process` | .20 (and .45) |
@@ -5783,7 +5856,7 @@ The real, complete view is `docs/examples/mini-daw.lisp`; this is its shape.
         (label (substring t.name 0 3)
           :font-size (sc 32) :color :dim
           :active #'t.selected :active-color :white)
-        (grid :cols 8 :col-width (sc 8) :row-height (sc 4)
+        (grid :cols 8 :col-width (sc 8) :col-gap 1 :row-height (sc 4)
           (each t.steps |s| (step-view s t)))
         (v-stack :gap (sc 0.5)
           (h-stack :gap (sc 1)

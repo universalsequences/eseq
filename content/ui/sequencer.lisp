@@ -1152,7 +1152,7 @@
             (set! duration-drag-source s)
             (sgi/step-clear-drag-state)
             (eseq.seq-core-state/cool-off-follow)
-            (sgi/set-track-cursor-step s.index)
+            (sgi/set-cursor-step-for-track t.index s.index)
             (set-duration-from-drag s s.index))
           (sgi/step-pointer-down-for-track
             t.index s.index evt use-selection))))))
@@ -1318,13 +1318,10 @@
 (def drop-step-selection ()
   (when (seq-has-selection?) (seq-clear-selection)))
 
-;; Put the shared step cursor on `step` of t. Not through
-;; `sgi/set-track-cursor-step`, whose hook names the current track: right
-;; after `select-track-for-edit` that read is still the old track until the
-;; host pushes the new one, whose cursor would move too.
+;; Put the shared step cursor on `step` of t, naming t: right after
+;; `select-track-for-edit` the current track still reads as the old one.
 (def set-expanded-cursor (t step)
-  (eseq.seq-core-state/set-cursor-step-value step)
-  (cursor-step-changed t.index step))
+  (sgi/set-cursor-step-for-track t.index step))
 
 ;; Select t for edit and put its cursor on `step`, as every editor edit does.
 (def focus-step (t step)
@@ -1335,7 +1332,7 @@
 (def expanded-step-click (t s evt)
   (focus-step t s.index)
   (if (sgi/selection-click? evt)
-    (sgi/step-select-drag-start s.index evt)
+    (sgi/step-select-drag-start-for-track t.index s.index evt)
     (seq-clear-selection)))
 
 (def expanded-step-drag (t s evt)

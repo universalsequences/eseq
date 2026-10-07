@@ -14,7 +14,7 @@ pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
 pub use data::{
     bar_of_step, ceil_to_grid, rack_slot_pool_index, sync_beats, BarTransposeData, BusId,
-    ChordData, ChordSnapshot,
+    ChordData, ChordSnapshot, NoteId, new_note_id, note_id_or_new,
     CustomInstrumentRunMode, PatternStepGeometry,
     InstrumentType, KeyboardTrigger, LiveNoteSource, LiveNoteOrigin, LiveInputEvent, MidiFxPosition, MonoTrigger, VoicePriority, ModConnection, ModDestination,
     LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded, SequenceRollSource,

@@ -1728,9 +1728,9 @@ impl App {
         let chunk = &mut lane.chunks[step / MAX_STEPS];
         let local = step % MAX_STEPS;
         chunk.track_bits[local / 64] |= 1 << (local % 64);
-        chunk.chord_snapshot.steps[local].push(transpose);
-        chunk.chord_snapshot.durations[local].push(duration_steps);
-        chunk.chord_snapshot.delays[local].push(delay);
+        chunk
+            .chord_snapshot
+            .push_note(local, transpose, duration_steps, delay);
         let first_note = chunk.chord_snapshot.steps[local][0];
         chunk.step_data[local][StepParam::Transpose.index()] = first_note;
         chunk.step_data[local][StepParam::Velocity.index()] = 1.0;

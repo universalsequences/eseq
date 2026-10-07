@@ -214,10 +214,10 @@
         (label (substring t.name 0 3)
           :width (sc 8) :font-size (sc 32) :v-align :center :bg :transparent
           :color :dim :active #'t.selected :active-color :white)
-        ;; columns are a step plus the stack's 1-cell gap
-        (grid :cols 8 :col-width (+ (sc 8) 1) :row-height (sc 4)
+        ;; a 1-cell gap between steps, as an h-stack of them had; rows touch
+        (grid :cols 8 :col-width (sc 8) :col-gap 1 :row-height (sc 4)
           (each t.steps |s| (step-view s t)))
-        (box :width (- (sc 3) 1))  ; the last column's gap is the other 1
+        (box :width (sc 3))
         (v-stack :gap (sc 0.5)
           (mixer-view t)
           (preset-view t)

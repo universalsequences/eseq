@@ -1,4 +1,5 @@
 use super::*;
+use crate::sequencer::{note_id_or_new, NoteId};
 
 #[derive(Clone, Debug)]
 pub struct StepSnapshot {
@@ -8,6 +9,9 @@ pub struct StepSnapshot {
     pub chord: Vec<f32>,
     pub chord_durations: Vec<f32>,
     pub chord_delays: Vec<f32>,
+    /// Each chord note's id, beside `chord` (missing or `0`: none; a restore
+    /// gives such a note a fresh one).
+    pub chord_ids: Vec<NoteId>,
     pub timebase: Option<Timebase>,
     pub swing: Option<f32>,
     pub swing_resolution: Option<SwingResolution>,
@@ -24,6 +28,21 @@ pub struct StepSnapshot {
 pub type StepCellSnapshot = StepSnapshot;
 
 impl StepSnapshot {
+    /// Each chord note's id to restore, a fresh one where it has none.
+    pub fn note_ids(&self) -> Vec<NoteId> {
+        (0..self.chord.len())
+            .map(|n| note_id_or_new(self.chord_ids.get(n).copied().unwrap_or(0)))
+            .collect()
+    }
+
+    /// The step as a copy beside its original: its notes are other notes
+    /// (fresh ids at restore).
+    pub fn with_fresh_note_ids(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.chord_ids.clear();
+        snapshot
+    }
+
     pub fn without_audio_plocks(&self) -> Self {
         let mut snapshot = self.clone();
         snapshot.track_send_plocks.clear();

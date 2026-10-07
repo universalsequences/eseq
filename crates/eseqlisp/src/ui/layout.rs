@@ -4081,6 +4081,59 @@ mod tests {
         assert_eq!(natural, 50.0, "grid 16x3 + padding should be 50");
     }
 
+    /// `:col-gap` / `:row-gap` (each defaulting to `:gap`) space a grid's
+    /// slots apart, between slots only: a grid of steps with a 1-cell gap
+    /// lays out as columns a step plus 1 wide, and measures without a
+    /// trailing gap.
+    #[test]
+    fn grid_gaps_space_slots_between_columns_and_rows() {
+        let cell = || bx(Some(2.0), Some(1.0), vec![]);
+        let gapped = |gaps: Vec<Value>| {
+            let mut args = vec![
+                kw("cols"),
+                num(3.0),
+                kw("col-width"),
+                num(2.0),
+                kw("row-height"),
+                num(1.0),
+            ];
+            args.extend(gaps);
+            args.extend((0..5).map(|_| cell()));
+            build_widget("grid", args)
+        };
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let wrap = |grid: Value| build_widget("v-stack", vec![kw("padding"), num(0.0), grid]);
+        let child_offsets = |tree: &Value| {
+            let layout = engine.layout(tree).expect("layout");
+            let grid = &layout.children[0];
+            grid.children
+                .iter()
+                .map(|child| (child.rect.col - grid.rect.col, child.rect.row - grid.rect.row))
+                .collect::<Vec<_>>()
+        };
+
+        let both = wrap(gapped(vec![kw("col-gap"), num(1.0), kw("row-gap"), num(0.5)]));
+        assert_eq!(
+            child_offsets(&both),
+            [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0), (0.0, 1.5), (3.0, 1.5)]
+        );
+        assert_eq!(engine.natural_content_width(&both), 8.0, "3*2 + 2 gaps");
+
+        // :gap sets both axes; an axis key overrides it.
+        let gap = wrap(gapped(vec![kw("gap"), num(1.0), kw("row-gap"), num(0.0)]));
+        assert_eq!(
+            child_offsets(&gap),
+            [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0), (0.0, 1.0), (3.0, 1.0)]
+        );
+        let gap = wrap(gapped(vec![kw("gap"), num(1.0)]));
+        assert_eq!(child_offsets(&gap)[3], (0.0, 2.0));
+
+        // No gap: the old packed layout.
+        let packed = wrap(gapped(vec![]));
+        assert_eq!(child_offsets(&packed)[1], (2.0, 0.0));
+        assert_eq!(engine.natural_content_width(&packed), 6.0);
+    }
+
     #[test]
     fn natural_width_sequencer_layout_fits_wide_viewport() {
         // Mirrors the full sequencer layout from ui/main.lisp
