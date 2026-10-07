@@ -282,7 +282,7 @@ fn apply_one_shot(
     let keys = selected_keys(&lanes, &selection);
     let steps = touched_steps(edits);
     let focus = app.track_edit_focus(source.track);
-    let script = super::ScriptEdit::begin(app, ctx);
+    let script = super::ScriptEdit::begin(app, ctx, false);
     let mut placed = Vec::new();
     let outcome = script.apply_with(app, |app| {
         app::edit::apply_recorded_focus_step_mutation(app, focus, &steps, label, |app| {
@@ -292,7 +292,7 @@ fn apply_one_shot(
         })
     });
     let changed = matches!(outcome, Ok(app::edit::EditOutcome::Applied(_)));
-    script.end(app, ctx, false, changed);
+    script.end(app, ctx, changed);
     outcome.map_err(|error| format!("{error:?}"))?;
     let moves: Vec<(NoteKey, Option<NoteKey>)> = (edits.iter().zip(&placed))
         .filter_map(|(edit, placed)| Some((edit.from?.0, *placed)))
@@ -432,8 +432,8 @@ fn set_note(
     let source = track_source(app, ctx, map)?;
     let nid = SetValue::of(map, "nid", "nid").id("a note id")?;
     let (field, value) = SetValue::field(map)?;
-    let script = super::ScriptEdit::begin(app, ctx);
-    let drags = field != "selected" && script.drags(ctx, true);
+    let script = super::ScriptEdit::begin(app, ctx, field != "selected");
+    let drags = script.drags(ctx);
     // The script drag this `set!` joins: a pending frame's, or the open
     // drag's, while it is this source's.
     let key = MergeKey::new(app::edit::NOTE_DRAG_KEY);

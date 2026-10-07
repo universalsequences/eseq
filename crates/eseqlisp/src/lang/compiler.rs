@@ -308,13 +308,16 @@ fn is_widget_name(name: &str) -> bool {
 /// The `:slot value` pairs of a `def-kind` form, in order, and its `:key`
 /// (kind-bindings spec §3.1): `None` without `:key` (a created kind). This
 /// is the one place the key's shape (at most two names) is checked. A
+/// `:key` of names without a `:host` group is view-local
+/// ([`KindKey::Local`], any number of plain names; eseq-0l17.62): there is
+/// nothing for a host to publish, so Lisp creates the instances. A
 /// malformed slot list or key is an error.
 pub(crate) fn def_kind_slots<'e>(
     name: &str,
     list: &'e [Expression],
 ) -> Result<(Vec<(String, &'e Expression)>, Option<KindKey>), CompilerError> {
     let mut slots = Vec::new();
-    let mut key = None;
+    let mut key_value = None;
     let key_shape = || {
         CompilerError::Message(format!(
             "def-kind {name}: :key expects () (a singleton), (index), (parent index) or ((parent …) index)"
@@ -333,50 +336,70 @@ pub(crate) fn def_kind_slots<'e>(
             )));
         };
         if slot == "key" {
-            let key_name = |name: &Expression| match name {
-                Expression::Symbol(name) if name != "nil" => Ok(name.clone()),
-                _ => Err(key_shape()),
-            };
-            key = Some(match strip_source_origin_wrappers(value.clone()) {
-                Expression::List(names) | Expression::QuoteList(names) => match names.as_slice() {
-                    [] => KindKey::Singleton,
-                    [index] => KindKey::Indexed {
-                        index: key_name(index)?,
-                    },
-                    [parent, index] => {
-                        let parents = match strip_source_origin_wrappers(parent.clone()) {
-                            // `((p1 p2 …) index)`: under any of several kinds.
-                            Expression::List(parents) | Expression::QuoteList(parents)
-                                if !parents.is_empty() =>
-                            {
-                                parents
-                                    .iter()
-                                    .map(|parent| {
-                                        key_name(&strip_source_origin_wrappers(parent.clone()))
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?
-                            }
-                            parent => vec![key_name(&parent)?],
-                        };
-                        if let Some(duplicate) = first_duplicate(&parents) {
-                            return Err(CompilerError::Message(format!(
-                                "def-kind {name}: :key names parent {duplicate} twice"
-                            )));
-                        }
-                        KindKey::Under {
-                            parents,
-                            index: key_name(index)?,
-                        }
-                    }
-                    _ => return Err(key_shape()),
-                },
-                Expression::Symbol(nil) if nil == "nil" => KindKey::Singleton,
-                _ => return Err(key_shape()),
-            });
+            key_value = Some(value);
         }
         slots.push((slot, value));
     }
-    Ok((slots, key))
+    let Some(value) = key_value else {
+        return Ok((slots, None));
+    };
+    let host = slots.iter().any(|(slot, _)| slot == "host");
+    let key_name = |name: &Expression| match name {
+        Expression::Symbol(name) if name != "nil" => Ok(name.clone()),
+        _ => Err(key_shape()),
+    };
+    let key = match strip_source_origin_wrappers(value.clone()) {
+        Expression::List(names) | Expression::QuoteList(names) if !host && !names.is_empty() => {
+            let names = names
+                .iter()
+                .map(|name| key_name(&strip_source_origin_wrappers(name.clone())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    CompilerError::Message(format!(
+                        "def-kind {name}: a view-local :key (no :host) is a list of names"
+                    ))
+                })?;
+            if let Some(duplicate) = first_duplicate(&names) {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {name}: :key names {duplicate} twice"
+                )));
+            }
+            KindKey::Local { names }
+        }
+        Expression::List(names) | Expression::QuoteList(names) => match names.as_slice() {
+            [] => KindKey::Singleton,
+            [index] => KindKey::Indexed {
+                index: key_name(index)?,
+            },
+            [parent, index] => {
+                let parents = match strip_source_origin_wrappers(parent.clone()) {
+                    // `((p1 p2 …) index)`: under any of several kinds.
+                    Expression::List(parents) | Expression::QuoteList(parents)
+                        if !parents.is_empty() =>
+                    {
+                        parents
+                            .iter()
+                            .map(|parent| key_name(&strip_source_origin_wrappers(parent.clone())))
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                    parent => vec![key_name(&parent)?],
+                };
+                if let Some(duplicate) = first_duplicate(&parents) {
+                    return Err(CompilerError::Message(format!(
+                        "def-kind {name}: :key names parent {duplicate} twice"
+                    )));
+                }
+                KindKey::Under {
+                    parents,
+                    index: key_name(index)?,
+                }
+            }
+            _ => return Err(key_shape()),
+        },
+        Expression::Symbol(nil) if nil == "nil" => KindKey::Singleton,
+        _ => return Err(key_shape()),
+    };
+    Ok((slots, Some(key)))
 }
 
 /// The first name `names` holds twice, if any (a `:key`'s parent list).
@@ -410,7 +433,10 @@ fn def_kind_entries(value: &Expression) -> Option<Vec<Expression>> {
 /// `__def-keyed-kind`) for a `defwidget` earlier in the same unit, which
 /// registers only when it runs.
 pub(crate) fn kind_name_widget_collision(name: &str, key: &KindKey) -> Option<String> {
-    if !matches!(key, KindKey::Singleton | KindKey::Indexed { .. }) {
+    if !matches!(
+        key,
+        KindKey::Singleton | KindKey::Indexed { .. } | KindKey::Local { .. }
+    ) {
         return None;
     }
     let what = if crate::widgets::is_builtin_widget_name(name) {
@@ -421,8 +447,8 @@ pub(crate) fn kind_name_widget_collision(name: &str, key: &KindKey) -> Option<St
         return None;
     };
     Some(format!(
-        "def-kind {name}: '{name}' is {what}; a :key () or :key (index) kind binds its name, \
-         which would shadow the widget (and `({name} …)` calls get widget source props); \
+        "def-kind {name}: '{name}' is {what}; a :key () or :key (index) kind binds its name \
+         (as does a view-local kind), which would shadow the widget (and `({name} …)` calls get widget source props); \
          rename the kind"
     ))
 }
@@ -2347,7 +2373,10 @@ impl<'a> Compiler<'a> {
         }
         let name_idx = self.use_string_constant(name);
         self.emit(OpCode::PushSymbol(name_idx));
-        let key_idx = self.use_string_constant("key");
+        let key_idx = self.use_string_constant(match key {
+            KindKey::Local { .. } => "local-key",
+            _ => "key",
+        });
         self.emit(OpCode::PushKeyword(key_idx));
         // The key names as data: `(index)`, `(parent index)`, or
         // `((p1 p2 …) index)` for several parent kinds.
@@ -2355,19 +2384,26 @@ impl<'a> Compiler<'a> {
             KindKey::Created | KindKey::Singleton => (&[], None),
             KindKey::Indexed { index } => (&[], Some(index)),
             KindKey::Under { parents, index } => (parents, Some(index)),
+            // `:local-key (name …)`, all names as data.
+            KindKey::Local { names } => (names.as_slice(), None),
         };
         for parent in parents {
             let parent_idx = self.use_string_constant(parent);
             self.emit(OpCode::PushSymbol(parent_idx));
         }
-        if parents.len() > 1 {
+        let local = matches!(key, KindKey::Local { .. });
+        if parents.len() > 1 && !local {
             self.emit(OpCode::MakeList(parents.len()));
         }
         if let Some(index) = index {
             let index_idx = self.use_string_constant(index);
             self.emit(OpCode::PushSymbol(index_idx));
         }
-        let parts = usize::from(!parents.is_empty()) + usize::from(index.is_some());
+        let parts = if local {
+            parents.len()
+        } else {
+            usize::from(!parents.is_empty()) + usize::from(index.is_some())
+        };
         if parts == 0 {
             self.emit(OpCode::PushNil);
         } else {

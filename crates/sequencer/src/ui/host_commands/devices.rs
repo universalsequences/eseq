@@ -183,10 +183,10 @@ fn param_edit(
         if current == value {
             return Ok(());
         }
-        let script = ScriptEdit::begin(app, ctx);
+        let script = ScriptEdit::begin(app, ctx, true);
         let edit = (owner, device, param_idx);
         let changed = base_edit(app, editor, ctx, &script, edit, &pdesc, value);
-        script.end(app, ctx, true, changed);
+        script.end(app, ctx, changed);
         return Ok(());
     }
     // Only a bus effect has no track.
@@ -226,7 +226,7 @@ fn param_edit(
     let Some(command) = command.filter(|_| !steps.is_empty()) else {
         return Ok(());
     };
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, true);
     let changed = script.apply(app, command);
     if changed {
         let invalidations = &ctx.shared.ui_invalidations;
@@ -245,7 +245,7 @@ fn param_edit(
         }
     }
     // A drag's locks of the same steps join one entry (eseq-0l17.58).
-    script.end(app, ctx, true, changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 
@@ -321,7 +321,7 @@ pub(super) fn lock_steps(
     if steps.is_empty() {
         return;
     }
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, true);
     let changed = script.apply(app, command(steps.clone()));
     if changed {
         let rows = plock_rows(shown, shown_locked, &steps, lock.is_some());
@@ -335,7 +335,7 @@ pub(super) fn lock_steps(
         refresh(editor, app, ctx, rows);
     }
     // A drag's locks of the same steps join one entry (eseq-0l17.58).
-    script.end(app, ctx, true, changed);
+    script.end(app, ctx, changed);
 }
 
 /// Set a device param's base (stored units) through its family's history
@@ -427,7 +427,7 @@ fn device_edit(
             if f32::from_bits(current.load(Ordering::Relaxed)) == note {
                 return Ok(());
             }
-            let script = ScriptEdit::begin(app, ctx);
+            let script = ScriptEdit::begin(app, ctx, true);
             let command = app::AppCommand::SetInstrumentBaseNoteOffset {
                 track: owner,
                 value: note,
@@ -441,7 +441,7 @@ fn device_edit(
                         change: InstrumentInvalidation::BaseNote,
                     });
             }
-            script.end(app, ctx, true, changed);
+            script.end(app, ctx, changed);
             Ok(())
         }
         other => match StripControl::from_field(other) {
@@ -478,12 +478,12 @@ fn strip_edit(
         return Ok(());
     }
     let wanted = control.parse(value)?;
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, control.drags());
     let changed = script.apply(app, control.command(owner, slot_idx, wanted));
     if changed {
         rack_slot_strip_applied(editor, app, ctx, owner, slot_idx, control);
     }
-    script.end(app, ctx, control.drags(), changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 

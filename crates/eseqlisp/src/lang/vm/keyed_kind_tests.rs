@@ -1179,3 +1179,287 @@ fn a_kind_that_binds_a_widget_name_is_a_compile_error() {
     eval(&mut vm, "(def-kind knob :key (track index) :host ((value :number)))");
     assert!(vm.instance_kind_schema("scratch:knob").is_some());
 }
+
+/// eseq-0l17.62: a `:key` of names with no `:host` is view-local state Lisp
+/// owns. The constructor answers the instance under its arguments, creating
+/// it on first call; equal arguments answer the same instance, and each
+/// instance's fields dirty only their own readers.
+#[test]
+fn a_view_local_kind_creates_one_instance_per_key() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        "(def-kind adsr-gesture :key (scope section) :state ((attack false) (decay false)))",
+    );
+    let core = eval(&mut vm, r#"(adsr-gesture "core" -1)"#);
+    let Value::Instance(core_id) = core else {
+        panic!("expected an instance, got {core:?}");
+    };
+    assert_eq!(eval(&mut vm, r#"(adsr-gesture "core" -1)"#), core);
+    assert_eq!(
+        eval(
+            &mut vm,
+            r#"(= (adsr-gesture "core" -1) (adsr-gesture "core" 0))"#
+        ),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval(
+            &mut vm,
+            r#"(= (adsr-gesture "core" 0) (adsr-gesture "core" -0))"#
+        ),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval(&mut vm, r#"(str (adsr-gesture "core" -1))"#),
+        Value::String(format!("<adsr-gesture#{core_id} [\"core\" -1]>"))
+    );
+    assert_eq!(
+        eval(
+            &mut vm,
+            r#"(let ((g (adsr-gesture "core" -1))) (str g.key))"#
+        ),
+        Value::String("(\"core\" -1)".into())
+    );
+    assert!(core_id >= KEYED_INSTANCE_ID_BASE);
+    eval(
+        &mut vm,
+        r#"(def flag (scope) (let ((g (adsr-gesture scope -1))) (if g.attack "a" "-")))
+           (effect-buffer "*a*" (label (flag "core")))
+           (effect-buffer "*b*" (label (flag "triton")))"#,
+    );
+    assert_eq!(rendered_targets(&mut vm), vec!["*a*", "*b*"]);
+    eval(
+        &mut vm,
+        r#"(let ((g (adsr-gesture "triton" -1))) (set! g.attack true))"#,
+    );
+    assert_eq!(rendered_targets(&mut vm), vec!["*b*"]);
+    assert_eq!(eval(&mut vm, r#"(flag "core")"#), Value::String("-".into()));
+    assert_eq!(vm.local_instances("adsr-gesture").len(), 3);
+    // Keyword, symbol and boolean parts key too; a binding works as usual.
+    eval(&mut vm, "(def g (adsr-gesture :env 'amp))");
+    eval(&mut vm, "(def held #'g.decay)");
+    eval(&mut vm, "(set! g.decay true)");
+    assert_eq!(
+        eval(&mut vm, "(let ((g (adsr-gesture :env 'amp))) g.decay)"),
+        Value::Bool(true)
+    );
+    // Re-evaluating the def-kind keeps every instance and its values.
+    eval(
+        &mut vm,
+        "(def-kind adsr-gesture :key (scope section) :state ((attack false) (decay false)))",
+    );
+    assert_eq!(eval(&mut vm, r#"(adsr-gesture "core" -1)"#), core);
+    assert_eq!(
+        eval(&mut vm, "(let ((g (adsr-gesture :env 'amp))) g.decay)"),
+        Value::Bool(true)
+    );
+}
+
+/// `(drop-instance g)` drops a view-local instance: its handle turns stale,
+/// readers of its constructor re-run, and the next call creates a fresh one.
+#[test]
+fn drop_instance_drops_a_view_local_instance_and_its_readers_re_run() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        "(def-kind row-ui :key (slot) :state ((open false)))",
+    );
+    eval(&mut vm, "(def r (row-ui 3))");
+    eval(&mut vm, "(set! r.open true)");
+    // A reader that only holds the instance (a binding, no by-value read)
+    // still re-runs when its key's instance goes.
+    eval(
+        &mut vm,
+        r#"(effect-buffer "*row*" (let ((u (row-ui 3))) (do (def bound #'u.open) (label "x"))))"#,
+    );
+    assert_eq!(rendered_targets(&mut vm), vec!["*row*"]);
+    assert_eq!(eval(&mut vm, "(drop-instance r)"), Value::Bool(true));
+    assert_eq!(rendered_targets(&mut vm), vec!["*row*"]);
+    assert_eq!(eval(&mut vm, "r.open"), Value::Bool(false), "stale handle");
+    assert_eq!(eval(&mut vm, "(drop-instance r)"), Value::Bool(false));
+    assert_eq!(eval(&mut vm, "(= r (row-ui 3))"), Value::Bool(false));
+    assert_eq!(
+        eval(&mut vm, "(let ((u (row-ui 3))) u.open)"),
+        Value::Bool(false),
+        "fresh defaults"
+    );
+    // Host and singleton instances are not Lisp's to drop.
+    vm.register_keyed_instance("track", &[0]).expect("register");
+    assert!(error(&mut vm, "(drop-instance (track 0))").contains("view-local kind"));
+    assert!(error(&mut vm, "(drop-instance log)").contains("view-local kind"));
+    assert!(error(&mut vm, "(drop-instance 3)").contains("view-local kind"));
+}
+
+#[test]
+fn view_local_keys_are_checked_and_the_host_cannot_create_them() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        "(def-kind pick :key (scope section) :state ((on false)))",
+    );
+    let message = error(&mut vm, r#"(pick "a")"#);
+    assert!(
+        message.contains("(pick scope section) takes 2 key values"),
+        "{message}"
+    );
+    let message = error(&mut vm, r#"(pick "a" (list 1))"#);
+    assert!(message.contains("takes 2 key values"), "{message}");
+    assert!(error(&mut vm, r#"(pick "a" nil)"#).contains("takes 2 key values"));
+    assert_eq!(
+        vm.register_keyed_instance("pick", &[1, 2])
+            .unwrap_err()
+            .to_string(),
+        "pick instances are view-local; create them with (pick key …)"
+    );
+    assert_eq!(
+        vm.create_instance(7, "scratch:pick")
+            .unwrap_err()
+            .to_string(),
+        "pick instances are view-local; create them with (pick key …)"
+    );
+    // Any number of names; the key's length is fixed until restart.
+    eval(&mut vm, "(def-kind cell-ui :key (a b c) :state ((n 0)))");
+    eval(&mut vm, "(cell-ui 1 2 3)");
+    assert!(error(&mut vm, "(def-kind cell-ui :key (a b) :state ((n 0)))").contains("restart"));
+    let errors = compile_errors(&mut vm, "(def-kind bad :key ((a b) c) :state ((n 0)))");
+    assert!(
+        errors.contains("a view-local :key (no :host) is a list of names"),
+        "{errors}"
+    );
+    let errors = compile_errors(&mut vm, "(def-kind bad :key (a a) :state ((n 0)))");
+    assert!(errors.contains(":key names a twice"), "{errors}");
+    let errors = compile_errors(&mut vm, "(def-kind knob :key (a) :state ((n 0)))");
+    assert!(errors.contains("'knob' is a built-in widget"), "{errors}");
+    let errors = compile_errors(&mut vm, "(def-kind bad :key (a) :state ((key 0)))");
+    assert!(
+        errors.contains("built-in field of a keyed kind"),
+        "{errors}"
+    );
+}
+
+/// A key part that is an instance makes the view-local instance its child:
+/// dropping the parent drops it, and a stale parent answers nil.
+#[test]
+fn a_view_local_instance_keyed_by_an_instance_goes_with_it() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        "(def-kind track-ui :key (track row) :state ((open false)))",
+    );
+    let track = vm.register_keyed_instance("track", &[0]).expect("register");
+    eval(&mut vm, "(def t0 (track 0))");
+    let Value::Instance(ui) = eval(&mut vm, "(track-ui t0 2)") else {
+        panic!("expected an instance");
+    };
+    assert!(vm.instance_is_live(ui));
+    assert!(vm.keyed_children(track).contains(&ui));
+    assert!(vm.drop_instance(track));
+    assert!(!vm.instance_is_live(ui));
+    assert_eq!(eval(&mut vm, "(track-ui t0 2)"), Value::Nil);
+    assert!(vm.local_instances("track-ui").is_empty());
+}
+
+/// eseq-0l17.23: `(describe-kind 'k)` lists every field with its group,
+/// type and options.
+#[test]
+fn describe_kind_lists_every_field_with_its_options() {
+    let (mut vm, _) = vm();
+    let Value::String(text) = eval(&mut vm, "(describe-kind 'track)") else {
+        panic!("describe-kind returns text");
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "kind scratch:track: keyed (:key (index)); built-in fields: id, kind, key"
+    );
+    let line = |name: &str| {
+        lines
+            .iter()
+            .find(|line| line.split_whitespace().nth(1) == Some(name))
+            .unwrap_or_else(|| panic!("no line for {name}: {text}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(line("name"), r#":host name :string :doc "Track name""#);
+    assert_eq!(
+        line("volume"),
+        ":host volume :number :set set-volume :range (0 1)"
+    );
+    assert_eq!(line("muted"), ":host muted :bool :set seq-set-mute");
+    assert_eq!(line("steps"), ":host steps (list-of step)");
+    assert_eq!(line("open"), ":state open :bool :default false");
+    assert_eq!(lines.len(), 8, "{text}");
+    // A singleton, a view-local kind; unknown names are errors.
+    let Value::String(text) = eval(&mut vm, "(describe-kind \"log\")") else {
+        panic!("text");
+    };
+    assert!(
+        text.starts_with("kind scratch:log: as a singleton (:key ()); built-in fields: id, kind")
+    );
+    eval(
+        &mut vm,
+        "(def-kind pick :key (scope section) :state ((on false)))",
+    );
+    let Value::String(text) = eval(&mut vm, "(describe-kind 'pick)") else {
+        panic!("text");
+    };
+    assert!(
+        text.starts_with("kind scratch:pick: view-local (:key (scope section))"),
+        "{text}"
+    );
+    assert!(error(&mut vm, "(describe-kind 'nope)").contains("no kind named 'nope'"));
+}
+
+/// eseq-0l17.23: with the re-render log on, a by-value field read in a
+/// view logs the field and the function that read it each time a change of
+/// that field re-renders the view; a binding (`#'`) logs nothing.
+#[test]
+fn the_rerender_log_names_the_field_and_the_reader() {
+    let (mut vm, _) = vm();
+    let id = vm.register_keyed_instance("track", &[0]).expect("register");
+    // On before the view renders: a read is located when it happens.
+    assert_eq!(eval(&mut vm, "(rerender-log! true)"), Value::Bool(true));
+    eval(
+        &mut vm,
+        r#"(def t0 (track 0))
+           (def row-label (t) (label t.name))
+           (effect-buffer "*row*"
+             (v-stack (subtree :key :row-name (row-label t0))
+                      (hslider :value #'t0.volume)))"#,
+    );
+    rendered_targets(&mut vm);
+    eval(&mut vm, "(rerender-reasons)");
+    push(&mut vm, id, "name", Value::String("Kick".into()));
+    push(&mut vm, id, "volume", Value::Number(0.5));
+    let reasons = eval(&mut vm, "(rerender-reasons)");
+    let Value::List(lines) = reasons else {
+        panic!("a list");
+    };
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|line| match &*line.borrow() {
+            Value::String(line) => line.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        vec![format!(
+            "[rerender] subtree :row-name (*row*): <track#{id} [0]>.name read in row-label"
+        )]
+    );
+    assert_eq!(
+        eval(&mut vm, "(rerender-reasons)"),
+        Value::List(Vec::new()),
+        "cleared"
+    );
+    eval(&mut vm, "(rerender-log! false)");
+    push(&mut vm, id, "name", Value::String("Snare".into()));
+    assert_eq!(
+        eval(&mut vm, "(rerender-reasons)"),
+        Value::List(Vec::new()),
+        "off"
+    );
+}

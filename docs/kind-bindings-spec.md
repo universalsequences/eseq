@@ -66,6 +66,7 @@ written with dotted fields. Kinds differ on two axes.
 | created (no `:key`, today's kinds) | created by the host on request (Packages tab, `:on-create`), with lifecycles, tabs, views | `neural`, `jaki` |
 | keyed (`:key (index)`) | projections of host things, resolved by key, never created by hand | `track`, `step`, `scene` |
 | singleton (`:key ()`) | exactly one, bound to the kind's name | `transport`, `scene-menu` |
+| view-local (`:key (a b …)`, no `:host`) | created by Lisp, one per key, by the constructor (§3.1) | `adsr-gesture` |
 
 **Where each field is stored** (the field group):
 
@@ -149,6 +150,9 @@ The rules an author learns:
 - `()`: singleton. `def-kind` binds the kind's name, in the defining module,
   to its one instance, so `transport.playing` and
   `(set! scene-menu.open true)` work directly.
+- `(a b …)` with no `:host` group: view-local (eseq-0l17.62, below). Lisp
+  owns the instances: `(adsr-gesture scope section)` returns the instance
+  for that key, creating it on first call.
 
 Constructors and singleton bindings are ordinary module definitions: a view
 gets the host ones by importing them (§3.4). Kind *names* are a separate,
@@ -254,6 +258,50 @@ Built (stage 3, keyed kinds):
   `fmt` and the minibuffer echo) print `<track#41 [3]>`, `<step#902 [41 12]>`,
   `<transport>`, and a dropped keyed instance as `<track#41>`;
   `format_lisp_value` without a VM still prints `<instance:id>`.
+
+Built (eseq-0l17.62, view-local keyed state): a `:key` of names on a kind
+with no `:host` group is **view-local** (`KindKey::Local`). Such a kind has
+nothing for a host to publish, so Lisp creates its instances; the rule is
+the declaration's, not a flag (adding a `:host` group makes it a host kind
+and is a key-shape change, "restart to change its :key"):
+
+```lisp
+(def-kind adsr-gesture
+  :key (scope section)
+  :state ((attack false) (decay false) (sustain false) (release false)))
+
+(let ((g (adsr-gesture "core" -1)))   ; created on first call, then the same
+  (set! g.attack true))
+(drop-instance g)                      ; true; readers of its key re-run
+```
+
+- Any number of key names (one or more, no duplicates, no parent lists:
+  `((a b) c)` is a compile error). The compiler emits the key as
+  `:local-key` to `__def-keyed-kind`; the name is bound to the
+  constructor, so the widget-name check applies (§3.1 above) and hot
+  reload counts it as a definition.
+- Key values (`LocalKeyPart`): numbers (`-0` is `0`), strings, keywords,
+  symbols, booleans and instances; nil, lists, maps and functions are an
+  error naming the call (`(adsr-gesture scope section) takes 2 key values
+  …`), as is the wrong count. Equal arguments return the same instance.
+- Instances are ordinary keyed ones: ids from `KEYED_INSTANCE_ID_BASE`,
+  built-in fields `id`, `kind` and `key` (the key values as a list), typed
+  `:state` cells, `#'` bindings, printing `<adsr-gesture#41 ["core" -1]>`,
+  tombstones once dropped. Re-evaluating the `def-kind` keeps every
+  instance and its values; the number of key names is fixed until restart.
+- A constructor call records a dependency on that key's source
+  (`%keys/<kind id>`, field = the key's text), so a reader re-runs when its
+  instance is dropped and gets a fresh one at the fields' defaults.
+- `(drop-instance x)` drops a view-local instance (true when it was live);
+  any other value, a host or singleton instance included, is an error.
+  An instance key part makes the view-local instance that instance's
+  child: dropping the parent (a track deleted) drops it, and a constructor
+  call naming a dropped instance answers nil instead of creating one.
+- The host never creates them: `register_keyed_instance` and
+  `create_instance` on a view-local kind are errors
+  (`InstanceError::LocalKind`, `adsr-gesture instances are view-local;
+  create them with (adsr-gesture key …)`). `VM::local_instances(kind)`
+  lists the live ones.
 
 ### 3.2 `:host`
 
@@ -500,6 +548,11 @@ Built (stage 4):
 
 Nested chains (`transport.scene.bank.label`) are repeated `GetField`s, each
 recording its own dependency.
+
+A view-local kind's constructor (§3.1, eseq-0l17.62) is a read too: it
+depends on its key's source, which moves only when the instance is dropped
+(or created), so a view that keeps per-scope state in `(adsr-gesture scope
+section)` re-renders on its fields, never on the lookup.
 
 ## 6. Writing
 
@@ -916,6 +969,41 @@ Built (stage 4):
 - `(describe-kind 'track)` prints the fields with group, type, `:set`,
   `:range` and `:doc`.
 
+Built (eseq-0l17.23):
+
+- **Re-render reason log.** `ESEQ_RERENDER_LOG=1` (any build) turns it on
+  at startup and prints to stderr; `(rerender-log! true)` / `false` turns
+  it on or off from Lisp and `(rerender-reasons)` returns the lines kept
+  since the last call (the newest 512), oldest first. Each effect or
+  subtree a changed source dirties logs one line, the source an instance
+  field (`<track#41 [3]>.muted`), a constructor key (`(track 3)`) or a
+  `namespace.field`, and where the effect read it (the running function,
+  and its file when it has one):
+  `[rerender] subtree :row-name (*row*): <track#41 [0]>.name read in row-label (view.lisp)`.
+  Chunks carry no line table, so the site is the function, not a line. A
+  read is located when it happens: with the log turned on from Lisp, an
+  effect's reads before then are logged without a site until it re-runs.
+  `#'` bindings repaint without re-running, so they never log (which is
+  the point: a line in a hot view is a by-value read to turn into a
+  binding). `VM::set_rerender_log` / `take_rerender_reasons` are the Rust
+  side; the existing `ESEQ_SCENE_TRACE` `[mark-dirty]` trace is unchanged.
+- **`(describe-kind 'k)`** returns the kind as text (the REPL echoes it):
+  `k` is a kind id, or a bare name (the current module's kind first, else
+  the one kind with that name; ambiguous or unknown names are errors). A
+  first line with the kind id, how its instances come (`created (no
+  :key)`, `as a singleton (:key ())`, `keyed (:key (index))`, `view-local
+  (:key (scope section))`) and its built-in fields; `:keymap`, `:view` and
+  `:on-create` when present; then one line per field, `:host` then
+  `:state` then `:document`, with its type and options: `:set` (the
+  setter's name), `:range`, `:doc` on `:host` fields, `:default` on the
+  others:
+
+  ```
+  kind eseq.kinds:track: keyed (:key (index)); built-in fields: id, kind, key
+    :host     volume         :number  :set seq-set-track-volume  :range (0 1)
+    :state    open           :bool  :default false
+  ```
+
 ## 11. Migration
 
 - `SEQ.x`, `bind-seq`, `bind-seq-nth`, `bind`, `reactive-get` keep working.
@@ -1043,6 +1131,16 @@ its instance and field.
      `:gap 1` would also part its two rows, which touched. No factory view
      outside `ui/effects/*` hand-compensated a grid gap (`ui/mixer.lisp`'s
      pattern cells are inset in their columns, not gapped).
+   - eseq-0l17.27: the scene menu's missing focus highlight (the capture
+     opens it from `capture-after-sync`, then makes `*sequencer*` the
+     active tile) was not the subtree: only the active tile's widget focus
+     followed relayouts, so once the menu's tile (`*fx*`) went inactive and
+     was laid out afresh, its leaf kept a widget id the new layout gave
+     another node (800024 vs 800019) and no item painted focused. An
+     inactive tile's relayout now remaps the leaf's focus the way the
+     active tile's does (`widget_focus::remap_leaf_focus_to_layout`: stable
+     widget id, stable key and type, subtree root and type, else the same
+     id with the same identity; a widget that is gone leaves it unfocused).
    - `metal_seq capture --noui` (bare root) with a host-kinds sync
      (`HostKinds::sync_with` over `KindsHandles`), so kinds views render
      headlessly.
@@ -1849,7 +1947,11 @@ its instance and field.
      binds its flags and reads nothing by value (no first-drag re-render;
      two custom UIs on screen whose dragged editors share a section number
      light each other's readouts during that drag: keyed `:state` instances
-     cannot be created from Lisp). The keys tab resolves the instrument's
+     could not be created from Lisp). eseq-0l17.62 added view-local keyed
+     kinds (§3.1), so the pool can now be replaced by one
+     `(def-kind adsr-gesture :key (scope section) :state …)` and
+     `(adsr-gesture scope section)` per editor (follow-up for the panels
+     lane, in `effects/custom-ui-sections.lisp`). The keys tab resolves the instrument's
      key locks once per render (`key-locks-of`). The p-lock projections
      publish only the rows their COMPAT readers use (track-level `-on` /
      `-def`, rack macro and slot-control `-any`). The tick no longer
@@ -3415,6 +3517,23 @@ Built (7b):
   (`app::edit::apply_command_beside_gesture`, over
   `UndoManager::suspend_gesture` / `resume_gesture`): its own entry, the
   drag neither split nor joined.
+  Since eseq-0l17.55 `ScriptEdit::begin` takes whether the edit is
+  continuous (and `end` no longer does). A non-continuous script edit
+  (a flag: `(set! rs.muted true)`, voices, choke, enabled) landing during
+  the script's *own* drag is applied beside it, the drag staying open, when
+  `app::edit::command_is_disjoint_from_active_gesture` says its command
+  touches another device than the drag's pending device-value entry (a
+  filter param drag with a rack slot's mute toggled mid-drag: one entry
+  for the drag, one for the mute). Device values are recorded as
+  whole-device snapshots (`DeviceValuesPatch`; a rack slot's covers its
+  strip, p-locks, instrument and effects), so an entry of the *same*
+  device beside the open drag would undo to states nobody saw (undoing the
+  drag drops the flag, undoing the flag restores mid-drag values). Those
+  edits, and any edit without a command to check (`apply_with`) or during
+  a drag whose pending entry is not a device-value snapshot, keep the
+  earlier behaviour: the flag ends the drag's entry and the drag's later
+  frames start another. The same overlap applies to the user-drag case
+  above (pre-existing, not changed here).
 - **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
   (eseq-0l17.36, built: §14.2f); modulation display, process mapping, tensors, base
   note, key locks, rack and project macros, the variant chip list, the

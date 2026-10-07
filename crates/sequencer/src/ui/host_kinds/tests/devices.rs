@@ -1222,6 +1222,83 @@ fn rack_slot_strip_setters_follow_the_value_rule_through_history() {
     assert_eq!(h.rack_slot().gain, slot.gain);
 }
 
+/// eseq-0l17.55: a flag `set!` landing during a script drag (the pointer
+/// down) of another device is an undo entry of its own beside the drag,
+/// which stays open: a param drag with a rack slot's mute toggled mid-drag
+/// is one entry for the drag and one for the mute. A flag of the dragged
+/// device itself still ends the drag's entry (whole-device undo snapshots
+/// cannot interleave), so every undo lands on a state the user saw.
+#[test]
+fn a_flag_set_mid_script_drag_lands_beside_the_drag() {
+    let mut h = Harness::new();
+    h.add_effect(0, "Filter");
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        r#"(def t0 (track 0)) (def flt (first t0.devices)) (def cutoff (device-param flt "cutoff"))
+           (def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))"#,
+    );
+    let cutoff = |h: &mut Harness| num(h.eval_all("cutoff.base"));
+    let base = cutoff(&mut h);
+    let gain = h.rack_slot().gain;
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in [600, 700] {
+        h.eval_all(&format!("(set! cutoff.base {value})"));
+        h.drain();
+    }
+    h.eval_all("(toggle! rs.muted)");
+    h.drain();
+    assert!(
+        h.app.history.active_gesture().is_some(),
+        "the drag stays open"
+    );
+    h.eval_all("(set! cutoff.base 800)");
+    h.drain();
+    // The release frame joins the drag and ends it.
+    h.gesture.pointer_down = false;
+    h.eval_all("(set! cutoff.base 850)");
+    h.drain_and_sync();
+    assert!(h.app.history.active_gesture().is_none(), "ended");
+    assert_eq!((cutoff(&mut h), h.rack_slot().mute), (850.0, true));
+    assert_eq!(
+        h.app.history.undo_len(),
+        before + 2,
+        "one for the drag, one for the mute"
+    );
+    // The drag closed last: it undoes first, as a whole, then the mute.
+    app::edit::undo(&mut h.app);
+    h.sync();
+    assert_eq!((cutoff(&mut h), h.rack_slot().mute), (base, true));
+    app::edit::undo(&mut h.app);
+    h.sync();
+    assert_eq!((cutoff(&mut h), h.rack_slot().mute), (base, false));
+
+    // A flag of the dragged device: the drag's entry ends at the flag and
+    // its later frames start another, so undo walks back through states
+    // that existed.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    h.eval_all("(set! rs.gain 0.3)");
+    h.drain();
+    h.eval_all("(toggle! rs.muted)");
+    h.drain();
+    h.eval_all("(set! rs.gain 0.4)");
+    h.drain();
+    h.gesture.pointer_down = false;
+    h.eval_all("(set! rs.gain 0.45)");
+    h.drain_and_sync();
+    assert_eq!(h.app.history.undo_len(), before + 3);
+    let state = |h: &Harness| (h.rack_slot().gain, h.rack_slot().mute);
+    assert_eq!(state(&h), (0.45, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (0.3, true));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (0.3, false));
+    app::edit::undo(&mut h.app);
+    assert_eq!(state(&h), (gain, false));
+}
+
 #[test]
 fn rack_slot_strip_base_reads_round_trip_even_out_of_range() {
     let mut h = Harness::new();

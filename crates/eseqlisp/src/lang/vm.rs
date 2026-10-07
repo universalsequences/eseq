@@ -629,6 +629,54 @@ fn value_change_scope(old: &Value, new: &Value) -> Option<ValueChange> {
 /// `ESEQLISP_PROFILE_CLONES=1` to log, once per second, cumulative clone
 /// time and allocation counts per site (each cloned Value node allocates
 /// one `Rc<RefCell<..>>`, so the node count is the allocation proxy).
+/// The re-render reason log (kind-bindings spec §10, eseq-0l17.23): while
+/// on, every effect or subtree a changed source dirties logs one line naming
+/// the source (an instance field as `<track#41 [3]>.muted`) and where the
+/// effect read it (the function, and its file), so an accidental by-value
+/// read in a hot view shows up as the field that keeps re-rendering it:
+///
+/// `[rerender] subtree track-row-3 (*sequencer*): <track#41 [3]>.muted read in track-row (mini-daw.lisp)`
+///
+/// `ESEQ_RERENDER_LOG=1` turns it on from startup and prints each line to
+/// stderr; `(rerender-log! true)` turns it on from Lisp, and
+/// `(rerender-reasons)` returns (and clears) the lines kept since.
+struct RerenderLog {
+    stderr: bool,
+    /// The newest lines, at most [`RerenderLog::KEEP`].
+    lines: std::collections::VecDeque<String>,
+    /// Where each (source, reader) edge was read: the reading function and
+    /// its file, recorded while the log is on.
+    sites: HashMap<(NodeId, NodeId), Rc<str>>,
+}
+
+impl RerenderLog {
+    const KEEP: usize = 512;
+
+    fn new(stderr: bool) -> Self {
+        Self {
+            stderr,
+            lines: std::collections::VecDeque::new(),
+            sites: HashMap::new(),
+        }
+    }
+
+    fn from_env() -> Option<Self> {
+        std::env::var("ESEQ_RERENDER_LOG")
+            .is_ok_and(|value| !value.is_empty() && value != "0")
+            .then(|| Self::new(true))
+    }
+
+    fn push(&mut self, line: String) {
+        if self.stderr {
+            eprintln!("{line}");
+        }
+        if self.lines.len() == Self::KEEP {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+    }
+}
+
 pub fn clone_probe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_PROFILE_CLONES").is_some())
@@ -2944,6 +2992,9 @@ pub struct VM {
     /// errors into Lisp `nil`, and violations must never be swallowed that
     /// way) and [`VM::fail_native_call`].
     pending_native_error: Option<VMError>,
+    /// The re-render reason log (kind-bindings spec §10, eseq-0l17.23):
+    /// `Some` while on (`ESEQ_RERENDER_LOG=1`, or `(rerender-log! true)`).
+    rerender_log: Option<RerenderLog>,
     active_execution_origins: Vec<Rc<ExpansionOrigin>>,
     /// Kind schemas and per-instance field cells (instance-kinds spec §4).
     instances: instances::InstanceStore,
@@ -3238,6 +3289,55 @@ pub fn register_core_natives(vm: &mut VM) {
             Value::Instance(*id as InstanceId)
         }
         _ => Value::Nil,
+    });
+
+    // (rerender-log! on) turns the re-render reason log on or off;
+    // (rerender-reasons) → its lines since the last call, oldest first
+    // (kind-bindings spec §10).
+    vm.register_native_with_vm("rerender-log!", |args, vm| {
+        let on = !matches!(args.first(), None | Some(Value::Nil | Value::Bool(false)));
+        vm.set_rerender_log(on);
+        Value::Bool(on)
+    });
+    vm.register_native_with_vm("rerender-reasons", |_args, vm| {
+        list_from_values(vm.take_rerender_reasons().into_iter().map(Value::String))
+    });
+
+    // (describe-kind 'k) → the kind's fields as text (kind-bindings spec
+    // §10): group, name, type, :default, :set, :range, :doc.
+    vm.register_native_with_vm("describe-kind", |args, vm| {
+        let result = match args.as_slice() {
+            [Value::Symbol(name) | Value::String(name) | Value::Keyword(name)] => {
+                vm.describe_kind(name)
+            }
+            _ => Err("(describe-kind 'name) takes a kind name".to_string()),
+        };
+        match result {
+            Ok(text) => Value::String(text),
+            Err(message) => {
+                vm.fail_native_call(VMError::Instance(message));
+                Value::Nil
+            }
+        }
+    });
+
+    // (drop-instance x) → whether the view-local instance x was live; it
+    // turns stale and its constructor's readers re-run (kind-bindings spec
+    // §3.1, eseq-0l17.62). Host and singleton instances are an error.
+    vm.register_native_with_vm("drop-instance", |args, vm| {
+        let result = match args.as_slice() {
+            [value] => vm.drop_local_instance(value),
+            _ => Err(VMError::Instance(
+                "(drop-instance x) takes one view-local instance".to_string(),
+            )),
+        };
+        match result {
+            Ok(dropped) => Value::Bool(dropped),
+            Err(error) => {
+                vm.fail_native_call(error);
+                Value::Nil
+            }
+        }
     });
 
     // `(def-kind name :key (...) :host (...) :state (...))` (kind-bindings
@@ -5183,6 +5283,7 @@ impl VM {
             active_expander: None,
             active_expansion_site: None,
             pending_native_error: None,
+            rerender_log: RerenderLog::from_env(),
             active_execution_origins: Vec::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
@@ -7140,7 +7241,110 @@ impl VM {
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             let source_id = self.get_or_create_source_node(namespace, field);
             self.dag.add_edge(source_id, ctx_id);
+            self.note_rerender_read_site(source_id, ctx_id);
         }
+    }
+
+    /// While the re-render log is on, remember where `reader` read
+    /// `source`: the running function and its file.
+    pub(super) fn note_rerender_read_site(&mut self, source: NodeId, reader: NodeId) {
+        let Some(log) = self.rerender_log.as_mut() else {
+            return;
+        };
+        let chunk = self.chunks.get(self.current_chunk);
+        let function = chunk
+            .and_then(|chunk| chunk.source_symbol.as_deref())
+            .unwrap_or("top level");
+        let site = match chunk
+            .and_then(|chunk| chunk.source_file.as_deref())
+            .and_then(|file| file.file_name())
+        {
+            Some(file) => format!("{function} ({})", file.to_string_lossy()),
+            None => function.to_string(),
+        };
+        if log.sites.len() >= 1 << 16 {
+            // Edges come and go with every re-run; keep the map bounded.
+            log.sites.clear();
+        }
+        log.sites.insert((source, reader), site.into());
+    }
+
+    /// Log why `dependent` re-runs: `source` changed (eseq-0l17.23).
+    fn log_rerender_reason(&mut self, source: NodeId, dependent: NodeId) {
+        if self.rerender_log.is_none() {
+            return;
+        }
+        let Some(ReactiveNode::Effect {
+            target,
+            subtree_root_id,
+            stable_key,
+            ..
+        }) = self.dag.nodes.get(&dependent)
+        else {
+            return;
+        };
+        let target = match target {
+            EffectTarget::Observer => "observer".to_string(),
+            EffectTarget::BufferName(name) => name.clone(),
+            EffectTarget::BufferId(Some(id)) => format!("buffer {id}"),
+            EffectTarget::BufferId(None) => "active buffer".to_string(),
+        };
+        let what = match (stable_key, subtree_root_id) {
+            (Some(key), _) => format!("subtree {key} ({target})"),
+            (None, Some(root)) => format!("subtree #{root} ({target})"),
+            (None, None) => format!("effect ({target})"),
+        };
+        let field = match self.dag.nodes.get(&source) {
+            Some(ReactiveNode::Source { source, .. }) => self.describe_reactive_source(source),
+            _ => format!("node {source}"),
+        };
+        let log = self.rerender_log.as_mut().expect("checked above");
+        let line = match log.sites.get(&(source, dependent)) {
+            Some(site) => format!("[rerender] {what}: {field} read in {site}"),
+            None => format!("[rerender] {what}: {field}"),
+        };
+        log.push(line);
+    }
+
+    /// A reactive source as the re-render log names it: an instance field
+    /// as `<track#41 [3]>.muted`, a keyed constructor's key as
+    /// `(track 3)`, anything else as `namespace.field` or its name.
+    fn describe_reactive_source(&self, source: &ReactiveSource) -> String {
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                if let Some(id) = namespace
+                    .strip_prefix(INSTANCE_NAMESPACE_PREFIX)
+                    .and_then(|id| id.parse::<InstanceId>().ok())
+                {
+                    let instance = self
+                        .instance_display(id)
+                        .unwrap_or_else(|| format!("<instance:{id}>"));
+                    return format!("{instance}.{field}");
+                }
+                if let Some(kind) = namespace.strip_prefix(instances::KIND_KEYS_NAMESPACE_PREFIX) {
+                    return format!("({} {field})", kind_name_of(kind));
+                }
+                format!("{namespace}.{field}")
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// `(rerender-log! on)`: turn the re-render reason log on or off.
+    pub fn set_rerender_log(&mut self, on: bool) {
+        match (on, self.rerender_log.is_some()) {
+            (true, false) => self.rerender_log = Some(RerenderLog::new(false)),
+            (false, true) => self.rerender_log = None,
+            _ => {}
+        }
+    }
+
+    /// The re-render log's lines since the last call (oldest first).
+    pub fn take_rerender_reasons(&mut self) -> Vec<String> {
+        self.rerender_log
+            .as_mut()
+            .map(|log| log.lines.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// A binding ref used as a value reads itself (kind-bindings spec §8):
@@ -8131,6 +8335,7 @@ impl VM {
                             self.dag.dependency_scope(dependent, source_id)
                         );
                     }
+                    self.log_rerender_reason(source_id, dependent);
                     self.dag.mark_dirty(dependent);
                 }
             }

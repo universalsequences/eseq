@@ -705,12 +705,17 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
-        // A singleton or index-keyed kind binds its name (kind-bindings
-        // spec §3.1); a created or parent-keyed one binds nothing.
+        // A singleton, index-keyed or view-local kind binds its name
+        // (kind-bindings spec §3.1); a created or parent-keyed one binds
+        // nothing.
         [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "def-kind" => {
             if let Ok((
                 _,
-                Some(crate::vm::KindKey::Singleton | crate::vm::KindKey::Indexed { .. }),
+                Some(
+                    crate::vm::KindKey::Singleton
+                    | crate::vm::KindKey::Indexed { .. }
+                    | crate::vm::KindKey::Local { .. },
+                ),
             )) = crate::compiler::def_kind_slots(name, items)
             {
                 out.insert(name.clone());

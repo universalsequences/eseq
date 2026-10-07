@@ -6950,6 +6950,108 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
     }
 }
 
+/// The device a device-value snapshot covers: a track's instrument, one of
+/// its effect or MIDI-FX slots, or one rack slot (its instrument, strip,
+/// p-locks and effects together).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceScope {
+    Instrument(crate::sequencer::TrackId),
+    AudioEffect(crate::sequencer::TrackId, usize),
+    MidiEffect(crate::sequencer::TrackId, usize),
+    RackSlot(crate::sequencer::TrackId, usize),
+}
+
+impl DeviceScope {
+    fn of_device(app: &App, id: DeviceId) -> Option<Self> {
+        let registry = &app.device_registry;
+        Some(match id {
+            DeviceId::TrackInstrument(track) => Self::Instrument(track),
+            DeviceId::AudioEffect(id) => {
+                let (track, slot) = registry.audio_effect_location(id)?;
+                Self::AudioEffect(track, slot)
+            }
+            DeviceId::MidiEffect(id) => {
+                let (track, slot) = registry.midi_effect_location(id)?;
+                Self::MidiEffect(track, slot)
+            }
+            DeviceId::RackSlot(id) | DeviceId::RackInstrument(id) => {
+                let (track, slot) = registry.rack_slot_location(id)?;
+                Self::RackSlot(track, slot)
+            }
+        })
+    }
+
+    /// The scope a device-value command snapshots (as
+    /// `resolve_device_value_target` resolves it, without allocating).
+    fn of_command(app: &App, cmd: &AppCommand) -> Option<Self> {
+        let track = app.track_registry.id_at(device_value_command_track(cmd)?)?;
+        Some(match cmd {
+            AppCommand::SetEffectParam { slot_idx, .. }
+            | AppCommand::SetEffectTensorCell { slot_idx, .. } => {
+                Self::AudioEffect(track, *slot_idx)
+            }
+            AppCommand::SetMidiFxParam { slot_idx, .. }
+            | AppCommand::SetMidiFxTensorCell { slot_idx, .. } => {
+                Self::MidiEffect(track, *slot_idx)
+            }
+            AppCommand::SetRackSlotGain { slot_idx, .. }
+            | AppCommand::SetRackSlotPan { slot_idx, .. }
+            | AppCommand::SetRackSlotMute { slot_idx, .. }
+            | AppCommand::SetRackSlotEnabled { slot_idx, .. }
+            | AppCommand::SetRackSlotSolo { slot_idx, .. }
+            | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
+            | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
+            | AppCommand::SetRackSlotBaseNoteOffset { slot_idx, .. }
+            | AppCommand::SetRackSlotInstrumentParam { slot_idx, .. } => {
+                Self::RackSlot(track, *slot_idx)
+            }
+            AppCommand::SetRackSlotEffectParam { rack_slot_idx, .. } => {
+                Self::RackSlot(track, *rack_slot_idx)
+            }
+            _ => Self::Instrument(track),
+        })
+    }
+
+    /// Whether the two snapshots may share state. A track instrument's is
+    /// taken to cover its whole track (a rack track's instrument is the rack).
+    fn overlaps(self, other: Self) -> bool {
+        let track = |scope| match scope {
+            Self::Instrument(track)
+            | Self::AudioEffect(track, _)
+            | Self::MidiEffect(track, _)
+            | Self::RackSlot(track, _) => track,
+        };
+        track(self) == track(other)
+            && (self == other
+                || matches!(self, Self::Instrument(_))
+                || matches!(other, Self::Instrument(_)))
+    }
+}
+
+/// Whether `cmd` can be recorded as an undo entry beside the active gesture
+/// without overlapping it (eseq-0l17.55): the gesture's pending entry is a
+/// device-value drag (a param or strip drag) and `cmd` a device-value edit
+/// of another device. Device values are recorded as whole-device snapshots,
+/// so an entry of the same device landing beside the open drag would undo
+/// to a mixed state (the drag's undo dropping the flag, the flag's undo
+/// restoring mid-drag values). Anything else is not known to be disjoint.
+pub fn command_is_disjoint_from_active_gesture(app: &App, cmd: &AppCommand) -> bool {
+    let Some(gesture) = app.history.active_gesture() else {
+        return false;
+    };
+    let Some(EditPatch::DeviceValues(patch)) = app.history.active_gesture_patch(&gesture.merge_key)
+    else {
+        return false;
+    };
+    match (
+        DeviceScope::of_device(app, patch.target),
+        DeviceScope::of_command(app, cmd),
+    ) {
+        (Some(drag), Some(edit)) => !drag.overlaps(edit),
+        _ => false,
+    }
+}
+
 /// Effective pattern id for `track`, lazily materializing one when the
 /// current scene is bare for the track (takes spec 11.1): device edits are
 /// keyed per-pattern, so the first edit in a bare scene creates the pattern

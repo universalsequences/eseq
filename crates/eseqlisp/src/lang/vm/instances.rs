@@ -42,6 +42,13 @@
 //! function and leaves the cell to the host, and without `:set` it is
 //! read-only.
 //!
+//! A view-local kind (a `:key` of names and no `:host`, kind-bindings spec
+//! §3.1, eseq-0l17.62) is keyed state Lisp owns: its constructor,
+//! `(adsr-gesture scope section)`, answers the instance under that key and
+//! creates it on first call; `(drop-instance g)` drops one. Key parts are
+//! plain values ([`LocalKeyPart`]); a part that is an instance makes the
+//! view-local instance its child, dropped with it.
+//!
 //! A dropped instance keeps a tombstone naming its kind: reads answer the
 //! kind's defaults, writes are silent no-ops (spec §4 "stale self").
 //!
@@ -164,6 +171,65 @@ fn key_text(key: &[u64]) -> String {
     key.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
 }
 
+/// One part of a view-local instance's key (kind-bindings spec §3.1,
+/// eseq-0l17.62): the values a constructor call `(adsr-gesture "core" -1)`
+/// may key by. Numbers compare by value (`-0` is `0`); an instance part
+/// compares by id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LocalKeyPart {
+    Number(u64),
+    Bool(bool),
+    String(String),
+    Keyword(String),
+    Symbol(String),
+    Instance(InstanceId),
+}
+
+impl LocalKeyPart {
+    /// The part for `value`, or `None` for a value that cannot key (nil, a
+    /// non-finite number, a list, a map, a function, a binding).
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(match value {
+            Value::Number(n) if n.is_finite() => Self::Number((n + 0.0).to_bits()),
+            Value::Bool(b) => Self::Bool(*b),
+            Value::String(s) => Self::String(s.clone()),
+            Value::Keyword(k) => Self::Keyword(k.clone()),
+            Value::Symbol(s) => Self::Symbol(s.clone()),
+            Value::Instance(id) => Self::Instance(*id),
+            _ => return None,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Number(bits) => Value::Number(f64::from_bits(*bits)),
+            Self::Bool(b) => Value::Bool(*b),
+            Self::String(s) => Value::String(s.clone()),
+            Self::Keyword(k) => Value::Keyword(k.clone()),
+            Self::Symbol(s) => Value::Symbol(s.clone()),
+            Self::Instance(id) => Value::Instance(*id),
+        }
+    }
+}
+
+/// A view-local key as messages, printing and its key source show it:
+/// `"core" -1`.
+fn local_key_text(key: &[LocalKeyPart]) -> String {
+    key.iter()
+        .map(|part| super::format_lisp_source(&part.to_value()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The first instance a view-local key names: the instance it lives under
+/// (dropped with it).
+fn local_key_parent(key: &[LocalKeyPart]) -> Option<InstanceId> {
+    key.iter().find_map(|part| match part {
+        LocalKeyPart::Instance(id) => Some(*id),
+        _ => None,
+    })
+}
+
 /// A kind's `:key` (kind-bindings spec §3.1).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum KindKey {
@@ -182,6 +248,11 @@ pub enum KindKey {
     /// `:key ((p1 p2 …) index)` names several parent kinds: the parent is
     /// an instance of any one of them (a device under a track or a bus).
     Under { parents: Vec<String>, index: String },
+    /// `:key (name …)` with no `:host` group (eseq-0l17.62): view-local
+    /// state Lisp owns, an instance per tuple of key values, created by the
+    /// constructor `(name v …)` on first call and dropped by
+    /// `(drop-instance x)`. The host never registers these.
+    Local { names: Vec<String> },
 }
 
 impl KindKey {
@@ -192,6 +263,7 @@ impl KindKey {
             Self::Created | Self::Singleton => 0,
             Self::Indexed { .. } => 1,
             Self::Under { .. } => 2,
+            Self::Local { names } => names.len(),
         }
     }
 
@@ -205,6 +277,8 @@ impl KindKey {
             (Self::Under { parents: a, .. }, Self::Under { parents: b, .. }) => {
                 a.len() == b.len() && a.iter().all(|parent| b.contains(parent))
             }
+            // Key names may change; their number may not (live keys).
+            (Self::Local { names: a }, Self::Local { names: b }) => a.len() == b.len(),
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -219,6 +293,7 @@ impl KindKey {
                 [parent] => format!("keyed (:key ({parent} {index}))"),
                 parents => format!("keyed (:key (({}) {index}))", parents.join(" ")),
             },
+            Self::Local { names } => format!("view-local (:key ({}))", names.join(" ")),
         }
     }
 
@@ -281,7 +356,9 @@ pub(crate) fn builtin_fields_for(key: &KindKey) -> &'static [&'static str] {
     match key {
         KindKey::Created => &CREATED_BUILTIN_FIELDS,
         KindKey::Singleton => &SINGLETON_BUILTIN_FIELDS,
-        KindKey::Indexed { .. } | KindKey::Under { .. } => &KEYED_BUILTIN_FIELDS,
+        KindKey::Indexed { .. } | KindKey::Under { .. } | KindKey::Local { .. } => {
+            &KEYED_BUILTIN_FIELDS
+        }
     }
 }
 
@@ -292,7 +369,7 @@ pub(crate) fn builtin_field_message(kind: &str, slot: &str, field: &str, key: &K
     let what = match key {
         KindKey::Created => "a created kind",
         KindKey::Singleton => "a singleton (:key ())",
-        KindKey::Indexed { .. } | KindKey::Under { .. } => "a keyed kind",
+        KindKey::Indexed { .. } | KindKey::Under { .. } | KindKey::Local { .. } => "a keyed kind",
     };
     format!(
         "def-kind {kind}: :{slot} field '{field}' is a built-in field of {what} ({}); rename it",
@@ -777,7 +854,14 @@ impl InstanceKindSchema {
         self.key == KindKey::Singleton
     }
 
-    /// `:key (index)` or `:key (parent index)`.
+    /// A view-local kind (`:key (name …)` without `:host`): Lisp creates
+    /// its instances.
+    pub fn is_local(&self) -> bool {
+        matches!(self.key, KindKey::Local { .. })
+    }
+
+    /// `:key (index)` or `:key (parent index)`: the host registers the
+    /// instances (a view-local kind is not keyed in this sense).
     pub fn is_keyed(&self) -> bool {
         matches!(self.key, KindKey::Indexed { .. } | KindKey::Under { .. })
     }
@@ -952,6 +1036,9 @@ pub enum InstanceError {
     },
     /// A keyed registration or re-key the kind's `:key` does not admit.
     InvalidKey(String),
+    /// The host asked to create (or register) an instance of a view-local
+    /// kind: Lisp creates those with the kind's constructor.
+    LocalKind(String),
     /// The host asked to create an instance with an id from the range the
     /// VM allocates keyed and singleton instances in.
     ReservedId(InstanceId),
@@ -1002,6 +1089,13 @@ impl std::fmt::Display for InstanceError {
                 kind_name_of(kind)
             ),
             Self::InvalidKey(message) => write!(f, "{message}"),
+            Self::LocalKind(kind) => {
+                let name = kind_name_of(kind);
+                write!(
+                    f,
+                    "{name} instances are view-local; create them with ({name} key …)"
+                )
+            }
             Self::ReservedId(id) => write!(
                 f,
                 "instance id {id} is reserved for keyed and singleton instances"
@@ -1032,6 +1126,8 @@ struct InstanceRecord {
     host: Vec<Value>,
     /// A keyed instance's current key.
     key: Option<InstanceKey>,
+    /// A view-local instance's key (its constructor's arguments).
+    local_key: Option<Rc<[LocalKeyPart]>>,
 }
 
 /// Which cell a field name resolves to.
@@ -1091,6 +1187,8 @@ pub(crate) struct InstanceStore {
     singletons: HashMap<String, InstanceId>,
     /// Keyed kind id -> its live instances by key.
     keyed: HashMap<Rc<str>, KeyRegistry>,
+    /// View-local kind id -> its live instances by key (eseq-0l17.62).
+    local: HashMap<Rc<str>, HashMap<Rc<[LocalKeyPart]>, InstanceId>>,
     /// `:key (parent index)` kind id -> its parent kind ids (one per name
     /// its key gives), resolved when the first instance registers and then
     /// fixed, so a kind defined later (one that would make a parent name
@@ -1149,6 +1247,7 @@ impl InstanceStore {
                             label: clone_value_for_snapshot(&record.label),
                             host: record.host.iter().map(clone_value_for_snapshot).collect(),
                             key: record.key.clone(),
+                            local_key: record.local_key.clone(),
                         },
                     )
                 })
@@ -1156,6 +1255,7 @@ impl InstanceStore {
             dropped: self.dropped.clone(),
             singletons: self.singletons.clone(),
             keyed: self.keyed.clone(),
+            local: self.local.clone(),
             parent_kinds: self.parent_kinds.clone(),
             children: self.children.clone(),
             keyed_allocated: self.keyed_allocated,
@@ -1200,7 +1300,7 @@ impl InstanceStore {
         // A kind with a :key has no owner/label (those names are its own
         // fields, or unknown); a keyed kind has `key`.
         let created = schema.is_none_or(|schema| schema.key == KindKey::Created);
-        let keyed = schema.is_some_and(InstanceKindSchema::is_keyed);
+        let keyed = schema.is_some_and(|schema| schema.is_keyed() || schema.is_local());
         let resolved = |slot, declared| Resolved {
             kind,
             slot,
@@ -1250,7 +1350,10 @@ impl InstanceStore {
             FieldSlot::Kind => Value::String(kind.to_string()),
             FieldSlot::Owner => record.map(|r| r.owner.clone()).unwrap_or(Value::Nil),
             FieldSlot::Label => record.map(|r| r.label.clone()).unwrap_or(Value::Nil),
-            FieldSlot::Key => key_value(record.and_then(|r| r.key.as_deref()).unwrap_or(&[])),
+            FieldSlot::Key => match record.and_then(|r| r.local_key.as_deref()) {
+                Some(key) => super::list_from_values(key.iter().map(LocalKeyPart::to_value)),
+                None => key_value(record.and_then(|r| r.key.as_deref()).unwrap_or(&[])),
+            },
             FieldSlot::Host(index) => match record.and_then(|r| r.host.get(index)) {
                 Some(value) => value.clone(),
                 None => self
@@ -1419,6 +1522,8 @@ impl InstanceStore {
         if let Some((id, schema)) = self.kinds.get_key_value(kind) {
             return if schema.is_keyed() {
                 Ok((id, schema))
+            } else if schema.is_local() {
+                Err(InstanceError::LocalKind(id.to_string()))
             } else {
                 Err(not_keyed(schema))
             };
@@ -1432,6 +1537,9 @@ impl InstanceStore {
                 "keyed kind name '{kind}' is ambiguous ('{first}', '{second}'); use its kind id"
             ))),
             (None, _) => match self.kinds_named(kind).next() {
+                Some((id, schema)) if schema.is_local() => {
+                    Err(InstanceError::LocalKind(id.to_string()))
+                }
                 Some((_, schema)) => Err(not_keyed(schema)),
                 None => Err(InstanceError::UnknownKind(kind.to_string())),
             },
@@ -1553,6 +1661,16 @@ impl InstanceStore {
             KindKey::Indexed { .. } | KindKey::Under { .. } => Some(
                 match self.live.get(&id).and_then(|record| record.key.as_deref()) {
                     Some(key) => format!("<{name}#{id} [{}]>", key_text(key)),
+                    None => format!("<{name}#{id}>"),
+                },
+            ),
+            KindKey::Local { .. } => Some(
+                match self
+                    .live
+                    .get(&id)
+                    .and_then(|record| record.local_key.as_deref())
+                {
+                    Some(key) => format!("<{name}#{id} [{}]>", local_key_text(key)),
                     None => format!("<{name}#{id}>"),
                 },
             ),
@@ -1681,6 +1799,9 @@ impl VM {
             if schema.is_singleton() {
                 return Err(InstanceError::SingletonKind(kind.to_string()));
             }
+            if schema.is_local() {
+                return Err(InstanceError::LocalKind(kind.to_string()));
+            }
             if schema.is_keyed() {
                 return Err(InstanceError::KeyedKind {
                     kind: kind.to_string(),
@@ -1723,6 +1844,7 @@ impl VM {
                 .map(|declared| declared.field.default.deep_clone())
                 .collect(),
             key,
+            local_key: None,
         };
         self.instances.live.insert(id, record);
         // Readers of a previously dropped id see the revived values (an id
@@ -1796,6 +1918,21 @@ impl VM {
                         _ => return Err(malformed_key()),
                     };
                 }
+                // `:key (name …)` without `:host`: the compiler emits a
+                // view-local kind's key as `:local-key` (eseq-0l17.62).
+                [Value::Keyword(slot), Value::List(names)] if slot == "local-key" => {
+                    let names = names
+                        .iter()
+                        .map(|item| match &*item.borrow() {
+                            Value::Symbol(name) => Ok(name.clone()),
+                            _ => Err(malformed_key()),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if names.is_empty() {
+                        return Err(malformed_key());
+                    }
+                    schema.key = KindKey::Local { names };
+                }
                 [Value::Keyword(slot), Value::Nil] if slot == "state" || slot == "host" => {}
                 [Value::Keyword(slot), Value::List(entries)] if slot == "state" => {
                     for entry in entries {
@@ -1837,12 +1974,27 @@ impl VM {
         }
         let kind = schema.kind.clone();
         let indexed = matches!(schema.key, KindKey::Indexed { .. });
+        let local = schema.is_local();
         self.register_instance_kind(schema)?;
+        let namespace = key_namespace(&kind);
+        if local {
+            // `(adsr-gesture scope section)`: the instance under that key,
+            // created on first call.
+            let constructor = super::NativeFunction::new(name.clone(), move |args, vm| {
+                match vm.local_constructor_call(&kind, &namespace, &name, &args) {
+                    Ok(instance) => instance,
+                    Err(error) => {
+                        vm.fail_native_call(error);
+                        Value::Nil
+                    }
+                }
+            });
+            return Ok(Value::NativeFunction(constructor));
+        }
         if !indexed {
             return Ok(Value::String(kind));
         }
         // `(track 3)`: the instance registered under key [3], or nil.
-        let namespace = key_namespace(&kind);
         let constructor = super::NativeFunction::new(name.clone(), move |args, vm| {
             match vm.keyed_constructor_call(&kind, &namespace, &name, &args) {
                 Ok(instance) => instance,
@@ -1890,6 +2042,253 @@ impl VM {
             .map_or(Value::Nil, Value::Instance);
         self.track_instance_source_read(namespace, &index.to_string(), &value);
         Ok(value)
+    }
+
+    /// `(adsr-gesture scope section)` (eseq-0l17.62): the instance of
+    /// view-local kind `kind` under the key the arguments make, created at
+    /// its fields' defaults on first call, with a dependency on that key's
+    /// source (field `<key text>` of `namespace`) so the reader re-runs when
+    /// the instance is dropped. A key part that is a dropped instance answers
+    /// nil (its view-local children went with it).
+    fn local_constructor_call(
+        &mut self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, VMError> {
+        if self.active_expander.is_some() {
+            return Err(self.expansion_error("view-local instance lookup"));
+        }
+        let names = match self.instances.kinds.get(kind).map(|schema| &schema.key) {
+            Some(KindKey::Local { names }) => names.clone(),
+            _ => {
+                return Err(VMError::Instance(format!(
+                    "{name}: kind '{kind}' is not view-local"
+                )));
+            }
+        };
+        let shape = || {
+            VMError::Instance(format!(
+                "({name} {}) takes {} key value{} (numbers, strings, keywords, symbols, booleans \
+                 or instances); got ({name}{})",
+                names.join(" "),
+                names.len(),
+                if names.len() == 1 { "" } else { "s" },
+                args.iter()
+                    .map(|arg| format!(" {}", describe_value(arg)))
+                    .collect::<String>()
+            ))
+        };
+        if args.len() != names.len() {
+            return Err(shape());
+        }
+        let key: Rc<[LocalKeyPart]> = args
+            .iter()
+            .map(LocalKeyPart::from_value)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(shape)?
+            .into();
+        let field = local_key_text(&key);
+        let parent = local_key_parent(&key);
+        let live_parent = key.iter().all(|part| match part {
+            LocalKeyPart::Instance(id) => self.instances.live.contains_key(id),
+            _ => true,
+        });
+        let existing = self
+            .instances
+            .local
+            .get(kind)
+            .and_then(|ids| ids.get(&key))
+            .copied();
+        let value = match existing {
+            Some(id) => Value::Instance(id),
+            None if !live_parent => Value::Nil,
+            None => {
+                let id = KEYED_INSTANCE_ID_BASE + self.instances.keyed_allocated;
+                self.instances.keyed_allocated += 1;
+                self.insert_instance_record(id, kind, None)?;
+                if let Some(record) = self.instances.live.get_mut(&id) {
+                    record.local_key = Some(key.clone());
+                }
+                let kind_rc = self.instances.kind_rc(kind).unwrap_or_else(|| kind.into());
+                self.instances
+                    .local
+                    .entry(kind_rc)
+                    .or_default()
+                    .insert(key.clone(), id);
+                self.instances.set_parent(id, None, parent);
+                self.dirty_namespace_field(namespace, &field, Value::Instance(id));
+                Value::Instance(id)
+            }
+        };
+        self.track_instance_source_read(namespace, &field, &value);
+        Ok(value)
+    }
+
+    /// The live instances of view-local kind `kind` (its kind id or a
+    /// unique bare name), sorted (eseq-0l17.62).
+    pub fn local_instances(&self, kind: &str) -> Vec<InstanceId> {
+        let kind = match self.instances.kinds.get_key_value(kind) {
+            Some((kind, _)) => kind.clone(),
+            None => match self
+                .instances
+                .kinds_named(kind)
+                .find(|(_, schema)| schema.is_local())
+            {
+                Some((kind, _)) => kind.clone(),
+                None => return Vec::new(),
+            },
+        };
+        let mut ids: Vec<InstanceId> = self
+            .instances
+            .local
+            .get(&kind)
+            .map(|ids| ids.values().copied().collect())
+            .unwrap_or_default();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// `(drop-instance x)` (eseq-0l17.62): drop a view-local instance (as
+    /// [`Self::drop_instance`]). Whether it was live; any other value is an
+    /// error, since host and singleton instances are not Lisp's to drop.
+    pub(super) fn drop_local_instance(&mut self, value: &Value) -> Result<bool, VMError> {
+        let local = match value {
+            Value::Instance(id) => self
+                .instances
+                .kind_of(*id)
+                .and_then(|kind| self.instances.kinds.get(kind))
+                .is_some_and(InstanceKindSchema::is_local),
+            _ => false,
+        };
+        match value {
+            Value::Instance(id) if local => Ok(self.drop_instance(*id)),
+            other => Err(VMError::Instance(format!(
+                "(drop-instance x) takes an instance of a view-local kind (a :key without \
+                 :host); got {}",
+                self.instance_display_or_value(other)
+            ))),
+        }
+    }
+
+    fn instance_display_or_value(&self, value: &Value) -> String {
+        match value {
+            Value::Instance(id) => self
+                .instances
+                .display(*id)
+                .unwrap_or_else(|| format!("<instance:{id}>")),
+            other => describe_value(other),
+        }
+    }
+
+    /// `(describe-kind 'track)` (kind-bindings spec §10, eseq-0l17.23): the
+    /// kind `name` names (its kind id, or a bare name: the current module's
+    /// kind first, else the one kind with that name) as text, one line for
+    /// the kind (id, how its instances come, built-in fields) and one per
+    /// declared field: group, name, type, then `:default`, `:set`,
+    /// `:range` and `:doc` where it has them.
+    pub fn describe_kind(&self, name: &str) -> Result<String, String> {
+        let module = self.current_module_name();
+        let local = kind_id(None, Some(module), name);
+        let schema = match self
+            .instances
+            .kinds
+            .get(name)
+            .or_else(|| self.instances.kinds.get(local.as_str()))
+        {
+            Some(schema) => schema,
+            None => {
+                let mut found: Vec<&InstanceKindSchema> = self
+                    .instances
+                    .kinds_named(name)
+                    .map(|(_, schema)| schema)
+                    .collect();
+                found.sort_by(|a, b| a.kind.cmp(&b.kind));
+                match found.as_slice() {
+                    [schema] => *schema,
+                    [] => return Err(format!("describe-kind: no kind named '{name}'")),
+                    several => {
+                        return Err(format!(
+                            "describe-kind: kind name '{name}' is ambiguous ({}); use its kind id",
+                            several
+                                .iter()
+                                .map(|schema| schema.kind.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+        };
+        let how = match &schema.key {
+            KindKey::Created => "created (no :key)".to_string(),
+            key => key.describe(),
+        };
+        let mut lines = vec![format!(
+            "kind {}: {how}; built-in fields: {}",
+            schema.kind,
+            schema.builtin_fields().join(", ")
+        )];
+        let mut extras = Vec::new();
+        if let Some(keymap) = &schema.keymap {
+            extras.push(format!(":keymap {keymap}"));
+        }
+        if schema.view.is_some() {
+            extras.push(":view".to_string());
+        }
+        if schema.on_create.is_some() {
+            extras.push(":on-create".to_string());
+        }
+        if !extras.is_empty() {
+            lines.push(format!("  {}", extras.join(" ")));
+        }
+        let field_line = |group: &str, field: &KindField, options: &[String]| {
+            let mut line = format!("  {group:<9} {:<14} {}", field.name, field.ty);
+            for option in options {
+                line.push_str("  ");
+                line.push_str(option);
+            }
+            line
+        };
+        for host in &schema.host {
+            let mut options = Vec::new();
+            if let Some(set) = &host.set {
+                options.push(format!(":set {}", self.callable_name(set)));
+            }
+            if let Some((lo, hi)) = host.range {
+                options.push(format!(
+                    ":range ({} {})",
+                    super::format_lisp_source(&Value::Number(lo)),
+                    super::format_lisp_source(&Value::Number(hi))
+                ));
+            }
+            if let Some(doc) = &host.doc {
+                options.push(format!(":doc {doc:?}"));
+            }
+            lines.push(field_line(":host", &host.field, &options));
+        }
+        for (group, fields) in [(":state", &schema.fields), (":document", &schema.document)] {
+            for field in fields {
+                let default = format!(":default {}", self.format_value(&field.default));
+                lines.push(field_line(group, field, &[default]));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// How a `:set` function reads in [`Self::describe_kind`]: its name.
+    fn callable_name(&self, value: &Value) -> String {
+        match value {
+            Value::NativeFunction(native) => native.name.clone(),
+            Value::Closure(chunk, _) | Value::Function(chunk) => self
+                .chunks
+                .get(*chunk)
+                .and_then(|chunk| chunk.source_symbol.clone())
+                .unwrap_or_else(|| "(lambda)".to_string()),
+            Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
+            other => self.format_value(other),
+        }
     }
 
     // ---- keyed registry (kind-bindings spec §4, §9) --------------------
@@ -1968,7 +2367,7 @@ impl VM {
     }
 
     /// The live children of `parent` (instances of `:key (parent index)`
-    /// kinds under it), sorted.
+    /// kinds under it, and view-local instances keyed by it), sorted.
     pub fn keyed_children(&self, parent: InstanceId) -> Vec<InstanceId> {
         let mut ids: Vec<InstanceId> = self
             .instances
@@ -2112,7 +2511,17 @@ impl VM {
         let Some(record) = self.instances.live.remove(&id) else {
             return false;
         };
-        let keyed = record.key.is_some();
+        let keyed = record.key.is_some() || record.local_key.is_some();
+        if let Some(key) = &record.local_key {
+            if let Some(ids) = self.instances.local.get_mut(&record.kind)
+                && ids.get(key) == Some(&id)
+            {
+                ids.remove(key);
+            }
+            self.instances.set_parent(id, local_key_parent(key), None);
+            let field = local_key_text(key);
+            self.dirty_namespace_field(&key_namespace(&record.kind), &field, Value::Nil);
+        }
         if let Some(key) = &record.key {
             if let Some(registry) = self.instances.keyed.get_mut(&record.kind)
                 && registry.ids.get(key) == Some(&id)
@@ -2449,6 +2858,7 @@ impl VM {
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             let source_id = self.get_or_create_instance_source_node(namespace, field, value);
             self.dag.add_edge(source_id, ctx_id);
+            self.note_rerender_read_site(source_id, ctx_id);
             self.instance_observer_epoch += 1;
         }
     }

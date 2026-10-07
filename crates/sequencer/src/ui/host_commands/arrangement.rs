@@ -118,8 +118,8 @@ fn apply_song_edit(
 ) {
     let continuous = edit.continuous();
     let clip = edit.clip();
-    let script = super::ScriptEdit::begin(app, ctx);
-    let result = if script.drags(ctx, continuous) {
+    let script = super::ScriptEdit::begin(app, ctx, continuous);
+    let result = if script.drags(ctx) {
         apply_drag(app, ctx, &edit)
     } else {
         script.apply_with(app, |app| edit.apply(app))
@@ -129,7 +129,7 @@ fn apply_song_edit(
         // `arrangement-clip-move`.
         app.refresh_song_region_for_clip(clip);
     }
-    script.end(app, ctx, continuous, result.is_ok());
+    script.end(app, ctx, result.is_ok());
     super::song::song_edit_landed(app, editor, ctx, name, result.map(|()| None));
 }
 

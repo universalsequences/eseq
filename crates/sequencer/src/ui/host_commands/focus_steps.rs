@@ -67,8 +67,8 @@ fn set_focus_step(app: &mut app::App, ctx: &mut LoopCtx<'_>, map: &Payload) -> R
         notes.iter().map(|note| NoteKey::of(step, note)).collect()
     };
     let before = keys(app);
-    let script = super::ScriptEdit::begin(app, ctx);
-    let drags = script.drags(ctx, true);
+    let script = super::ScriptEdit::begin(app, ctx, true);
+    let drags = script.drags(ctx);
     let changed = if drags {
         app::edit::focus_step_param_drag(app, focus, &[step], LABEL, write)?;
         true
@@ -82,7 +82,7 @@ fn set_focus_step(app: &mut app::App, ctx: &mut LoopCtx<'_>, map: &Payload) -> R
         let outcome = outcome.map_err(|error| format!("{error:?}"))?;
         matches!(outcome, app::edit::EditOutcome::Applied(_))
     };
-    script.end(app, ctx, true, changed);
+    script.end(app, ctx, changed);
     if changed {
         move_step_notes(app, ctx, track, &before, &keys(app));
         let landing = match drags {

@@ -8373,6 +8373,7 @@ impl Editor {
                 leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                widget_focus::remap_leaf_focus_to_layout(leaf);
                 leaf.cached_inactive_frame = None;
             }
             self.record_layout_refresh_timing(
@@ -8586,6 +8587,7 @@ impl Editor {
                 leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                widget_focus::remap_leaf_focus_to_layout(leaf);
                 leaf.cached_inactive_frame = None;
             }
             self.record_layout_refresh_timing(

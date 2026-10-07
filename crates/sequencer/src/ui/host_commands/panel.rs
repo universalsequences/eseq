@@ -120,14 +120,14 @@ fn tensor_edit(
     if current.and_then(|values| values.get(cell).copied()) == Some(value) {
         return Ok(());
     }
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, true);
     let changed = script.apply(app, command);
     if changed && device == DeviceSlot::Instrument {
         let current_track = ctx.shared.current_track.load(Ordering::Relaxed);
         let selected = &ctx.shared.selected_steps;
         sync_instrument_tensor_display(editor, app, track, tensor_idx, current_track, selected);
     }
-    script.end(app, ctx, true, changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 
@@ -181,14 +181,14 @@ fn stamp_variant(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Re
     if steps.is_empty() {
         return Ok(());
     }
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, false);
     let changed = script.apply_with(app, |app| {
         stamp_step_variant(app, track, &steps, key.as_ref())
     })?;
     if changed {
         variant_edit_applied(ctx.shared);
     }
-    script.end(app, ctx, false, changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 
@@ -233,12 +233,12 @@ fn stamp_key_variant(
     if notes.is_empty() {
         return Ok(());
     }
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, false);
     let changed = script.apply(app, key_variant_command(track, notes, key));
     if changed {
         variant_edit_applied(ctx.shared);
     }
-    script.end(app, ctx, false, changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 
@@ -288,13 +288,13 @@ fn macro_edit(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Resul
         }
         (None, other) => return Err(format!("a macro has no settable field {other}")),
     };
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, false);
     let changed = script.apply(app, command);
     if changed {
         // As the macro commands do: a UI epoch resync.
         ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
-    script.end(app, ctx, false, changed);
+    script.end(app, ctx, changed);
     Ok(())
 }
 
@@ -552,12 +552,12 @@ fn mapping_edit(
             }
             other => return Err(format!("a mapping has no settable field {other}")),
         };
-        let script = ScriptEdit::begin(app, ctx);
+        let script = ScriptEdit::begin(app, ctx, field != "curve");
         let changed = script.apply(app, command);
         if changed {
             ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
         }
-        script.end(app, ctx, field != "curve", changed);
+        script.end(app, ctx, changed);
         return Ok(());
     }
     use sequencer::sequencer::{RackMacroCurve, RackMacroField};

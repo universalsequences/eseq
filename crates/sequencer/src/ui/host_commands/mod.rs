@@ -84,34 +84,53 @@ use super::{map_number, map_string, map_u32, map_usize};
 /// while another gesture is active (a user's drag) gets an undo entry of its
 /// own beside it, neither splitting nor joining the drag; otherwise a
 /// continuous edit while the pointer is down stays open and the script's
-/// later edits join it (a drag view's `set!` per frame is one entry, ended
-/// by the release), and any other edit ends its entry at once.
+/// later continuous edits join it (a drag view's `set!` per frame is one
+/// entry, ended by the release), and any other edit ends its entry at once.
+/// A non-continuous edit during the script's own drag (a flag toggled
+/// mid-drag) is an entry beside that drag, which stays open, when its
+/// command is known to touch another device than the drag's
+/// ([`app::edit::command_is_disjoint_from_active_gesture`], eseq-0l17.55);
+/// otherwise it still ends the drag's entry, since whole-device undo
+/// snapshots of one device cannot interleave.
 pub(super) struct ScriptEdit {
-    beside: bool,
+    beside: std::cell::Cell<bool>,
+    continuous: bool,
+    /// A non-continuous edit landing during the script's own open drag.
+    in_script_drag: bool,
 }
 
 impl ScriptEdit {
-    pub(super) fn begin(app: &app::App, ctx: &crate::LoopCtx<'_>) -> Self {
+    /// Begin a script edit; `continuous` says whether it moves a value a
+    /// drag moves (and so may join the script's drag).
+    pub(super) fn begin(app: &app::App, ctx: &crate::LoopCtx<'_>, continuous: bool) -> Self {
         let active = app.history.active_gesture().map(|active| active.id);
+        let script_drag = active.is_some() && active == ctx.gesture.script_param_gesture;
         Self {
-            beside: active.is_some() && active != ctx.gesture.script_param_gesture,
+            beside: std::cell::Cell::new(active.is_some() && !script_drag),
+            continuous,
+            in_script_drag: script_drag && !continuous,
         }
     }
 
-    /// Apply `command`; returns whether the model changed.
+    /// Apply `command`; returns whether the model changed. During the
+    /// script's own drag, a command of another device lands beside it.
     pub(super) fn apply(&self, app: &mut app::App, command: app::AppCommand) -> bool {
+        if self.in_script_drag && app::edit::command_is_disjoint_from_active_gesture(app, &command)
+        {
+            self.beside.set(true);
+        }
         self.apply_with(app, |app| app::try_apply_command(app, command))
             .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
     }
 
-    /// Apply an edit `apply` makes (beside the active gesture when there is
-    /// one that is not the script's).
+    /// Apply an edit `apply` makes (beside the active gesture when the edit
+    /// lands beside it).
     pub(super) fn apply_with<T>(
         &self,
         app: &mut app::App,
         apply: impl FnOnce(&mut app::App) -> T,
     ) -> T {
-        if self.beside {
+        if self.beside.get() {
             app::edit::apply_beside_gesture(app, apply)
         } else {
             apply(app)
@@ -126,34 +145,28 @@ impl ScriptEdit {
         continuous: bool,
         apply: impl FnOnce(&mut app::App) -> Result<app::edit::EditOutcome, app::edit::EditError>,
     ) -> Result<bool, String> {
-        let script = Self::begin(app, ctx);
+        let script = Self::begin(app, ctx, continuous);
         let outcome = script.apply_with(app, apply);
         let changed = outcome.as_ref().is_ok_and(app::edit::EditOutcome::changed);
-        script.end(app, ctx, continuous, changed);
+        script.end(app, ctx, changed);
         outcome
             .map(|_| changed)
             .map_err(|error| format!("{error:?}"))
     }
 
-    /// Whether a `continuous` edit (a value a drag moves) joins the
-    /// script's drag: the pointer is down and no user gesture is active.
-    pub(super) fn drags(&self, ctx: &crate::LoopCtx<'_>, continuous: bool) -> bool {
-        !self.beside && continuous && ctx.gesture.pointer_down
+    /// Whether this edit joins the script's drag: continuous, the pointer
+    /// is down and it is not beside another gesture.
+    pub(super) fn drags(&self, ctx: &crate::LoopCtx<'_>) -> bool {
+        !self.beside.get() && self.continuous && ctx.gesture.pointer_down
     }
 
-    /// End the edit: `continuous` edits (a value a drag moves) stay open
-    /// while the pointer is down.
-    pub(super) fn end(
-        self,
-        app: &mut app::App,
-        ctx: &mut crate::LoopCtx<'_>,
-        continuous: bool,
-        changed: bool,
-    ) {
-        if self.beside {
+    /// End the edit: a continuous edit stays open while the pointer is
+    /// down; an edit beside a gesture leaves that gesture alone.
+    pub(super) fn end(self, app: &mut app::App, ctx: &mut crate::LoopCtx<'_>, changed: bool) {
+        if self.beside.get() {
             return;
         }
-        if continuous && ctx.gesture.pointer_down {
+        if self.continuous && ctx.gesture.pointer_down {
             // A drag view: its later `set!`s join this entry until release.
             ctx.gesture.script_param_gesture = app.history.active_gesture().map(|active| active.id);
         } else {

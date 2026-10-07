@@ -538,8 +538,8 @@ fn set_lane_steps(
         return Ok(());
     }
     let changed = super::step_list(changed);
-    let script = ScriptEdit::begin(app, ctx);
-    let drags = script.drags(ctx, true);
+    let script = ScriptEdit::begin(app, ctx, true);
+    let drags = script.drags(ctx);
     let result = script.apply_with(app, |app| {
         let result =
             app::edit::apply_process_lane_drag_steps(app, track, id, &inlet, &changed, value);
@@ -554,7 +554,7 @@ fn set_lane_steps(
             .ui_invalidations
             .push(UiInvalidation::ProcessLaneValues { track });
     }
-    script.end(app, ctx, true, landed);
+    script.end(app, ctx, landed);
     result
 }
 
@@ -567,7 +567,7 @@ fn edit_track_process(
     all: bool,
 ) -> Result<(), String> {
     let id = id.unwrap_or_else(|| app.state.next_track_roster_slot_id());
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, false);
     let result = script.apply_with(app, |app| apply_process_edit(app, track, id, all, edit));
     let changed = matches!(result, Ok(true));
     if changed {
@@ -575,7 +575,7 @@ fn edit_track_process(
             .ui_invalidations
             .push(UiInvalidation::ProcessChain { track });
     }
-    script.end(app, ctx, false, changed);
+    script.end(app, ctx, changed);
     result.map(|_| ())
 }
 
@@ -601,7 +601,7 @@ fn edit_node_process(
     };
     let scene = app.state.current_scene_id().ok_or("no current scene")?;
     let continuous = merge.is_some();
-    let script = ScriptEdit::begin(app, ctx);
+    let script = ScriptEdit::begin(app, ctx, continuous);
     let result = script.apply_with(app, |app| {
         let (changed, before, after) = sequencer::lisp_host::edit_graph_node_process_chain_now(
             &app.state,
@@ -626,7 +626,7 @@ fn edit_node_process(
         Ok(changed)
     });
     let changed = matches!(result, Ok(true));
-    script.end(app, ctx, continuous, changed);
+    script.end(app, ctx, changed);
     result.map(|_| ())
 }
 

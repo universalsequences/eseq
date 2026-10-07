@@ -17992,3 +17992,90 @@ fn context_menu_opened_from_inactive_tile_hover_moves_the_highlight() {
     assert!(!focused.contains(&rename), "Rename must not stay focused: {focused:?} (rename {rename}, delete {delete})");
     assert!(focused.contains(&delete), "hovered Delete must be focused: {focused:?}");
 }
+
+/// The context menu of [`CONTEXT_MENU_PROGRAM`], rendered by its own
+/// `subtree` only while open, with a widget after it (eseq-0l17.27).
+const SUBTREE_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (def menu-view ()
+      (if (not menu-open)
+        (box :width 1 :height 1)
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 58 :height 3
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (subtree :key :menu (menu-view))
+        (button "after" :width 10 :height 1)))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+/// eseq-0l17.27: a context menu opened in a tile keeps its first item's
+/// focus highlight while another tile is active. Only the active tile's
+/// focus followed relayouts, so once the menu's tile went inactive and
+/// was laid out afresh with new widget ids, its focus named an id the new
+/// layout no longer gave the item and the menu painted no highlight.
+#[test]
+fn a_context_menu_in_an_inactive_tile_keeps_its_focus_across_relayouts() {
+    let _overlay_guard = OverlayClearGuard;
+    for program in [CONTEXT_MENU_PROGRAM, SUBTREE_CONTEXT_MENU_PROGRAM] {
+        // Labels ahead of the menu while `extra` holds: showing them shifts
+        // the ids of every widget after it.
+        let program = program.replace(
+            "    (effect-buffer \"*panel*\"\n      (v-stack\n",
+            "    (def extra (state false))\n    (effect-buffer \"*panel*\"\n      (v-stack\n        (if extra (v-stack (label \"a\") (label \"b\")) (box :width 1 :height 1))\n",
+        );
+        assert!(program.contains("(if extra"));
+        let mut editor = context_menu_two_tile_editor_for(&program);
+        editor
+            .runtime_mut()
+            .eval_str("(set! menu-col 6) (set! menu-row 1) (set! menu-open true)")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+        let focused = editor.focused_widget_node().expect("the menu takes focus");
+        assert_eq!(focused.widget_type, "menu-item");
+        let panel_tile = editor.active_tile;
+        assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+        // The menu's tile re-renders while inactive, with new widget ids.
+        editor.runtime_mut().eval_str("(set! extra true)").unwrap();
+        editor.refresh_runtime_side_effects();
+        let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+        let panel = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.tile_id == panel_tile)
+            .expect("panel tile");
+        let layout = panel.frame.widget_layout.as_ref().expect("panel layout");
+        let rename = find_menu_item(layout, "Rename").expect("the menu is open");
+        assert_eq!(
+            panel.frame.focused_widget_id,
+            Some(rename.widget_id),
+            "the inactive tile's focus follows its relayout"
+        );
+        crate::widget_render::clear_overlay();
+    }
+}

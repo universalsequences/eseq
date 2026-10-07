@@ -461,14 +461,14 @@ fn apply_edit(
     track: usize,
     edit: TrackSettingEdit,
 ) -> Result<(), String> {
-    let script = super::ScriptEdit::begin(app, ctx);
+    let script = super::ScriptEdit::begin(app, ctx, edit.continuous);
     let outcome = script.apply_with(app, |app| app::try_apply_command(app, edit.command));
     let label = match outcome {
         Ok(app::edit::EditOutcome::Applied(result)) => Some(Some(result.label)),
         Ok(app::edit::EditOutcome::AppliedUnrecorded) => Some(None),
         Ok(app::edit::EditOutcome::NoOp) => None,
         Err(error) => {
-            script.end(app, ctx, edit.continuous, false);
+            script.end(app, ctx, false);
             return Err(format!("{error:?}"));
         }
     };
@@ -478,7 +478,7 @@ fn apply_edit(
             None => super::routing::track_output_applied(app, editor, ctx, track),
         }
     }
-    script.end(app, ctx, edit.continuous, label.is_some());
+    script.end(app, ctx, label.is_some());
     Ok(())
 }
 

@@ -384,11 +384,11 @@ fn apply_edit(
 ) -> Result<(), String> {
     let continuous = edit.continuous();
     let landing = edit.landing();
-    let script = super::ScriptEdit::begin(app, ctx);
-    let drags = script.drags(ctx, continuous);
+    let script = super::ScriptEdit::begin(app, ctx, continuous);
+    let drags = script.drags(ctx);
     let outcome = script.apply_with(app, |app| edit.apply(app, drags));
     let changed = matches!(outcome, Ok(true));
-    script.end(app, ctx, continuous, changed);
+    script.end(app, ctx, changed);
     if changed {
         match landing {
             None => super::drum_rack_v2::sync_rack_pad_map(
