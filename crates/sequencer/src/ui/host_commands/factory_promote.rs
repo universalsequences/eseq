@@ -65,7 +65,7 @@ fn commit(payload: &Value, app: &mut app::App, editor: &mut Editor) -> Result<()
             let rt = editor.runtime_mut();
             rt.eval_str("(eseq.factory-promote/close)").map_err(|error| format!("{error:?}"))?;
             record_preset_listings();
-            sync_sidebar_browser(rt, app, app.ui.cursor_track);
+            sync_sidebar_browser(app, app.ui.cursor_track);
             let file = path
                 .file_name()
                 .map(|file| file.to_string_lossy().to_string())

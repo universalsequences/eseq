@@ -263,6 +263,7 @@ pub(crate) fn process_slot_port_defs(
     ports
 }
 
+#[cfg(test)]
 pub(super) fn process_slot_ports_value(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
@@ -288,8 +289,8 @@ pub(super) fn process_mappable_port_values(
     .unwrap_or_default()
 }
 
-/// What a slot's port shows (`SEQ.track-process-slots :ports`, the host
-/// kinds' `port`): its binding, status and capabilities.
+/// What a slot's port shows (the host kinds' `port`): its binding, status
+/// and capabilities.
 pub(crate) struct ProcessPortView<'a> {
     pub(crate) hint: String,
     /// The bound target's label (the hint's when it follows the hint;
@@ -529,8 +530,7 @@ pub(crate) fn process_lane_entries_for_track(
 }
 
 /// The lane entries of `track`'s composed `chain` (one per lane inlet of
-/// each slot, in chain order): what `SEQ.track-process-lanes` lists and the
-/// host kinds' `lane`s show.
+/// each slot, in chain order): what the host kinds' `lane`s show.
 pub(crate) fn process_lane_entries_for_chain(
     state: &SequencerState,
     track: usize,
@@ -643,6 +643,7 @@ pub(crate) fn process_slot_lane_entries(
     }
 }
 
+#[cfg(test)]
 pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
     map_value([
         ("mode", Value::Number(mode as f64)),
@@ -680,6 +681,7 @@ pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) 
     ])
 }
 
+#[cfg(test)]
 pub(crate) fn build_process_lanes_value(state: &Arc<SequencerState>, track: usize) -> Value {
     list_value(
         process_lane_entries_for_track(state, track)
@@ -691,21 +693,16 @@ pub(crate) fn build_process_lanes_value(state: &Arc<SequencerState>, track: usiz
     )
 }
 
-pub(crate) fn build_all_track_process_lanes_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_process_lanes_value(state, track)))
-}
-
 /// Numeric lane data is separate from metadata so slider writes do not
 /// invalidate the expanded row's selector, ranges, labels and patchbay.
+#[cfg(test)]
 fn process_lane_values_value(entries: &[ProcessLaneUiEntry]) -> Value {
     list_value(entries.iter().map(|entry| {
         list_value(entry.values.iter().map(|value| Value::Number(*value as f64)))
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn build_all_track_process_lane_values(
     state: &Arc<SequencerState>,
     track_count: usize,
@@ -713,30 +710,6 @@ pub(crate) fn build_all_track_process_lane_values(
     list_value((0..track_count).map(|track| {
         process_lane_values_value(&process_lane_entries_for_track(state, track))
     }))
-}
-
-/// A lane edit changes one track's values and, on its first project-lane
-/// write, its fork marker. It cannot change ports, the library or other tracks.
-pub(crate) fn sync_process_lane_track_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-    current_track: usize,
-) -> bool {
-    let entries = process_lane_entries_for_track(state, track);
-    let metadata = list_value(entries.iter().enumerate().map(|(index, entry)| {
-        process_lane_entry_value(entry, PROCESS_LANE_MODE_OFFSET + index)
-    }));
-    let mut dirty = rt.set_reactive_list_index(
-        "SEQ", "track-process-lanes", track, metadata.clone(),
-    ).effects_dirty;
-    dirty |= rt.set_reactive_list_index(
-        "SEQ", "track-process-lane-values", track, process_lane_values_value(&entries),
-    ).effects_dirty;
-    if track == current_track {
-        dirty |= rt.set_reactive("SEQ", "process-lanes", metadata).effects_dirty;
-    }
-    dirty
 }
 
 pub(super) fn process_lane_value_for_mode(
@@ -811,9 +784,9 @@ pub(super) fn process_scalar_inlet_value(
         .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
 }
 
-/// What a slot's scalar (non-lane) inlet shows (`SEQ.track-process-slots
-/// :inlets`, the host kinds' `inlet`): its value (the slot's literal, else
-/// the class default), range and options.
+/// What a slot's scalar (non-lane) inlet shows (the host kinds' `inlet`):
+/// its value (the slot's literal, else the class default), range and
+/// options.
 pub(crate) struct ProcessInletView {
     pub(crate) kind: &'static str,
     /// An enum inlet's option labels (the value is the option index).
@@ -864,6 +837,7 @@ pub(crate) fn process_scalar_inlet_view(
     })
 }
 
+#[cfg(test)]
 pub(super) fn process_scalar_inlet_entry_value(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
@@ -945,6 +919,7 @@ pub(crate) fn process_slot_def<'a>(
         .find(|def| def.name == slot.class_name)
 }
 
+#[cfg(test)]
 pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let Some(chain) = state.composed_track_process_chain(track) else {
         return list_value(Vec::<Value>::new());
@@ -997,21 +972,6 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
         ])
     }))
 }
-
-pub(crate) fn build_all_track_process_slots_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_process_slots_value(state, track)))
-}
-
-/// Out ports get cable ids `(track * TRACK_STRIDE + slot-index) * PORT_STRIDE
-/// + ordinal`. The patch-port machinery keys cable sources by a single number
-/// across the whole buffer layout, and two expanded tracks show two
-/// patchbays at once, so the id must be unique per track as well as per
-/// port (a slot-only id drew track 3's cables from track 2's ports).
-pub(crate) const LANE_PATCH_PORT_STRIDE: usize = 16;
-pub(crate) const LANE_PATCH_TRACK_STRIDE: usize = 4096;
 
 /// The chain slot a writer's process-inlet `target` lands on, with the
 /// inlet: wiring stays within a layer, as the scheduler resolves it
@@ -1073,8 +1033,7 @@ pub(crate) fn lane_patch_in_port(
     inlet.lane || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate) || wired
 }
 
-/// The library's classes (`SEQ.process-library`, the host kinds'
-/// `process-class`): compiled expr bodies (`expr#<hash>`) are reached
+/// The library's classes (the host kinds' `process-class`): compiled expr bodies (`expr#<hash>`) are reached
 /// through the plain `expr` card, never offered as classes
 /// (docs/expr-process-spec.md §2.1).
 pub(crate) fn process_library_defs(
@@ -1086,6 +1045,7 @@ pub(crate) fn process_library_defs(
         .filter(|def| !sequencer::process::is_expr_process_class(&def.name))
 }
 
+#[cfg(test)]
 pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
     let published = state.published_process_authoring();
     list_value(process_library_defs(&published).map(|def| {
@@ -1184,30 +1144,3 @@ pub(crate) fn process_bound_bus_sends(state: &SequencerState, track: usize) -> H
     bound
 }
 
-pub(crate) fn sync_process_chain_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_count: usize,
-    current_track: usize,
-) {
-    rt.set_reactive(
-        "SEQ", "track-process-lane-values",
-        build_all_track_process_lane_values(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-process-lanes",
-        build_all_track_process_lanes_value(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "process-lanes",
-        build_process_lanes_value(state, current_track),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-process-slots",
-        build_all_track_process_slots_value(state, track_count),
-    );
-    rt.set_reactive("SEQ", "process-library", build_process_library_value(state));
-}

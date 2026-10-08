@@ -40,7 +40,6 @@ fn meter_cache() -> MeterCache {
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: Vec::new(),
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: Vec::new(),
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -120,7 +119,6 @@ impl Harness {
         let RuntimeInit { runtime, .. } = init_runtime(
             &app,
             state.clone(),
-            &track_names,
             shared.track_pan_ids.clone(),
             shared.track_collapsed.clone(),
             shared.bus_state.clone(),

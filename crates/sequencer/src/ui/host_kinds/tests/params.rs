@@ -846,7 +846,7 @@ fn has_locks_counts_only_the_steps_of_the_pattern() {
 }
 
 #[test]
-fn step_plock_render_and_send_lock_flags_match_the_legacy_fields() {
+fn step_plock_render_and_send_lock_flags_match_the_model() {
     let (mut h, slot) = Harness::with_devices();
     let fx = h.add_bus("FX");
     h.sync();
@@ -866,7 +866,6 @@ fn step_plock_render_and_send_lock_flags_match_the_legacy_fields() {
         .get_num_steps()
         .min(MAX_STEPS);
     let render = plock_variant_step_render_values(&h.shared.state, 0);
-    let mask = track_step_plock_mask(&h.shared.state, 0, &h.app.graph.effect_descriptors);
     let rows =
         h.eval_all("(map (lambda (s) (list s.plocked s.lock-kind s.variant-color)) t0.steps)");
     let Value::List(rows) = rows else {
@@ -876,16 +875,13 @@ fn step_plock_render_and_send_lock_flags_match_the_legacy_fields() {
     for (step, row) in rows.iter().enumerate() {
         let expected = h.eval_all(&format!(
             "(list {} {} (rgb {} {} {}))",
-            mask[step / 64] & (1 << (step % 64)) != 0,
+            [2, 5, 9].contains(&step),
             render[step].kind,
             f64::from(render[step].color[0]),
             f64::from(render[step].color[1]),
             f64::from(render[step].color[2]),
         ));
         assert_eq!(*row.borrow(), expected, "step {step}");
-    }
-    for step in [2, 5, 9] {
-        assert!(mask[step / 64] & (1 << (step % 64)) != 0, "step {step}");
     }
     assert_eq!(h.slot("kind9"), f64::from(render[9].kind));
     // Sends: a lock somewhere, and whether the shown level is one.

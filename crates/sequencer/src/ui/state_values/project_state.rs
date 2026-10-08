@@ -1,50 +1,5 @@
 use super::*;
 
-/// Build a Lisp Value::List of bools indicating which steps are selected.
-pub(crate) fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
-    let set = selected.lock().unwrap();
-    build_selection_value_from_set(&set)
-}
-
-/// Build a Lisp Value::List of bools from an already-held selection snapshot.
-pub(crate) fn build_selection_value_from_set(set: &HashSet<usize>) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
-        .collect();
-    Value::List(items)
-}
-
-/// Build list of available effect names from the effects/ directory.
-pub(crate) fn build_available_effects() -> Value {
-    let names = sequencer::lisp_host::list_saved_effects();
-    let items: Vec<Rc<RefCell<Value>>> = names
-        .into_iter()
-        .map(|n| Rc::new(RefCell::new(Value::String(n))))
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_available_builtin_effects() -> Value {
-    let items = sequencer::effects::builtin_effect_names()
-        .into_iter()
-        .map(|name| Rc::new(RefCell::new(Value::String(name.to_string()))))
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_available_midi_effects() -> Value {
-    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
-        .into_iter()
-        .map(|desc| desc.name)
-        .collect();
-    names.sort();
-    let items: Vec<Rc<RefCell<Value>>> = names
-        .into_iter()
-        .map(|name| Rc::new(RefCell::new(Value::String(name))))
-        .collect();
-    Value::List(items)
-}
-
 pub(crate) fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str) -> Option<usize> {
     sequencer::lisp_host::load_midi_fx_descriptor(fx_name)
         .and_then(|desc| desc.params.get(param_idx).cloned())
@@ -84,7 +39,7 @@ const RESET_RACK_PANEL_VIEWS: &str = "eseq.effects.state/reset-rack-panel-views!
 /// which restart with every project). Not a playback update. The scene bank
 /// view resets through the host kinds: a load replaces every bank instance.
 pub(crate) fn sync_project_replacement(rt: &mut Runtime, state: &Arc<SequencerState>) {
-    sync_pattern_state(rt, state);
+    sync_scene_slot_state(rt, state);
     if rt.has_global(RESET_RACK_PANEL_VIEWS) {
         if let Err(error) = rt.invoke_global(RESET_RACK_PANEL_VIEWS, Vec::new()) {
             eprintln!("[project] could not reset the rack panel views: {error:?}");
@@ -402,8 +357,8 @@ pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Op
     }
 }
 
-/// The loaded preset name of the first `count` tracks ("" when none).
-/// Shared by `SEQ.track-loaded-presets` and the `track` host kind.
+/// The loaded preset name of the first `count` tracks ("" when none):
+/// the `track` host kind's `preset`.
 pub(crate) fn track_loaded_presets(app: &app::App, count: usize) -> Vec<String> {
     let sound = app.state.pattern.track_sound_state.lock().unwrap();
     (0..count)
@@ -416,15 +371,9 @@ pub(crate) fn track_loaded_presets(app: &app::App, count: usize) -> Vec<String> 
         .collect()
 }
 
-pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usize) {
-    // Every track's loaded preset name ("" when none), for views that show
-    // all tracks at once rather than the current track's sidebar.
-    let loaded_presets = track_loaded_presets(app, app.tracks.len());
-    rt.set_reactive(
-        "SEQ",
-        "track-loaded-presets",
-        build_string_list(&loaded_presets),
-    );
+/// Record what the browser sidebar shows for `track` (the `browser` host
+/// kind reads it through `presented`).
+pub(crate) fn sync_sidebar_browser(app: &app::App, track: usize) {
     crate::presented::present_sidebar(sidebar_browser(app, track));
 }
 
@@ -748,7 +697,7 @@ pub(crate) fn extract_usize_list_from_payload(payload: &Value, key: &str) -> Vec
 }
 
 /// A drum rack track's selected slot and that slot's voice count; `None`
-/// for any other track (`SEQ.tp-rack-slot-idx`, `selection.rack-slot`).
+/// for any other track (`selection.rack-slot`).
 pub(crate) fn rack_slot_selection(app: &app::App, track: usize) -> Option<(usize, usize)> {
     if app.graph.track_instrument_types.get(track)
         != Some(&sequencer::sequencer::InstrumentType::Rack)
@@ -770,7 +719,7 @@ pub(crate) fn rack_slot_selection(app: &app::App, track: usize) -> Option<(usize
 }
 
 /// Whether the track's instrument honours voice priority and mono trigger
-/// (`SEQ.tp-supports-mono-trigger`, `track.supports-mono-trigger`): rack
+/// (`track.supports-mono-trigger`): rack
 /// slots read the parent track's.
 pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool {
     matches!(
@@ -778,49 +727,6 @@ pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool 
         Some(sequencer::sequencer::InstrumentType::Custom)
             | Some(sequencer::sequencer::InstrumentType::Rack)
     )
-}
-
-/// Push the current track's step grid fields (`tp-num-steps`, `tp-timebase`).
-/// (The track panel reads the track's settings, its p-lock table and variant
-/// chips from eseq.kinds: `track.*`, `selection.plock-rows`.)
-pub(crate) fn sync_track_params(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) {
-    let tp = &state.pattern.track_params[track];
-    rt.set_reactive(
-        "SEQ",
-        "tp-num-steps",
-        Value::Number(tp.get_num_steps() as f64),
-    );
-    let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
-}
-
-/// Refreshes the step grid's timebase (`tp-timebase`), which follows the
-/// selected (else playing) step's p-lock. Selection changes should use this
-/// instead of rebuilding every track field. (The track panel reads the
-/// track's own settings and their locks from eseq.kinds:
-/// `track.setting-locks`.)
-pub(crate) fn sync_track_selection_param_binding_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> bool {
-    let tp = &state.pattern.track_params[track];
-    let selected_step = selected_plock_step(selected);
-    let display_step = displayed_plock_step(state, track, selected_step);
-    let timebase = display_step
-        .and_then(|step| state.pattern.timebase_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_timebase());
-    rt.set_reactive(
-        "SEQ",
-        "tp-timebase",
-        Value::String(timebase.label().to_string()),
-    )
-    .effects_dirty
 }
 
 #[cfg(test)]

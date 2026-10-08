@@ -988,12 +988,18 @@ mod step_print_tests {
     }
 
     /// Every picker in the *step* panel must be printable through both the
-    /// native and the host command, so the keyword table has to cover
-    /// `STEP_INSPECTOR_PARAMS` exactly (see `seqv-param-keyword`).
+    /// native and the host command, so the keyword table has to cover the
+    /// panel's step params exactly (see `seqv-param-keyword`).
     #[test]
     fn every_step_inspector_param_has_a_print_keyword() {
-        use crate::state_values::STEP_INSPECTOR_PARAMS;
-        for param in STEP_INSPECTOR_PARAMS {
+        for param in [
+            StepParam::Transpose,
+            StepParam::Velocity,
+            StepParam::Duration,
+            StepParam::Pan,
+            StepParam::Retrig,
+            StepParam::RetrigRate,
+        ] {
             let keyword = match param {
                 StepParam::Velocity => "velocity",
                 StepParam::Duration => "duration",
@@ -1001,7 +1007,7 @@ mod step_print_tests {
                 StepParam::Pan => "pan",
                 StepParam::Retrig => "retrig",
                 StepParam::RetrigRate => "retrig-rate",
-                other => panic!("{other:?} is in STEP_INSPECTOR_PARAMS but has no keyword"),
+                other => panic!("{other:?} is a step panel param but has no keyword"),
             };
             assert_eq!(
                 super::print_step_param_from_keyword(keyword),

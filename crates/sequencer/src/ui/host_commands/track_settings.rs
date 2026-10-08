@@ -30,7 +30,7 @@ type Payload = HashMap<String, Rc<RefCell<Value>>>;
 /// `track-tuning-action`, `set-track-setting`, `set-tuning`) applied: pause
 /// the playhead follow, queue the mixer strip's targeted invalidation for a
 /// mixer op, else the track's whole-track refresh and a UI epoch bump (the
-/// legacy `SEQ.tp-*` resync), and show the edit's label when it has one.
+/// host kinds' model resync), and show the edit's label when it has one.
 pub(super) fn slice3_edit_applied(
     editor: &mut Editor,
     ctx: &LoopCtx<'_>,
@@ -475,7 +475,7 @@ fn apply_edit(
     if let Some(label) = label.clone() {
         match &edit.payload {
             Some(payload) => slice3_edit_applied(editor, ctx, payload, Some(track), label),
-            None => super::routing::track_output_applied(app, editor, ctx, track),
+            None => super::routing::track_output_applied(editor, ctx),
         }
     }
     script.end(app, ctx, label.is_some());
@@ -503,11 +503,6 @@ fn set_cursor_step(
     super::natives::CurrentTrackSwitch::of(shared).select(track);
     let rt = editor.runtime_mut();
     rt.set_global_value(FX_STEP_CURSOR_GLOBAL, Value::Number(step as f64));
-    let (selected, count) = {
-        let selected = shared.selected_steps.lock().unwrap();
-        (selected.iter().copied().min(), selected.len())
-    };
-    sync_fx_step_cursor_binding_fields(rt, &shared.state, track, step, selected, count);
     const HOOK: &str = "sequencer-cursor-step-changed";
     if rt.global_value(HOOK).is_some() {
         let args = vec![Value::Number(track as f64), Value::Number(step as f64)];

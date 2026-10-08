@@ -32,8 +32,7 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         eng.keyboard_tx,
     );
 
-    let mut runtime = Runtime::new();
-    runtime.register_reactive("SEQ", Vec::new(), true);
+    let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
     let selected_steps = Arc::new(Mutex::new(HashSet::new()));
@@ -94,7 +93,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: Vec::new(),
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -126,22 +124,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
             shared.track_pan_ids.lock().unwrap().len(),
             app.graph.track_node_ids.len()
         );
-        assert!(
-            matches!(editor.runtime().reactive_field_value("SEQ", "num-tracks"),
-    Some(Value::Number(n)) if *n == 2.0)
-        );
-        for field in [
-            "track-ids",
-            "track-names",
-            "record-armed",
-            "track-num-steps",
-        ] {
-            assert!(
-                matches!(editor.runtime().reactive_field_value("SEQ", field),
-        Some(Value::List(items)) if items.len() == 2),
-                "SEQ.{field}"
-            );
-        }
         for track in 0..2 {
             assert_eq!(
                 natives::toggle_track_record_arm(

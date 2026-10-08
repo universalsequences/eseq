@@ -122,7 +122,7 @@ fn browser_sidebar_and_track_instruments_follow_the_presented_sidebar() {
         .expect("track");
     h.track_names = h.app.tracks.clone();
     h.sync();
-    sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 2);
+    sync_sidebar_browser(&h.app, 2);
     h.sync();
     check(&h);
     assert_eq!(h.single(BROWSER, "track"), Value::Instance(h.track_id(2)));
@@ -168,7 +168,7 @@ fn idle_syncs_push_no_view_and_list_nothing() {
         generations
     );
     // A republish of the same sidebar moves no area either.
-    sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 0);
+    sync_sidebar_browser(&h.app, 0);
     h.sync();
     assert_eq!(h.view_pushes(), pushes);
     // The live fields cost nothing until observed.
@@ -726,7 +726,7 @@ fn a_drum_racks_slots_carry_their_presets_and_their_slot_device() {
     let mut h = Harness::new();
     h.rack_track();
     h.sync();
-    sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 2);
+    sync_sidebar_browser(&h.app, 2);
     h.sync();
     let sidebar = presented(|p| p.sidebar.get().clone());
     let slots = h.instances(h.single(BROWSER, "rack-slots"));
@@ -745,11 +745,11 @@ fn a_drum_racks_slots_carry_their_presets_and_their_slot_device() {
     assert_eq!(h.cell(slots[0], "device"), h.eval_all("rs"));
     assert_eq!(h.eval_all("rs.role"), s("rack-slot"));
     // A republish keeps the instance.
-    sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 2);
+    sync_sidebar_browser(&h.app, 2);
     h.sync();
     assert_eq!(h.instances(h.single(BROWSER, "rack-slots")), slots);
     // Showing another track drops the slots.
-    sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 0);
+    sync_sidebar_browser(&h.app, 0);
     h.sync();
     assert!(h.instances(h.single(BROWSER, "rack-slots")).is_empty());
     assert!(!h.rt().instance_is_live(slots[0]));

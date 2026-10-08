@@ -1310,7 +1310,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     } = init_runtime(
         &app,
         Arc::clone(&state),
-        &track_names,
         Arc::clone(&track_pan_ids),
         Arc::clone(&track_collapsed),
         Arc::clone(&bus_state),
@@ -1398,24 +1397,14 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         record_preset_listings();
         // This also publishes group topology, which hook gestures need to
         // calculate the same visible track order as the rendered UI.
-        sync_track_color_state(runtime, &app);
         sync_track_topology_state(
             runtime,
             &app,
             &state,
             &mut track_names,
             args.track,
-            &selected_steps,
             &accumulator_names,
-            &record_armed,
-            &vec![0.0; app.tracks.len()],
         );
-        runtime.set_reactive(
-            "SEQ",
-            "selected-steps",
-            build_selection_value(&selected_steps),
-        );
-        sync_song_state(runtime, &app, &mut SongFrameState::default());
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
@@ -1434,33 +1423,16 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     // before the palette / clip-sound colors below are published, since those
     // rows carry the theme's variant tint baked into their RGB.
     editor.refresh_runtime_side_effects();
-    if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
-        sync_song_state(editor.runtime_mut(), &app, &mut SongFrameState::default());
-    }
-    // Selection gestures in the hook mutate the same shared state as live UI
-    // clicks. Publish it before drawing, as the live reactive tick does.
-    let selected_track = current_track.load(std::sync::atomic::Ordering::Relaxed);
-    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(selected_track as f64));
-    sync_selected_tracks_bindings(editor.runtime_mut(), &selected_tracks.lock().unwrap());
+    apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
     let _ = sync_sound_palette(&app, &mut SoundPaletteFrameState::default(), true);
     publish_capture_sound_glyphs(&mut editor)?;
-    // The live tick publishes `SEQ.instances`; capture has no tick.
-    let mut instances_fingerprint = None;
-    if let Some(value) =
-        crate::host_commands::instances::instances_value_if_changed(&app, &mut instances_fingerprint)
-    {
-        editor.runtime_mut().set_reactive("SEQ", "instances", value);
-    }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
-    // capture-after-sync may apply a theme after the initial project sync.
-    // Mirror the live loop's display-color refresh before rendering.
-    sync_track_color_state(editor.runtime_mut(), &app);
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
+    // capture-after-sync may apply a theme after the initial project sync:
+    // the host kinds re-push the tinted colors before rendering.
     sync_host_kinds(&mut editor, &app);
 
     let buffer_id = editor

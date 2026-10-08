@@ -250,7 +250,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = init_runtime(
         &app,
         state.clone(),
-        &track_names,
         track_pan_ids.clone(),
         track_collapsed.clone(),
         bus_state.clone(),

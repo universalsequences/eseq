@@ -810,3 +810,37 @@ fn a_knob_drag_rebuilds_no_clips_or_cells() {
     h.sync();
     assert_eq!(h.frame.host_kinds.song.structure_syncs, syncs + 1);
 }
+
+/// The song's capture failure latch and existence (ported from the
+/// `SEQ.song-*` smoke test, eseq-0l17.78): `song.capture-failed` /
+/// `capture-error` follow the latch both ways, and clearing resets to the
+/// empty arrangement (empty-arrangement spec 4.3), so `song.exists` stays
+/// true.
+#[test]
+fn song_capture_failure_and_existence_follow_the_model() {
+    let mut h = Harness::new();
+    h.clip(0, 0.0, 4.0, 1);
+    h.sync();
+    assert_eq!(h.eval_7d("song.exists"), Value::Bool(true));
+    assert_eq!(h.eval_7d("song.capture-failed"), Value::Bool(false));
+    assert_eq!(h.eval_7d("song.capture-error"), Value::String(String::new()));
+
+    h.app.song_capture_failed = true;
+    h.app.song_capture_error = Some("take could not be committed".to_string());
+    h.sync();
+    assert_eq!(h.eval_7d("song.capture-failed"), Value::Bool(true));
+    assert_eq!(
+        h.eval_7d("song.capture-error"),
+        Value::String("take could not be committed".to_string())
+    );
+
+    h.app.song_capture_failed = false;
+    h.app.song_capture_error = None;
+    h.sync();
+    assert_eq!(h.eval_7d("song.capture-failed"), Value::Bool(false));
+    assert_eq!(h.eval_7d("song.capture-error"), Value::String(String::new()));
+
+    h.app.arr_clear().expect("clear succeeds");
+    h.sync();
+    assert_eq!(h.eval_7d("song.exists"), Value::Bool(true));
+}

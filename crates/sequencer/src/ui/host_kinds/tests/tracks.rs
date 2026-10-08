@@ -48,10 +48,7 @@ fn track_scene_bank_transport_selection_and_device_fields_read_through_kinds() {
     // Transport, scenes, banks, selection.
     assert_eq!(h.eval("transport.playing"), Value::Bool(false));
     assert_eq!(h.eval("transport.recording"), Value::Bool(false));
-    assert_eq!(
-        h.eval("transport.launch-quantize"),
-        h.eval("SEQ.scene-launch-quantize")
-    );
+    assert_eq!(h.eval("transport.launch-quantize"), s("off"));
     let scene_count = h.shared.state.scene_count();
     assert!(scene_count >= 1);
     assert_eq!(h.eval("(len (scenes))"), Value::Number(scene_count as f64));

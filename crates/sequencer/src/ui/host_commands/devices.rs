@@ -117,7 +117,7 @@ pub(super) fn handle(
         return;
     };
     let result = match name {
-        "set-device" => device_edit(map, app, editor, ctx),
+        "set-device" => device_edit(map, app, ctx),
         "set-device-strip-locks" | "clear-device-strip-locks" => {
             strip_lock_edit(name, map, app, editor, ctx)
         }
@@ -230,7 +230,7 @@ fn param_edit(
         });
         if is_rack_device(device) {
             let rebuild = param_change_needs_fx_rebuild(&pdesc);
-            rack_param_applied(editor, app, ctx, track, rebuild, Some(rows));
+            rack_param_applied(ctx, rebuild, Some(rows));
         }
     }
     // A drag's locks of the same steps join one entry (eseq-0l17.58).
@@ -372,7 +372,7 @@ fn base_edit(
     let changed = apply_device_param_base(app, ctx.shared, edit, rebuild, value, apply);
     if rack && changed {
         let rebuild = param_change_needs_fx_rebuild(pdesc);
-        rack_param_applied(editor, app, ctx, owner, rebuild, None);
+        rack_param_applied(ctx, rebuild, None);
     }
     changed
 }
@@ -382,7 +382,6 @@ fn base_edit(
 fn device_edit(
     map: &Payload,
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     let Addressed { owner, device, .. } = addressed(app, map)?;
@@ -432,7 +431,7 @@ fn device_edit(
             Ok(())
         }
         other => match StripControl::from_field(other) {
-            Some(control) => strip_edit(owner, device, control, &value, app, editor, ctx),
+            Some(control) => strip_edit(owner, device, control, &value, app, ctx),
             None => Err(format!("a device has no settable field {other}")),
         },
     }
@@ -449,7 +448,6 @@ fn strip_edit(
     control: StripControl,
     value: &SetValue<'_>,
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     let DeviceSlot::RackSlot(slot_idx) = device else {
@@ -468,7 +466,7 @@ fn strip_edit(
     let script = ScriptEdit::begin(app, ctx, control.drags());
     let changed = script.apply(app, control.command(owner, slot_idx, wanted));
     if changed {
-        rack_slot_strip_applied(editor, app, ctx, owner, control);
+        rack_slot_strip_applied(ctx, control);
     }
     script.end(app, ctx, changed);
     Ok(())
@@ -542,9 +540,7 @@ fn strip_lock_edit(
         ctx,
         locks,
         command,
-        |editor, app, ctx, rows| {
-            rack_slot_plock_applied(editor, app, ctx, track, param, rows)
-        },
+        |_, _, ctx, rows| rack_slot_plock_applied(ctx, param, rows),
     );
     Ok(())
 }

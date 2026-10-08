@@ -236,7 +236,7 @@ use panel_kinds_seed::*;
                 &[sequencer::sequencer::InstrumentType::Sampler],
             )
             .expect("switch to second scene");
-        sync_pattern_state(&mut runtime, &state);
+        sync_scene_slot_state(&mut runtime, &state);
         runtime.run_reactive_cycle();
 
         let updates = runtime.take_pending_buffer_widget_trees();
@@ -285,7 +285,7 @@ use panel_kinds_seed::*;
                        (subtree :key "unrelated" (label "static"))))"#,
             )
             .expect("render scene-slot reader");
-        sync_pattern_state(&mut runtime, &state);
+        sync_scene_slot_state(&mut runtime, &state);
         runtime.run_reactive_cycle();
         runtime.take_pending_buffer_widget_trees();
 
@@ -304,7 +304,7 @@ use panel_kinds_seed::*;
             "the scene index must be unchanged: that is the point of this case"
         );
 
-        sync_pattern_state(&mut runtime, &state);
+        sync_scene_slot_state(&mut runtime, &state);
         runtime.run_reactive_cycle();
 
         let updates = runtime.take_pending_buffer_widget_trees();
@@ -6005,55 +6005,6 @@ use panel_kinds_seed::*;
         assert_eq!(device_leaf_name("/"), "");
     }
 
-    #[test]
-    fn device_chain_values_are_per_channel_lists_of_device_maps() {
-        let app = test_app_with_instrument_descriptor_on_tracks(
-            sequencer::effects::EffectDescriptor::builtin_filter(),
-            2,
-        );
-        let tracks = build_track_device_chains_value(&app, &app.state);
-        let Value::List(tracks) = tracks else {
-            panic!("track device chains should be a per-track list");
-        };
-        assert_eq!(tracks.len(), app.tracks.len());
-        for track in &tracks {
-            let Value::List(devices) = &*track.borrow() else {
-                panic!("each track should carry a device list");
-            };
-            for device in devices {
-                let Value::Map(device) = &*device.borrow() else {
-                    panic!("device entry should be a map");
-                };
-                assert!(matches!(
-                    device.get("kind").map(|v| v.borrow().clone()),
-                    Some(Value::String(kind)) if kind == "instrument" || kind == "effect"
-                ));
-                assert!(matches!(
-                    device.get("enabled").map(|v| v.borrow().clone()),
-                    Some(Value::Bool(_))
-                ));
-                assert!(matches!(
-                    device.get("name").map(|v| v.borrow().clone()),
-                    Some(Value::String(_))
-                ));
-            }
-        }
-        let Value::List(buses) = build_bus_device_chains_value(&app) else {
-            panic!("bus device chains should be a per-bus list");
-        };
-        assert_eq!(buses.len(), app.buses.len());
-        for bus in &buses {
-            let Value::List(devices) = &*bus.borrow() else {
-                panic!("each bus should carry a device list");
-            };
-            assert_eq!(
-                devices.len(),
-                0,
-                "a fresh bus has no effects: {devices:?}"
-            );
-        }
-    }
-
     fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
         let Value::Map(map) = payload else {
             return None;
@@ -8671,38 +8622,6 @@ use panel_kinds_seed::*;
         assert_eq!(render[5].kind, 0);
     }
 
-    #[test]
-    fn track_name_sync_republishes_restored_topology_when_mirror_already_matches() {
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        let app = test_app_for_track_visual_state(state);
-        let mut mirror = app.tracks.clone();
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("track-ids", Value::List(vec![])),
-                ("track-instrument-types", Value::List(vec![])),
-                ("track-instrument-run-modes", Value::List(vec![])),
-                ("num-tracks", Value::Number(1.0)),
-                ("track-names", build_track_names(&["Track 1".to_string()])),
-                ("track-colors", Value::List(vec![])),
-                ("track-collapsed", Value::List(vec![])),
-            ],
-            false,
-        );
-
-        sync_track_name_state(&mut runtime, &mut mirror, &app);
-
-        assert_eq!(
-            runtime.eval_str("SEQ.num-tracks").unwrap(),
-            Some(Value::Number(2.0)),
-        );
-        assert_eq!(
-            runtime.eval_str("(len SEQ.track-names)").unwrap(),
-            Some(Value::Number(2.0)),
-        );
-    }
-
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
         match value {
             Value::List(items) => items
@@ -8728,22 +8647,20 @@ use panel_kinds_seed::*;
         app.groups = vec![regular_group_fixture(false)];
         let authored_group_color = app.groups[0].color;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor.runtime_mut().eval_str(
             "(load \"ui/themes.lisp\") (seq-theme-mac-osx-dark)"
         ).expect("load theme registry");
         editor.refresh_runtime_side_effects();
-        let original = build_track_colors(&app);
+        let displayed = |app: &sequencer::app::App| {
+            (0..app.tracks.len()).map(|track| track_display_color(app, track)).collect::<Vec<_>>()
+        };
+        let original = displayed(&app);
         editor.runtime_mut().eval_str("(seq-theme-phosphor)")
             .expect("apply Phosphor through public command");
         editor.refresh_runtime_side_effects();
         let tint = eseqlisp::theme::TRACK_TINT();
         assert_eq!(tint.a, 1.0, "Phosphor fully replaces displayed track colors");
-        sync_track_color_state(editor.runtime_mut(), &app);
-        let runtime = editor.runtime_mut();
-        assert_eq!(runtime.eval_str(
-            "(= (nth SEQ.track-colors 0) (nth SEQ.track-colors 1))"
-        ).unwrap(), Some(Value::Bool(true)));
+        assert_eq!(track_display_color(&app, 0), track_display_color(&app, 1));
         // Every selectable theme must set its own tint (never inherit
         // Phosphor's), even when loaded directly (not just through the
         // registry wrapper). Themes that release it restore the authored
@@ -8761,10 +8678,9 @@ use panel_kinds_seed::*;
             editor.refresh_runtime_side_effects();
             let loaded_tint = eseqlisp::theme::TRACK_TINT();
             assert_ne!(loaded_tint, tint, "{} must declare its own :track-tint", path.display());
-            sync_track_color_state(editor.runtime_mut(), &app);
             let has_palette = eseqlisp::theme::track_palette().iter().any(|c| c.a > 0.0);
             if loaded_tint.a == 0.0 && !has_palette {
-                assert_eq!(build_track_colors(&app), original, "{}", path.display());
+                assert_eq!(displayed(&app), original, "{}", path.display());
             }
         }
         assert_eq!(app.track_colors, authored, "theme switching must not edit project colors");
@@ -8784,7 +8700,6 @@ use panel_kinds_seed::*;
         ];
         let authored = app.track_colors.clone();
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor
             .runtime_mut()
             .eval_str("(load \"ui/themes.lisp\") (seq-theme-aura)")
@@ -8798,12 +8713,12 @@ use panel_kinds_seed::*;
         let variant_tint = eseqlisp::theme::VARIANT_TINT();
         assert!(variant_tint.a < 0.25, "variant tint stays a faint wash over the palette snap");
 
-        sync_track_color_state(editor.runtime_mut(), &app);
-        let displayed = value_list_maps_as_rgb(&reactive_field_value(
-            editor.runtime_mut(),
-            "SEQ",
-            "track-colors",
-        ));
+        let displayed: Vec<[f32; 3]> = (0..app.tracks.len())
+            .map(|track| {
+                let color = track_display_color(&app, track);
+                [color.r, color.g, color.b]
+            })
+            .collect();
         assert_eq!(displayed.len(), 3);
         for (i, rgb) in displayed.iter().enumerate() {
             let a = authored[i];
@@ -8848,114 +8763,6 @@ use panel_kinds_seed::*;
         (h.rem_euclid(360.0), 1.0, (max + min) * 0.5)
     }
 
-    fn value_list_maps_as_rgb(value: &Value) -> Vec<[f32; 3]> {
-        match value {
-            Value::List(items) => items
-                .iter()
-                .map(|item| {
-                    let rgb = number_list_values(&item.borrow());
-                    [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]
-                })
-                .collect(),
-            other => panic!("expected list of colors, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn track_mute_visual_binding_sync_updates_effective_mute_fields() {
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        let app = test_app_for_track_visual_state(state.clone());
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
-                ("track-muted-effective", build_track_muted_effective(&app, &state)),
-            ],
-            true,
-        );
-
-        state.pattern.track_params[1].set_mute(true);
-        sync_track_mute_visual_binding_fields(
-            &mut runtime,
-            &app,
-            &state,
-            std::iter::once(1),
-            false,
-        );
-        assert_eq!(
-            number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-effective"
-            )),
-            vec![0.0, 1.0]
-        );
-        assert_eq!(
-            bool_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-by-solo"
-            )),
-            vec![false, false]
-        );
-
-        state.pattern.track_params[0].set_solo(true);
-        sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
-        assert_eq!(
-            bool_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-by-solo"
-            )),
-            vec![false, true]
-        );
-        assert_eq!(
-            number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-effective"
-            )),
-            vec![0.0, 1.0]
-        );
-
-        state.pattern.track_params[0].set_solo(false);
-        sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
-        assert_eq!(
-            bool_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-by-solo"
-            )),
-            vec![false, false]
-        );
-        assert_eq!(
-            number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-effective"
-            )),
-            vec![0.0, 1.0]
-        );
-
-        state.pattern.track_params[1].set_mute(false);
-        sync_track_mute_visual_binding_fields(
-            &mut runtime,
-            &app,
-            &state,
-            std::iter::once(1),
-            false,
-        );
-        assert_eq!(
-            number_list_values(&reactive_field_value(
-                &runtime,
-                "SEQ",
-                "track-muted-effective"
-            )),
-            vec![0.0, 0.0]
-        );
-    }
-
     #[test]
     fn duration_spans_cover_steps_held_by_active_sources() {
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -8965,111 +8772,11 @@ use panel_kinds_seed::*;
         state.pattern.step_data[track].set(0, StepParam::Duration, 2.0);
         state.pattern.step_data[track].set(3, StepParam::Duration, 0.5);
 
-        let spans = bool_list_values(&build_track_duration_spans_value(&state, track));
+        let spans: Vec<bool> = (0..5)
+            .map(|step| track_step_duration_covered(&state, track, step))
+            .collect();
 
-        assert!(spans[0]);
-        assert!(spans[1]);
-        assert!(!spans[2]);
-        assert!(spans[3]);
-        assert!(!spans[4]);
-    }
-
-    #[test]
-    fn sequencer_track_timebase_labels_show_current_selected_step_plock() {
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        state.pattern.track_params[0].set_timebase(Timebase::Sixteenth);
-        state.pattern.track_params[1].set_timebase(Timebase::Quarter);
-        state.pattern.timebase_plocks[0].set(3, Timebase::EighthTriplet);
-        state.pattern.timebase_plocks[1].set(3, Timebase::HalfTriplet);
-
-        let selected = Some(3);
-        assert_eq!(
-            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, selected)),
-            ["8T", "4"],
-            "only the current track row should reflect the selected step's timebase plock"
-        );
-        assert_eq!(
-            string_list_values(&build_track_timebase_labels_value(&state, 2, 1, selected)),
-            ["16", "2T"],
-            "switching current track should resolve that track's selected-step timebase plock"
-        );
-        assert_eq!(
-            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, None)),
-            ["16", "4"],
-            "without selected steps every row should show its track default timebase"
-        );
-    }
-
-    #[test]
-    fn playhead_param_binding_gate_only_opens_across_relevant_plocks() {
-        let state = Arc::new(SequencerState::new(1, vec![]));
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let descriptors = vec![Vec::new()];
-
-        assert!(!playhead_transition_changes_param_bindings(
-            &state,
-            0,
-            &descriptors,
-            &selected,
-            2,
-            3,
-        ));
-        state.pattern.swing_plocks[0].set(3, 70.0);
-        assert!(playhead_transition_changes_param_bindings(
-            &state,
-            0,
-            &descriptors,
-            &selected,
-            2,
-            3,
-        ));
-        assert!(playhead_transition_changes_param_bindings(
-            &state,
-            0,
-            &descriptors,
-            &selected,
-            3,
-            4,
-        ));
-
-        selected.lock().unwrap().insert(7);
-        assert!(!playhead_transition_changes_param_bindings(
-            &state,
-            0,
-            &descriptors,
-            &selected,
-            2,
-            3,
-        ));
-    }
-
-    #[test]
-    fn track_selection_timebase_follows_selected_step_and_restores_default() {
-        // The step grid's timebase (SEQ.tp-timebase); the track panel reads
-        // track.setting-locks (host_kinds settings tests).
-        let state = Arc::new(SequencerState::new(1, vec![]));
-        state.pattern.track_params[0].set_timebase(Timebase::Sixteenth);
-        state.pattern.timebase_plocks[0].set(3, Timebase::EighthTriplet);
-        let selected_steps = Arc::new(Mutex::new(HashSet::from([3])));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![("tp-timebase", Value::String(String::new()))],
-            true,
-        );
-
-        sync_track_selection_param_binding_fields(&mut runtime, &state, 0, &selected_steps);
-        assert_eq!(
-            runtime.eval_str("SEQ.tp-timebase").unwrap(),
-            Some(Value::String("8T".to_string()))
-        );
-
-        selected_steps.lock().unwrap().clear();
-        sync_track_selection_param_binding_fields(&mut runtime, &state, 0, &selected_steps);
-        assert_eq!(
-            runtime.eval_str("SEQ.tp-timebase").unwrap(),
-            Some(Value::String("16".to_string()))
-        );
+        assert_eq!(spans, [true, true, false, true, false]);
     }
 
     #[test]
@@ -9189,8 +8896,8 @@ use panel_kinds_seed::*;
         assert_eq!(registry.entries.len(), 1);
         assert_eq!(VariantChip::of(&registry.entries[0]).count, 1);
         assert_eq!(
-            number_list_values(&build_step_plock_kinds(&app.state, 0))[4],
-            2.0,
+            plock_variant_step_render_values(&app.state, 0)[4].kind,
+            2,
             "timebase-only steps should use the colored variant rendering path"
         );
 
@@ -9603,7 +9310,6 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(40, 16);
         // The panel tests built on this editor publish their dicts here.
-        editor.runtime_mut().register_reactive("SEQ", vec![], false);
         for path in ["ui/macro-state.lisp", "ui/macros.lisp"] {
             let source = read_factory_source(path).expect("read macro UI source");
             let overlays = editor.snapshot_file_backed_sources();
@@ -9682,7 +9388,6 @@ use panel_kinds_seed::*;
         }
         // The per-param projection namespace the *plock-sync* effects write
         // into; the app registers it in `natives.rs`.
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "playing", Value::Bool(true));
@@ -9843,7 +9548,6 @@ use panel_kinds_seed::*;
         ] {
             editor.runtime_mut().set_reactive("SEQ", field, value);
         }
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read param control UI source");
             let overlays = editor.snapshot_file_backed_sources();
@@ -11574,7 +11278,6 @@ use panel_kinds_seed::*;
             "track-plocks",
             build_track_plocks_value(&app, &app.state, 0, &selected),
         );
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
             Value::List(vec![plock_key_row("rack-macro", None, None, Some(0))]));
         // The rack's macros as the host kinds push them from these lists;
@@ -14122,7 +13825,6 @@ use panel_kinds_seed::*;
             ],
             true,
         );
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
@@ -14899,8 +14601,6 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
-        editor.runtime_mut().register_reactive("SEQ", vec![], true);
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
             .eval_str("(do (defstate eseq.seq-core-state/selected-bus -1) (defstate cursor-step 0) (def eseq.seq-core-state/page-size 16))")
@@ -22872,113 +22572,6 @@ use panel_kinds_seed::*;
         )));
     }
 
-    /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
-    /// `sync_song_state` seam the event loop calls each frame: the scalar
-    /// song bindings follow the committed song and the capture failure. The
-    /// mode, latches and lane surfaces are the host kinds' (`song`, `clip`,
-    /// `scene-span`; host_kinds::tests::arrangement). The exact
-    /// `song-current-row` display value needs the scheduler's position
-    /// atomics, which stay inactive in this headless test, so it must read
-    /// -1 here.
-    #[test]
-    fn metal_seq_song_reactive_bindings_reflect_transport_mode() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-
-        let state = sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        );
-        state.replace_pattern_repository(
-            vec![
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-            ],
-            0,
-        );
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut test_app = sequencer::app::App::new(
-            std::sync::Arc::new(state),
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            sequencer::app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        test_app.tracks = vec!["Track 1".to_string()];
-        test_app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
-            start_beat,
-            scene,
-            overrides: Vec::new(),
-        };
-        test_app
-            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
-            .expect("song committed");
-        test_app.set_arrangement_cursor(12.0, -1);
-
-        let mut frame = SongFrameState::default();
-        assert!(
-            sync_song_state(editor.runtime_mut(), &test_app, &mut frame),
-            "the first sync publishes everything"
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
-        assert_eq!(
-            read(&mut editor, "SEQ.song-recording-kind"),
-            Value::String("".into())
-        );
-        assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
-        assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
-        assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
-        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
-
-        // No change: no publish, and nothing is rebuilt (revision key).
-        assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame),
-            "an unchanged frame publishes nothing"
-        );
-
-        // A latched capture failure publishes both failure bindings.
-        test_app.song_capture_failed = true;
-        test_app.song_capture_error = Some("take could not be committed".to_string());
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(true));
-        assert_eq!(
-            read(&mut editor, "SEQ.song-capture-error"),
-            Value::String("take could not be committed".into())
-        );
-        test_app.song_capture_failed = false;
-        test_app.song_capture_error = None;
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
-        assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
-
-        // Clearing resets to the EMPTY arrangement (empty-arrangement spec
-        // 4.3): song-exists stays true — there is no "no song" mode.
-        test_app.arr_clear().expect("clear succeeds");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
-    }
-
     /// Build a one-track app with a committed one-row song, ready to enter
     /// arrangement capture (the fixture the `song-pending` tests share).
     fn pending_capture_test_app() -> sequencer::app::App {
@@ -26533,7 +26126,7 @@ use panel_kinds_seed::*;
         for (scene, expected) in [(1, 0.0), (0, -9.0)] {
             state.launch_scene(scene, 1, &[-1], &[44_100], &["Track 1".to_string()],
                 &[sequencer::sequencer::InstrumentType::Sampler]).unwrap();
-            sync_pattern_state(editor.runtime_mut(), &state);
+            sync_scene_slot_state(editor.runtime_mut(), &state);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
@@ -28137,7 +27730,6 @@ use panel_kinds_seed::*;
             ],
             true,
         );
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         // The mixer's view of the same tracks: kinds.
         editor
             .runtime_mut()
@@ -29294,38 +28886,6 @@ use panel_kinds_seed::*;
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
         );
-    }
-
-    #[test]
-    fn process_lane_value_sync_preserves_metadata_readers_and_updates_bindings() {
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], true);
-        sequencer::lisp_host::register_published_process_authoring_natives(
-            &mut runtime, Arc::clone(&state), Arc::new(AtomicUsize::new(0)),
-        );
-        runtime.eval_str(r#"
-            (def-accumulator test-lane :target (step-param :transpose)
-              :amount (amount :lane true :default 0) :range (-24 24) :mode :clip)
-            (def test-chain (processes :track 0 (test-lane :amount (lane 0 1 0 0))))
-        "#).unwrap();
-        let instance = state.track_process_chain(0).unwrap().slots[0].instance_id;
-        sync_process_chain_state(&mut runtime, &state, 2, 0);
-        runtime.eval_str(r#"
-            (defstate metadata-runs 0)
-            (effect (do SEQ.track-process-lanes SEQ.process-lanes SEQ.track-process-slots
-              SEQ.process-library
-              (set! metadata-runs (+ metadata-runs 1))))
-            (defstate observed-value 0)
-            (effect (set! observed-value (nth (nth (nth SEQ.track-process-lane-values 0) 0) 3)))
-        "#).unwrap();
-        runtime.run_reactive_cycle();
-        let runs_before = runtime.eval_str("metadata-runs").unwrap();
-        assert!(state.set_process_lane_steps(0, instance, "amount", &[1, 3], 7.0));
-        sync_process_lane_track_state(&mut runtime, &state, 0, 0);
-        runtime.run_reactive_cycle();
-        assert_eq!(runtime.eval_str("metadata-runs").unwrap(), runs_before);
-        assert_eq!(runtime.eval_str("observed-value").unwrap(), Some(Value::Number(7.0)));
     }
 
     #[test]
@@ -32049,7 +31609,6 @@ use panel_kinds_seed::*;
         let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         // The shared state modules the mixer imports still read SEQ.
-        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -33803,7 +33362,6 @@ use panel_kinds_seed::*;
         // The p-lock presence projection (param-controls.lisp) publishes into
         // the Lisp-writable SEQV namespace, which init_runtime always
         // registers in production.
-        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -44128,7 +43686,6 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 30);
         // The shared state modules the mixer imports still read SEQ.
-        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -45759,76 +45316,6 @@ use panel_kinds_seed::*;
                 "Bus A strip should render styled button backgrounds for mute, solo, and label"
             );
         }
-    }
-
-    #[test]
-    fn piano_roll_item_edit_syncs_sequencer_track_reactive_state() {
-        let app = test_app_with_instrument_descriptor(
-            sequencer::effects::EffectDescriptor::empty_custom_slot(),
-        );
-        let state = app.state.clone();
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], true);
-
-        sync_single_track_sequencer_state(&mut runtime, &state, &app, 0, 0);
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.steps 4)")
-                .expect("read initial current-track step"),
-            Some(Value::Bool(false))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth SEQ.track-steps 0) 4)")
-                .expect("read initial sequencer track step"),
-            Some(Value::Bool(false))
-        );
-
-        let piano_roll_selection = Arc::new(Mutex::new(HashSet::new()));
-        let move_state = Arc::new(Mutex::new(None));
-        let action = map_value([
-            ("type", Value::Keyword("finish-create-item".to_string())),
-            ("lane", Value::Number(50.0)),
-            ("start", Value::Number(4.0)),
-            ("end", Value::Number(5.5)),
-        ]);
-        assert!(piano_roll_action_mutates_pattern(&action));
-        apply_piano_roll_action(&PianoRollLanes::live(&state, 0), &piano_roll_selection, &move_state, &action)
-            .expect("create piano roll note");
-
-        sync_single_track_sequencer_state(&mut runtime, &state, &app, 0, 0);
-
-        let expected_transpose = state.pattern.step_data[0].get(4, StepParam::Transpose) as f64;
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.steps 4)")
-                .expect("read current-track step after piano roll edit"),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth SEQ.track-steps 0) 4)")
-                .expect("read sequencer track step after piano roll edit"),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.transposes 4)")
-                .expect("read current-track transpose after piano roll edit"),
-            Some(Value::Number(expected_transpose))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth SEQ.track-transposes 0) 4)")
-                .expect("read sequencer track transpose after piano roll edit"),
-            Some(Value::Number(expected_transpose))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.durations 4)")
-                .expect("read current-track duration after piano roll edit"),
-            Some(Value::Number(1.5))
-        );
     }
 
     #[test]

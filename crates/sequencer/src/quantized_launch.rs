@@ -11,8 +11,9 @@ const DUE_CAPACITY: usize = 256;
 const BOUNDARY_EPSILON_BEATS: f64 = 1.0e-9;
 pub const QUARTER_NOTES_PER_BAR: f64 = 4.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LaunchQuantize {
+    #[default]
     Off,
     Sixteenth,
     Eighth,

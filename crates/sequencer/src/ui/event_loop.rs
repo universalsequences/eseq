@@ -391,38 +391,26 @@ pub(crate) fn run_event_loop(
         prev_song_row_mirror_epoch: 0,
         prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
-        prev_instances_fingerprint: None,
         prev_current_track: usize::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
         recording_history_open: false,
-        prev_roll_windows: Vec::new(),
-        prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
-        prev_track_peak_levels: Vec::new(),
-        prev_rack_slot_peak_levels: Vec::new(),
-        prev_bus_peak_levels: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
         rack_pad_triggers: Vec::new(),
         prev_track_playheads: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
-        prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
-        prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
         prev_sound_binding_epoch: 0,
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
-        track_param_sync_revision: None,
-        prev_instrument_active_notes: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
         // Force one complete track/rack publication on the first frame; an
         // analysis may have completed between graph binding and loop startup.
         prev_sampler_analysis_generation: u64::MAX,
-        prev_auto_follow: true,
-        song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
         watched_sampler_voice_ids: Vec::new(),
@@ -434,7 +422,6 @@ pub(crate) fn run_event_loop(
         cached_peak_l_level: 0.0f64,
         cached_peak_r_level: 0.0f64,
         cached_track_peak_levels: vec![0.0; track_names.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids),
         cached_modulator_phases: initial_modulator_phases,
         cached_modulator_levels: initial_modulator_levels,
@@ -681,6 +668,7 @@ pub(crate) fn run_event_loop(
         if animation_active { editor.mark_needs_redraw(); }
 
         // Native-owned loops drain translated input; the wgpu loop still polls.
+        #[cfg(not(target_os = "macos"))]
         let playing_now = shared.state.transport.playing.load(Ordering::Relaxed);
         #[cfg(not(target_os = "macos"))]
         let timeout = {
@@ -944,20 +932,11 @@ pub(crate) fn run_event_loop(
                                         &shared.state,
                                         &mut track_names,
                                         replay_track,
-                                        &shared.selected_steps,
                                         &shared.accumulator_names,
-                                        &shared.record_armed,
-                                        &meters.cached_track_peak_levels,
                                     );
-                                    sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
-                                sync_bus_mixer_state(rt, &app);
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "track-names",
-                                    build_track_names(&track_names),
-                                );
+                                crate::param_words::set_track_word_names(&track_names);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 if topology_changed {
@@ -1553,72 +1532,12 @@ pub(crate) fn run_event_loop(
 
                         sync_project_replacement(rt, &shared.state);
                         record_preset_listings();
-                        sync_bus_mixer_state(rt, &app);
-                        rt.set_reactive("SEQ", "playing", Value::Bool(playing));
-                        rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-                        sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                        rt.set_reactive(
-                            "SEQ",
-                            "num-tracks",
-                            Value::Number(track_names.len() as f64),
-                        );
-                        set_current_track_reactive(rt, ct);
-                        rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                        rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
-                        rt.set_reactive(
-                            "SEQ",
-                            "record-armed",
-                            build_record_armed_value(&shared.record_armed.lock().unwrap()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "selected-steps",
-                            build_selection_value(&shared.selected_steps),
-                        );
+                        crate::param_words::set_track_word_names(&track_names);
 
-                        if app.tracks.is_empty() {
-                            sync_playhead_fields(rt, 0, 1);
-                            rt.set_reactive("SEQ", "steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "durations", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "pans", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "delays", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
-                            sync_track_mixer_empty_state(rt);
-                            rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
-                        } else {
-                            sync_all_track_sequencer_state(rt, &shared.state, &app);
-                            sync_playhead_fields(
-                                rt,
-                                playhead as usize,
-                                shared.state.pattern.track_params[ct].get_num_steps(),
-                            );
-                            rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                            sync_step_param_lists(rt, &shared.state, ct);
-                            sync_track_mixer_state(rt, &app, &shared.state);
-                            sync_track_peak_fields(rt, &meters.cached_track_peak_levels);
-                            sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
+                        if !app.tracks.is_empty() {
                             *shared.accumulator_names.lock().unwrap() =
                                 build_accumulator_names(&app);
-                            sync_track_params(rt, &shared.state, ct, &shared.selected_steps);
-                            rt.set_reactive(
-                                "SEQ",
-                                "step-has-plocks",
-                                build_step_has_plocks(
-                                    &shared.state,
-                                    ct,
-                                    &app.graph.effect_descriptors,
-                                ),
-                            );
-                            sync_sidebar_browser(rt, &app, ct);
+                            sync_sidebar_browser(&app, ct);
                         }
 
                         rt.clear_subtree_effects_for_named_target("*sequencer*");
@@ -1639,7 +1558,6 @@ pub(crate) fn run_event_loop(
                         frame.prev_bpm = bpm;
                         frame.prev_playing = playing;
                         frame.prev_pattern_epoch = epoch;
-                        frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_track_playheads = track_playheads_snapshot(&shared.state, &app);
                         frame.prev_track_button_states = track_button_state_snapshot(&shared.state);
                         frame.prev_ui_epoch = shared.ui_epoch.load(Ordering::Relaxed);
@@ -1728,9 +1646,7 @@ pub(crate) fn run_event_loop(
                                 track_names: &mut track_names,
                                 track_pan_ids: &shared.track_pan_ids,
                                 record_armed: &shared.record_armed,
-                                selected_steps: &shared.selected_steps,
                                 accumulator_names: &shared.accumulator_names,
-                                cached_track_peak_levels: &meters.cached_track_peak_levels,
                                 group_id,
                                 pad_note,
                                 track_groups: &shared.track_groups,
@@ -1763,10 +1679,8 @@ pub(crate) fn run_event_loop(
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,
-                                state: &shared.state,
                                 current_track: &shared.current_track,
                                 track_names: &mut track_names,
-                                selected_steps: &shared.selected_steps,
                                 fx_epoch: &shared.fx_epoch,
                                 ui_epoch: &shared.ui_epoch,
                             },
@@ -1959,7 +1873,6 @@ pub(crate) fn run_event_loop(
                             present_editor_closed(rt);
                             if let EffectEditTarget::Bus { .. } = session.target {
                                 *shared.bus_state.lock().unwrap() = app.buses.clone();
-                                sync_bus_mixer_state(rt, &app);
                             }
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
@@ -2129,7 +2042,6 @@ pub(crate) fn run_event_loop(
                                             if let EffectEditTarget::Bus { .. } = session.target {
                                                 *shared.bus_state.lock().unwrap() =
                                                     app.buses.clone();
-                                                sync_bus_mixer_state(rt, &app);
                                             }
                                             rt.run_reactive_cycle();
                                             editor.refresh_runtime_side_effects();
@@ -2480,7 +2392,6 @@ pub(crate) fn run_event_loop(
             TickInputs {
                 cols,
                 rows,
-                playing_now,
             },
             &mut frame_pacer,
             &mut ui_loop_stats,

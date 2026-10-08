@@ -49,132 +49,6 @@ pub(super) fn modulation_routing_param_indices(
     indices
 }
 
-/// Build a Lisp Value::List of bools from the step pattern for a given track.
-pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|s| {
-            Rc::new(RefCell::new(Value::Bool(
-                state.pattern.patterns[track].is_active(s),
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
-/// Build a list-of-lists of bools: one step list per track for the *sequencer* buffer.
-pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &app::App) -> Value {
-    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
-        .map(|t| {
-            let steps: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-                .map(|s| {
-                    Rc::new(RefCell::new(Value::Bool(
-                        state.pattern.patterns[t].is_active(s),
-                    )))
-                })
-                .collect();
-            Rc::new(RefCell::new(Value::List(steps)))
-        })
-        .collect();
-    Value::List(tracks)
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ReactiveSetStats {
-    pub calls: usize,
-    pub effects_dirty: usize,
-    pub widgets_dirty: usize,
-}
-
-impl ReactiveSetStats {
-    pub(super) fn note(&mut self, result: ReactiveSetResult) {
-        self.calls += 1;
-        if result.effects_dirty {
-            self.effects_dirty += 1;
-        }
-        if result.widgets_dirty {
-            self.widgets_dirty += 1;
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AllTrackSequencerSyncProfile {
-    pub elapsed: Duration,
-    pub track_steps: Duration,
-    pub track_num_steps: Duration,
-    pub track_duration_spans: Duration,
-    pub track_step_has_plocks: Duration,
-    pub track_playheads: Duration,
-    pub track_velocities: Duration,
-    pub track_durations: Duration,
-    pub track_auxas: Duration,
-    pub track_transposes: Duration,
-    pub track_pans: Duration,
-    pub track_syncs: Duration,
-    pub track_delays: Duration,
-    pub playhead_fields: Duration,
-}
-
-pub(crate) fn build_all_track_num_steps_value(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
-        .map(|t| {
-            Rc::new(RefCell::new(Value::Number(
-                state.pattern.track_params[t].get_num_steps() as f64,
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(super) fn resolved_track_timebase_label(
-    state: &Arc<SequencerState>,
-    track: usize,
-    current_track_idx: usize,
-    selected_step: Option<usize>,
-) -> String {
-    let timebase = if track == current_track_idx {
-        selected_step
-            .and_then(|step| state.pattern.timebase_plocks[track].get(step))
-            .unwrap_or_else(|| state.pattern.track_params[track].get_timebase())
-    } else {
-        state.pattern.track_params[track].get_timebase()
-    };
-    timebase.label().to_string()
-}
-
-pub(super) fn build_track_timebase_labels_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-    current_track_idx: usize,
-    selected_step: Option<usize>,
-) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..track_count)
-        .map(|track| {
-            Rc::new(RefCell::new(Value::String(resolved_track_timebase_label(
-                state,
-                track,
-                current_track_idx,
-                selected_step,
-            ))))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let num_steps = state.pattern.track_params[track]
-        .get_num_steps()
-        .min(MAX_STEPS);
-    let held = track_held_steps(state, track, num_steps);
-    let spans: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|step| Rc::new(RefCell::new(Value::Bool(held.get(step) == Some(&true)))))
-        .collect();
-    Value::List(spans)
-}
-
 pub(crate) fn track_step_duration_covered(
     state: &Arc<SequencerState>,
     track: usize,
@@ -273,33 +147,10 @@ mod delete_target_binding_tests {
     }
 }
 
-/// Builds the `SEQ.selected-tracks` reactive list (sorted track indices).
-pub(crate) fn build_selected_tracks_value(selected: &HashSet<usize>) -> Value {
-    let tracks = sorted_selected_tracks(selected);
-    list_value(tracks.into_iter().map(|t| Value::Number(t as f64)))
-}
-
-/// The multi-track selection in track order (`SEQ.selected-tracks`,
-/// `selection.tracks`).
+/// The multi-track selection in track order (`selection.tracks`).
 pub(crate) fn sorted_selected_tracks(selected: &HashSet<usize>) -> Vec<usize> {
     let mut tracks: Vec<usize> = selected.iter().copied().collect();
     tracks.sort_unstable();
     tracks
 }
 
-/// Refreshes `SEQ.selected-tracks` (the highlight is `track.in-selection`).
-pub(crate) fn sync_selected_tracks_bindings(rt: &mut Runtime, selected: &HashSet<usize>) {
-    rt.set_reactive(
-        "SEQ",
-        "selected-tracks",
-        build_selected_tracks_value(selected),
-    );
-}
-
-pub(crate) fn set_current_track_reactive(rt: &mut Runtime, current_track_idx: usize) {
-    rt.set_reactive(
-        "SEQ",
-        "current-track",
-        Value::Number(current_track_idx as f64),
-    );
-}

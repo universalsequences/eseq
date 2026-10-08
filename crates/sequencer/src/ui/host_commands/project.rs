@@ -115,17 +115,14 @@ pub(super) fn handle(
                                     &mut *ctx.track_names,
                                     &track_pan_ids,
                                     &record_armed,
-                                    &selected_steps,
                                     &accumulator_names,
-                                    &ctx.meters.cached_track_peak_levels,
-                                    &ctx.meters.cached_bus_peak_levels,
                                     &ui_epoch,
                                     lg_raw,
                                 );
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 let rt = editor.runtime_mut();
-                                sync_sidebar_browser(rt, &app, track);
+                                sync_sidebar_browser(&app, track);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -206,7 +203,7 @@ pub(super) fn handle(
                             app.save_current_track_as_preset(&name, overwrite);
                         // Refresh sidebar presets list
                         let rt = editor.runtime_mut();
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         match save_result {
@@ -226,7 +223,7 @@ pub(super) fn handle(
             app.ui.cursor_track = track;
             app.overwrite_loaded_preset();
             let rt = editor.runtime_mut();
-            sync_sidebar_browser(rt, &app, track);
+            sync_sidebar_browser(&app, track);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
         }
@@ -280,10 +277,6 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             sync_project_replacement(rt, &state);
             record_preset_listings();
-            rt.set_reactive("SEQ", "playing", Value::Bool(playing));
-            rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-            sync_bus_mixer_state(rt, &app);
-            sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             // New projects have default tracks; publish their real topology,
             // rather than leaving live input and the UI with empty mirrors.
             sync_track_topology_state(
@@ -292,13 +285,9 @@ pub(super) fn handle(
                 &state,
                 ctx.track_names,
                 0,
-                &selected_steps,
                 &accumulator_names,
-                &record_armed,
-                &ctx.meters.cached_track_peak_levels,
             );
-            rt.set_reactive("SEQ", "selected-steps", Value::List(vec![]));
-            sync_sidebar_browser(rt, &app, 0);
+            sync_sidebar_browser(&app, 0);
             rt.clear_subtree_effects_for_named_target("*sequencer*");
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -309,7 +298,6 @@ pub(super) fn handle(
             ctx.frame.prev_bpm = bpm;
             ctx.frame.prev_playing = playing;
             ctx.frame.prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-            ctx.frame.prev_track_peak_levels.clear();
             ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, &app);
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
             ctx.frame.prev_ui_epoch = ui_epoch.fetch_add(1, Ordering::Relaxed) + 1;

@@ -37,9 +37,6 @@ pub(super) fn run(
     editor.blur_all_widget_focus();
     shared.recording.store(true, Ordering::Relaxed);
     app.state.start_playback();
-    editor
-        .runtime_mut()
-        .set_reactive("SEQ", "playing", Value::Bool(true));
     let mut sessions = EditSessionState::default();
     let mut frame = FrameDiffState::default();
     let mut gesture = GestureState::default();
@@ -49,7 +46,6 @@ pub(super) fn run(
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0; app.tracks.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: vec![0.0; app.buses.len()],
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -86,11 +82,6 @@ pub(super) fn run(
                 gesture: &mut gesture,
                 track_names: &mut track_names,
                 shared,
-            },
-            &TickInputs {
-                cols: cols as usize,
-                rows: rows as usize,
-                playing_now: true,
             },
             &mut stats,
         );

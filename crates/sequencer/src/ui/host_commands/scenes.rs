@@ -105,7 +105,6 @@ pub(super) fn handle(
 ) {
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let active_delete_target = ctx.shared.active_delete_target.clone();
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
@@ -139,13 +138,9 @@ pub(super) fn handle(
                 )));
                 return;
             };
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "scene-launch-quantize",
-                Value::String(quantize.transport_label().to_string()),
-            );
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
+            // UI state of record (not saved); the host kinds push it as
+            // `transport.launch-quantize` at the next sync.
+            ctx.frame.host_kinds.set_scene_launch_quantize(quantize);
             editor.mark_needs_redraw();
         }
         "fork-track-pattern" => {
@@ -726,24 +721,12 @@ pub(super) fn handle(
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let rt = editor.runtime_mut();
             sync_shared_track_collapsed(&track_collapsed, &app);
-            sync_track_name_state(rt, &mut *ctx.track_names, &app);
-            sync_pattern_state(rt, &state);
-            set_current_track_reactive(rt, ct);
-            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-            sync_all_track_sequencer_state(rt, &state, &app);
-            sync_step_param_lists(rt, &state, ct);
-            sync_track_mixer_state(rt, &app, &state);
-            sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
+            refresh_track_names_cache(&mut *ctx.track_names, &app);
+            sync_scene_slot_state(rt, &state);
             if fx_visible {
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
             }
-            sync_track_params(rt, &state, ct, &selected_steps);
-            rt.set_reactive(
-                "SEQ",
-                "step-has-plocks",
-                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-            );
-            sync_sidebar_browser(rt, &app, ct);
+            sync_sidebar_browser(&app, ct);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             if editor_has_visible_mixer_buffer(editor) {
@@ -818,13 +801,8 @@ pub(super) fn handle(
                     let apply_samples_elapsed = Duration::ZERO;
                     let restored_defaults_elapsed = Duration::ZERO;
                     let mut sync_names_pattern_elapsed = Duration::ZERO;
-                    let mut sync_current_steps_elapsed = Duration::ZERO;
-                    let mut sync_sequencer_elapsed = Duration::ZERO;
-                    let mut sync_step_params_elapsed = Duration::ZERO;
-                    let mut sync_mixer_elapsed = Duration::ZERO;
                     let mut sync_fx_lists_elapsed = Duration::ZERO;
                     let mut sync_accumulators_elapsed = Duration::ZERO;
-                    let mut sync_track_params_elapsed = Duration::ZERO;
                     let mut sync_plocks_sidebar_elapsed = Duration::ZERO;
                     let mut reactive_elapsed = Duration::ZERO;
                     let mut side_effects_elapsed = Duration::ZERO;
@@ -842,26 +820,9 @@ pub(super) fn handle(
                         let rt = editor.runtime_mut();
                         let started = Instant::now();
                         sync_shared_track_collapsed(&track_collapsed, &app);
-                        sync_track_name_state(rt, &mut *ctx.track_names, &app);
-                        sync_pattern_state(rt, &state);
+                        refresh_track_names_cache(&mut *ctx.track_names, &app);
+                        sync_scene_slot_state(rt, &state);
                         sync_names_pattern_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                        sync_current_steps_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        sync_all_track_sequencer_state(rt, &state, &app);
-                        sync_sequencer_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        // The all-track pass above already published its parameter lists.
-                        sync_current_track_step_param_lists(rt, &state, ct);
-                        sync_process_chain_state(rt, &state, state.active_track_count(), ct);
-                        sync_step_params_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_bus_mixer_state(rt, &app);
-                        sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-                        sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                        sync_mixer_elapsed = started.elapsed();
                         let started = Instant::now();
                         if fx_visible {
                             let sub_started = Instant::now();
@@ -871,19 +832,7 @@ pub(super) fn handle(
                         }
                         sync_fx_lists_elapsed = started.elapsed();
                         let started = Instant::now();
-                        sync_track_params(rt, &state, ct, &selected_steps);
-                        sync_track_params_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                ct,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_sidebar_browser(rt, &app, ct);
+                        sync_sidebar_browser(&app, ct);
                         sync_plocks_sidebar_elapsed = started.elapsed();
                         let started = Instant::now();
                         rt.run_reactive_cycle();
@@ -901,7 +850,7 @@ pub(super) fn handle(
                     }
                     if profile_switch {
                         eprintln!(
-                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms accumulators={:.2}ms track_params={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms fx_lists={:.2}ms accumulators={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
                             idx,
                             pattern_changed,
                             duration_ms(profile_total_started.elapsed()),
@@ -910,13 +859,8 @@ pub(super) fn handle(
                             duration_ms(apply_samples_elapsed),
                             duration_ms(restored_defaults_elapsed),
                             duration_ms(sync_names_pattern_elapsed),
-                            duration_ms(sync_current_steps_elapsed),
-                            duration_ms(sync_sequencer_elapsed),
-                            duration_ms(sync_step_params_elapsed),
-                            duration_ms(sync_mixer_elapsed),
                             duration_ms(sync_fx_lists_elapsed),
                             duration_ms(sync_accumulators_elapsed),
-                            duration_ms(sync_track_params_elapsed),
                             duration_ms(sync_plocks_sidebar_elapsed),
                             duration_ms(reactive_elapsed),
                             duration_ms(side_effects_elapsed),
@@ -952,7 +896,7 @@ pub(super) fn handle(
             match renamed {
                 Ok(()) => {
                     let rt = editor.runtime_mut();
-                    sync_pattern_state(rt, &state);
+                    sync_scene_slot_state(rt, &state);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -978,7 +922,7 @@ pub(super) fn handle(
                     );
                     if reordered.is_ok() {
                         let rt = editor.runtime_mut();
-                        sync_pattern_state(rt, &state);
+                        sync_scene_slot_state(rt, &state);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1115,8 +1059,7 @@ pub(super) fn handle(
                 }
             };
             let rt = editor.runtime_mut();
-            sync_pattern_state(rt, &state);
-            sync_bus_mixer_state(rt, &app);
+            sync_scene_slot_state(rt, &state);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1161,22 +1104,10 @@ pub(super) fn handle(
                 let ct = current_track.load(Ordering::Relaxed);
                 let rt = editor.runtime_mut();
                 sync_shared_track_collapsed(&track_collapsed, &app);
-                sync_track_name_state(rt, &mut *ctx.track_names, &app);
-                sync_pattern_state(rt, &state);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                sync_step_param_lists(rt, &state, ct);
-                sync_track_mixer_state(rt, &app, &state);
-                sync_bus_mixer_state(rt, &app);
-                sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-                sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
+                refresh_track_names_cache(&mut *ctx.track_names, &app);
+                sync_scene_slot_state(rt, &state);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                sync_track_params(rt, &state, ct, &selected_steps);
-                rt.set_reactive(
-                    "SEQ",
-                    "step-has-plocks",
-                    build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                );
-                sync_sidebar_browser(rt, &app, ct);
+                sync_sidebar_browser(&app, ct);
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1281,8 +1212,7 @@ mod tests {
         app.track_registry =
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
 
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
+        let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
         let current_track = Arc::new(AtomicUsize::new(TRACK));
@@ -1333,7 +1263,6 @@ mod tests {
             cached_peak_l_level: 0.0,
             cached_peak_r_level: 0.0,
             cached_track_peak_levels: vec![0.0],
-            cached_rack_slot_peak_levels: Vec::new(),
             cached_bus_peak_levels: Vec::new(),
             cached_modulator_phases: Vec::new(),
             cached_modulator_levels: Vec::new(),

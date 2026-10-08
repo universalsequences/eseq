@@ -37,7 +37,7 @@ fn rack_slot_presets_follow_explicit_selection_and_route_to_the_slot() {
     });
     editor.set_layout_viewport(55, 38);
     seed_browser_tracks(&mut editor, &vec!["rack"; app.tracks.len()], track);
-    sync_sidebar_browser(editor.runtime_mut(), &app, track);
+    sync_sidebar_browser(&app, track);
     let slot_devices = push_presented_sidebar(&mut editor);
     // The rack slot the delete target selects, as the host pushes
     // `device.delete-target`.
@@ -133,7 +133,7 @@ fn rack_slot_presets_follow_explicit_selection_and_route_to_the_slot() {
     assert!(!rack_slot_runs_instrument(&app, track, 9, name));
     assert!(!track_runs_instrument(&app, track, name));
 
-    sync_sidebar_browser(editor.runtime_mut(), &app, track);
+    sync_sidebar_browser(&app, track);
     push_presented_sidebar(&mut editor);
     let rt = editor.runtime_mut();
     assert_eq!(rt.eval_str("(eseq.browser/browser-loaded-preset)").unwrap(), Some(Value::String(preset.name.clone())));
@@ -178,7 +178,7 @@ fn dropped_preset_of_the_running_instrument_loads_in_place() {
     // The browser stamps the track's instrument on its preset rows.
     let mut editor = browser_editor_on_instrument_tab();
     seed_browser_tracks(&mut editor, &vec!["custom"; app.tracks.len()], track);
-    sync_sidebar_browser(editor.runtime_mut(), &app, track);
+    sync_sidebar_browser(&app, track);
     push_presented_sidebar(&mut editor);
     let rt = editor.runtime_mut();
     assert_eq!(rt.eval_str("(eseq.browser/browser-preset-instrument)").unwrap(),

@@ -872,16 +872,7 @@ fn soft_step_param_edit_spec(
     }
 }
 
-fn sync_soft_step_param_commit(
-    editor: &mut Editor,
-    state: &Arc<SequencerState>,
-    target: &SoftStepParamEditTarget,
-) {
-    sync_step_param_lists(editor.runtime_mut(), state, target.track);
-}
-
 fn commit_soft_step_param_edit(
-    editor: &mut Editor,
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -907,7 +898,6 @@ fn commit_soft_step_param_edit(
             ).is_err() {
                 return false;
             }
-            sync_soft_step_param_commit(editor, &app.state, target);
             true
         }
         SoftStepParamEditKind::ProcessLane { instance_id, inlet_name } => {
@@ -917,10 +907,6 @@ fn commit_soft_step_param_edit(
             );
             app::edit::finish_active_gesture(app);
             if result.is_err() { return false; }
-            sync_process_lane_track_state(
-                editor.runtime_mut(), &app.state, target.track,
-                current_track.load(Ordering::Relaxed),
-            );
             true
         }
     }
@@ -1136,7 +1122,6 @@ pub(crate) fn handle_metal_soft_step_param_key(
         }
         Some(NumberPickerEditOutcome::Commit(value)) => {
             if !commit_soft_step_param_edit(
-                editor,
                 app,
                 current_track,
                 selected_steps,
@@ -2359,7 +2344,7 @@ mod live_keyboard_tests {
 
     use super::{
         apply_live_trigger_stamps,
-        armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
+        armed_rack_pad_track, current_step_param_number_picker_id,
         handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         handle_number_picker_edit_key_for_widget,
         handle_midi_note, handle_recording_key, held_note_for_key, held_note_for_source,
@@ -4676,11 +4661,6 @@ mod live_keyboard_tests {
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![("selected-steps", build_selection_value(&selected_steps))],
-            true,
-        );
         {
             let selected_steps = Arc::clone(&selected_steps);
             editor
@@ -5367,37 +5347,9 @@ mod live_keyboard_tests {
 
     #[test]
     fn sequencer_soft_number_entry_edits_current_expanded_track_step() {
-        fn number_list(values: &[f64]) -> Value {
-            Value::List(
-                values
-                    .iter()
-                    .copied()
-                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
-                    .collect(),
-            )
-        }
-
-        fn list(values: Vec<Value>) -> Value {
-            Value::List(
-                values
-                    .into_iter()
-                    .map(|value| Rc::new(RefCell::new(value)))
-                    .collect(),
-            )
-        }
-
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
-        let initial_values = number_list(&[1.0; 16]);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("velocities", initial_values.clone()),
-                ("track-velocities", list(vec![initial_values])),
-            ],
-            true,
-        );
         editor
             .runtime_mut()
             .eval_str(
@@ -5406,11 +5358,8 @@ mod live_keyboard_tests {
                 (def eseq.sequencer/current-selected-step () 2)
                 (def eseq.sequencer/current-param-mode () 0)
                 (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
-                (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (effect
-                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,
             )
             .expect("install sequencer soft edit fixture");
@@ -5461,30 +5410,6 @@ mod live_keyboard_tests {
             0.5,
             "sequencer numeric entry should commit through the same soft number-picker path"
         );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(nth SEQ.velocities 2)")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit should keep the current-track parameter mirror in sync"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(nth (nth SEQ.track-velocities 0) 2)")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit should keep the all-track sequencer parameter mirror in sync"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("seqv-soft-edit-flushed")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit commit should flush the reactive cycle immediately"
-        );
     }
 
     fn check_process_lane_soft_entry(selection: &[usize]) {
@@ -5495,17 +5420,6 @@ mod live_keyboard_tests {
         editor.set_layout_viewport(80, 20);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("process-lanes", Value::List(vec![])),
-                ("track-process-lanes", Value::List(vec![])),
-                ("process-slots", Value::List(vec![])),
-                ("track-process-slots", Value::List(vec![])),
-                ("process-library", Value::List(vec![])),
-            ],
-            true,
-        );
         sequencer::lisp_host::register_published_process_authoring_natives(
             editor.runtime_mut(),
             Arc::clone(&state),
@@ -5620,37 +5534,9 @@ mod live_keyboard_tests {
 
     #[test]
     fn sequencer_soft_enter_commits_existing_number_picker_edit() {
-        fn number_list(values: &[f64]) -> Value {
-            Value::List(
-                values
-                    .iter()
-                    .copied()
-                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
-                    .collect(),
-            )
-        }
-
-        fn list(values: Vec<Value>) -> Value {
-            Value::List(
-                values
-                    .into_iter()
-                    .map(|value| Rc::new(RefCell::new(value)))
-                    .collect(),
-            )
-        }
-
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
-        let initial_values = number_list(&[1.0; 16]);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("velocities", initial_values.clone()),
-                ("track-velocities", list(vec![initial_values])),
-            ],
-            true,
-        );
         editor
             .runtime_mut()
             .eval_str(
@@ -5659,11 +5545,8 @@ mod live_keyboard_tests {
                 (def eseq.sequencer/current-selected-step () 2)
                 (def eseq.sequencer/current-param-mode () 0)
                 (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
-                (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (effect
-                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,
             )
             .expect("install sequencer soft edit fixture");
@@ -5754,14 +5637,6 @@ mod live_keyboard_tests {
             state.pattern.step_data[0].get(2, StepParam::Velocity),
             0.25,
             "Enter should commit the pending number-picker edit through the soft step path"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("seqv-soft-edit-flushed")
-                .unwrap(),
-            Some(Value::Number(0.25)),
-            "commit should flush the reactive mirror immediately"
         );
     }
 }

@@ -100,13 +100,6 @@ impl Harness {
         assert_eq!(self.app.history.undo_len(), undo, "{code} changed nothing");
     }
 
-    fn legacy(&self, field: &str) -> Value {
-        self.rt()
-            .reactive_field_value("SEQ", field)
-            .unwrap_or_else(|| panic!("SEQ.{field}"))
-            .clone()
-    }
-
     fn settings(&self, track: usize) -> Settings {
         let tp = &self.shared.state.pattern.track_params[track];
         Settings {
@@ -164,7 +157,7 @@ impl Harness {
 }
 
 #[test]
-fn track_settings_read_after_sync_and_match_the_legacy_fields() {
+fn track_settings_read_after_sync_and_match_the_model() {
     let mut h = Harness::new();
     let fx = h.add_bus("FX");
     {
@@ -207,12 +200,6 @@ fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     h.eval_7i("(def d2 (nth tn.degrees 2))");
     assert_eq!(h.eval_7i("(= d2.tuning tn)"), Value::Bool(true));
     assert_eq!(h.eval_7i("d2.index"), Value::Number(2.0));
-    // Legacy parity: the step grid's sync labels say the same (the track
-    // settings' SEQ.tp-* fields went with the panels' port, eseq-0l17.61).
-    let selected = h.shared.selected_steps.clone();
-    let state = h.shared.state.clone();
-    sync_track_params(h.editor.runtime_mut(), &state, 1, &selected);
-    assert_eq!(h.legacy("sync-labels"), h.eval_7i("project.sync-options"));
     assert_eq!(h.eval_7i("tn.morph"), Value::Number(1.0));
     assert_eq!(h.eval_7i("(nth mute-group-options t1.mute-group)"), s("3"));
     // The output choices: every bus, the main mix first (nil is sends only).
@@ -271,11 +258,19 @@ fn option_constants_match_the_host_lists() {
 fn project_option_lists_follow_the_buses_and_scripts() {
     let mut h = Harness::new();
     h.sync();
-    assert_eq!(h.eval_7i("project.fts-options"), build_fts_options());
-    assert_eq!(h.eval_7i("project.sync-options"), build_sync_labels());
+    let entries = |h: &mut Harness, field: &str, count: usize| {
+        let code = format!("(list {})", (0..count).map(|i| format!("(nth {field} {i})")).collect::<Vec<_>>().join(" "));
+        strings(&h.eval_7i(&code))
+    };
+    assert_eq!(entries(&mut h, "project.fts-options", 2), ["Off", "Major"]);
     assert_eq!(
-        h.eval_7i("project.accumulator-options"),
-        build_accumulator_options(&h.app)
+        entries(&mut h, "project.sync-options", 8),
+        ["Off", "1/16", "1/8", "1/4", "1/2b", "1bar", "2bar", "4bar"]
+    );
+    assert_eq!(h.eval_7i("(len project.sync-options)"), Value::Number(8.0));
+    assert_eq!(
+        entries(&mut h, "project.accumulator-options", 3),
+        ["Off", "TransposeRamp", "VelocityDecay"]
     );
     assert_eq!(
         h.eval_7i("project.output-options"),
@@ -851,17 +846,11 @@ fn selection_steps_and_delete_targets() {
     assert_eq!(h.eval_7i("selection.edit-step"), step(&mut h, 0, 5));
     let picked = h.eval_7i("(list (nth t0.steps 5) (nth t0.steps 7))");
     assert_eq!(h.eval_7i("selection.steps"), picked);
-    // Legacy parity: the step panel's cursor and edited step.
-    let state = h.shared.state.clone();
-    let selected = selected_plock_step(&h.shared.selected_steps);
-    sync_fx_step_cursor_binding_fields(h.editor.runtime_mut(), &state, 0, 3, selected, 2);
-    assert_eq!(h.legacy("fx-step-cursor-number"), Value::Number(4.0));
-    let edited = h.eval_7i("selection.edit-step.index");
-    assert_eq!(h.legacy("fx-step-parameter-step"), edited);
-    assert_eq!(
-        h.legacy("fx-step-selection-count"),
-        h.eval_7i("(len selection.steps)")
-    );
+    // The step panel's cursor and edited step (the legacy
+    // `SEQ.fx-step-*` fields, eseq-0l17.78).
+    assert_eq!(h.eval_7i("selection.cursor-step.index"), Value::Number(3.0));
+    assert_eq!(h.eval_7i("selection.edit-step.index"), Value::Number(5.0));
+    assert_eq!(h.eval_7i("(len selection.steps)"), Value::Number(2.0));
     // Mixer delete targets: what a setter writes, the field reads.
     let target = |h: &Harness| h.shared.active_delete_target.lock().unwrap().clone();
     h.eval_7i("(set! t1.delete-target true)");
@@ -916,8 +905,11 @@ fn the_cursor_step_setter_moves_the_grid_cursor_to_the_steps_track() {
     let cursor = h.eval_7i("selection.cursor-step");
     assert_eq!(cursor, h.eval_7i("(nth t1.steps 9)"));
     // The step panel shows the new track's step.
-    assert_eq!(h.legacy("fx-step-cursor-number"), Value::Number(10.0));
-    assert_eq!(h.legacy("fx-step-value-velocity"), Value::Number(0.75));
+    assert_eq!(h.eval_7i("selection.edit-step"), cursor);
+    assert_eq!(
+        h.eval_7i("(let ((s selection.edit-step)) s.velocity)"),
+        Value::Number(0.75)
+    );
     // The grid's cursor moved, as a click on the step moves it.
     assert_eq!(
         h.eval_7i("(let ((c eseq.sequencer/grid-cursor)) c.step)"),

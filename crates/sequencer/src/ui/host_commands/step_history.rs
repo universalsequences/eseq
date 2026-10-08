@@ -1545,14 +1545,9 @@ pub(super) fn handle(
             if !changed {
                 return;
             }
-            let track = selected_track;
-            // Same refresh arms the per-step clear uses, plus the automation
-            // presence field so the knob's dot goes out with the locks.
-            {
-                let rt = editor.runtime_mut();
-                sync_instrument_plock_presence_fields(rt, &state, &app.graph.effect_descriptors, track);
-                rt.run_reactive_cycle();
-            }
+            // The panels and the step grids read the locks through the host
+            // kinds (the knob's dot goes out with them).
+            editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1838,11 +1833,9 @@ mod tests {
                 sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
 
             let mut runtime = Runtime::new();
-            runtime.register_reactive("SEQ", Vec::new(), true);
-            // `sync_single_step_param_binding` resolves the *step* panel's
-            // "parameter step" from the lisp `cursor-step` global, exactly as
-            // ui/main.lisp defines it. Park the cursor on the edited step,
-            // which is what dragging that panel's picker means.
+            // The *step* panel's cursor (the lisp `cursor-step` global, as
+            // ui/main.lisp defines it), parked on the edited step, which is
+            // what dragging that panel's picker means.
             runtime
                 .eval_str(&format!("(def cursor-step {STEP})"))
                 .expect("seed the lisp cursor-step global");
@@ -1910,7 +1903,6 @@ mod tests {
                     cached_peak_l_level: 0.0,
                     cached_peak_r_level: 0.0,
                     cached_track_peak_levels: vec![0.0],
-                    cached_rack_slot_peak_levels: Vec::new(),
                     cached_bus_peak_levels: Vec::new(),
                     cached_modulator_phases: Vec::new(),
                     cached_modulator_levels: Vec::new(),
@@ -2010,9 +2002,6 @@ mod tests {
                 !invalidations.is_empty(),
                 "a step-param edit must queue targeted invalidations"
             );
-            let neural = BTreeSet::new();
-            let peaks = vec![0.0f64];
-            let bus_peaks: Vec<f64> = Vec::new();
             apply_ui_invalidations(
                 invalidations,
                 UiInvalidationApplyCtx {
@@ -2022,12 +2011,7 @@ mod tests {
                     track_collapsed: &self.track_collapsed,
                     bus_state: &self.bus_state,
                     current_track_idx: TRACK,
-                    selected_steps: &self.selected_steps,
-                    selected_neural_neurons: &neural,
                     accumulator_names: &self.accumulator_names,
-                    cached_track_peak_levels: &peaks,
-                    cached_bus_peak_levels: &bus_peaks,
-                    record_armed: &self.record_armed,
                     fx_visible: true,
                     sequencer_visible: true,
                     mixer_visible: true,
@@ -2035,41 +2019,7 @@ mod tests {
             );
         }
 
-        fn number(&self, field: &str) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::Number(value)) => *value,
-                other => panic!("SEQ.{field} should be a number, got {other:?}"),
-            }
-        }
 
-        fn list_number(&self, field: &str, index: usize) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(items)) => {
-                    match items.get(index).map(|item| item.borrow().clone()) {
-                        Some(Value::Number(value)) => value,
-                        other => panic!("SEQ.{field}[{index}] should be a number, got {other:?}"),
-                    }
-                }
-                other => panic!("SEQ.{field} should be a list, got {other:?}"),
-            }
-        }
-
-        fn nested_list_number(&self, field: &str, outer: usize, inner: usize) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
-                    Some(Value::List(items)) => {
-                        match items.get(inner).map(|item| item.borrow().clone()) {
-                            Some(Value::Number(value)) => value,
-                            other => panic!(
-                                "SEQ.{field}[{outer}][{inner}] should be a number, got {other:?}"
-                            ),
-                        }
-                    }
-                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
-                },
-                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
-            }
-        }
 
         /// The lanes of the edited step's notes (lane 0 is the highest
         /// pitch), as the host kinds read them for `piano-roll.notes`.
@@ -2081,38 +2031,16 @@ mod tests {
             .collect()
         }
 
-        fn nested_list_bool(&self, field: &str, outer: usize, inner: usize) -> bool {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
-                    Some(Value::List(items)) => {
-                        match items.get(inner).map(|item| item.borrow().clone()) {
-                            Some(Value::Bool(value)) => value,
-                            other => panic!(
-                                "SEQ.{field}[{outer}][{inner}] should be a bool, got {other:?}"
-                            ),
-                        }
-                    }
-                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
-                },
-                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
-            }
-        }
     }
 
-    /// Every surface a Transpose / Velocity edit from the `*step*` panel feeds.
-    ///
-    /// `set-step-param-history` no longer bumps `ui_epoch` (that bump cost
-    /// ~7ms of `sync_all_track_sequencer_state` + a whole-list
-    /// `sync_step_param_lists` per drag update), so the targeted invalidations
-    /// are now the ONLY writer for all of these:
-    ///   - `SEQ.{transposes,velocities}` — read by the `*step*` panel's
-    ///     `fx-step-param-value` and `set-cursor-step-value`.
-    ///   - `SEQ.track-{transposes,velocities}` — the per-track lists
-    ///     (the step editors read the `step` kind's fields instead).
-    ///   - `fx-step-value-{param}` — the number-picker readout being dragged.
-    ///   - the piano roll's notes — note pitch comes from the step transpose.
+    /// A Transpose / Velocity edit from the `*step*` panel stays on the
+    /// targeted path: `set-step-param-history` bumps no `ui_epoch` (a resync
+    /// of every track per drag update); the targeted invalidations it queues
+    /// feed the host kinds (`step.*`, `a_step_panel_param_edit_moves_the_step_fields_without_a_ui_epoch_bump`),
+    /// and the piano roll's notes follow (note pitch comes from the step
+    /// transpose).
     #[test]
-    fn set_step_param_publishes_every_step_panel_surface_without_a_ui_epoch_bump() {
+    fn set_step_param_stays_on_the_targeted_path_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
@@ -2128,21 +2056,6 @@ mod tests {
             epoch_before,
             "a step-param edit must stay on the targeted path — a ui_epoch bump \
              resyncs every track on every drag update"
-        );
-        assert_eq!(
-            harness.list_number("transposes", STEP),
-            7.0,
-            "the current track's flat transpose list must be published"
-        );
-        assert_eq!(
-            harness.nested_list_number("track-transposes", TRACK, STEP),
-            7.0,
-            "the per-track transpose list-of-lists must be published"
-        );
-        assert_eq!(
-            harness.number("fx-step-value-transpose"),
-            7.0,
-            "the *step* panel's Transpose number-picker readout must be published"
         );
         let lanes_at_7 = harness.piano_roll_lanes();
         assert!(
@@ -2171,15 +2084,9 @@ mod tests {
 
         // Velocity shares the funnel but a different mode index / list.
         harness.set_step_param("velocity", 0.25);
-        assert_eq!(harness.list_number("velocities", STEP), 0.25);
         assert_eq!(
-            harness.nested_list_number("track-velocities", TRACK, STEP),
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
             0.25
-        );
-        assert_eq!(
-            harness.number("fx-step-value-velocity"),
-            0.25,
-            "the *step* panel's Velocity number-picker readout must be published"
         );
         assert_eq!(
             harness.ui_epoch.load(Ordering::Relaxed),
@@ -2224,27 +2131,24 @@ mod tests {
         harness.set_step_param("transpose", 12.0);
         assert_eq!(harness.state.pattern.chord_data[TRACK].get(STEP, 0), 12.0);
         assert_eq!(harness.piano_roll_lanes(), vec![36.0]);
-        assert_eq!(harness.number("fx-step-value-transpose"), 12.0);
 
         harness.set_step_param("duration", 3.5);
         assert_eq!(
             harness.state.pattern.chord_data[TRACK].get_duration(STEP, 0),
             3.5
         );
-        assert_eq!(harness.number("fx-step-value-duration"), 3.5);
 
         harness.set_step_param("velocity", 0.375);
         assert_eq!(
             harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
             0.375
         );
-        assert_eq!(harness.number("fx-step-value-velocity"), 0.375);
     }
 
-    /// Duration additionally paints the duration bar's list form
-    /// (`SEQ.track-duration-spans`; the step grid binds `step.held`).
+    /// A duration edit stays on the targeted path too (the step grid binds
+    /// `step.held`, which the host kinds derive from the durations).
     #[test]
-    fn set_step_duration_publishes_the_duration_bar_surfaces_without_a_ui_epoch_bump() {
+    fn set_step_duration_stays_on_the_targeted_path_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
@@ -2260,25 +2164,15 @@ mod tests {
             epoch_before,
             "duration edits must stay on the targeted path"
         );
-        assert_eq!(harness.list_number("durations", STEP), 4.0);
-        assert_eq!(
-            harness.nested_list_number("track-durations", TRACK, STEP),
-            4.0
-        );
-        assert_eq!(
-            harness.number("fx-step-value-duration"),
-            4.0,
-            "the *step* panel's Duration number-picker readout must be published"
-        );
         assert!(
-            harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
-            "the list form of the duration span must be published too"
+            track_step_duration_covered(&harness.state, TRACK, STEP + 3),
+            "the duration holds the steps it reaches"
         );
 
         // Shortening it must clear the cells it no longer reaches.
         harness.set_step_param("duration", 1.0);
         assert!(
-            !harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
+            !track_step_duration_covered(&harness.state, TRACK, STEP + 3),
             "the span is released when the note is shortened"
         );
     }

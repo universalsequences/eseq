@@ -1878,7 +1878,7 @@ pub(crate) struct TreeKind {
 }
 
 /// One project instance as the Packages tab lists it (read from
-/// `SEQ.instances`, which the reactive tick publishes).
+/// `project.instances`, which the host kinds publish).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TreeInstance {
     pub id: u64,
@@ -1897,7 +1897,7 @@ pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<Se
         "seq-package-tree",
         "(seq-package-tree query [instances])",
         "Return the Packages browser tree (Local / Installed / Factory roots) filtered by query. \
-         `instances` is `SEQ.instances`: module rows that define kinds get a count badge and one \
+         `instances` is `project.instances`: module rows that define kinds get a count badge and one \
          child row per instance.",
         move |args, _ctx| {
             let query = match args.first() {
@@ -1992,7 +1992,7 @@ pub(crate) fn module_kinds(
     kinds
 }
 
-/// Parse `SEQ.instances` (see `build_instances_value`).
+/// Parse `project.instances` (the host kinds' rows, one dict per instance).
 pub(crate) fn tree_instances_from_value(value: &Value) -> Vec<TreeInstance> {
     let Value::List(items) = value else {
         return Vec::new();
@@ -2538,7 +2538,6 @@ mod tests {
         sequencer::lisp_host::clear_kind_registry();
         let mut app = kind_test_app();
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
         sequencer::lisp_host::register_graph_authoring_natives(
             &mut runtime,
             std::sync::Arc::clone(&app.state),
@@ -2622,7 +2621,6 @@ mod tests {
         sequencer::lisp_host::clear_kind_registry();
         let mut app = kind_test_app();
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
         sequencer::lisp_host::register_graph_authoring_natives(
             &mut runtime,
             std::sync::Arc::clone(&app.state),
@@ -2916,8 +2914,7 @@ mod tests {
 
     #[test]
     fn scratch_attach_then_detach_round_trips_the_draft_buffer() {
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
+        let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
         editor
             .buffers
@@ -2942,8 +2939,7 @@ mod tests {
 
     #[test]
     fn toggling_module_overrides_reverts_the_factory_seam_and_reattach_restores_it() {
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
+        let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
         let root = temp_root("override-toggle");
         std::fs::create_dir_all(root.join("t")).unwrap();
@@ -3323,8 +3319,7 @@ mod tests {
     }
 
     fn editor_with_step_tabs() -> Editor {
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
+        let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
         let ui_dir = sequencer::app_paths::app_paths().ui_dir();
         for file in ["seq-core-state.lisp", "seq-step-tabs.lisp"] {

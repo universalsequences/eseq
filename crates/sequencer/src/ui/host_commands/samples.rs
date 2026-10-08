@@ -17,7 +17,6 @@ pub(super) fn handle(
     mut editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let state = ctx.shared.state.clone();
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
     match name {
@@ -44,7 +43,6 @@ pub(super) fn handle(
                 match load_or_convert_sampler_track(
                     &mut app,
                     &mut editor,
-                    &state,
                     &current_track,
                     &mut *ctx.track_names,
                     lg_raw,
@@ -193,7 +191,6 @@ pub(super) fn handle(
                     match load_or_convert_sampler_track(
                         &mut app,
                         &mut editor,
-                        &state,
                         &current_track,
                         &mut *ctx.track_names,
                         lg_raw,

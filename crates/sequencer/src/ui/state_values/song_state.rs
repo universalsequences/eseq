@@ -1,45 +1,11 @@
-//! Song-mode reactive bindings (docs/song-mode-spec.md section 12): builds
-//! and diff-publishes the `SEQ.song-*` values each
-//! frame from `App` transport state plus the committed song. The arrangement
-//! reads the host kinds (`song`, `clip`, `scene-span`, kind-bindings spec
-//! §14.2d); the helpers here that build their content are shared with them.
+//! Song-mode values (docs/song-mode-spec.md section 12) from `App`
+//! transport state plus the committed song. The arrangement reads the host
+//! kinds (`song`, `clip`, `scene-span`, kind-bindings spec §14.2d); the
+//! helpers here build their content.
 
 use super::*;
 
-use sequencer::app::song_transport::SongTransportMode;
-use sequencer::sequencer::{
-    state_at_beat, ArrClip, ProjectScenes, ProjectSong, ProjectSongRow, StepParam,
-};
-
-/// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
-/// reactive is only rewritten when its value changed.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SongBindingsSnapshot {
-    pub(crate) exists: bool,
-    /// "" while not recording, else "take" / "dub"
-    /// (docs/unified-transport-spec.md 8).
-    pub(crate) recording_kind: &'static str,
-    /// Current row ordinal during song playback, else -1.
-    pub(crate) current_row: f64,
-    /// Current row stable id during song playback, else -1.
-    pub(crate) current_row_id: f64,
-    pub(crate) row_count: f64,
-    pub(crate) loop_enabled: bool,
-    /// Latched failure state of the most recent arrangement capture
-    /// (docs/song-mode-spec.md 12); cleared when the next capture starts.
-    pub(crate) capture_failed: bool,
-    pub(crate) capture_error: Option<String>,
-}
-
-/// Per-frame diff state for the song bindings: the committed song is cached
-/// and re-read only when `committed_song_revision` changes
-/// (`set_committed_arrangement` bumps it).
-#[derive(Default)]
-pub(crate) struct SongFrameState {
-    pub(crate) revision: Option<u64>,
-    pub(crate) cached_song: Option<ProjectSong>,
-    pub(crate) prev: Option<SongBindingsSnapshot>,
-}
+use sequencer::sequencer::{ArrClip, ProjectScenes, StepParam};
 
 /// Display grain of the record head (spec 3.3): the head advances every
 /// frame, so it is floored to this grid before it can force a publish. A
@@ -438,57 +404,6 @@ pub(crate) fn pattern_events_value(events: &[(f64, f64, f64, f64)]) -> Value {
     }))
 }
 
-/// The row governing `beats` for display purposes: `state_at_beat` semantics
-/// (loop-normalized), with the last row covering the transient `end_beat`
-/// readout of a non-looping song.
-fn display_row_at_beat(song: &ProjectSong, beats: f64) -> Option<&ProjectSongRow> {
-    state_at_beat(song, beats).or_else(|| {
-        (beats >= song.end_beat).then(|| song.rows.last()).flatten()
-    })
-}
-
-/// Build the scalar binding snapshot from app + committed song. The current
-/// row is derived exactly from the committed song at the rendered position
-/// (`state_at_beat`), not from the scheduler's shared atomics, which run up
-/// to a lookahead window early.
-pub(crate) fn build_song_bindings_snapshot(
-    app: &app::App,
-    song: Option<&ProjectSong>,
-) -> SongBindingsSnapshot {
-    // Capturing over an EMPTY song runs the plain session transport, so the
-    // song-playback position atomics are inactive and every arrangement lane
-    // drew its playhead pinned at beat 0. The capture's own record head is
-    // the same clock the launches and take notes are stamped on, so it is
-    // the honest fallback; capture ON TOP of song playback keeps the
-    // scheduler position, which `pending_capture_head_beat` clamps to anyway.
-    let position = song_position(&app.state, app.pending_capture_head_beat());
-    let song_playing = app.song_transport_mode == SongTransportMode::SongPlayback;
-    let (current_row, current_row_id) = match (song, position) {
-        (Some(song), Some(beats)) if song_playing => match display_row_at_beat(song, beats) {
-            Some(row) => {
-                let ordinal = song
-                    .rows
-                    .iter()
-                    .position(|candidate| candidate.id == row.id)
-                    .unwrap_or(0);
-                (ordinal as f64, row.id.0 as f64)
-            }
-            None => (-1.0, -1.0),
-        },
-        _ => (-1.0, -1.0),
-    };
-    SongBindingsSnapshot {
-        exists: song.is_some(),
-        recording_kind: song_recording_kind_label(app.recording_kind),
-        current_row,
-        current_row_id,
-        row_count: song.map(|song| song.rows.len()).unwrap_or(0) as f64,
-        loop_enabled: song.map(|song| song.loop_enabled).unwrap_or(false),
-        capture_failed: app.song_capture_failed,
-        capture_error: app.song_capture_error.clone(),
-    }
-}
-
 /// The song position (`song.position`): the song
 /// playback position, else `capture_head` (capturing over an EMPTY song runs
 /// the plain session transport, so the playback position is inactive and the
@@ -506,8 +421,7 @@ pub(crate) fn displayed_song_position_beats(position: Option<f64>) -> f64 {
 }
 
 /// "" while not recording, else "take" (arrangement capture) or "dub"
-/// (docs/unified-transport-spec.md 8): `SEQ.song-recording-kind`,
-/// `song.recording-kind`.
+/// (docs/unified-transport-spec.md 8): `song.recording-kind`.
 pub(crate) fn song_recording_kind_label(
     kind: Option<sequencer::app::song_transport::RecordingKind>,
 ) -> &'static str {
@@ -627,62 +541,3 @@ pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<
     }
 }
 
-/// Per-frame publish of the song bindings (spec 12). The committed song is
-/// re-read only when the committed-song revision changes; scalars publish on
-/// change. Returns true when a reactive cycle is needed.
-pub(crate) fn sync_song_state(
-    rt: &mut Runtime,
-    app: &app::App,
-    frame: &mut SongFrameState,
-) -> bool {
-    let mut dirty = false;
-    let revision = app.state.committed_song_revision();
-    if frame.revision != Some(revision) {
-        frame.cached_song = app.state.committed_song();
-        frame.revision = Some(revision);
-        dirty = true;
-    }
-    let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
-    let prev = frame.prev.as_ref();
-    macro_rules! publish_on_change {
-        ($field:literal, $accessor:ident, $value:expr) => {
-            if prev.map(|prev| prev.$accessor != next.$accessor).unwrap_or(true) {
-                rt.set_reactive("SEQ", $field, $value);
-                dirty = true;
-            }
-        };
-    }
-    publish_on_change!("song-exists", exists, Value::Bool(next.exists));
-    publish_on_change!(
-        "song-recording-kind",
-        recording_kind,
-        Value::String(next.recording_kind.to_string())
-    );
-    publish_on_change!("song-current-row", current_row, Value::Number(next.current_row));
-    publish_on_change!(
-        "song-current-row-id",
-        current_row_id,
-        Value::Number(next.current_row_id)
-    );
-    publish_on_change!("song-row-count", row_count, Value::Number(next.row_count));
-    publish_on_change!(
-        "song-loop-enabled",
-        loop_enabled,
-        Value::Bool(next.loop_enabled)
-    );
-    publish_on_change!(
-        "song-capture-failed",
-        capture_failed,
-        Value::Bool(next.capture_failed)
-    );
-    publish_on_change!(
-        "song-capture-error",
-        capture_error,
-        match &next.capture_error {
-            Some(error) => Value::String(error.clone()),
-            None => Value::Nil,
-        }
-    );
-    frame.prev = Some(next);
-    dirty
-}

@@ -58,20 +58,11 @@ pub(super) fn bus_effect_param_applied(
 }
 
 /// After a track's output changed (`set-track-output`, the host kinds'
-/// `track.output`): refresh the mixer, and the track panel when it is the
-/// current track.
-pub(super) fn track_output_applied(
-    app: &app::App,
-    editor: &mut Editor,
-    ctx: &LoopCtx<'_>,
-    track: usize,
-) {
+/// `track.output`): resync (the mixer and the track panel read the host
+/// kinds).
+pub(super) fn track_output_applied(editor: &mut Editor, ctx: &LoopCtx<'_>) {
     let shared = ctx.shared;
     let rt = editor.runtime_mut();
-    sync_track_mixer_state(rt, app, &shared.state);
-    if track == shared.current_track.load(Ordering::Relaxed) {
-        sync_track_params(rt, &shared.state, track, &shared.selected_steps);
-    }
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -99,8 +90,6 @@ pub(super) fn handle(
                     *bus_state.lock().unwrap() = app.buses.clone();
                     *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                     let rt = editor.runtime_mut();
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_mixer_state(rt, app, &state);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -131,7 +120,7 @@ pub(super) fn handle(
                     let track =
                         payload_track.unwrap_or_else(|| current_track.load(Ordering::Relaxed));
                     app::apply_command(&mut app, app::AppCommand::SetTrackOutput { track, output });
-                    track_output_applied(app, editor, ctx, track);
+                    track_output_applied(editor, ctx);
                 }
             }
         }
@@ -184,7 +173,6 @@ pub(super) fn handle(
                             );
                             eprintln!("[mod-route] {message}");
                             let rt = editor.runtime_mut();
-                            sync_track_mixer_state(rt, &app, &state);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -252,7 +240,6 @@ pub(super) fn handle(
                             );
                             eprintln!("[mod-route] {message}");
                             let rt = editor.runtime_mut();
-                            sync_track_mixer_state(rt, &app, &state);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -273,7 +260,6 @@ pub(super) fn handle(
         }
         "refresh-mixer-ui" => {
             let rt = editor.runtime_mut();
-            sync_track_mixer_state(rt, &app, &state);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             refresh_visible_mixer_layouts(editor);
@@ -510,7 +496,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -601,7 +586,6 @@ pub(super) fn handle(
                                     app.publish_bus_effect_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     let rt = editor.runtime_mut();
-                                    sync_bus_mixer_state(rt, &app);
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -667,7 +651,6 @@ pub(super) fn handle(
                                 app.publish_bus_effect_runtime();
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 let rt = editor.runtime_mut();
-                                sync_bus_mixer_state(rt, &app);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -704,7 +687,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -752,7 +734,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -791,7 +772,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -828,7 +808,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -859,7 +838,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -904,7 +882,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);

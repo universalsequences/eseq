@@ -1253,79 +1253,8 @@ pub(crate) fn track_output_for_bus(
     }
 }
 
-/// Build a Lisp Value::Map of track parameters for the current track.
-pub(crate) fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
-    use std::collections::HashMap;
-    let tp = &state.pattern.track_params[track];
-    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    map.insert(
-        "gate".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_gate_on()))),
-    );
-    map.insert(
-        "attack".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_attack_ms() as f64))),
-    );
-    map.insert(
-        "release".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_release_ms() as f64))),
-    );
-    map.insert(
-        "swing".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_swing() as f64))),
-    );
-    map.insert(
-        "swing-resolution".into(),
-        Rc::new(RefCell::new(Value::String(
-            tp.get_swing_resolution().label().to_string(),
-        ))),
-    );
-    map.insert(
-        "num-steps".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_num_steps() as f64))),
-    );
-    map.insert(
-        "volume".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_volume() as f64))),
-    );
-    map.insert(
-        "pan".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))),
-    );
-    map.insert(
-        "mute".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_muted()))),
-    );
-    map.insert(
-        "solo".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_solo()))),
-    );
-    map.insert(
-        "timebase".into(),
-        Rc::new(RefCell::new(Value::String(
-            tp.get_timebase().label().to_string(),
-        ))),
-    );
-    map.insert(
-        "send".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_send() as f64))),
-    );
-    map.insert(
-        "poly".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))),
-    );
-    map.insert(
-        "max-polyphony".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_max_polyphony() as f64))),
-    );
-    map.insert(
-        "mute-group".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_mute_group() as f64))),
-    );
-    Value::Map(map)
-}
-
 /// Build a Lisp Value::List of bools indicating which steps have any p-locks on the given track.
+#[cfg(test)]
 pub(crate) fn build_step_has_plocks(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1335,6 +1264,7 @@ pub(crate) fn build_step_has_plocks(
     build_step_has_plocks_from_mask(&mask)
 }
 
+#[cfg(test)]
 pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
@@ -1394,76 +1324,10 @@ pub(crate) fn plock_variant_step_render_values(
         .collect()
 }
 
-pub(crate) fn build_step_plock_kinds(state: &Arc<SequencerState>, track: usize) -> Value {
-    build_step_plock_kinds_from_render(&plock_variant_step_render_values(state, track))
-}
-
-pub(crate) fn build_step_plock_kinds_from_render(render_values: &[PlockVariantStepRender]) -> Value {
-    Value::List(
-        render_values
-            .iter()
-            .map(|render| Rc::new(RefCell::new(Value::Number(render.kind as f64))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_step_variant_color_channel(
-    state: &Arc<SequencerState>,
-    track: usize,
-    channel: usize,
-) -> Value {
-    build_step_variant_color_channel_from_render(
-        &plock_variant_step_render_values(state, track),
-        channel,
-    )
-}
-
-pub(crate) fn build_step_variant_color_channel_from_render(
-    render_values: &[PlockVariantStepRender],
-    channel: usize,
-) -> Value {
-    Value::List(
-        render_values
-            .iter()
-            .map(|render| {
-                Rc::new(RefCell::new(Value::Number(
-                    render.color.get(channel).copied().unwrap_or(0.0) as f64,
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_all_track_step_plock_kinds(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-) -> Value {
-    Value::List(
-        (0..app.tracks.len())
-            .map(|track| Rc::new(RefCell::new(build_step_plock_kinds(state, track))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_all_track_step_variant_color_channel(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    channel: usize,
-) -> Value {
-    Value::List(
-        (0..app.tracks.len())
-            .map(|track| {
-                Rc::new(RefCell::new(build_step_variant_color_channel(
-                    state, track, channel,
-                )))
-            })
-            .collect(),
-    )
-}
-
 /// One bit per step: whether any effect/instrument/midi-fx/timebase/swing
 /// plock exists for that step. Single flat scan per slot instead of the
 /// per-(step, slot, param) probing done by track_step_has_plock.
+#[cfg(test)]
 pub(crate) fn track_step_plock_mask(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1475,6 +1339,7 @@ pub(crate) fn track_step_plock_mask(
 /// A full UI sync already reconciles variant keys and sequencer locks for its
 /// color lanes. Reuse that result while still including the rack/slot locks
 /// that do not participate in the variant palette.
+#[cfg(test)]
 pub(super) fn track_step_plock_mask_with_render(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1577,105 +1442,6 @@ pub(crate) fn track_step_plock_mask_for_slots(
         }
     }
     mask
-}
-
-pub(crate) fn track_step_has_plock(
-    state: &Arc<SequencerState>,
-    track: usize,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
-    step: usize,
-) -> bool {
-    let chain = &state.pattern.effect_chains[track];
-    let midi_fx_slots = &state.pattern.midi_fx_slots[track];
-    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
-    let instrument_slot = &state.pattern.instrument_slots[track];
-    let instrument_num_params = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-    let timebase_plocks = &state.pattern.timebase_plocks[track];
-    let swing_plocks = &state.pattern.swing_plocks[track];
-    let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
-    let track_send_plocks = state.pattern.track_send_plocks[track].snapshot();
-    let effect_has_plock = (0..num_slots).any(|slot_idx| {
-        let Some(slot) = chain.get(slot_idx) else {
-            return false;
-        };
-        let np = slot.num_params.load(Ordering::Relaxed) as usize;
-        (0..np).any(|p| slot.plocks.get(step, p).is_some())
-    });
-    let instrument_has_plock =
-        (0..instrument_num_params).any(|p| instrument_slot.plocks.get(step, p).is_some());
-    let rack_slot_has_plock = state
-        .pattern
-        .rack_tracks
-        .lock()
-        .unwrap()
-        .get(track)
-        .and_then(|rack| rack.as_ref())
-        .is_some_and(|rack| {
-            if rack
-                .macros
-                .iter()
-                .any(|rack_macro| rack_macro.plocks.get(step).is_some_and(Option::is_some))
-            {
-                return true;
-            }
-            rack.slots.iter().any(|slot| {
-                if slot.param_plocks.step_has_plock(step) {
-                    return true;
-                }
-                let num_params = slot.instrument_slot.num_params as usize;
-                if slot
-                    .instrument_slot
-                    .plocks
-                    .get(step)
-                    .is_some_and(|step_plocks| {
-                        step_plocks
-                            .iter()
-                            .take(num_params)
-                            .any(|value| value.is_some())
-                    })
-                {
-                    return true;
-                }
-                slot.effect_slots.iter().any(|effect| {
-                    let num_params = effect.num_params as usize;
-                    effect
-                        .plocks
-                        .get(step)
-                        .is_some_and(|row| row.iter().take(num_params).any(Option::is_some))
-                })
-            })
-        });
-    let midi_fx_has_plock = midi_fx_slots.iter().any(|slot| {
-        let np = slot.num_params.load(Ordering::Relaxed) as usize;
-        (0..np).any(|p| slot.plocks.get(step, p).is_some())
-    });
-
-    effect_has_plock
-        || midi_fx_has_plock
-        || instrument_has_plock
-        || rack_slot_has_plock
-        || track_send_plocks.get(step)
-            .is_some_and(|row| !row.is_empty())
-        || timebase_plocks.has_plock(step)
-        || swing_plocks.has_plock(step)
-        || swing_resolution_plocks.has_plock(step)
-        || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
-        || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step).is_some()
-}
-
-pub(crate) fn playhead_transition_changes_param_bindings(
-    state: &Arc<SequencerState>,
-    track: usize,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    previous_step: usize,
-    current_step: usize,
-) -> bool {
-    if previous_step == current_step || !selected_steps.lock().unwrap().is_empty() {
-        return false;
-    }
-    track_step_has_plock(state, track, descriptors, previous_step)
-        || track_step_has_plock(state, track, descriptors, current_step)
 }
 
 /// One row of the p-lock key projections (beads eseq-4seq / eseq-yr6w).

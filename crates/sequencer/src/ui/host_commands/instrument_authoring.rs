@@ -36,7 +36,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -142,10 +141,7 @@ pub(super) fn handle(
                 &mut *ctx.track_names,
                 &track_pan_ids,
                 &record_armed,
-                &selected_steps,
                 &accumulator_names,
-                &ctx.meters.cached_track_peak_levels,
-                &ctx.meters.cached_bus_peak_levels,
                 &ui_epoch,
                 lg_raw,
             );
@@ -310,10 +306,7 @@ pub(super) fn handle(
                 &mut *ctx.track_names,
                 &track_pan_ids,
                 &record_armed,
-                &selected_steps,
                 &accumulator_names,
-                &ctx.meters.cached_track_peak_levels,
-                &ctx.meters.cached_bus_peak_levels,
                 &ui_epoch,
                 lg_raw,
             );
@@ -727,12 +720,8 @@ pub(super) fn handle(
 
                         let rt = editor.runtime_mut();
                         present_editor_closed(rt);
-                        rt.set_reactive(
-                            "SEQ",
-                            "track-names",
-                            build_track_names(&app.tracks),
-                        );
-                        sync_sidebar_browser(rt, &app, draft_track);
+                        crate::param_words::set_track_word_names(&app.tracks);
+                        sync_sidebar_browser(&app, draft_track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*fx*");
@@ -815,10 +804,7 @@ pub(super) fn handle(
                             &mut *ctx.track_names,
                             &track_pan_ids,
                             &record_armed,
-                            &selected_steps,
                             &accumulator_names,
-                            &ctx.meters.cached_track_peak_levels,
-                            &ctx.meters.cached_bus_peak_levels,
                             &ui_epoch,
                             lg_raw,
                         );
@@ -1004,13 +990,9 @@ pub(super) fn handle(
 
                             let ct = current_track.load(Ordering::Relaxed);
                             ctx.track_names[ct] = inst_name.clone();
+                            crate::param_words::set_track_word_names(ctx.track_names);
                             let rt = editor.runtime_mut();
                             present_editor_closed(rt);
-                            rt.set_reactive(
-                                "SEQ",
-                                "track-names",
-                                build_track_names(&ctx.track_names),
-                            );
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1051,13 +1033,9 @@ pub(super) fn handle(
 
                                 let ct = current_track.load(Ordering::Relaxed);
                                 ctx.track_names[ct] = inst_name.clone();
+                                crate::param_words::set_track_word_names(ctx.track_names);
                                 let rt = editor.runtime_mut();
                                 present_editor_closed(rt);
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "track-names",
-                                    build_track_names(&ctx.track_names),
-                                );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2271,16 +2249,6 @@ pub(super) fn handle(
 
                         let rt = editor.runtime_mut();
                         present_editor_closed(rt);
-                        rt.set_reactive(
-                            "SEQ",
-                            "available-builtin-effects",
-                            build_available_builtin_effects(),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "available-effects",
-                            build_available_effects(),
-                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*fx*");
@@ -2506,7 +2474,6 @@ pub(super) fn handle(
                 EffectEditTarget::Track { .. } => {}
                 EffectEditTarget::Bus { .. } => {
                     *bus_state.lock().unwrap() = app.buses.clone();
-                    sync_bus_mixer_state(rt, &app);
                 }
             }
             rt.run_reactive_cycle();
@@ -2977,10 +2944,7 @@ pub(super) fn handle(
                                     &state,
                                     &mut *ctx.track_names,
                                     restored_track,
-                                    &selected_steps,
                                     &accumulator_names,
-                                    &record_armed,
-                                    &ctx.meters.cached_track_peak_levels,
                                 );
                                 rt.clear_subtree_effects_for_named_target(
                                     "*sequencer*",

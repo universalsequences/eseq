@@ -1068,10 +1068,10 @@ pub struct App {
     pub(crate) song_capture_take: Option<song_capture::SongCaptureTake>,
     /// True when the most recent arrangement capture failed to commit
     /// (overflow, normalization, validation). Cleared when the next capture
-    /// starts. Bound to `SEQ.song-capture-failed`.
+    /// starts. Read as `song.capture-failed` (the host kinds).
     pub song_capture_failed: bool,
-    /// The actionable error for the most recent failed capture, bound to
-    /// `SEQ.song-capture-error`.
+    /// The actionable error for the most recent failed capture, read as
+    /// `song.capture-error`.
     pub song_capture_error: Option<String>,
     /// The most recent song editing-primitive rejection, pushed as
     /// `song.edit-error` so the arrangement view can surface it (the

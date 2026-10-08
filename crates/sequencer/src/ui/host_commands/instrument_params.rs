@@ -439,7 +439,6 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
                         }
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
@@ -553,9 +552,6 @@ pub(super) fn handle(
                                     value: stored,
                                 },
                             );
-                        }
-                        if !wrote_neural_plock {
-                            sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
                         }
                         // Same policy as "set-instrument-param": a p-lock drag
                         // repaints through the param it binds (the host kinds
@@ -681,9 +677,6 @@ pub(super) fn handle(
                                         value,
                                     },
                                 );
-                            }
-                            if !wrote_neural_plock {
-                                sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
                             }
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
@@ -945,8 +938,7 @@ mod tests {
             ),
         );
 
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", Vec::new(), true);
+        let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
         let selected_steps = Arc::new(Mutex::new(HashSet::from([STEP])));
@@ -1000,7 +992,6 @@ mod tests {
             cached_peak_l_level: 0.0,
             cached_peak_r_level: 0.0,
             cached_track_peak_levels: vec![0.0],
-            cached_rack_slot_peak_levels: Vec::new(),
             cached_bus_peak_levels: Vec::new(),
             cached_modulator_phases: Vec::new(),
             cached_modulator_levels: Vec::new(),

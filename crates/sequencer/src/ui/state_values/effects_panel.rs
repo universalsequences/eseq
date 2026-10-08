@@ -59,22 +59,6 @@ impl EffectTableFields {
 
 }
 
-/// One entry per device in a channel's signal chain, for compact channel
-/// views that list devices by name (the Autechre-style grid mixer): the
-/// track's instrument first, then each effect slot. `enabled` mirrors the
-/// effect's own `enabled` parameter when it has one (true otherwise), so a
-/// bypassed device reads as off without the panel's full param projection.
-fn device_entry(name: String, kind: &str, enabled: bool, slot: i64) -> Value {
-    map_value([
-        ("name", Value::String(name)),
-        ("kind", Value::String(kind.to_string())),
-        ("enabled", Value::Bool(enabled)),
-        // Effect slot index (matches the fx panel's `slot-idx`); -1 for the
-        // instrument, which has no slot.
-        ("slot", Value::Number(slot as f64)),
-    ])
-}
-
 pub(super) fn enabled_param_index(desc: &sequencer::effects::EffectDescriptor) -> Option<usize> {
     desc.params.iter().position(|param| param.name == "enabled")
 }
@@ -107,8 +91,8 @@ pub(crate) struct DeviceChainEntry {
 }
 
 /// A track's devices in signal order: its instrument (when it has one),
-/// then each occupied effect slot. Shared by `SEQ.track-device-chains` and
-/// the `device` host kind (kind-bindings spec §13 stage 4).
+/// then each occupied effect slot: the `device` host kind's (kind-bindings
+/// spec §13 stage 4).
 pub(crate) fn track_device_chain(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -166,29 +150,6 @@ pub(crate) fn track_device_chain(
     entries
 }
 
-pub(crate) fn build_track_device_chains_value(
-    app: &app::App,
-    state: &Arc<SequencerState>,
-) -> Value {
-    list_value((0..app.tracks.len()).map(|track| {
-        list_value(
-            track_device_chain(app, state, track)
-                .into_iter()
-                .map(|entry| device_entry(entry.name, entry.kind, entry.enabled, entry.slot)),
-        )
-    }))
-}
-
-pub(crate) fn build_bus_device_chains_value(app: &app::App) -> Value {
-    list_value(app.buses.iter().map(|bus| {
-        list_value(
-            bus_device_chain(bus)
-                .into_iter()
-                .map(|entry| device_entry(entry.name, entry.kind, entry.enabled, entry.slot)),
-        )
-    }))
-}
-
 /// The occupied effect slots of a snapshot chain (a bus's, a rack slot's),
 /// in order.
 fn snapshot_effect_chain(
@@ -208,8 +169,8 @@ fn snapshot_effect_chain(
         .collect()
 }
 
-/// A bus's effects in chain order (its occupied slots). Shared by
-/// `SEQ.bus-device-chains` and the host kinds' `bus.devices`.
+/// A bus's effects in chain order (its occupied slots): the host kinds'
+/// `bus.devices`.
 pub(crate) fn bus_device_chain(bus: &app::BusChannelState) -> Vec<DeviceChainEntry> {
     snapshot_effect_chain(&bus.effect_descriptors, &bus.effect_slots)
 }
@@ -224,8 +185,7 @@ pub(crate) fn rack_slot_effect_chain(
 
 /// A track's MIDI effects in chain order, each with its descriptor
 /// (`descriptors`: `load_midi_fx_descriptors`); a slot whose effect has no
-/// descriptor is left out. Shared by `SEQ.midi-effects` and the host kinds'
-/// `track.midi-devices`.
+/// descriptor is left out: the host kinds' `track.midi-devices`.
 pub(crate) fn midi_fx_device_chain<'a>(
     chain: &[String],
     descriptors: &'a [sequencer::effects::EffectDescriptor],

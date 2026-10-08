@@ -15,7 +15,7 @@
         apply_slice3_history_host_command, apply_track_params_batch_host_command,
         apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
         slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
-        build_custom_instrument_ui_source_with_overlay, claim_param_sync_revision,
+        build_custom_instrument_ui_source_with_overlay,
         editor_surface_for_existing, effect_code_buffer_name, effect_patcher_buffer_source,
         escape_lisp_string, finish_piano_roll_gesture, instrument_code_buffer_name,
         instrument_patcher_buffer_source, EditorSurface,
@@ -24,7 +24,7 @@
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
         track_and_bus_meter_bindings_visible, ActiveDeleteTarget,
-        FxDeleteChain, ParamSyncRevision, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
+        FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
         NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -235,30 +235,6 @@
         assert!(pull_shared_bus_state(&mut app, &shared));
         assert_eq!(app.buses.len(), 4);
         assert_eq!(app.buses[3].name, "New bus");
-    }
-
-    #[test]
-    fn param_sync_revision_claims_only_changed_composite_inputs() {
-        let revision = ParamSyncRevision {
-            track: 1,
-            scene: 2,
-            pattern_epoch: 3,
-            song_row_mirror_epoch: 4,
-            ui_epoch: 5,
-            fx_epoch: 6,
-            sound_binding_epoch: 7,
-            display_step: Some(8),
-            selected_steps: vec![8, 9],
-            selected_neural_neurons: Vec::new(),
-        };
-        let mut previous = None;
-
-        assert!(claim_param_sync_revision(&mut previous, &revision));
-        assert!(!claim_param_sync_revision(&mut previous, &revision));
-
-        let mut changed = revision;
-        changed.pattern_epoch += 1;
-        assert!(claim_param_sync_revision(&mut previous, &changed));
     }
 
     /// Clip-edit-target spec 3.4 end to end through the host-command seam: a
@@ -1220,164 +1196,6 @@
     }
 
     #[test]
-    fn step_selection_sync_updates_the_step_fields_without_deadlocking() {
-        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
-        state.pattern.track_params[0].set_num_steps(8);
-        state
-            .pattern
-            .step_data[0]
-            .set(3, sequencer::sequencer::StepParam::Velocity, 0.66);
-        state
-            .pattern
-            .step_data[0]
-            .set(3, sequencer::sequencer::StepParam::Duration, 2.5);
-        state
-            .pattern
-            .step_data[0]
-            .set(3, sequencer::sequencer::StepParam::Transpose, 7.0);
-        state
-            .pattern
-            .step_data[0]
-            .set(2, sequencer::sequencer::StepParam::Velocity, 0.72);
-        state
-            .pattern
-            .step_data[0]
-            .set(2, sequencer::sequencer::StepParam::Duration, 1.5);
-        state
-            .pattern
-            .step_data[0]
-            .set(2, sequencer::sequencer::StepParam::Transpose, -4.0);
-        state
-            .pattern
-            .step_data[0]
-            .set(2, sequencer::sequencer::StepParam::Pan, -0.35);
-        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
-            [2_usize, 3, 4]
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![(
-                "selected-steps",
-                Value::List(
-                    (0..sequencer::sequencer::MAX_STEPS)
-                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(false))))
-                        .collect(),
-                ),
-            )],
-            true,
-        );
-        runtime
-            .eval_str("(def cursor-step 3)")
-            .expect("register cursor step");
-
-        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
-
-        for (field, expected) in [
-            ("fx-step-cursor-number", 4.0),
-            ("fx-step-selection-count", 3.0),
-            ("fx-step-value-velocity", 0.72),
-            ("fx-step-value-duration", 1.5),
-            ("fx-step-value-transpose", -4.0),
-            ("fx-step-value-pan", -0.35),
-        ] {
-            let value = runtime
-                .eval_str(&format!("SEQ.{field}"))
-                .unwrap_or_else(|error| panic!("read {field}: {error:?}"));
-            let Some(Value::Number(value)) = value else {
-                panic!("{field} should be numeric, got {value:?}");
-            };
-            assert!(
-                (value - expected).abs() < 0.0001,
-                "{field} expected {expected}, got {value}"
-            );
-        }
-
-        selected_steps.lock().unwrap().remove(&3);
-        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
-        assert_eq!(
-            runtime.eval_str("SEQ.fx-step-selection-count").expect("read count"),
-            Some(Value::Number(2.0)),
-            "a deselect resyncs the selection count"
-        );
-    }
-
-    #[test]
-    fn single_step_param_sync_updates_selected_panel_scalar_binding() {
-        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
-        state.pattern.track_params[0].set_num_steps(8);
-        state
-            .pattern
-            .step_data[0]
-            .set(4, sequencer::sequencer::StepParam::Velocity, 0.72);
-        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
-            [4, 5, 6, 7].into_iter().collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![(
-                "velocities",
-                Value::List(
-                    (0..sequencer::sequencer::MAX_STEPS)
-                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))))
-                        .collect(),
-                ),
-            )],
-            true,
-        );
-        runtime
-            .eval_str("(def cursor-step 0)")
-            .expect("register cursor step");
-
-        super::sync_single_step_param_binding(
-            &mut runtime,
-            &state,
-            0,
-            4,
-            sequencer::sequencer::StepParam::Velocity,
-            0,
-            &selected_steps,
-        );
-
-        let value = runtime
-            .eval_str("SEQ.fx-step-value-velocity")
-            .expect("read cursor velocity binding");
-        let Some(Value::Number(value)) = value else {
-            panic!("selected velocity should be numeric, got {value:?}");
-        };
-        assert!((value - 0.72).abs() < 0.0001);
-    }
-
-    #[test]
-    fn instrument_plock_presence_sync_updates_step_markers() {
-        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, vec![vec![]]));
-        state.pattern.track_params[0].set_num_steps(8);
-        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
-        state.pattern.instrument_slots[0].set_plock(2, 8, 22_050.0);
-        let effect_descriptors = vec![Vec::new()];
-        let mut runtime = Runtime::new();
-
-        super::sync_instrument_plock_presence_fields(&mut runtime, &state, &effect_descriptors, 0);
-
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.step-has-plocks 2)")
-                .expect("read p-locked step"),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth SEQ.step-has-plocks 3)")
-                .expect("read unp-locked step"),
-            Some(Value::Bool(false))
-        );
-    }
-
-    #[test]
     fn selecting_a_lock_free_step_still_lists_the_track_variant_chips() {
         let (state, app) = history_test_app();
         state.pattern.track_params[0].set_num_steps(8);
@@ -2058,7 +1876,6 @@
         } = init_runtime(
             &app,
             state.clone(),
-            &track_names,
             track_pan_ids.clone(),
             track_collapsed.clone(),
             bus_state.clone(),
@@ -2146,9 +1963,6 @@
             editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
         }
 
-        let cached_track_peak_levels = vec![0.0; track_names.len()];
-        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-
         {
             let rt = editor.runtime_mut();
             record_preset_listings();
@@ -2158,17 +1972,8 @@
                 &state,
                 &mut track_names,
                 0,
-                &selected_steps,
                 &accumulator_names,
-                &record_armed,
-                &cached_track_peak_levels,
             );
-            rt.set_reactive(
-                "SEQ",
-                "selected-steps",
-                build_selection_value(&selected_steps),
-            );
-            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             rt.run_reactive_cycle();
         }
         editor.refresh_runtime_side_effects();
@@ -2250,10 +2055,7 @@
                 &state,
                 &mut track_names,
                 ct,
-                &selected_steps,
                 &accumulator_names,
-                &record_armed,
-                &cached_track_peak_levels,
             );
         }
         let topology_sync = phase.elapsed();
@@ -2261,11 +2063,6 @@
         let phase = Instant::now();
         {
             let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "selected-steps",
-                build_selection_value(&selected_steps),
-            );
             rt.run_reactive_cycle();
         }
         let reactive_cycle = phase.elapsed();
@@ -3038,7 +2835,6 @@
         } = init_runtime(
             &app,
             state.clone(),
-            &track_names,
             track_pan_ids.clone(),
             track_collapsed.clone(),
             bus_state.clone(),
@@ -3357,17 +3153,8 @@
                 &state,
                 &mut track_names,
                 0,
-                &selected_steps,
                 &accumulator_names,
-                &record_armed,
-                &cached_track_peak_levels,
             );
-            rt.set_reactive(
-                "SEQ",
-                "selected-steps",
-                build_selection_value(&selected_steps),
-            );
-            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             rt.run_reactive_cycle();
         }
         editor.refresh_runtime_side_effects();
@@ -3447,25 +3234,14 @@
                 .expect("sequencer buffer should exist")
                 .id;
             editor.set_active_buffer(sequencer_buffer_id);
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             // Real per-tick syncs, exactly like the arranged probe: pianohold
             // carries takes + use_arrangement, so this exercises the
             // take-pool-aware lane-event collection every frame.
-            let mut song_frame = super::state_values::SongFrameState::default();
             assert!(
                 !editor_has_visible_buffer(&editor, "*arrangement*"),
                 "pianohold probe must measure the Seq view"
             );
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             assert!(
                 app.state.with_committed_arrangement(|arrangement| arrangement
                     .is_some_and(|arrangement| arrangement
@@ -3550,7 +3326,6 @@
                     }
                 }
             };
-            let neural = BTreeSet::new();
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
@@ -3565,12 +3340,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -3578,11 +3348,6 @@
                     );
                 }
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 let frame =
@@ -3952,12 +3717,6 @@
                 None
             };
 
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
-
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
@@ -3972,13 +3731,7 @@
                 "the drag probes must measure the Seq view"
             );
 
-            let mut song_frame = super::state_values::SongFrameState::default();
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
@@ -4173,10 +3926,8 @@
             };
 
             // --- visible update: the real reactive tick, minus the render --
-            let neural = selected_neural_neurons.lock().unwrap().clone();
             let mut prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
             let mut prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
-            let mut track_param_sync_revision: Option<super::loop_ctx::ParamSyncRevision> = None;
 
             struct DragUpdate {
                 tick_sync_ms: f64,
@@ -4210,11 +3961,6 @@
                 // reactive_tick.rs order: sound bindings + song state, then
                 // typed invalidations, then the epoch-driven resyncs.
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -4227,12 +3973,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -4250,73 +3991,19 @@
                 let ui_epoch_fired = ui_ep != prev_ui_epoch;
                 let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
                 if ui_epoch_fired {
-                    let mut sorted_steps: Vec<usize> =
-                        selected_steps.lock().unwrap().iter().copied().collect();
-                    sorted_steps.sort_unstable();
-                    let revision = super::loop_ctx::ParamSyncRevision {
-                        track: TRACK,
-                        scene: state.current_scene_index(),
-                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-                        song_row_mirror_epoch: app.song_row_mirror_epoch,
-                        ui_epoch: ui_ep,
-                        fx_epoch: fx_ep,
-                        sound_binding_epoch: app.sound_binding_epoch,
-                        display_step: displayed_plock_step(
-                            &state,
-                            TRACK,
-                            sorted_steps.first().copied(),
-                        ),
-                        selected_steps: sorted_steps,
-                        selected_neural_neurons: neural.iter().copied().collect(),
-                    };
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
-                        let rt = editor.runtime_mut();
-                        sync_track_name_state(rt, &mut track_names, app);
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
-                        sync_step_param_lists(rt, &state, TRACK);
+                        refresh_track_names_cache(&mut track_names, app);
                         let phase = Instant::now();
-                        sync_all_track_sequencer_state(rt, &state, app);
                         epoch_seq_state_ms = duration_ms(phase.elapsed());
-                        sync_track_mixer_state(rt, app, &state);
-                        sync_bus_mixer_state(rt, app);
-                        sync_track_peak_fields(rt, &cached_track_peak_levels);
-                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                         *accumulator_names.lock().unwrap() = build_accumulator_names(app);
                         let phase = Instant::now();
-                        if super::reactive_tick::claim_param_sync_revision(
-                            &mut track_param_sync_revision,
-                            &revision,
-                        ) {
-                            sync_track_params(rt, &state, TRACK, &selected_steps);
-                        }
                         epoch_track_params_ms = duration_ms(phase.elapsed());
-                        rt.set_reactive(
-                            "SEQ",
-                            "selected-steps",
-                            build_selection_value(&selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "record-armed",
-                            build_record_armed_value(&record_armed.lock().unwrap()),
-                        );
                     }
                     prev_ui_epoch = ui_ep;
                 }
                 if fx_epoch_fired {
                     let phase = Instant::now();
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
-                    );
                     prev_fx_epoch = fx_ep;
                     epoch_fx_values_ms = duration_ms(phase.elapsed());
                 }
@@ -4788,9 +4475,6 @@
                                 }
                                 host_apply_ms += duration_ms(dispatch_done.elapsed());
                                 let sync_started = Instant::now();
-                                if plock {
-                                    sync_instrument_plock_presence_display(&mut editor, &app, &state, TRACK);
-                                }
                                 host_sync_ms += duration_ms(sync_started.elapsed());
                                 if param_change_needs_fx_rebuild(&desc) {
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -5211,25 +4895,10 @@
                 "production layout must show the *transport* bar"
             );
 
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             {
-                let rt = editor.runtime_mut();
-                sync_step_param_lists(rt, &state, track);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, track));
             }
-            sync_track_params(editor.runtime_mut(), &state, track, &selected_steps);
 
-            let mut song_frame = super::state_values::SongFrameState::default();
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
@@ -5353,7 +5022,6 @@
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: cached_track_peak_levels.clone(),
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
@@ -5393,10 +5061,8 @@
             };
 
             // --- visible update: the real reactive tick, minus the render --
-            let neural = selected_neural_neurons.lock().unwrap().clone();
             let mut prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
             let mut prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
-            let mut track_param_sync_revision: Option<super::loop_ctx::ParamSyncRevision> = None;
 
             struct ColdUpdate {
                 tick_sync_ms: f64,
@@ -5418,11 +5084,6 @@
              -> ColdUpdate {
                 let started = Instant::now();
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -5435,12 +5096,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: track,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -5454,68 +5110,14 @@
                 let ui_epoch_fired = ui_ep != prev_ui_epoch;
                 let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
                 if ui_epoch_fired {
-                    let mut sorted_steps: Vec<usize> =
-                        selected_steps.lock().unwrap().iter().copied().collect();
-                    sorted_steps.sort_unstable();
-                    let revision = super::loop_ctx::ParamSyncRevision {
-                        track,
-                        scene: state.current_scene_index(),
-                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-                        song_row_mirror_epoch: app.song_row_mirror_epoch,
-                        ui_epoch: ui_ep,
-                        fx_epoch: fx_ep,
-                        sound_binding_epoch: app.sound_binding_epoch,
-                        display_step: displayed_plock_step(
-                            &state,
-                            track,
-                            sorted_steps.first().copied(),
-                        ),
-                        selected_steps: sorted_steps,
-                        selected_neural_neurons: neural.iter().copied().collect(),
-                    };
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
-                        let rt = editor.runtime_mut();
-                        sync_track_name_state(rt, &mut track_names, app);
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, track));
-                        sync_step_param_lists(rt, &state, track);
-                        sync_all_track_sequencer_state(rt, &state, app);
-                        sync_track_mixer_state(rt, app, &state);
-                        sync_bus_mixer_state(rt, app);
-                        sync_track_peak_fields(rt, &cached_track_peak_levels);
-                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                        refresh_track_names_cache(&mut track_names, app);
                         *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-                        if super::reactive_tick::claim_param_sync_revision(
-                            &mut track_param_sync_revision,
-                            &revision,
-                        ) {
-                            sync_track_params(rt, &state, track, &selected_steps);
-                        }
-                        rt.set_reactive(
-                            "SEQ",
-                            "selected-steps",
-                            build_selection_value(&selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(&state, track, &app.graph.effect_descriptors),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "record-armed",
-                            build_record_armed_value(&record_armed.lock().unwrap()),
-                        );
                     }
                     prev_ui_epoch = ui_ep;
                 }
                 if fx_epoch_fired {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, track, &app.graph.effect_descriptors),
-                    );
                     prev_fx_epoch = fx_ep;
                 }
                 let epoch_sync_done = Instant::now();
@@ -6069,7 +5671,6 @@
                 let mut publish_track_ms: Vec<f64> = Vec::new();
                 let mut variant_reconcile_ms: Vec<f64> = Vec::new();
                 let mut variants_value_ms: Vec<f64> = Vec::new();
-                let mut step_batch_apply_ms: Vec<f64> = Vec::new();
 
                 let mut control = PrintSamples::new();
                 let mut printing = PrintSamples::new();
@@ -6182,35 +5783,6 @@
                                 ui_invalidations.push(invalidation);
                             }
                         }
-                        // The reactive tick's own playhead branch: p-lock
-                        // presence on either side of the crossing re-syncs the
-                        // displayed (held) parameter values.
-                        {
-                            let rt = editor.runtime_mut();
-                            let _ = sync_playhead_field_delta(
-                                rt,
-                                playhead,
-                                next_playhead,
-                                STEP_COUNT,
-                            );
-                        }
-                        let binding_change = playhead_transition_changes_param_bindings(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                            playhead,
-                            next_playhead,
-                        );
-                        if binding_change {
-                            let rt = editor.runtime_mut();
-                            let _ = sync_track_selection_param_binding_fields(
-                                rt,
-                                &state,
-                                track,
-                                &selected_steps,
-                            );
-                        }
                         let playhead_done = Instant::now();
                         let update =
                             finish_visible_update(&mut editor, &mut app, &mut tile_retained);
@@ -6317,17 +5889,6 @@
                                     .map(VariantChip::of)
                                     .count();
                                 variants_value_ms.push(duration_ms(at.elapsed()));
-                                let at = Instant::now();
-                                let _ = sync_step_batch_structural_bindings(
-                                    editor.runtime_mut(),
-                                    &state,
-                                    &app,
-                                    track,
-                                    &[next_playhead],
-                                    track,
-                                    &selected_steps,
-                                );
-                                step_batch_apply_ms.push(duration_ms(at.elapsed()));
                             }
                         }
 
@@ -6532,12 +6093,10 @@
                 phase_line("control", &control);
                 eprintln!(
                     "[{probe_prefix}-attribution] publish_scheduler_track_ms={:.3} \
-                     variant_reconcile_ms={:.3} track_plock_variants_value_ms={:.3} \
-                     step_batch_apply_ms={:.3}",
+                     variant_reconcile_ms={:.3} track_plock_variants_value_ms={:.3}",
                     percentile(&mut publish_track_ms, 0.5),
                     percentile(&mut variant_reconcile_ms, 0.5),
                     percentile(&mut variants_value_ms, 0.5),
-                    percentile(&mut step_batch_apply_ms, 0.5),
                 );
                 eprintln!(
                     "[{probe_prefix}-work] variants_seeded={variants_seeded} \
@@ -7144,15 +6703,7 @@
                 state.pattern.track_params[track].set_num_steps(16);
             }
 
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             {
-                let rt = editor.runtime_mut();
-                sync_step_param_lists(rt, &state, TRACK);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
             }
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -7257,7 +6808,6 @@
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: cached_track_peak_levels.clone(),
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
@@ -7294,19 +6844,12 @@
                 names
             };
 
-            let neural = selected_neural_neurons.lock().unwrap().clone();
-            let mut song_frame = super::state_values::SongFrameState::default();
             let mut prev_auto_follow =
                 super::state_values::auto_follow_enabled(&auto_follow_override_until);
             let mut finish_visible_update = |editor: &mut Editor,
                                              app: &mut app::App,
                                              retained: &mut Vec<TileRetained>| {
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
                     apply_ui_invalidations(
@@ -7318,12 +6861,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -7333,9 +6871,6 @@
                 let auto_follow =
                     super::state_values::auto_follow_enabled(&auto_follow_override_until);
                 if auto_follow != prev_auto_follow {
-                    editor
-                        .runtime_mut()
-                        .set_reactive("SEQ", "auto-follow", Value::Bool(auto_follow));
                     prev_auto_follow = auto_follow;
                 }
                 editor.runtime_mut().run_reactive_cycle();
@@ -7733,24 +7268,10 @@
                 "the step-buffer probe must measure the Seq view"
             );
 
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             {
-                let rt = editor.runtime_mut();
-                sync_step_param_lists(rt, &state, TRACK);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
             }
 
-            let mut song_frame = super::state_values::SongFrameState::default();
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
@@ -7862,7 +7383,6 @@
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: cached_track_peak_levels.clone(),
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
@@ -7905,7 +7425,6 @@
             };
 
             // --- visible update: the real reactive tick, minus the render --
-            let neural = selected_neural_neurons.lock().unwrap().clone();
             let mut prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
             let mut prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
             // `seq-pause-auto-follow` (which `fx-step-set-param` calls on every
@@ -7915,7 +7434,6 @@
             // that now carries it.
             let mut prev_auto_follow =
                 super::state_values::auto_follow_enabled(&auto_follow_override_until);
-            let mut track_param_sync_revision: Option<super::loop_ctx::ParamSyncRevision> = None;
 
             struct EditUpdate {
                 tick_sync_ms: f64,
@@ -7943,11 +7461,6 @@
              -> EditUpdate {
                 let started = Instant::now();
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -7960,12 +7473,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -7977,15 +7485,12 @@
                 let mut epoch_track_params_ms = 0.0;
                 let mut epoch_fx_values_ms = 0.0;
 
-                // reactive_tick.rs: `SEQ.auto-follow` delta write. This is the
-                // surface `seq-pause-auto-follow` actually feeds now that it
-                // only bumps ui_epoch on the following -> paused transition.
+                // The auto-follow flag `seq-pause-auto-follow` feeds (the host
+                // kinds' `transport.auto-follow`); it only bumps ui_epoch on
+                // the following -> paused transition.
                 let auto_follow =
                     super::state_values::auto_follow_enabled(&auto_follow_override_until);
                 if auto_follow != prev_auto_follow {
-                    editor
-                        .runtime_mut()
-                        .set_reactive("SEQ", "auto-follow", Value::Bool(auto_follow));
                     prev_auto_follow = auto_follow;
                 }
 
@@ -7995,73 +7500,19 @@
                 let ui_epoch_fired = ui_ep != prev_ui_epoch;
                 let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
                 if ui_epoch_fired {
-                    let mut sorted_steps: Vec<usize> =
-                        selected_steps.lock().unwrap().iter().copied().collect();
-                    sorted_steps.sort_unstable();
-                    let revision = super::loop_ctx::ParamSyncRevision {
-                        track: TRACK,
-                        scene: state.current_scene_index(),
-                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-                        song_row_mirror_epoch: app.song_row_mirror_epoch,
-                        ui_epoch: ui_ep,
-                        fx_epoch: fx_ep,
-                        sound_binding_epoch: app.sound_binding_epoch,
-                        display_step: displayed_plock_step(
-                            &state,
-                            TRACK,
-                            sorted_steps.first().copied(),
-                        ),
-                        selected_steps: sorted_steps,
-                        selected_neural_neurons: neural.iter().copied().collect(),
-                    };
                     sync_shared_track_collapsed(&track_collapsed, app);
                     {
-                        let rt = editor.runtime_mut();
-                        sync_track_name_state(rt, &mut track_names, app);
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
-                        sync_step_param_lists(rt, &state, TRACK);
+                        refresh_track_names_cache(&mut track_names, app);
                         let phase = Instant::now();
-                        sync_all_track_sequencer_state(rt, &state, app);
                         epoch_seq_state_ms = duration_ms(phase.elapsed());
-                        sync_track_mixer_state(rt, app, &state);
-                        sync_bus_mixer_state(rt, app);
-                        sync_track_peak_fields(rt, &cached_track_peak_levels);
-                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                         *accumulator_names.lock().unwrap() = build_accumulator_names(app);
                         let phase = Instant::now();
-                        if super::reactive_tick::claim_param_sync_revision(
-                            &mut track_param_sync_revision,
-                            &revision,
-                        ) {
-                            sync_track_params(rt, &state, TRACK, &selected_steps);
-                        }
                         epoch_track_params_ms = duration_ms(phase.elapsed());
-                        rt.set_reactive(
-                            "SEQ",
-                            "selected-steps",
-                            build_selection_value(&selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "record-armed",
-                            build_record_armed_value(&record_armed.lock().unwrap()),
-                        );
                     }
                     prev_ui_epoch = ui_ep;
                 }
                 if fx_epoch_fired {
                     let phase = Instant::now();
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, TRACK, &app.graph.effect_descriptors),
-                    );
                     prev_fx_epoch = fx_ep;
                     epoch_fx_values_ms = duration_ms(phase.elapsed());
                 }
@@ -8303,14 +7754,8 @@
                 "the cursor click must leave the panel in its '0 selected' state"
             );
             assert_eq!(
-                editor
-                    .runtime()
-                    .reactive_field_value("SEQ", "fx-step-cursor-number")
-                    .map(|value| match value {
-                        Value::Number(number) => *number,
-                        other => panic!("fx-step-cursor-number should be a number: {other:?}"),
-                    }),
-                Some((CURSOR_STEP + 1) as f64),
+                fx_step_cursor_value(editor.runtime().global_value(FX_STEP_CURSOR_GLOBAL)),
+                CURSOR_STEP,
                 "the click must park the step cursor on step {}",
                 CURSOR_STEP + 1
             );
@@ -8723,15 +8168,7 @@
                 "the launch probe must measure the Seq view"
             );
 
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             {
-                let rt = editor.runtime_mut();
-                sync_step_param_lists(rt, &state, TRACK);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
             }
 
             // The real host-command seam (same construction as the *step*-
@@ -8780,7 +8217,6 @@
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: cached_track_peak_levels.clone(),
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
@@ -8837,7 +8273,6 @@
             };
 
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(editor.runtime_mut(), &app, &mut frame_diff.song);
             let _ = super::state_values::sync_sound_palette(
                 &app,
                 &mut frame_diff.sound_palette,
@@ -8908,7 +8343,6 @@
             }
 
             // --- visible update: the real reactive tick, minus the render --
-            let neural = selected_neural_neurons.lock().unwrap().clone();
 
             struct LaunchUpdate {
                 tick_sync_ms: f64,
@@ -8944,11 +8378,6 @@
                     frame.prev_sound_binding_epoch = app.sound_binding_epoch;
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut frame.song,
-                );
                 let _ = super::state_values::sync_sound_palette(app, &mut frame.sound_palette, true);
                 let tick_sync_done = Instant::now();
                 let ct = current_track.load(Ordering::Relaxed);
@@ -8963,12 +8392,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: ct,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -8976,30 +8400,6 @@
                     );
                 }
                 let invalidations_done = Instant::now();
-
-                let build_revision = |state: &Arc<SequencerState>,
-                                      app: &app::App|
-                 -> super::loop_ctx::ParamSyncRevision {
-                    let mut sorted_steps: Vec<usize> =
-                        selected_steps.lock().unwrap().iter().copied().collect();
-                    sorted_steps.sort_unstable();
-                    super::loop_ctx::ParamSyncRevision {
-                        track: ct,
-                        scene: state.current_scene_index(),
-                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-                        song_row_mirror_epoch: app.song_row_mirror_epoch,
-                        ui_epoch: ui_epoch.load(Ordering::Relaxed),
-                        fx_epoch: fx_epoch.load(Ordering::Relaxed),
-                        sound_binding_epoch: app.sound_binding_epoch,
-                        display_step: displayed_plock_step(
-                            state,
-                            ct,
-                            sorted_steps.first().copied(),
-                        ),
-                        selected_steps: sorted_steps,
-                        selected_neural_neurons: neural.iter().copied().collect(),
-                    }
-                };
 
                 // --- reactive_tick.rs pattern-epoch branch -----------------
                 // This is the branch a clip launch (`set-scene-cell`) leans
@@ -9011,31 +8411,12 @@
                     || mirror_epoch != frame.prev_song_row_mirror_epoch)
                     && !app.tracks.is_empty();
                 if pattern_epoch_fired {
-                    let revision = build_revision(&state, app);
                     let rt = editor.runtime_mut();
                     sync_shared_track_collapsed(&track_collapsed, app);
-                    sync_track_name_state(rt, &mut track_names, app);
-                    sync_pattern_state(rt, &state);
-                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_all_track_sequencer_state(rt, &state, app);
-                    sync_step_param_lists(rt, &state, ct);
-                    sync_track_mixer_state(rt, app, &state);
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_peak_fields(rt, &cached_track_peak_levels);
-                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                    refresh_track_names_cache(&mut track_names, app);
+                    sync_scene_slot_state(rt, &state);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-                    if super::reactive_tick::claim_param_sync_revision(
-                        &mut frame.track_param_sync_revision,
-                        &revision,
-                    ) {
-                        sync_track_params(rt, &state, ct, &selected_steps);
-                    }
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
-                    sync_sidebar_browser(rt, app, ct);
+                    sync_sidebar_browser(app, ct);
                     frame.prev_pattern_epoch = epoch;
                     frame.prev_song_row_mirror_epoch = mirror_epoch;
                     frame.prev_track_button_states = track_button_state_snapshot(&state);
@@ -9054,49 +8435,13 @@
                 let ui_epoch_fired = ui_ep != frame.prev_ui_epoch;
                 let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
                 if ui_epoch_fired {
-                    let revision = build_revision(&state, app);
                     sync_shared_track_collapsed(&track_collapsed, app);
-                    let rt = editor.runtime_mut();
-                    sync_track_name_state(rt, &mut track_names, app);
-                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_step_param_lists(rt, &state, ct);
-                    sync_all_track_sequencer_state(rt, &state, app);
-                    sync_track_mixer_state(rt, app, &state);
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_peak_fields(rt, &cached_track_peak_levels);
-                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                    refresh_track_names_cache(&mut track_names, app);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-                    if super::reactive_tick::claim_param_sync_revision(
-                        &mut frame.track_param_sync_revision,
-                        &revision,
-                    ) {
-                        sync_track_params(rt, &state, ct, &selected_steps);
-                    }
-                    rt.set_reactive(
-                        "SEQ",
-                        "selected-steps",
-                        build_selection_value(&selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "record-armed",
-                        build_record_armed_value(&record_armed.lock().unwrap()),
-                    );
                     frame.prev_track_button_states = track_button_state_snapshot(&state);
                     frame.prev_ui_epoch = ui_ep;
                 }
                 if fx_epoch_fired {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
                     prev_fx_epoch = fx_ep;
                 }
                 let epoch_sync_done = Instant::now();
@@ -9910,12 +9255,6 @@
             // Initial full sync so the fixture group, its bus chain, and the
             // 14-track topology are all live before the first click.
             {
-                let rt = editor.runtime_mut();
-                sync_all_track_sequencer_state(rt, &state, &app);
-                sync_step_param_lists(rt, &state, 0);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, 0));
-                sync_track_mixer_state(rt, &app, &state);
-                sync_bus_mixer_state(rt, &app);
             }
 
             // The real host-command seam, shared with the probe's syncs.
@@ -9961,7 +9300,6 @@
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: cached_track_peak_levels.clone(),
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: cached_modulator_phases.clone(),
                 cached_modulator_levels: cached_modulator_levels.clone(),
@@ -9989,7 +9327,6 @@
             frame_diff.prev_track_button_states = track_button_state_snapshot(&state);
             frame_diff.prev_track_playheads = track_playheads_snapshot(&state, &app);
             frame_diff.prev_groups = app.groups.clone();
-            frame_diff.prev_selected_tracks = selected_tracks.lock().unwrap().clone();
 
             let mut apply_host_commands = |editor: &mut Editor,
                                            app: &mut app::App,
@@ -10016,11 +9353,6 @@
             };
 
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut frame_diff.song,
-            );
             // These probes time track switches within ONE layout. Selecting
             // a drum rack member splits the sidebar for the *groove* buffer
             // (and a plain track joins it back), which is a layout change,
@@ -10097,7 +9429,6 @@
             }
 
             // --- visible update: the real reactive tick, minus the render --
-            let neural = selected_neural_neurons.lock().unwrap().clone();
 
             struct OwnerSwitchUpdate {
                 tick_sync_ms: f64,
@@ -10131,30 +9462,6 @@
                 let started = Instant::now();
                 let ct = current_track.load(Ordering::Relaxed);
 
-                let build_revision = |state: &Arc<SequencerState>,
-                                      app: &app::App|
-                 -> super::loop_ctx::ParamSyncRevision {
-                    let mut sorted_steps: Vec<usize> =
-                        selected_steps.lock().unwrap().iter().copied().collect();
-                    sorted_steps.sort_unstable();
-                    super::loop_ctx::ParamSyncRevision {
-                        track: ct,
-                        scene: state.current_scene_index(),
-                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
-                        song_row_mirror_epoch: app.song_row_mirror_epoch,
-                        ui_epoch: ui_epoch.load(Ordering::Relaxed),
-                        fx_epoch: fx_epoch.load(Ordering::Relaxed),
-                        sound_binding_epoch: app.sound_binding_epoch,
-                        display_step: displayed_plock_step(
-                            state,
-                            ct,
-                            sorted_steps.first().copied(),
-                        ),
-                        selected_steps: sorted_steps,
-                        selected_neural_neurons: neural.iter().copied().collect(),
-                    }
-                };
-
                 // --- reactive_tick.rs "track switch — rebuild everything" --
                 let track_switch_fired =
                     ct != frame.prev_current_track && !app.tracks.is_empty();
@@ -10179,18 +9486,7 @@
                         .runtime_mut()
                         .eval_str("(set! eseq.seq-core-state/selected-bus -1)");
                     reset_sampler_waveform_view(editor);
-                    let revision = build_revision(&state, app);
-                    let rt = editor.runtime_mut();
-                    set_current_track_reactive(rt, ct);
-                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_step_param_lists(rt, &state, ct);
-                    if super::reactive_tick::claim_param_sync_revision(
-                        &mut frame.track_param_sync_revision,
-                        &revision,
-                    ) {
-                        sync_track_params(rt, &state, ct, &selected_steps);
-                    }
-                    sync_sidebar_browser(rt, app, ct);
+                    sync_sidebar_browser(app, ct);
                     frame.prev_current_track = ct;
                     frame.prev_pattern_epoch =
                         state.transport.pattern_epoch.load(Ordering::Relaxed);
@@ -10204,16 +9500,6 @@
                         frame.prev_groups = groups_snapshot;
                     }
                 }
-                {
-                    let selected_snapshot = selected_tracks.lock().unwrap().clone();
-                    if selected_snapshot != frame.prev_selected_tracks {
-                        sync_selected_tracks_bindings(
-                            editor.runtime_mut(),
-                            &selected_snapshot,
-                        );
-                        frame.prev_selected_tracks = selected_snapshot;
-                    }
-                }
                 let track_switch_done = Instant::now();
 
                 app.sync_track_sound_bindings();
@@ -10221,11 +9507,6 @@
                     frame.prev_sound_binding_epoch = app.sound_binding_epoch;
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut frame.song,
-                );
                 let tick_sync_done = Instant::now();
 
                 let invalidations = ui_invalidations.drain();
@@ -10239,12 +9520,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: ct,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -10259,44 +9535,13 @@
                 let ui_epoch_fired = ui_ep != frame.prev_ui_epoch;
                 let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
                 if ui_epoch_fired {
-                    let revision = build_revision(&state, app);
                     sync_shared_track_collapsed(&track_collapsed, app);
-                    let rt = editor.runtime_mut();
-                    sync_track_name_state(rt, &mut track_names, app);
-                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                    sync_step_param_lists(rt, &state, ct);
-                    sync_all_track_sequencer_state(rt, &state, app);
-                    sync_track_mixer_state(rt, app, &state);
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_peak_fields(rt, &cached_track_peak_levels);
-                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                    refresh_track_names_cache(&mut track_names, app);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-                    if super::reactive_tick::claim_param_sync_revision(
-                        &mut frame.track_param_sync_revision,
-                        &revision,
-                    ) {
-                        sync_track_params(rt, &state, ct, &selected_steps);
-                    }
-                    rt.set_reactive(
-                        "SEQ",
-                        "selected-steps",
-                        build_selection_value(&selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
                     frame.prev_track_button_states = track_button_state_snapshot(&state);
                     frame.prev_ui_epoch = ui_ep;
                 }
                 if fx_epoch_fired {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
                     prev_fx_epoch = fx_ep;
                 }
                 let epoch_sync_done = Instant::now();
@@ -11473,11 +10718,6 @@
                 );
                 state.pattern.instrument_slots[TRACK].set_plock(0, plock_param_idx, plock_value);
             }
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
 
             // The production layout must make the selection side-effect
             // publication paths live: these flags gate the fx/mixer work in
@@ -11497,13 +10737,7 @@
                 "the full-layout step probe must measure the Seq view"
             );
 
-            let mut song_frame = super::state_values::SongFrameState::default();
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
@@ -11641,8 +10875,7 @@
                 tiles: Vec<(String, usize, f64, bool)>,
             }
             let step_clipboard = Arc::new(Mutex::new(None));
-            let neural = selected_neural_neurons.lock().unwrap().clone();
-            let mut finish_visible_update = |editor: &mut Editor,
+            let finish_visible_update = |editor: &mut Editor,
                                              app: &mut app::App,
                                              tiles: &mut Vec<TileRetained>|
              -> FullLayoutUpdate {
@@ -11658,12 +10891,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -11675,11 +10903,6 @@
                 // syncs on every frame before the reactive cycle
                 // (reactive_tick.rs).
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let tick_sync_done = Instant::now();
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
@@ -11771,16 +10994,6 @@
                 samples.sort_by(|a, b| a.total_cmp(b));
                 let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
                 samples[index]
-            };
-            let fx_display_step = |editor: &mut Editor| -> f64 {
-                match editor
-                    .runtime_mut()
-                    .eval_str("SEQ.fx-step-display-step")
-                    .expect("read SEQ.fx-step-display-step")
-                {
-                    Some(Value::Number(step)) => step,
-                    other => panic!("SEQ.fx-step-display-step must be a number, got {other:?}"),
-                }
             };
 
             struct ActionSamples {
@@ -11876,11 +11089,6 @@
                     STEP_COUNT,
                     "all {STEP_COUNT} selected step shells must be in the retained sequencer scene"
                 );
-                assert_eq!(
-                    fx_display_step(&mut editor),
-                    0.0,
-                    "select-all must publish the selection's p-lock display step to the fx panel"
-                );
                 let fx_dirty = update
                     .tiles
                     .iter()
@@ -11918,11 +11126,6 @@
                     count_selected_shells(&tile_retained),
                     0,
                     "no selected step shells may remain in the retained scene after Escape"
-                );
-                assert_eq!(
-                    fx_display_step(&mut editor),
-                    -1.0,
-                    "unselect must revert the fx panel's p-lock display step"
                 );
                 if iteration >= WARMUPS {
                     unselect_samples.record(
@@ -12005,16 +11208,10 @@
             for step in 0..STEP_COUNT {
                 state.pattern.patterns[TRACK].set_step_active(step, step < 24);
             }
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             // The real event loop runs the song-state and sound-binding syncs
             // on every reactive tick (reactive_tick.rs); seed them here so the
             // arrangement read surfaces are published and warm, then include
             // the same syncs inside the timed region below.
-            let mut song_frame = super::state_values::SongFrameState::default();
             let arrangement_buffer_visible =
                 editor_has_visible_buffer(&editor, "*arrangement*");
             assert!(
@@ -12022,11 +11219,6 @@
                 "step probes must measure the Seq view, not the Arr view"
             );
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut song_frame,
-            );
             if arranged {
                 assert!(
                     app.state.with_committed_arrangement(|arrangement| arrangement
@@ -12170,7 +11362,6 @@
                 }
             };
 
-            let neural = selected_neural_neurons.lock().unwrap().clone();
             let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
                 let started = Instant::now();
                 let invalidations = ui_invalidations.drain();
@@ -12184,12 +11375,7 @@
                             track_collapsed: &track_collapsed,
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
-                            selected_steps: &selected_steps,
-                            selected_neural_neurons: &neural,
                             accumulator_names: &accumulator_names,
-                            cached_track_peak_levels: &cached_track_peak_levels,
-                            cached_bus_peak_levels: &cached_bus_peak_levels,
-                            record_armed: &record_armed,
                             fx_visible,
                             sequencer_visible: true,
                             mixer_visible,
@@ -12202,11 +11388,6 @@
                 // (reactive_tick.rs); they are part of the user-visible
                 // latency of every step interaction and belong in the sample.
                 app.sync_track_sound_bindings();
-                super::state_values::sync_song_state(
-                    editor.runtime_mut(),
-                    app,
-                    &mut song_frame,
-                );
                 let tick_sync_done = Instant::now();
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
@@ -12364,11 +11545,6 @@
                         .unwrap(),
                     Some(Value::Bool(true)),
                     "move fixture must expose step 8 as active to the gesture Lisp",
-                );
-                assert_eq!(
-                    editor.runtime_mut().eval_str("SEQ.current-track").unwrap(),
-                    Some(Value::Number(0.0)),
-                    "move fixture must target the visible current track",
                 );
                 let (_, _, width, height) = step_center(&mut editor, 8);
                 let (target_col, target_row, _, _) = step_center(&mut editor, 9);
@@ -12676,11 +11852,6 @@
             let mut run_scenario = |selected_count: usize| {
                 selected_steps.lock().unwrap().clear();
                 selected_steps.lock().unwrap().extend(0..selected_count);
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "selected-steps",
-                    build_selection_value(&selected_steps),
-                );
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
 
@@ -12900,11 +12071,6 @@
             drop(run_scenario);
 
             selected_steps.lock().unwrap().clear();
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "selected-steps",
-                build_selection_value(&selected_steps),
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
 
@@ -13192,11 +12358,6 @@
             for step in 0..STEP_COUNT {
                 state.pattern.patterns[TRACK].set_step_active(step, step % 2 == 0);
             }
-            sync_all_track_sequencer_state(
-                editor.runtime_mut(),
-                &state,
-                &app,
-            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
@@ -13204,7 +12365,6 @@
             let mut samples = Vec::with_capacity(SAMPLES);
             for iteration in 0..(WARMUPS + SAMPLES) {
                 selected_steps.lock().unwrap().extend(0..SELECTED_COUNT);
-                let neural = selected_neural_neurons.lock().unwrap().clone();
                 apply_ui_invalidations(
                     vec![UiInvalidation::StepSelection {
                         track: TRACK,
@@ -13217,12 +12377,7 @@
                         track_collapsed: &track_collapsed,
                         bus_state: &bus_state,
                         current_track_idx: TRACK,
-                        selected_steps: &selected_steps,
-                        selected_neural_neurons: &neural,
                         accumulator_names: &accumulator_names,
-                        cached_track_peak_levels: &cached_track_peak_levels,
-                        cached_bus_peak_levels: &cached_bus_peak_levels,
-                        record_armed: &record_armed,
                         fx_visible: true,
                         sequencer_visible: true,
                         mixer_visible: true,
@@ -13317,12 +12472,7 @@
                         track_collapsed: &track_collapsed,
                         bus_state: &bus_state,
                         current_track_idx: TRACK,
-                        selected_steps: &selected_steps,
-                        selected_neural_neurons: &neural,
                         accumulator_names: &accumulator_names,
-                        cached_track_peak_levels: &cached_track_peak_levels,
-                        cached_bus_peak_levels: &cached_bus_peak_levels,
-                        record_armed: &record_armed,
                         fx_visible: true,
                         sequencer_visible: true,
                         mixer_visible: true,
@@ -13443,7 +12593,6 @@
         let sync_names_pattern_elapsed;
         let sync_current_steps_elapsed;
         let sync_sequencer_elapsed;
-        let sync_sequencer_profile;
         let sync_step_params_elapsed;
         let sync_mixer_elapsed;
         let sync_fx_lists_elapsed;
@@ -13493,28 +12642,20 @@
             let rt = editor.runtime_mut();
             let started = Instant::now();
             sync_shared_track_collapsed(&track_collapsed, &app);
-            sync_track_name_state(rt, &mut track_names, &app);
-            sync_pattern_state(rt, &state);
+            refresh_track_names_cache(&mut track_names, &app);
+            sync_scene_slot_state(rt, &state);
             sync_names_pattern_elapsed = started.elapsed();
 
             let started = Instant::now();
-            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
             sync_current_steps_elapsed = started.elapsed();
 
             let started = Instant::now();
-            sync_sequencer_profile =
-                sync_all_track_sequencer_state_profiled(rt, &state, &app);
             sync_sequencer_elapsed = started.elapsed();
 
             let started = Instant::now();
-            sync_step_param_lists(rt, &state, ct);
             sync_step_params_elapsed = started.elapsed();
 
             let started = Instant::now();
-            sync_track_mixer_state(rt, &app, &state);
-            sync_bus_mixer_state(rt, &app);
-            sync_track_peak_fields(rt, &cached_track_peak_levels);
-            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             sync_mixer_elapsed = started.elapsed();
 
             let started = Instant::now();
@@ -13528,16 +12669,10 @@
             sync_fx_lists_elapsed = started.elapsed();
 
             let started = Instant::now();
-            sync_track_params(rt, &state, ct, &selected_steps);
             sync_track_params_elapsed = started.elapsed();
 
             let started = Instant::now();
-            rt.set_reactive(
-                "SEQ",
-                "step-has-plocks",
-                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-            );
-            sync_sidebar_browser(rt, &app, ct);
+            sync_sidebar_browser(&app, ct);
             sync_plocks_sidebar_elapsed = started.elapsed();
 
             let started = Instant::now();
@@ -13645,7 +12780,7 @@
         );
 
         eprintln!(
-            "[project-92-scene-switch-detail] state_total_ms={:.3} state_capture_ms={:.3} state_lock_wait_ms={:.3} state_save_current_ms={:.3} state_launch_data_ms={:.3} state_restore_tracks_ms={:.3} state_collect_samples_ms={:.3} state_update_atoms_ms={:.3} state_mod_resync_ms={:.3} state_publish_snapshot_ms={:.3} seq_total_ms={:.3} seq_track_steps_ms={:.3} seq_track_num_steps_ms={:.3} seq_track_duration_spans_ms={:.3} seq_track_step_has_plocks_ms={:.3} seq_track_playheads_ms={:.3} seq_track_velocities_ms={:.3} seq_track_durations_ms={:.3} seq_track_auxas_ms={:.3} seq_track_transposes_ms={:.3} seq_track_pans_ms={:.3} seq_track_syncs_ms={:.3} seq_track_delays_ms={:.3} seq_playhead_fields_ms={:.3} reactive_apply_ms={:.3} reactive_flush_ms={:.3} reactive_cycle_trace_ms={:.3} reactive_hot={:?}",
+            "[project-92-scene-switch-detail] state_total_ms={:.3} state_capture_ms={:.3} state_lock_wait_ms={:.3} state_save_current_ms={:.3} state_launch_data_ms={:.3} state_restore_tracks_ms={:.3} state_collect_samples_ms={:.3} state_update_atoms_ms={:.3} state_mod_resync_ms={:.3} state_publish_snapshot_ms={:.3} reactive_apply_ms={:.3} reactive_flush_ms={:.3} reactive_cycle_trace_ms={:.3} reactive_hot={:?}",
             duration_ms(state_switch_profile.total),
             duration_ms(state_switch_profile.capture_current_snapshot),
             duration_ms(state_switch_profile.scene_lock_wait),
@@ -13656,20 +12791,6 @@
             duration_ms(state_switch_profile.update_pattern_atoms),
             duration_ms(state_switch_profile.schedule_mod_resync),
             duration_ms(state_switch_profile.publish_scheduler_snapshot),
-            duration_ms(sync_sequencer_profile.elapsed),
-            duration_ms(sync_sequencer_profile.track_steps),
-            duration_ms(sync_sequencer_profile.track_num_steps),
-            duration_ms(sync_sequencer_profile.track_duration_spans),
-            duration_ms(sync_sequencer_profile.track_step_has_plocks),
-            duration_ms(sync_sequencer_profile.track_playheads),
-            duration_ms(sync_sequencer_profile.track_velocities),
-            duration_ms(sync_sequencer_profile.track_durations),
-            duration_ms(sync_sequencer_profile.track_auxas),
-            duration_ms(sync_sequencer_profile.track_transposes),
-            duration_ms(sync_sequencer_profile.track_pans),
-            duration_ms(sync_sequencer_profile.track_syncs),
-            duration_ms(sync_sequencer_profile.track_delays),
-            duration_ms(sync_sequencer_profile.playhead_fields),
             duration_ms(trace.reactive_apply_duration),
             duration_ms(trace.reactive_flush_duration),
             duration_ms(trace.reactive_cycle_duration),
@@ -13785,7 +12906,6 @@
         } = init_runtime(
             &app,
             state.clone(),
-            &track_names,
             track_pan_ids.clone(),
             track_collapsed.clone(),
             bus_state.clone(),
@@ -13869,9 +12989,6 @@
         if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
             editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
         }
-        let cached_track_peak_levels = vec![0.0; app.tracks.len()];
-        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-        let mut song_frame = SongFrameState::default();
         // The arrangement reads the host kinds; the live loop syncs them
         // every tick.
         let kinds_handles = super::host_kinds::KindsHandles {
@@ -13905,13 +13022,8 @@
                 &state,
                 &mut track_names,
                 0,
-                &selected_steps,
                 &accumulator_names,
-                &record_armed,
-                &cached_track_peak_levels,
             );
-            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-            sync_song_state(rt, &app, &mut song_frame);
             host_kinds.sync_with(&app, rt, &kinds_handles, &Default::default());
             rt.run_reactive_cycle();
         }
@@ -14082,11 +13194,8 @@
         // The visible-update phases the production frame performs after an
         // arrangement mutation: song read-surface publish, reactive cycle,
         // tiled-frame build, retained Metal refresh.
-        let mut finish_visible_update = |editor: &mut Editor,
-                                         app: &mut app::App,
-                                         song_frame: &mut SongFrameState| {
+        let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
             let started = Instant::now();
-            sync_song_state(editor.runtime_mut(), app, song_frame);
             host_kinds.sync_with(
                 app,
                 editor.runtime_mut(),
@@ -14253,7 +13362,7 @@
             };
             let started = Instant::now();
             apply_clip_resize(&mut app, shrunk_end);
-            let phases = finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            let phases = finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert_eq!(
                 read_num(
@@ -14272,7 +13381,7 @@
             }
             // Restore outside the sample.
             apply_clip_resize(&mut app, clip_end);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             // arr-select-clip: real mouse down+up on the clip title bar.
             let lane = lane_rect(&mut editor);
             let title_col = time_to_col(lane, (clip_start + clip_end) * 0.5);
@@ -14285,7 +13394,7 @@
                 send_mouse(&mut editor, kind, title_col, title_row);
             }
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert_eq!(
                 read_num(&mut editor, &format!("(len (eseq.arrangement/lane-selection {fixture_track}))")),
@@ -14301,7 +13410,7 @@
                 &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             // arr-resize-tick: arm the real end-edge drag, then time ONE
             // live drag tick (ghost update through reactive/frame/retained).
             let lane = lane_rect(&mut editor);
@@ -14310,10 +13419,10 @@
             let row = lane.1 + 0.4;
             send_mouse(&mut editor, MouseEventKind::Down(MouseButton::Left), edge_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let started = Instant::now();
             send_mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), target_col, row);
-            let phases = finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            let phases = finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert!(
                 phases.4 > 0,
@@ -14353,17 +13462,17 @@
             send_mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), edge_col, row);
             send_mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), edge_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             assert_eq!(eval(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Some(Value::Nil));
             // Whatever the release committed, restore the fixture geometry.
             apply_clip_resize(&mut app, clip_end);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             eval(
                 &mut editor,
                 &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             // arr-move-tick: arm the title-bar drag, time one move tick.
             let lane = lane_rect(&mut editor);
             let title_col = time_to_col(lane, (clip_start + clip_end) * 0.5);
@@ -14371,10 +13480,10 @@
             let row = lane.1 + 0.4;
             send_mouse(&mut editor, MouseEventKind::Down(MouseButton::Left), title_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let started = Instant::now();
             send_mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), move_target_col, row);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert!(
                 matches!(
@@ -14390,7 +13499,7 @@
             send_mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), title_col, row);
             send_mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), title_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             if read_num(
                 &mut editor,
                 &format!("(let ((c (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}))) c.start)"),
@@ -14414,7 +13523,7 @@
                 &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             // arr-marquee-tick: sweep a region from the clip body.
             let lane = lane_rect(&mut editor);
             let body_col = time_to_col(lane, clip_start + 1.0);
@@ -14422,10 +13531,10 @@
             let sweep_col = time_to_col(lane, clip_start + 9.0);
             send_mouse(&mut editor, MouseEventKind::Down(MouseButton::Left), body_col, body_row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let started = Instant::now();
             send_mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), sweep_col, body_row);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert!(
                 eval(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)") != Some(Value::Nil),
@@ -14436,14 +13545,14 @@
             }
             send_mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), sweep_col, body_row);
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             app.clear_song_region();
             eval(
                 &mut editor,
                 &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             // arr-scroll-tick: one horizontal pan of the shared time axis
             // (this reruns every lane: the whole-view rebuild path).
             let lane = lane_rect(&mut editor);
@@ -14460,7 +13569,7 @@
                 40.0,
                 0.5
             ));
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
             let elapsed = duration_ms(started.elapsed());
             assert!(
                 read_num(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.start)") != view_start,
@@ -14474,7 +13583,7 @@
                 &mut editor,
                 &format!("(eseq.arrangement/set-view-start {view_start} 64)"),
             );
-            finish_visible_update(&mut editor, &mut app, &mut song_frame);
+            finish_visible_update(&mut editor, &mut app);
         }
         // Pre-tuning medians recorded by this same probe on pianohold before
         // the arrangement tuning work. The 10x guardrail is enforced against

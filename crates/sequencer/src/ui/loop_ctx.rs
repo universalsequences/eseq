@@ -87,7 +87,6 @@ pub(crate) struct MeterCache {
     pub(crate) cached_peak_l_level: f64,
     pub(crate) cached_peak_r_level: f64,
     pub(crate) cached_track_peak_levels: Vec<f64>,
-    pub(crate) cached_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) cached_bus_peak_levels: Vec<f64>,
     pub(crate) cached_modulator_phases: Vec<f64>,
     pub(crate) cached_modulator_levels: Vec<f64>,
@@ -113,21 +112,6 @@ pub(crate) struct MeterCache {
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
     pub(crate) last_voice_count_log_at: Instant,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ParamSyncRevision {
-    pub(crate) track: usize,
-    pub(crate) scene: usize,
-    pub(crate) pattern_epoch: u64,
-    pub(crate) song_row_mirror_epoch: u64,
-    pub(crate) ui_epoch: usize,
-    pub(crate) fx_epoch: usize,
-    pub(crate) sound_binding_epoch: usize,
-    pub(crate) display_step: Option<usize>,
-    pub(crate) selected_steps: Vec<usize>,
-    pub(crate) selected_neural_neurons:
-        Vec<sequencer::lisp_host::SelectedNeuralNeuron>,
 }
 
 /// Previous-frame values the reactive tick diffs against to decide which
@@ -162,9 +146,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_graph_read_key: (u64, u64, usize),
     /// (instance revision, kind registry version) at the last instance sync.
     pub(crate) prev_instance_key: (u64, u64, u64, u64),
-    /// Fingerprint of the last `SEQ.instances` value (the Packages tab and
-    /// the rack menu read it; owner names follow rack renames).
-    pub(crate) prev_instances_fingerprint: Option<u64>,
     pub(crate) prev_current_track: usize,
     pub(crate) cpu_overload: CpuOverloadIndicator,
     /// Whether the recording-take undo transaction is open. Mirrors
@@ -172,12 +153,7 @@ pub(crate) struct FrameDiffState {
     /// `App::sync_recording_history_boundary`; force it false whenever
     /// recording is forced off outside that seam.
     pub(crate) recording_history_open: bool,
-    pub(crate) prev_roll_windows: Vec<(u64, u64)>,
-    pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
-    pub(crate) prev_track_peak_levels: Vec<f64>,
-    pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
-    pub(crate) prev_bus_peak_levels: Vec<f64>,
     /// Drum-rack pad lights (eseq-4b5.16): the instant each rack member last
     /// triggered, which is what the light decays from.
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
@@ -186,12 +162,9 @@ pub(crate) struct FrameDiffState {
     pub(crate) rack_pad_triggers: Vec<bool>,
     pub(crate) prev_track_playheads: Vec<u32>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
-    pub(crate) prev_current_track_playhead_visible: bool,
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
-    pub(crate) prev_track_tint:
-        Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_ui_epoch: usize,
@@ -203,20 +176,15 @@ pub(crate) struct FrameDiffState {
     /// Tracks a multi-track (rack-wide) step selection last highlighted, so
     /// dropping that delete target un-highlights the non-current ones.
     pub(crate) prev_multi_track_selection: Vec<usize>,
-    pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
     /// overlay, clip kind): `(selected (track, clip id), clip source kind,
     /// committed-song revision)`. They are keyed off the clip SELECTION,
     /// which can move while the resolved write focus stays put, so the focus
     /// spec alone is not enough to decide whether they need republishing.
-    pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_agent_generation_watermark: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_sampler_analysis_generation: u64,
-    pub(crate) prev_auto_follow: bool,
-    /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
-    pub(crate) song: SongFrameState,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).
     pub(crate) sound_palette: SoundPaletteFrameState,
     pub(crate) watched_sampler_voice_track: Option<usize>,

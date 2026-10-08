@@ -32,7 +32,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     } else {
         shared.state.start_playback();
     }
-    editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(!solo_replay));
     let mut sessions = EditSessionState::default();
     let mut frame = FrameDiffState::default();
     let mut gesture = GestureState::default();
@@ -42,7 +41,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0; app.tracks.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: vec![0.0; app.buses.len()],
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -67,7 +65,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             sync_reactive_tick(app, editor, &mut LoopCtx {
                 sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                 gesture: &mut gesture, track_names: &mut track_names, shared,
-            }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+            }, &mut stats);
             let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
             backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render solo warmup"));
         }
@@ -106,7 +104,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                     sync_reactive_tick(app, editor, &mut LoopCtx {
                         sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                         gesture: &mut gesture, track_names: &mut track_names, shared,
-                    }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+                    }, &mut stats);
                     let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
                     let build_started = Instant::now();
                     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
@@ -215,9 +213,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             sync_reactive_tick(app, editor, &mut LoopCtx {
                 sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                 gesture: &mut gesture, track_names: &mut track_names, shared,
-            }, &TickInputs {
-                cols, rows,
-                playing_now: true,
             }, &mut stats);
             let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
             let redraw = editor.needs_redraw();
@@ -255,9 +250,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     sync_reactive_tick(app, editor, &mut LoopCtx {
         sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
         gesture: &mut gesture, track_names: &mut track_names, shared,
-    }, &TickInputs {
-        cols, rows,
-        playing_now: true,
     }, &mut stats);
     assert!(meters.cached_peak_l_level >= 0.0, "reopened master meter samples immediately");
     assert_eq!(meters.cached_track_peak_levels.len(), app.tracks.len());

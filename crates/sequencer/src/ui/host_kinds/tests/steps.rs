@@ -106,7 +106,7 @@ fn step_gestures_on_a_step_instance_select_its_track_and_toggle_the_step() {
 }
 
 #[test]
-fn step_held_matches_the_legacy_duration_spans() {
+fn step_held_matches_the_duration_spans() {
     let mut h = Harness::new();
     h.sync();
     // `s3.held` bound (the tick's diff), every step read by value (the
@@ -128,23 +128,62 @@ fn step_held_matches_the_legacy_duration_spans() {
             h.shared.state.pattern.step_data[0].set(step, StepParam::Duration, duration);
         }
         h.sync();
-        let Value::List(legacy) = build_track_duration_spans_value(&h.shared.state, 0) else {
-            panic!("spans are a list");
-        };
+        let state = h.shared.state.clone();
+        let covered = |step| Value::Bool(track_step_duration_covered(&state, 0, step));
         let kinds = h.eval_all("(map (lambda (s) s.held) t0.steps)");
         let Value::List(kinds) = kinds else {
             panic!("held is a list: {kinds:?}");
         };
         assert_eq!(kinds.len(), num_steps);
         let bound = h.slot("h3") != 0.0;
-        assert_eq!(*legacy[3].borrow(), Value::Bool(bound), "the bound step");
+        assert_eq!(covered(3), Value::Bool(bound), "the bound step");
         for step in 0..num_steps {
-            let legacy = legacy[step].borrow().clone();
-            assert_eq!(*kinds[step].borrow(), legacy, "step {step}");
-            assert_eq!(
-                legacy,
-                Value::Bool(track_step_duration_covered(&h.shared.state, 0, step))
-            );
+            assert_eq!(*kinds[step].borrow(), covered(step), "step {step}");
         }
     }
+}
+
+/// A *step* panel param edit (`set-step-param-history`) moves the step's
+/// fields at the next sync, with no `ui_epoch` bump (the targeted path;
+/// ported from the legacy `SEQ.{transposes,velocities,durations}` and
+/// `track-duration-spans` checks, eseq-0l17.78).
+#[test]
+fn a_step_panel_param_edit_moves_the_step_fields_without_a_ui_epoch_bump() {
+    let mut h = Harness::new();
+    h.shared.state.pattern.track_params[0].set_num_steps(16);
+    h.shared.state.pattern.patterns[0].set_step_active(5, true);
+    h.sync();
+    h.eval_all(
+        "(def t0 (track 0)) (def s5 (nth t0.steps 5)) (def s8 (nth t0.steps 8)) \
+         (def held8 #'s8.held)",
+    );
+    h.sync();
+    let epoch = h.shared.ui_epoch.load(Ordering::Relaxed);
+    let edit = |h: &mut Harness, param: &str, value: f64| {
+        let payload = crate::values::map_value(vec![
+            ("track", Value::Number(0.0)),
+            ("param", Value::Keyword(param.to_string())),
+            ("value", Value::Number(value)),
+            (
+                "steps",
+                Value::List(vec![Rc::new(RefCell::new(Value::Number(5.0)))]),
+            ),
+        ]);
+        h.command("set-step-param-history", payload);
+        h.sync();
+    };
+    edit(&mut h, "transpose", 7.0);
+    assert_eq!(h.eval_all("s5.transpose"), Value::Number(7.0));
+    edit(&mut h, "velocity", 0.25);
+    assert_eq!(h.eval_all("s5.velocity"), Value::Number(0.25));
+    edit(&mut h, "duration", 4.0);
+    assert_eq!(h.eval_all("s5.duration"), Value::Number(4.0));
+    assert_eq!(h.slot("held8"), 1.0, "a 4-step duration holds step 8");
+    edit(&mut h, "duration", 1.0);
+    assert_eq!(h.slot("held8"), 0.0, "shortened, the span is released");
+    assert_eq!(
+        h.shared.ui_epoch.load(Ordering::Relaxed),
+        epoch,
+        "step-param edits stay on the targeted path"
+    );
 }

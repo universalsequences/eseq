@@ -3606,7 +3606,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),

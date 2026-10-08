@@ -32,7 +32,6 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
-    editor.runtime_mut().register_reactive("SEQV", vec![], true);
     let panel_seed = PanelSeed {
         instrument_panel: test_list(vec![Value::Map(hat909_inst)]),
         effects: test_list(vec![]),

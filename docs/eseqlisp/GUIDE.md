@@ -220,19 +220,21 @@ the cell changes and only then. `defstate` values survive hot reload.
 Inside a `(module m)` the cell is registered as `m/volume`, so two modules
 can each have a `volume`.
 
-### The host namespaces
+### Host state: the kinds
 
-The sequencer publishes its state as dotted reactive reads:
+The sequencer publishes its state as host kinds (`eseq.kinds`,
+docs/kind-bindings-spec.md): instances with fields, read with dots.
 
 ```lisp
-SEQ.current-track  SEQ.num-tracks  SEQ.track-names  SEQ.selected-steps
-(nth SEQ.steps 4)  (len SEQ.track-ids)
+(import eseq.kinds :refer (track tracks selection transport))
+selection.track.name  transport.playing  (len (tracks))
+(let ((t (track 0)) (s (nth t.steps 4))) s.active)
 ```
 
-Read `(nth SEQ.steps i)`, never bind `SEQ.steps` whole. Indexed reads
-register a per-index dependency; a whole-list read makes the buffer rerun on
-every edit anywhere in the list. Other namespaces are `SEQV` (Lisp-writable
-scratch), `THEME`, `APP`, `INPUT`, `MIDI`, and `GRAPH`.
+A read subscribes to that field of that instance only, so a view reruns
+when what it read changed and not otherwise. The legacy `SEQ` and `SEQV`
+namespaces are gone (eseq-0l17.78); `THEME` is the one host namespace a view
+still reads directly.
 
 Writes go through host commands, not `set!`:
 
@@ -253,7 +255,7 @@ second. Bind the prop to a float reference instead:
 
 ```lisp
 (meter :level #'master.peak-l)
-(slider :value (bind-nth "SEQV" "track-gain" i))
+(let ((t (track i))) (slider :value #'t.volume))
 ```
 
 Only props a widget lists as bindable accept references. A view's own
@@ -640,7 +642,8 @@ the project's scratch buffer.
 - **`defwidget` is a shader**, not a component.
 - **A `def` or parameter named like a widget shadows it.** `label` and
   `value` are the usual victims.
-- **Read `(nth SEQ.list i)`**, not `SEQ.list`.
+- **Read the field you need** (`s.active` of one step), not a whole list
+  you then index: the read is the subscription.
 - **Do not echo host values into a `defstate` from a drag handler.** Every
   reader re-renders per event. Read the host value directly or use a float
   binding.

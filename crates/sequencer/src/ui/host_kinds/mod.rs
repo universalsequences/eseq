@@ -99,6 +99,7 @@ use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, ObservedMask, MAX_OBSERVED_FIELDS, VM};
 use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
+use sequencer::quantized_launch::LaunchQuantize;
 
 mod arrangement;
 mod devices;
@@ -2539,8 +2540,7 @@ fn rgb(color: sequencer::track_color::TrackColor) -> Value {
 // ── the tick ────────────────────────────────────────────────────────────
 
 /// The change counters the model fields derive from; the model half of a
-/// sync runs only when this moves (or the track order does). Mirrors
-/// `capture_param_sync_revision` (reactive_tick.rs).
+/// sync runs only when this moves (or the track order does).
 #[derive(Clone, PartialEq)]
 struct ModelRevision {
     ui_epoch: usize,
@@ -2657,7 +2657,11 @@ pub(crate) struct HostKinds {
     step_changes: Vec<ObservedMask>,
     /// The transport's queued scene and launch quantization last pushed.
     queued: Option<Option<usize>>,
-    launch_quantize: Option<String>,
+    launch_quantize: Option<LaunchQuantize>,
+    /// The scene launch quantization the transport picker sets
+    /// (`set-scene-launch-quantize`): UI state of record, not saved in the
+    /// project; `transport.launch-quantize` reads it.
+    scene_launch_quantize: LaunchQuantize,
     /// Whether any track's `peak`, any bus's `peak`, or a master peak
     /// was observed at the last sync.
     peaks_observed: bool,

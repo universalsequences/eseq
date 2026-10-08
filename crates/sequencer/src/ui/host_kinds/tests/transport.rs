@@ -208,3 +208,44 @@ fn a_removed_viewed_bank_falls_back_to_the_previous_one() {
         "bank B, not the playing A"
     );
 }
+
+/// The scene launch quantization round-trips through the host kinds' UI
+/// state of record (eseq-0l17.78; it was `SEQ.scene-launch-quantize`):
+/// `set-scene-launch-quantize` sets `HostKinds`, the next sync pushes
+/// `transport.launch-quantize`, an unknown label changes nothing, and a
+/// new project keeps it (it is not saved in the project).
+#[test]
+fn scene_launch_quantize_round_trips_through_the_host_kinds_field() {
+    use sequencer::quantized_launch::LaunchQuantize;
+    let mut h = Harness::new();
+    h.sync();
+    assert_eq!(h.frame.host_kinds.scene_launch_quantize(), LaunchQuantize::Off);
+    assert_eq!(h.eval("transport.launch-quantize"), Value::String("off".into()));
+    for (label, quantize, shown) in [
+        ("1/4", LaunchQuantize::Quarter, "1/4"),
+        ("bar", LaunchQuantize::Bar, "1 bar"),
+        ("1/16", LaunchQuantize::Sixteenth, "1/16"),
+    ] {
+        h.command("set-scene-launch-quantize", Value::String(label.into()));
+        assert_eq!(h.frame.host_kinds.scene_launch_quantize(), quantize, "{label}");
+        h.sync();
+        assert_eq!(
+            h.eval("transport.launch-quantize"),
+            Value::String(shown.into()),
+            "{label}"
+        );
+    }
+    h.command("set-scene-launch-quantize", Value::String("1/3".into()));
+    assert_eq!(
+        h.frame.host_kinds.scene_launch_quantize(),
+        LaunchQuantize::Sixteenth,
+        "an unknown label changes nothing"
+    );
+    h.command("new-project", Value::Nil);
+    h.sync();
+    assert_eq!(
+        h.eval("transport.launch-quantize"),
+        Value::String("1/16".into()),
+        "a new project keeps the UI setting"
+    );
+}

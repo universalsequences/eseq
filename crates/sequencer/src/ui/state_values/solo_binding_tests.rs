@@ -1,20 +1,8 @@
 use super::*;
 
-fn bound_states<'a>(node: &'a eseqlisp::layout::LayoutNode, states: &mut Vec<(&'a eseqlisp::layout::LayoutNode, &'a str, f32)>) {
-    for (prop, value) in &node.props {
-        if let Value::ReactiveRef { namespace, field, .. } = value {
-            if namespace == "SEQ" && field == "track-muted-effective" {
-                states.push((node, prop, eseqlisp::widget_render::get_f32_prop(&node.props, prop, -1.0)));
-            }
-        }
-    }
-    for child in &node.children { bound_states(child, states); }
-}
-
 /// The *step* panel's track badge binds the kinds `audible`, like every
 /// other channel view (`mute_and_solo_only_repaint_through_kinds`). A mute or
-/// solo republishes the legacy effective-mute field without a render-time
-/// reader and never rebuilds the layout.
+/// solo never rebuilds the layout.
 #[test]
 fn mute_and_solo_repaint_the_step_panel_badge_without_rebuilding_layout() {
     let mut editor = full_grid_editor_for_scroll_tests();
@@ -23,7 +11,7 @@ fn mute_and_solo_repaint_the_step_panel_badge_without_rebuilding_layout() {
     editor.refresh_runtime_side_effects();
 
     let state = Arc::new(SequencerState::new(8, vec![]));
-    let app = test_app_for_track_visual_state(state.clone());
+    let _app = test_app_for_track_visual_state(state.clone());
     let buffer = "*step*";
     let id = editor.buffers.iter().find(|item| item.name == buffer).expect(buffer).id;
     editor.set_active_buffer(id);
@@ -40,23 +28,11 @@ fn mute_and_solo_repaint_the_step_panel_badge_without_rebuilding_layout() {
     );
     for (edit, index) in [("solo", 0), ("mute", 0), ("mute", 3)] {
         for enabled in [true, false] {
-            let mut bindings = Vec::new();
-            bound_states(&layout, &mut bindings);
             let _ = editor.take_dirty_widget_ids();
             let before = editor.runtime().ui_work_counters();
             match edit {
                 "mute" => state.pattern.track_params[index].set_mute(enabled),
                 _ => state.pattern.track_params[index].set_solo(enabled),
-            }
-            let rt = editor.runtime_mut();
-            assert!(!sync_track_mute_visual_binding_fields(rt, &app, &state, 0..8, true),
-                "{edit}: effective mute fields still have render-time readers");
-            let dirty = editor.take_dirty_widget_ids();
-            for (node, prop, previous) in bindings {
-                let current = eseqlisp::widget_render::get_f32_prop(&node.props, prop, -1.0);
-                if current != previous {
-                    assert!(dirty.contains(&node.widget_id), "{edit}: bound {prop} must request repaint");
-                }
             }
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();

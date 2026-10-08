@@ -89,7 +89,6 @@ pub(crate) enum UiInvalidation {
         change: PianoRollInvalidation,
     },
     Transport(TransportInvalidation),
-    Recording(RecordingInvalidation),
     DeleteTarget,
     AutoFollow,
     Sidebar {
@@ -202,8 +201,6 @@ pub(crate) enum BusMixerInvalidation {
     Volume,
     Mute,
     Solo,
-    Steps,
-    Timing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -284,12 +281,6 @@ pub(crate) enum TransportInvalidation {
     TrackMeters,
     BusMeters,
     Modulators,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum RecordingInvalidation {
-    RecordingEnabled,
-    ArmedTracks,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

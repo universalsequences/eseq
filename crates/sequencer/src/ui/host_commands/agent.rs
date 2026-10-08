@@ -18,7 +18,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let active_delete_target = ctx.shared.active_delete_target.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -57,10 +56,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                     conv_id,
@@ -89,10 +85,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                     conv_id,
@@ -159,10 +152,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                     conv_id,
@@ -211,10 +201,7 @@ pub(super) fn handle(
                 &mut *ctx.track_names,
                 &track_pan_ids,
                 &record_armed,
-                &selected_steps,
                 &accumulator_names,
-                &ctx.meters.cached_track_peak_levels,
-                &ctx.meters.cached_bus_peak_levels,
                 &ui_epoch,
                 lg_raw,
                 conv_id,
@@ -280,10 +267,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                     conv_id,
@@ -309,10 +293,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                     conv_id,

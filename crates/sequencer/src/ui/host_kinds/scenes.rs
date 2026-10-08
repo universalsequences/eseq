@@ -110,21 +110,25 @@ impl HostKinds {
         let Some(transport) = pusher.singleton(TRANSPORT) else {
             return;
         };
-        let quantize = match pusher
-            .rt
-            .reactive_field_value("SEQ", "scene-launch-quantize")
-        {
-            Some(Value::String(label)) => label.as_str(),
-            _ => "off",
-        };
-        if self.launch_quantize.as_deref() != Some(quantize) {
-            let quantize = quantize.to_string();
-            self.launch_quantize = Some(quantize.clone());
+        let quantize = self.scene_launch_quantize;
+        if self.launch_quantize != Some(quantize) {
+            self.launch_quantize = Some(quantize);
             pusher.push(
                 transport,
                 f::TRANSPORT_LAUNCH_QUANTIZE,
-                Value::String(quantize),
+                Value::String(quantize.transport_label().to_string()),
             );
         }
+    }
+
+    /// The scene launch quantization (`transport.launch-quantize`), pushed
+    /// at the next sync.
+    pub(crate) fn scene_launch_quantize(&self) -> LaunchQuantize {
+        self.scene_launch_quantize
+    }
+
+    /// Set the scene launch quantization (`set-scene-launch-quantize`).
+    pub(crate) fn set_scene_launch_quantize(&mut self, quantize: LaunchQuantize) {
+        self.scene_launch_quantize = quantize;
     }
 }

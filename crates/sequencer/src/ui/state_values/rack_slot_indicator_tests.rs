@@ -23,7 +23,6 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
         ],
         true,
     );
-    editor.runtime_mut().register_reactive("SEQV", vec![], true);
     editor.runtime_mut().eval_str(r#"
         (def eseq.seq-core-state/selected-bus-name () "Mix")
         (def seq-has-selection? () false)

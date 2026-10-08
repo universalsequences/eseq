@@ -184,7 +184,7 @@ pub(crate) fn move_instance_status(
     })
 }
 
-/// One row of `SEQ.instances`: `{:id :kind :label :owner-rack :owner-label
+/// One row of `project.instances`: `{:id :kind :label :owner-rack :owner-label
 /// :registered?}` per project instance, in list order. `:owner-rack` is nil
 /// for a project-owned instance; `:owner-label` is "project" or the rack's
 /// name; `:registered?` is false for a placeholder whose kind has not
@@ -220,11 +220,6 @@ fn instance_rows(app: &app::App) -> Vec<InstanceRow> {
         .collect()
 }
 
-/// `SEQ.instances` as a Lisp list of dicts.
-pub(crate) fn build_instances_value(app: &app::App) -> Value {
-    instances_value(&instance_rows(app))
-}
-
 fn instances_value(rows: &[InstanceRow]) -> Value {
     Value::List(
         rows.iter()
@@ -245,9 +240,9 @@ fn instances_value(rows: &[InstanceRow]) -> Value {
     )
 }
 
-/// The `SEQ.instances` value when it differs from the one `last`
-/// fingerprints (updating `last`; `None` always differs), else `None`. Runs every reactive tick,
-/// so the fingerprint borrows instead of building rows: each instance's
+/// The `project.instances` value when it differs from the one `last`
+/// fingerprints (updating `last`; `None` always differs), else `None`. Runs every host kinds
+/// sync it is observed, so the fingerprint borrows instead of building rows: each instance's
 /// fields, its owner rack's name, and ONE registry version read (which moves
 /// whenever any kind's registration does) stand in for `:registered?`.
 /// Rows are only built on a change.

@@ -82,10 +82,6 @@ impl Harness {
     }
 }
 
-fn legacy(h: &Harness, field: &str) -> Option<Value> {
-    h.rt().reactive_field_value("SEQ", field).cloned()
-}
-
 #[test]
 fn midi_devices_read_after_sync() {
     let mut h = Harness::new();

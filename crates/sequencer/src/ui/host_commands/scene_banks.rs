@@ -73,7 +73,7 @@ pub(super) fn handle(
     match result {
         Ok(status) => {
             let rt = editor.runtime_mut();
-            sync_pattern_state(rt, &ctx.shared.state);
+            sync_scene_slot_state(rt, &ctx.shared.state);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);

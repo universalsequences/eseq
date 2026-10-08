@@ -1581,9 +1581,7 @@ pub(super) fn handle(
                 if let Some(slot_idx) = app.next_free_custom_slot() {
                     app.start_effect_compile(&effect_name, slot_idx);
                     let rt = editor.runtime_mut();
-                    set_current_track_reactive(rt, track);
-                    sync_track_mixer_state(rt, &app, &state);
-                    sync_sidebar_browser(rt, &app, track);
+                    sync_sidebar_browser(&app, track);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1613,15 +1611,6 @@ pub(super) fn handle(
                         ) {
                             Ok(slot_idx) => {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "step-has-plocks",
-                                    build_step_has_plocks(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                    ),
-                                );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1661,18 +1650,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1704,15 +1682,6 @@ pub(super) fn handle(
                         ) {
                             Ok(slot_idx) => {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "step-has-plocks",
-                                    build_step_has_plocks(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                    ),
-                                );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1751,18 +1720,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1801,18 +1759,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1849,18 +1796,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1891,18 +1827,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1937,17 +1862,6 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, target_track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                target_track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2006,17 +1920,6 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, target_track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                target_track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2065,15 +1968,6 @@ pub(super) fn handle(
             match app.paste_effect_clipboard_to_track(track) {
                 Ok(message) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -2109,15 +2003,6 @@ pub(super) fn handle(
             ) {
                 Ok(()) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2159,15 +2044,6 @@ pub(super) fn handle(
             ) {
                 Ok(()) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     fx_epoch.fetch_add(1, Ordering::Relaxed);

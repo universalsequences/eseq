@@ -75,15 +75,12 @@ pub(crate) fn initialize_loaded_rack_view(app: &app::App, editor: &mut Editor, t
 /// kinds' rack slot params): mark the rack control snapshot dirty and
 /// refresh what shows the param. A base edit (`plock` `None`) of a param
 /// whose value redefines model data (`param_change_needs_fx_rebuild`: the
-/// sampler's slice settings) bumps `ui_epoch`; a lock of one resyncs the
-/// p-lock presence and bumps the epochs; anything else needs only the step
-/// p-lock rows on a lock's first write (`RowSetChanged`): the panels bind
-/// the param, which the host kinds push.
+/// sampler's slice settings) bumps `ui_epoch`; a lock of one bumps the
+/// epochs; anything else needs only the step p-lock rows on a lock's first
+/// write (`RowSetChanged`): the panels bind the param, which the host kinds
+/// push.
 pub(super) fn rack_param_applied(
-    editor: &mut Editor,
-    app: &app::App,
     ctx: &mut LoopCtx<'_>,
-    track: usize,
     rebuild: bool,
     plock: Option<RackPlockRowsSync>,
 ) {
@@ -92,15 +89,10 @@ pub(super) fn rack_param_applied(
     match (rebuild, plock) {
         (true, None) => refresh_instrument_panel_reactive(&shared.ui_epoch),
         (true, Some(_)) => {
-            sync_instrument_plock_presence_display(editor, app, &shared.state, track);
             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
             shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
         }
         (false, rows) => refresh_rack_direct_param_reactive(
-            editor,
-            app,
-            &shared.state,
-            track,
             rows.unwrap_or(RackPlockRowsSync::Unchanged),
             &shared.ui_epoch,
         ),
@@ -285,14 +277,11 @@ impl StripControl {
 /// After a rack slot strip control's own value changed: republish the rack
 /// control snapshot (else per-trigger panner pushes clobber the new value
 /// with the stale snapshot's; the controls bind the slot device's display
-/// fields, which the host kinds push); mute and solo also republish the
-/// p-lock presence lists, enabled bumps `fx_epoch` (the slot header);
-/// voices need nothing (the slot device's `voices-display` is bound).
+/// fields, which the host kinds push); enabled bumps `fx_epoch` (the slot
+/// header); voices need nothing (the slot device's `voices-display` is
+/// bound).
 pub(super) fn rack_slot_strip_applied(
-    editor: &mut Editor,
-    app: &app::App,
     ctx: &mut LoopCtx<'_>,
-    track: usize,
     control: StripControl,
 ) {
     let shared = ctx.shared;
@@ -308,12 +297,6 @@ pub(super) fn rack_slot_strip_applied(
     if !matches!(control, StripControl::BaseNote) {
         ctx.gesture.rack_control_snapshot_dirty = true;
     }
-    if matches!(
-        control,
-        StripControl::Mute | StripControl::Solo | StripControl::Enabled
-    ) {
-        sync_instrument_plock_presence_display(editor, app, &shared.state, track);
-    }
     if control == StripControl::Enabled {
         shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
     }
@@ -326,16 +309,13 @@ pub(super) fn rack_slot_strip_applied(
 /// header), while gain, pan, base note and polyphony bind the slot device's
 /// display fields and must not bump it per drag event (eseq-lf72).
 pub(super) fn rack_slot_plock_applied(
-    editor: &mut Editor,
-    app: &app::App,
     ctx: &mut LoopCtx<'_>,
-    track: usize,
     param: RackSlotParam,
     rows: RackPlockRowsSync,
 ) {
     let shared = ctx.shared;
     ctx.gesture.rack_control_snapshot_dirty = true;
-    refresh_rack_direct_param_reactive(editor, app, &shared.state, track, rows, &shared.ui_epoch);
+    refresh_rack_direct_param_reactive(rows, &shared.ui_epoch);
     if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
         shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
     }
@@ -389,10 +369,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                             );
@@ -456,10 +433,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                             );
@@ -773,9 +747,6 @@ pub(super) fn handle(
                     if outcome != app::edit::EditOutcome::NoOp {
                         if updates.iter().any(|&(_, _, rebuild)| rebuild) {
                             if plocks {
-                                sync_instrument_plock_presence_display(
-                                    &mut editor, &app, &state, track,
-                                );
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                             } else {
@@ -783,7 +754,6 @@ pub(super) fn handle(
                             }
                         } else {
                             refresh_rack_direct_param_reactive(
-                                &mut editor, &app, &state, track,
                                 if new_plock_row { RackPlockRowsSync::RowSetChanged } else { RackPlockRowsSync::Unchanged },
                                 &ui_epoch,
                             );
@@ -858,7 +828,7 @@ pub(super) fn handle(
                             effect_slot,
                             param,
                         );
-                        rack_param_applied(editor, app, ctx, track, rebuild, None);
+                        rack_param_applied(ctx, rebuild, None);
                     } else if let Err(error) = outcome {
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Error setting rack-slot effect parameter: {error:?}"
@@ -923,7 +893,7 @@ pub(super) fn handle(
                             param,
                         );
                         let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
-                        rack_param_applied(editor, app, ctx, track, rebuild, Some(rows));
+                        rack_param_applied(ctx, rebuild, Some(rows));
                     }
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
@@ -1046,10 +1016,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                             );
@@ -1095,10 +1062,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                             );
@@ -1164,10 +1128,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                             );
@@ -1241,7 +1202,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(editor, app, ctx, track, StripControl::Gain);
+                    rack_slot_strip_applied(ctx, StripControl::Gain);
                 }
             }
         }
@@ -1269,7 +1230,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(editor, app, ctx, track, StripControl::Pan);
+                    rack_slot_strip_applied(ctx, StripControl::Pan);
                 }
             }
         }
@@ -1296,7 +1257,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(editor, app, ctx, track, StripControl::Mute);
+                    rack_slot_strip_applied(ctx, StripControl::Mute);
                 }
             }
         }
@@ -1314,13 +1275,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(
-                        editor,
-                        app,
-                        ctx,
-                        track,
-                        StripControl::Enabled,
-                    );
+                    rack_slot_strip_applied(ctx, StripControl::Enabled);
                 }
             }
         }
@@ -1347,7 +1302,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(editor, app, ctx, track, StripControl::Solo);
+                    rack_slot_strip_applied(ctx, StripControl::Solo);
                 }
             }
         }
@@ -1394,7 +1349,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    rack_slot_strip_applied(editor, app, ctx, track, StripControl::Choke);
+                    rack_slot_strip_applied(ctx, StripControl::Choke);
                 }
             }
         }
@@ -1424,13 +1379,7 @@ pub(super) fn handle(
                     );
                     // The rack transpose picker and slot base-note knob share
                     // this value binding; neither changes panel structure.
-                    rack_slot_strip_applied(
-                        editor,
-                        app,
-                        ctx,
-                        track,
-                        StripControl::BaseNote,
-                    );
+                    rack_slot_strip_applied(ctx, StripControl::BaseNote);
                 }
             }
         }
@@ -1464,7 +1413,7 @@ pub(super) fn handle(
                         },
                     );
                     let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
-                    rack_slot_plock_applied(editor, app, ctx, track, param, rows);
+                    rack_slot_plock_applied(ctx, param, rows);
                 }
             }
         }
@@ -1770,7 +1719,7 @@ pub(super) fn handle(
                                 },
                             );
                             let rebuild = param_change_needs_fx_rebuild(&desc);
-                            rack_param_applied(editor, app, ctx, track, rebuild, None);
+                            rack_param_applied(ctx, rebuild, None);
                         }
                     }
                 }
@@ -1825,14 +1774,7 @@ pub(super) fn handle(
                             // rack slot panel per mouse move, eseq-lf72).
                             let rebuild = param_change_needs_fx_rebuild(&desc);
                             let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
-                            rack_param_applied(
-                                editor,
-                                app,
-                                ctx,
-                                track,
-                                rebuild,
-                                Some(rows),
-                            );
+                            rack_param_applied(ctx, rebuild, Some(rows));
                         }
                     }
                 }
@@ -1940,12 +1882,6 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            sync_instrument_plock_presence_display(
-                                &mut editor,
-                                &app,
-                                &state,
-                                track,
-                            );
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -2043,12 +1979,6 @@ pub(super) fn handle(
                                         value: selected_idx as f32,
                                     },
                                 );
-                                sync_instrument_plock_presence_display(
-                                    &mut editor,
-                                    &app,
-                                    &state,
-                                    track,
-                                );
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -2127,12 +2057,6 @@ pub(super) fn handle(
                             &label,
                         )
                     };
-                    if result.is_ok() {
-                        let plocks_changed = name == "set-instrument-plock-batch";
-                        if plocks_changed {
-                            sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
-                        }
-                    }
                     match result {
                         Ok(_) if map_bool(map, "commit") => {
                             app::edit::finish_active_gesture(&mut app);
@@ -2292,13 +2216,6 @@ mod tests {
         )
     }
 
-    fn reactive_number(editor: &Editor, field: &str) -> f64 {
-        match editor.runtime().reactive_field_value("SEQ", field) {
-            Some(Value::Number(n)) => *n,
-            other => panic!("SEQ.{field} should be a number, got {other:?}"),
-        }
-    }
-
     /// One-track app whose track 0 is a one-slot sampler Instrument Rack,
     /// plus the real `SharedHandles`/`LoopCtx` seam, so tests drive the
     /// production `dispatch_custom_host_command` path rather than a helper.
@@ -2379,8 +2296,7 @@ mod tests {
                 ),
             );
 
-            let mut runtime = Runtime::new();
-            runtime.register_reactive("SEQ", Vec::new(), true);
+            let runtime = Runtime::new();
             let editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
             let sample_db = sequencer::sample_db::SampleDb::open_in_memory()
@@ -2428,7 +2344,6 @@ mod tests {
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
                 cached_track_peak_levels: vec![0.0; tracks],
-                cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: Vec::new(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
