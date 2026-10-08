@@ -1398,6 +1398,107 @@ fn a_view_local_instance_keyed_by_an_instance_goes_with_it() {
     assert!(vm.local_instances("track-ui").is_empty());
 }
 
+#[test]
+fn a_view_local_instance_keyed_by_multiple_instances_goes_with_any_parent() {
+    for dropped in ["a", "b", "c"] {
+        let (mut vm, _) = vm();
+        eval(
+            &mut vm,
+            r#"(def-kind owner-ui :key (name) :state ((open false)))
+               (def-kind composite-ui :key (scope left row middle right)
+                 :state ((open false)))
+               (def-kind child-ui :key (parent) :state ((open false)))
+               (def a (owner-ui "a"))
+               (def b (owner-ui "b"))
+               (def c (owner-ui "c"))
+               (def u (composite-ui "core" a 2 b c))
+               (def child (child-ui u))
+               (set! u.open true)
+               (set! child.open true)
+               (def bound #'u.open)"#,
+        );
+        let parents: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| match eval(&mut vm, name) {
+                Value::Instance(id) => id,
+                _ => panic!("expected an instance"),
+            })
+            .collect();
+        let Value::Instance(ui) = eval(&mut vm, "u") else {
+            panic!("expected an instance");
+        };
+        let Value::Instance(child) = eval(&mut vm, "child") else {
+            panic!("expected an instance");
+        };
+        for parent in &parents {
+            assert_eq!(vm.keyed_children(*parent), vec![ui]);
+        }
+        eval(
+            &mut vm,
+            r#"(effect-buffer "*composite*"
+                 (label (if (composite-ui "core" a 2 b c) "live" "stale")))"#,
+        );
+        assert_eq!(rendered_targets(&mut vm), vec!["*composite*"]);
+        assert_eq!(eval(&mut vm, "(reactive-value bound)"), Value::Bool(true));
+
+        assert_eq!(
+            eval(&mut vm, &format!("(drop-instance {dropped})")),
+            Value::Bool(true)
+        );
+        assert!(!vm.instance_is_live(ui), "dropped parent {dropped}");
+        assert!(!vm.instance_is_live(child), "descendant must go too");
+        assert!(vm.local_instances("composite-ui").is_empty());
+        assert!(vm.local_instances("child-ui").is_empty());
+        for parent in &parents {
+            assert!(vm.keyed_children(*parent).is_empty());
+        }
+        assert_eq!(rendered_targets(&mut vm), vec!["*composite*"]);
+        assert_eq!(eval(&mut vm, "u.open"), Value::Bool(false));
+        assert_eq!(eval(&mut vm, "child.open"), Value::Bool(false));
+        assert_eq!(eval(&mut vm, "(reactive-value bound)"), Value::Bool(false));
+        assert_eq!(eval(&mut vm, r#"(composite-ui "core" a 2 b c)"#), Value::Nil);
+        assert_eq!(eval(&mut vm, "(child-ui u)"), Value::Nil);
+    }
+}
+
+#[test]
+fn dropping_a_view_local_composite_instance_detaches_it_from_all_parents() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        r#"(def-kind owner-ui :key (name) :state ((open false)))
+           (def-kind composite-ui :key (left right repeated) :state ((open false)))
+           (def a (owner-ui "a"))
+           (def b (owner-ui "b"))
+           (def u (composite-ui a b a))"#,
+    );
+    let Value::Instance(a) = eval(&mut vm, "a") else {
+        panic!("expected an instance");
+    };
+    let Value::Instance(b) = eval(&mut vm, "b") else {
+        panic!("expected an instance");
+    };
+    let Value::Instance(ui) = eval(&mut vm, "u") else {
+        panic!("expected an instance");
+    };
+    assert_eq!(vm.keyed_children(a), vec![ui], "repeated parents are deduplicated");
+    assert_eq!(vm.keyed_children(b), vec![ui]);
+    assert_eq!(eval(&mut vm, "(drop-instance u)"), Value::Bool(true));
+    assert!(vm.keyed_children(a).is_empty());
+    assert!(vm.keyed_children(b).is_empty());
+    let Value::Instance(fresh) = eval(&mut vm, "(composite-ui a b a)") else {
+        panic!("expected a fresh instance");
+    };
+    assert_ne!(fresh, ui);
+    assert_eq!(vm.keyed_children(a), vec![fresh]);
+    assert_eq!(vm.keyed_children(b), vec![fresh]);
+    assert_eq!(eval(&mut vm, "(drop-instance b)"), Value::Bool(true));
+    assert!(!vm.instance_is_live(fresh));
+    assert!(vm.keyed_children(a).is_empty());
+    assert!(vm.local_instances("composite-ui").is_empty());
+    assert_eq!(eval(&mut vm, "(composite-ui a b a)"), Value::Nil);
+}
+
 /// eseq-0l17.23: `(describe-kind 'k)` lists every field with its group,
 /// type and options.
 #[test]

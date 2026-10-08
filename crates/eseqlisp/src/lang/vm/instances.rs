@@ -229,10 +229,10 @@ fn local_key_text(key: &[LocalKeyPart]) -> String {
         .join(" ")
 }
 
-/// The first instance a view-local key names: the instance it lives under
-/// (dropped with it).
-fn local_key_parent(key: &[LocalKeyPart]) -> Option<InstanceId> {
-    key.iter().find_map(|part| match part {
+/// Every instance a view-local key names: dropping any of them drops the
+/// view-local instance.
+fn local_key_parents(key: &[LocalKeyPart]) -> impl Iterator<Item = InstanceId> + '_ {
+    key.iter().filter_map(|part| match part {
         LocalKeyPart::Instance(id) => Some(*id),
         _ => None,
     })
@@ -1202,8 +1202,8 @@ pub(crate) struct InstanceStore {
     /// fixed, so a kind defined later (one that would make a parent name
     /// ambiguous) never re-parents live children.
     parent_kinds: HashMap<Rc<str>, Rc<[Rc<str>]>>,
-    /// Parent instance -> its live children (instances of `:key (parent
-    /// index)` kinds whose key names it), dropped with it.
+    /// Parent instance -> its live children (host keys naming it as parent,
+    /// or view-local keys naming it in any part), dropped with it.
     children: HashMap<InstanceId, HashSet<InstanceId>>,
     /// Keyed instance ids allocated so far (from [`KEYED_INSTANCE_ID_BASE`]);
     /// never reused, so a stale handle never comes back as another thing.
@@ -2098,11 +2098,7 @@ impl VM {
             .ok_or_else(shape)?
             .into();
         let field = local_key_text(&key);
-        let parent = local_key_parent(&key);
-        let live_parent = key.iter().all(|part| match part {
-            LocalKeyPart::Instance(id) => self.instances.live.contains_key(id),
-            _ => true,
-        });
+        let live_parents = local_key_parents(&key).all(|id| self.instances.live.contains_key(&id));
         let existing = self
             .instances
             .local
@@ -2110,8 +2106,8 @@ impl VM {
             .and_then(|ids| ids.get(&key))
             .copied();
         let value = match existing {
+            _ if !live_parents => Value::Nil,
             Some(id) => Value::Instance(id),
-            None if !live_parent => Value::Nil,
             None => {
                 let id = KEYED_INSTANCE_ID_BASE + self.instances.keyed_allocated;
                 self.instances.keyed_allocated += 1;
@@ -2125,7 +2121,9 @@ impl VM {
                     .entry(kind_rc)
                     .or_default()
                     .insert(key.clone(), id);
-                self.instances.set_parent(id, None, parent);
+                for parent in local_key_parents(&key) {
+                    self.instances.set_parent(id, None, Some(parent));
+                }
                 self.dirty_namespace_field(namespace, &field, Value::Instance(id));
                 Value::Instance(id)
             }
@@ -2526,7 +2524,9 @@ impl VM {
             {
                 ids.remove(key);
             }
-            self.instances.set_parent(id, local_key_parent(key), None);
+            for parent in local_key_parents(key) {
+                self.instances.set_parent(id, Some(parent), None);
+            }
             let field = local_key_text(key);
             self.dirty_namespace_field(&key_namespace(&record.kind), &field, Value::Nil);
         }

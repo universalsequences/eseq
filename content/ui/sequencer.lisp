@@ -566,7 +566,7 @@
         :lighting (lighting :edge-min -0.35 :edge-max 0.5
           :light (vec3 0.0 -1.0 3.5) :shininess 82.0)
         :color
-        (* (if (= active 1) 1.0 (+ 0.1 (smoothstep -0.2 0.1 d)))
+        (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
           (eseq.materials/color
             (rgba
               (if (= active 1) 0.85 0.3)
@@ -800,7 +800,7 @@
       (sdf/layer
         (sdf/fill
             (sdf/rounded-rect width height 0.25)
-          (material :color (rgba 0.32 0.48 1.0 0.55))))
+          (material :color (rgba 1.00 1.08 1.0 0.25))))
       (rgba 0 0 0 0))))
 
 ;; The step shell's layers, shared by the grid's `seqv-step-shell` and the
@@ -856,10 +856,10 @@
                      :blur (if (= muted 1) 0.0 (if (= plock-kind 2) 0.12 0.0))
                      :offset (vec2 0 0))))
        ;; toggled fill
-       (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
+       (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.7)))
          (material
-           :lighting (lighting :edge-min -0.15 :edge-max 1.15
-             :light (vec3 0.01 -0.4 1.8) :shininess 32.0)
+           :lighting (lighting :edge-min -0.25 :edge-max 1.25
+             :light (vec3 0.01 -0.2 1.8) :shininess 32.0)
            :color (if (= active 1)
                     (if (= muted 1)
                       (* 0.7 (eseq.materials/color offcol border))
@@ -994,6 +994,10 @@
 (defcustom step-cell-height 1.55
   :type :number :min 1 :max 4 :step 0.05
   :doc "Height (cells) of each step in the sequencer grid; track rows and the colour badge scale with it.")
+
+(defcustom step-cell-inner-fill-scale 1.0
+  :type :number :min 0.1 :max 1 :step 0.05
+  :doc "Scale of inner fill size of step cells.")
 
 ;; Header colour badge: stock 2.0 at the stock 1.55 step height.
 (def track-color-badge-height ()

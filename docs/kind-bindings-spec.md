@@ -294,9 +294,11 @@ and is a key-shape change, "restart to change its :key"):
   instance is dropped and gets a fresh one at the fields' defaults.
 - `(drop-instance x)` drops a view-local instance (true when it was live);
   any other value, a host or singleton instance included, is an error.
-  An instance key part makes the view-local instance that instance's
-  child: dropping the parent (a track deleted) drops it, and a constructor
-  call naming a dropped instance answers nil instead of creating one.
+  Every instance key part makes the view-local instance that instance's
+  child: dropping any parent (a track deleted) drops it and its descendants,
+  and a constructor call naming any dropped instance answers nil. Dropping
+  the child removes it from every parent's child index; repeated parent
+  values in a key share one child entry.
 - The host never creates them: `register_keyed_instance` and
   `create_instance` on a view-local kind are errors
   (`InstanceError::LocalKind`, `adsr-gesture instances are view-local;
