@@ -1333,7 +1333,7 @@
         :width :fill :height 1.0 :padding 0 :font-size 10
         :background-color :mixer-label-bg
         :border-color :transparent
-        :color :white
+        :color :fg
         :on-click (lambda (event) (select-bus b))))))
 
 ;; Mute and solo of bus b (a group's, with `g`). Mute is lit while the bus

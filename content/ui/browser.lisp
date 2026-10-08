@@ -806,7 +806,7 @@
   (box :width :fill :height :fill :padding 1
     (label message
       :font-size 10
-      :color :gray
+      :color :dimmer
       :bg :transparent)))
 
 (def select-audio-effect (item)
@@ -936,7 +936,7 @@
       (if s s.instrument-label
         (if (= browser.instrument-label "") "Instrument" browser.instrument-label)))
       :font-size 12
-      :color :white
+      :color :fg
       :bg :transparent)))
 
 (def create-header ()
@@ -2001,7 +2001,7 @@
       (box :width :fill :padding 0.25
         (label "Projects"
           :font-size 10
-          :color :gray
+          :color :dimmer
           :bg :transparent))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)

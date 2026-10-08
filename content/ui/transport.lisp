@@ -930,7 +930,7 @@
       :on-select (lambda (event) (menus/activate (get item :id)))
       (if (get item :items) (map application-menu-row (get item :items)) (list)))
     (menu-separator)))
-
+ 
 (def application-context-menu (name)
   (context-menu :is-open (= app-menu.open name)
     :anchor app-menu.at
@@ -951,7 +951,7 @@
 
 ;; A label on a pill: white while on (a value or a #' binding), else gray.
 (def pill-label (text on &key (font 9))
-  (label text :font-size font :color :gray :active on :active-color :white
+  (label text :font-size font :color :dimmer :active on :active-color :white
     :hover-color :white :bg :transparent))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
@@ -1193,7 +1193,7 @@
       (v-stack :align :center
         (label (fmt " {} " s.number)
           :font-size 11
-          :color (if s.queued :scene-active-fg :gray)
+          :color (if s.queued :scene-active-fg :dimmer)
           :active #'s.active :active-color :scene-active-fg
           :hover-color :white
           :bg :transparent)))))

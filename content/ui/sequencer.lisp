@@ -566,12 +566,12 @@
         :lighting (lighting :edge-min -0.35 :edge-max 0.5
           :light (vec3 0.0 -1.0 3.5) :shininess 82.0)
         :color
-        (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
+        (* (if (= active 1) 1.0 (+ 0.1 (smoothstep -0.2 0.1 d)))
           (eseq.materials/color
             (rgba
-              (if (= active 1) 0.85 0.5)
-              (if (= active 1) 0.05 0.5)
-              (if (= active 1) 0.05 0.5)
+              (if (= active 1) 0.85 0.3)
+              (if (= active 1) 0.05 0.3)
+              (if (= active 1) 0.05 0.3)
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
 
@@ -677,23 +677,23 @@
     
     (sdf/fill (sdf/rounded-rect (* 0.96 width) (* 0.93 height) 0.98)
       (material
-        :lighting (lighting :edge-min -0.45 :edge-max 0.4
-          :light (vec3 0.1 -1.2 2.4) :shininess 24.0)
+        :lighting (lighting :edge-min -0.25 :edge-max 0.4
+          :light (vec3 0.1 -1.2 0.4) :shininess 24.0)
         :color 
         (if expanded 
           (rgba 0.18 0.18 0.20 1.0) 
-          :bg) 
+          :mixer-strip-bg) 
         ))
     (sdf/fill
       (sdf/translate -0.48 0
         (sdf/circle 0.12))
-      (material :color (rgba 0.60 0.62 0.68 1.0)))
+      (material :color :fg))
     (sdf/fill (sdf/circle 0.12)
-      (material :color (rgba 0.60 0.62 0.68 1.0)))
+      (material :color :fg))
     (sdf/fill
       (sdf/translate 0.48 0
         (sdf/circle 0.12))
-      (material :color (rgba 0.60 0.62 0.68 1.0)))))
+      (material :color :fg))))
 
 ;; Module spec §10 hazard (h): the two `:material` props that call this expand
 ;; much later, at shader-compile time, in a throwaway *implicit-module*
@@ -799,8 +799,7 @@
     (if (= (floor (/ track.playhead 16.0)) row)
       (sdf/layer
         (sdf/fill
-          (let ((x (+ x (- aspect 1.16))))
-            (sdf/rounded-rect 0.5 0.5 0.25))
+            (sdf/rounded-rect width height 0.25)
           (material :color (rgba 0.32 0.48 1.0 0.55))))
       (rgba 0 0 0 0))))
 
@@ -1245,7 +1244,7 @@
           (each (range 0 count) |row|
             (let ((steps (if (< row (len rows)) (nth rows row) (list))))
               (v-stack :gap -0.16
-                (box :background "seqv-row-lamp" :track t :row (if (> count 1) row -1)
+                (box :background "seqv-row-lamp" :track t :row (if (> count 1) row -1) 
                   (h-stack :align :center
                     (box :width 0.1)
                     (row-label row count)

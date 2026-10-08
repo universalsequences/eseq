@@ -183,7 +183,7 @@
 
 (def rack-macro-control (track rm)
   (let ((id rm.index)
-        (target (dict :track track :target "rack-macro" :param-idx rm.index)))
+      (target (dict :track track :target "rack-macro" :param-idx rm.index)))
     (box :key (str "rack-macro-" id) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
@@ -203,18 +203,19 @@
             :value #'rm.value :min 0 :max 1 :decimals 2
             :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
             :plock-active #'rm.locked
+            :text-color :fg
             :plock-default #'rm.base
-            :plock-color-r (pc/param-plock-color-r)
-            :plock-color-g (pc/param-plock-color-g)
-            :plock-color-b (pc/param-plock-color-b)
-            :on-change (lambda (value) (rack-macro-set track rm value))))
-        (button (str "map " (len rm.mappings)) :width 4.6 :height 0.7 :font-size 7.5
-          :active (if (= macro-arm.rack-index id) 1 0)
-          :background-color :mixer-control-bg
-          :active-background-color :rack-mapping-bg
-          :border-color :transparent
-          :color :dim :active-color :black
-          :on-click (lambda (event) (rack-macro-arm id)))))))
+              :plock-color-r (pc/param-plock-color-r)
+              :plock-color-g (pc/param-plock-color-g)
+              :plock-color-b (pc/param-plock-color-b)
+              :on-change (lambda (value) (rack-macro-set track rm value))))
+          (button (str "map " (len rm.mappings)) :width 4.6 :height 0.7 :font-size 7.5
+            :active (if (= macro-arm.rack-index id) 1 0)
+            :background-color :mixer-control-bg
+            :active-background-color :rack-mapping-bg
+            :border-color :transparent
+            :color :dim :active-color :black
+            :on-click (lambda (event) (rack-macro-arm id)))))))
 
 ;; The rack's macros are its instrument device's (rack-macro instances).
 (def rack-macro-bank (inst)
@@ -222,7 +223,7 @@
         (rack (dv/inst-device inst))
         (macros (if rack rack.macros '())))
     (box :debug-name "rack-macro-bank" :width 24 :height 9.7 :padding 0.2
-      :background-color :bg :border-color :buffer-bg :corner-radius 10
+      :background-color :mixer-control-bg :border-color :buffer-bg :corner-radius 10
       (v-stack :gap 0.15
         (h-stack :gap 0.15
           (rack-macro-cell track macros 0) (rack-macro-cell track macros 1)
@@ -451,7 +452,7 @@
           :width 1.5 :height 1.02 :padding 0 :font-size 10
           :border-color :transparent
           :background-color (if (get slot :enabled) :transparent :mixer-control-bg)
-          :color (if (get slot :enabled) (if selected :white :gray) :dim)
+          :color (if (get slot :enabled) (if selected :fg :gray) :dim)
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
         (box :width 1)
         (box :key (str "rack-slot-label-" (get slot :idx))
@@ -465,7 +466,7 @@
             (box :height 0.2)
             (label (substring (get slot :display-name) 0 14)
               :font-size 10.5
-              :color (if (get slot :enabled) :white :dim)
+              :color (if (get slot :enabled) :fg :dim)
               :active delete-target
               :active-color :white
               :bg :transparent)))
@@ -615,7 +616,7 @@
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :start :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :v-align :center
-                :font-size 11 :color :white :bg :transparent)
+                :font-size 11 :color :fg :bg :transparent)
               (box :flex 1 :height 0.15))
             (box :debug-name "rack-compact-header-content"
               :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
@@ -642,7 +643,7 @@
           (if (st/rack-panel-macros-open inst) (rack-macro-bank inst) (box :width 0 :height 0))
           (if (st/rack-panel-slot-list-open inst)
             (box
-              :background-color :bg
+              :background-color :mixer-control-bg
               :border-color :buffer-bg
               :corner-radius 10
               (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
@@ -681,7 +682,7 @@
 (def instrument-polyphony-control ()
   (button (if (tp/poly?) "poly" "mono")
     :debug-name "instrument-polyphony" :width 4 :height 0.8 :padding 0
-    :font-size 9 :color :white :background-color :transparent :border-color :transparent
+    :font-size 9 :color :fg :background-color :transparent :border-color :transparent
     :on-click |x y r| (tp/toggle-polyphony)
     :on-right-click (lambda (event) (tp/open-polyphony-menu event))))
 
@@ -720,7 +721,7 @@
                 (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "instrument-enabled")
                 (h-stack :v-align :center :height st/fx-panel-header-height :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
-                    :font-size 11  :color :white :bg :transparent)
+                    :font-size 11  :color :fg :bg :transparent)
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
                   (ep/instrument-keys-button)

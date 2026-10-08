@@ -227,7 +227,7 @@
           (if (get fx :bus-fx)
             (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
-      (label title :v-align :center :font-size 11 :color :white :bg :transparent)
+      (label title :v-align :center :font-size 11 :color :fg :bg :transparent)
       (if (pc/fx-has-modulators? fx)
         (ep/effect-mods-toggle-button fx)
         (box))

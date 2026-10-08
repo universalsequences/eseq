@@ -444,7 +444,7 @@
         :decimals (eseq.seqv-track-params/seqv-param-decimals mode)
         :noui true
         :font-size 10
-        :text-color :white
+        :text-color :fg
         :on-change (lambda (v) (step-set-param mode v))
         :on-release (lambda () (step-param-release mode))
         :width width
@@ -458,7 +458,7 @@
 ;; Track t's short label: its number and the start of its name (the
 ;; mixer's collapsed strip spells it so too).
 (def track-short-label (t)
-  (str (+ t.index 1) " " (substring t.name 0 3)))
+  (str (+ t.index 1) " " (substring t.name 0 16)))
 
 ;; The current track's chip (eseq.panel-header's chip shape). A binding
 ;; cannot be negated, so the box binds t.audible as :muted with the silenced
@@ -468,7 +468,7 @@
     (if t
       (box
         :key "step-track-badge"
-        :width 4.55 :height 1.0
+        :width 14.55 :height 1.0
         :padding 0
         :corner-radius 8
         :v-align :center
@@ -476,7 +476,7 @@
         :background-color (track-rgba t true)
         :muted-background-color (track-rgba t false)
         (label (track-short-label t)
-          :width 4.55
+          :width 14.55
           :font-size 10
           :v-align :center
           :h-align :center
@@ -611,84 +611,85 @@
       (box :width 0 :height 0))))
 
 (def settings-strip (t)
-  (let ((poly (poly?)))
-  (box :debug-name "track-parameters-strip" :padding 0.0
-    (v-stack :gap 0.25
-      (h-stack :gap 1.05 :align :center
-        (v-stack :gap 0.15 :align :center
-          (label "steps" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (number-picker :value #'t.num-steps :min 1 :max 256 :decimals 0
-            :border-color :none
-            :noui false :font-size 8 :text-color :white
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
-            :width 4.2 :height 1.0))
-        
-        (v-stack :align :center :gap 0.15
-          (label "poly" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (button  (if poly "ON" "OFF") :width 3.0 :height 1.0
-            :background-color (if poly :control-on-bg :poly-off-bg)
-            :border-color :none
-            :font-size 10
-            :color (if poly :control-on-fg :poly-off-fg)
-            :on-click |x y r| (toggle-polyphony)
-            )
-          )
-        (v-stack :gap 0.15 :align :center
-          (label "voices" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (number-picker :value (voices) :min 1 :max 12 :decimals 0
-            :border-color :none
-            :noui false :font-size 8 :text-color :white
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
-                (if (settings-rack-slot)
-                  (host-command "set-rack-slot-max-polyphony"
-                    (dict :track t.index :slot selection.rack-slot :value v))
-                  (seq-set-track-param :voices v))))
-            :width 3.4 :height 1.0)
-          )
-        (if t.supports-mono-trigger
-          (v-stack :align :center :gap 0.15
-            (label "priority"  :font-size 8 :color :dim :bg :transparent :v-align :center)
-            (dropdown :value t.voice-priority :options '("Last" "High" "Low")
-              :on-change (lambda (v)
-                (seq-set-track-param :voice-priority
-                  (if (= v "High") 1 (if (= v "Low") 2 0))))
-              :width 6.0 :height 1.0 :font-size 9)))
-        (if t.supports-mono-trigger
-          (v-stack :align :center :gap 0.15
-            (label "trigger"  :font-size 8 :color :dim :bg :transparent :v-align :center)
-            (dropdown :value t.mono-trigger :options '("retrig" "legato")
-              :on-change (lambda (v)
-                (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
-              :width 6.0 :height 1.0 :font-size 9)))
-      
-        
-        )
-      (h-stack :gap 1.05 :align :center
-        (swing-resolution-control t)
-        (v-stack :align :center :gap 0.22
-          (let ((gr (eseq.drum-rack-v2/groove-of-track t)))
-            (if gr (groove-swing-hint gr) (swing-control t))))
-        (timebase-control t)
-        
-        (v-stack :align :center :gap 0.15
-          (label "mute grp" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (dropdown :value (nth mute-group-options t.mute-group)
-            :options mute-group-options
-            :on-change (lambda (v)
-              (do
-                (eseq.seq-core-state/cool-off-follow)
-                (seq-set-track-param :mute-group (mute-group-value v))))
-            :width 5.4 :height 1.0 :font-size 9))
-        )
-      (v-stack :align :center :gap 0.5
-  	(v-stack :align :left :gap 0.15
-          (label "   scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (h-stack :gap 0.3 :align :center
-            (dropdown :value t.fts
-              :options project.fts-options
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
-              :width 8.6 :height 1.0 :font-size 9)
-            (se/scale-settings-button)))        )
-      )
-    )
-  ))
+              (let ((poly (poly?)))
+                (box :debug-name "track-parameters-strip" :padding 0.0
+                  (v-stack :gap 0.25
+                    (h-stack :gap 1.05 :align :center
+                      (v-stack :gap 0.15 :align :center
+                        (label "steps" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (number-picker :value #'t.num-steps :min 1 :max 256 :decimals 0
+                          :border-color :none
+                          :noui false :font-size 8 :text-color :fg
+                          :tri-color :fg
+                          :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
+                          :width 4.2 :height 1.0))
+                      
+                      (v-stack :align :center :gap 0.15
+                        (label "poly" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (button  (if poly "ON" "OFF") :width 3.0 :height 1.0
+                          :background-color (if poly :control-on-bg :poly-off-bg)
+                          :border-color :none
+                          :font-size 10
+                          :color (if poly :control-on-fg :poly-off-fg)
+                          :on-click |x y r| (toggle-polyphony)
+                          )
+                        )
+                      (v-stack :gap 0.15 :align :center
+                        (label "voices" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (number-picker :value (voices) :min 1 :max 12 :decimals 0
+                          :border-color :none
+                          :noui false :font-size 8 :text-color :fg :tri-color :fg
+                          :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
+                              (if (settings-rack-slot)
+                                (host-command "set-rack-slot-max-polyphony"
+                                  (dict :track t.index :slot selection.rack-slot :value v))
+                                (seq-set-track-param :voices v))))
+                          :width 3.4 :height 1.0)
+                        )
+                      (if t.supports-mono-trigger
+                        (v-stack :align :center :gap 0.15
+                          (label "priority"  :font-size 8 :color :dim :bg :transparent :v-align :center)
+                          (dropdown :value t.voice-priority :options '("Last" "High" "Low")
+                            :on-change (lambda (v)
+                              (seq-set-track-param :voice-priority
+                                (if (= v "High") 1 (if (= v "Low") 2 0))))
+                            :width 6.0 :height 1.0 :font-size 9)))
+                      (if t.supports-mono-trigger
+                        (v-stack :align :center :gap 0.15
+                          (label "trigger"  :font-size 8 :color :dim :bg :transparent :v-align :center)
+                          (dropdown :value t.mono-trigger :options '("retrig" "legato")
+                            :on-change (lambda (v)
+                              (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
+                            :width 6.0 :height 1.0 :font-size 9)))
+                      
+                      
+                      )
+                    (h-stack :gap 1.05 :align :center
+                      (swing-resolution-control t)
+                      (v-stack :align :center :gap 0.22
+                        (let ((gr (eseq.drum-rack-v2/groove-of-track t)))
+                          (if gr (groove-swing-hint gr) (swing-control t))))
+                      (timebase-control t)
+                      
+                      (v-stack :align :center :gap 0.15
+                        (label "mute grp" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (dropdown :value (nth mute-group-options t.mute-group)
+                          :options mute-group-options
+                          :on-change (lambda (v)
+                            (do
+                              (eseq.seq-core-state/cool-off-follow)
+                              (seq-set-track-param :mute-group (mute-group-value v))))
+                          :width 5.4 :height 1.0 :font-size 9))
+                      )
+                    (v-stack :align :center :gap 0.5
+                      	(v-stack :align :left :gap 0.15
+                        (label "   scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
+                        (h-stack :gap 0.3 :align :center
+                          (dropdown :value t.fts
+                            :options project.fts-options
+                            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
+                            :width 8.6 :height 1.0 :font-size 9)
+                          (se/scale-settings-button)))        )
+                    )
+                  )
+                ))
