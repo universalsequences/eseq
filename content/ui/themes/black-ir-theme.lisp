@@ -141,6 +141,7 @@
       :track-tint     '(0.0 0.0 0.0 0.0)
       :variant-tint    '(0.0 0.0 0.0 0.0)
       :bg             '(0.078 0.070 0.074)
+      :text-buffer-bg :transparent
       :fg             '(0.86 0.88 0.90)
       :fg-muted       '(0.47 0.50 0.54)
       :dim            '(0.58 0.61 0.65)

@@ -1106,6 +1106,72 @@ mod tests {
     }
 
     #[test]
+    fn text_buffer_background_tracks_view_mode_and_theme_in_all_tiles() {
+        use crate::{backend::Color, theme, tile::SplitDir};
+
+        let restore = theme::current();
+        theme::set_current(theme::default_theme());
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().set_text("(def answer 42)");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        let authored = Color::rgba(0.2, 0.3, 0.4, 1.0);
+        editor.active_leaf_mut().background_color = Some(authored);
+        editor.active_leaf_mut().background_color_name = Some("buffer-bg".into());
+        editor.split_active_tile(SplitDir::Vertical, 0).unwrap();
+
+        // Without an override, the sequencer surface and an ordinary pane
+        // retain their distinct fallback paths.
+        let assert_fallback = |frame: &crate::backend::TiledRenderFrame| {
+            let active = frame.tiles.iter().find(|tile| tile.is_active).unwrap();
+            assert_eq!(active.background_color, Some(authored));
+            assert_eq!(active.background_color_name.as_deref(), Some("buffer-bg"));
+            let inactive = frame.tiles.iter().find(|tile| !tile.is_active).unwrap();
+            assert_eq!(inactive.background_color, None);
+            assert_eq!(inactive.background_color_name, None);
+        };
+        assert_fallback(&build_tiled_render_frame_borderless(&mut editor, 80, 20));
+
+        editor.runtime_mut().eval_str(include_str!(
+            "../../../../content/ui/themes/mac-osx-rune.lisp"
+        )).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(theme::named_color("text-buffer-bg"), Some(Color::rgba(0.76, 0.78, 0.80, 1.0)));
+
+        for mode in [ViewMode::TextOnly, ViewMode::Both] {
+            editor.active_buffer_mut().view_mode = mode;
+            let frame = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+            assert_eq!(frame.tiles.len(), 2);
+            for tile in &frame.tiles {
+                assert_eq!(tile.background_color, Some(theme::TEXT_BUFFER_BG()));
+                assert_eq!(tile.background_color_name.as_deref(), Some("text-buffer-bg"));
+                assert!(!tile.frame.lines.is_empty());
+            }
+        }
+
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert_fallback(&build_tiled_render_frame_borderless(&mut editor, 80, 20));
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+
+        // The normal reactive theme path must update an already visible pane.
+        editor.runtime_mut().eval_str(
+            "(apply-theme (dict :text-buffer-bg '(0.8 0.82 0.84)))"
+        ).unwrap();
+        editor.refresh_runtime_side_effects();
+        let frame = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        assert!(frame.tiles.iter().all(|tile|
+            tile.background_color == Some(Color::rgba(0.8, 0.82, 0.84, 1.0))));
+
+        // Switching to another complete theme clears Rune's override.
+        editor.runtime_mut().eval_str(include_str!(
+            "../../../../content/ui/themes/mac-osx-haze.lisp"
+        )).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(theme::TEXT_BUFFER_BG().a, 0.0);
+        assert_fallback(&build_tiled_render_frame_borderless(&mut editor, 80, 20));
+        theme::set_current(restore);
+    }
+
+    #[test]
     fn text_zoom_increases_text_only_rows_without_moving_statusline_grid() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1215,6 +1281,10 @@ fn build_tiled_render_frame_impl(
         );
     }
 
+    // Resolve this per frame, without changing the leaf's authored surface:
+    // switching back to UI-only must restore the tile's original background.
+    let text_buffer_bg = theme::TEXT_BUFFER_BG();
+
     // Pre-collect per-tile metadata to avoid borrow conflicts
     let tile_info: Vec<_> = tile_rects
         .iter()
@@ -1233,6 +1303,7 @@ fn build_tiled_render_frame_impl(
                 .unwrap_or(leaf.show_status);
             let (text_cell_width_scale, text_cell_height_scale) =
                 editor.text_cell_scales_for_buffer(buf);
+            let text_background = buf.view_mode != ViewMode::UiOnly && text_buffer_bg.a > 0.0;
             (
                 *tile_id,
                 *rect,
@@ -1243,8 +1314,12 @@ fn build_tiled_render_frame_impl(
                 leaf.show_border,
                 leaf.border_width_px,
                 leaf.border_radius_px,
-                leaf.background_color,
-                leaf.background_color_name.clone(),
+                if text_background { Some(text_buffer_bg) } else { leaf.background_color },
+                if text_background {
+                    Some("text-buffer-bg".to_string())
+                } else {
+                    leaf.background_color_name.clone()
+                },
                 leaf.focused_widget_id,
                 if buf.inline_code_widgets().is_empty() {
                     leaf.widget_scroll_top

@@ -143,6 +143,7 @@
       :variant-tint    '(0.0 0.0 0.0 0.0)
       ;; Main editor
       :bg             '(0.10 0.10 0.12)     ; #1c1c1e — System dark bg
+      :text-buffer-bg :transparent
       :fg             '(0.88 0.88 0.89)     ; #e0e0e3
       :fg-muted       '(0.56 0.56 0.58)     ; #8e8e93 — System gray
       :dim            '(0.66 0.66 0.68)     ; Secondary sequencer text

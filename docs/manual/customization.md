@@ -163,9 +163,9 @@ Package authors declare a knob with `defcustom` in their module. `:type` and `:d
 
 ## Themes
 
-eseq ships 14 color themes. Each is a command: run `M-x`, type `theme`, and pick one of:
+eseq ships 15 color themes. Each is a command: run `M-x`, type `theme`, and pick one of:
 
-- `seq-theme-mac-osx-dark` (the default), `seq-theme-mac-osx-light`, `seq-theme-mac-osx-graphite`, `seq-theme-mac-osx-haze`, `seq-theme-mac-osx-midnight`, `seq-theme-mac-osx-midnight-50`, `seq-theme-mac-osx-ember`, `seq-theme-mac-osx-violet`
+- `seq-theme-mac-osx-dark` (the default), `seq-theme-mac-osx-light`, `seq-theme-mac-osx-graphite`, `seq-theme-mac-osx-haze`, `seq-theme-mac-osx-rune`, `seq-theme-mac-osx-midnight`, `seq-theme-mac-osx-midnight-50`, `seq-theme-mac-osx-ember`, `seq-theme-mac-osx-violet`
 - `seq-theme-ableton-mid`, `seq-theme-black-ir`, `seq-theme-tahoe-terminal`, `seq-theme-phosphor`, `seq-theme-phosphor-blue`, `seq-theme-aura`
 
 The theme applies at once, and a message confirms its name. It is not remembered: eseq starts in the default theme. To keep one, add its command to `init.lisp`, for example `(seq-theme-aura)`.

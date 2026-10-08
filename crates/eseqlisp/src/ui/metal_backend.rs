@@ -7935,8 +7935,10 @@ fragment float4 live_spectrogram_frag(
 
                 // The atlas records the actual outline overhang and padding relative
                 // to the pen, so italic and otherwise overhanging glyphs are not clipped.
-                let gx0 = base_x_px + (glyph.pen_x + glyph.offset_x) * scale;
-                let gy0 = base_y_px + y_offset;
+                let gx0 = crate::ui::glyph_atlas::snap_glyph_origin_px(
+                    base_x_px + (glyph.pen_x + glyph.offset_x) * scale,
+                );
+                let gy0 = crate::ui::glyph_atlas::snap_glyph_origin_px(base_y_px + y_offset);
                 let gx1 = gx0 + glyph.raster_w as f32 * scale;
                 let gy1 = gy0 + glyph.raster_h as f32 * scale;
 

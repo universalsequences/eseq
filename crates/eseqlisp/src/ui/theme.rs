@@ -60,6 +60,9 @@ pub struct Theme {
     pub bg_match_paren: Color,
     pub fg_match_paren: Color,
     pub buffer_bg: Color,
+    /// Background override for tiles showing source text. Zero alpha keeps
+    /// the tile's authored background (or `bg` for an unstyled editor tile).
+    pub text_buffer_bg: Color,
     pub buffer_tab_bar_bg: Color,
     pub buffer_tab_selected_bg: Color,
     pub buffer_tab_selected_border: Color,
@@ -650,6 +653,7 @@ theme_slots!(
         Color::from_hex(0x05, 0x05, 0x05)
     ),
     (buffer_bg, BUFFER_BG, Color::from_hex(0x12, 0x12, 0x13)),
+    (text_buffer_bg, TEXT_BUFFER_BG, Color::rgba(0.0, 0.0, 0.0, 0.0)),
     (
         buffer_tab_bar_bg,
         BUFFER_TAB_BAR_BG,

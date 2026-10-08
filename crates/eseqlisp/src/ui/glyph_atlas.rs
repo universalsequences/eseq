@@ -104,6 +104,17 @@ pub fn centered_text_baseline_px(cell_h: f32, cap_height_px: f32, scale: f32) ->
     (cell_h + cap_height_px) * 0.5 * scale
 }
 
+/// Snap a glyph quad's top-left corner to the device-pixel grid. The atlas is
+/// rasterized at device-pixel size, so an aligned quad samples texel centers
+/// and reproduces the raster exactly; a fractional origin (fractional columns,
+/// alignment slack, accumulated advances, the half-pixel centered baseline)
+/// makes the bilinear sampler smear every edge across two pixels, which reads
+/// as a halo around dark text on light themes. Both backends' proportional
+/// quad builders must call this so they stay pixel-identical.
+pub fn snap_glyph_origin_px(px: f32) -> f32 {
+    px.round()
+}
+
 /// A CPU-owned R8 atlas. Keeping the authoritative bitmap outside a graphics
 /// API makes glyph generation testable on headless Linux and lets each backend
 /// upload exactly the same pixels.

@@ -159,6 +159,7 @@
       ;; Core canvas and semantic colors
       :accent         '(0.00 0.478 1.00)       ; #007aff — system blue
       :bg             '(0.961 0.961 0.969)     ; #f5f5f7 — grouped background
+      :text-buffer-bg :transparent
       :fg             '(0.114 0.114 0.122)     ; #1d1d1f — primary label
       :fg-muted       '(0.353 0.353 0.373)     ; Strong secondary label
       :dim            '(0.365 0.365 0.384)     ; Survives disabled-state opacity

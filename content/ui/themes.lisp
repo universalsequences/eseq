@@ -9,6 +9,7 @@
     (dict :name "ableton-mid" :command "seq-theme-ableton-mid" :file "@/ui/themes/ableton-mid.lisp")
     (dict :name "mac-osx-graphite" :command "seq-theme-mac-osx-graphite" :file "@/ui/themes/mac-osx-graphite.lisp")
     (dict :name "mac-osx-haze" :command "seq-theme-mac-osx-haze" :file "@/ui/themes/mac-osx-haze.lisp")
+    (dict :name "mac-osx-rune" :command "seq-theme-mac-osx-rune" :file "@/ui/themes/mac-osx-rune.lisp")
     (dict :name "mac-osx-midnight" :command "seq-theme-mac-osx-midnight" :file "@/ui/themes/mac-osx-midnight.lisp")
     (dict :name "mac-osx-midnight-50" :command "seq-theme-mac-osx-midnight-50" :file "@/ui/themes/mac-osx-midnight-50.lisp")
     (dict :name "black-ir-theme" :command "seq-theme-black-ir" :file "@/ui/themes/black-ir-theme.lisp")
@@ -39,6 +40,9 @@
 
 (def seq-theme-mac-osx-haze ()
   (seq-apply-theme-file "mac-osx-haze" "@/ui/themes/mac-osx-haze.lisp"))
+
+(def seq-theme-mac-osx-rune ()
+  (seq-apply-theme-file "mac-osx-rune" "@/ui/themes/mac-osx-rune.lisp"))
 
 (def seq-theme-mac-osx-midnight ()
   (seq-apply-theme-file "mac-osx-midnight" "@/ui/themes/mac-osx-midnight.lisp"))

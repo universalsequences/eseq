@@ -396,6 +396,15 @@ A theme file sets slots; widgets refer to slots by keyword:
 (box :background-color :buffer-bg (label "12:00" :color :clock-fg))
 ```
 
+`:text-buffer-bg` overrides the tile background whenever source text is shown
+(text-only or mixed text/UI), including ordinary editor panes. UI-only tiles
+keep their authored background. For example, `:text-buffer-bg '(0.76 0.78 0.80)`
+gives text a light surface without changing `:bg` or `:buffer-bg`. The default,
+`:text-buffer-bg :transparent`, preserves each tile's existing background,
+falling back to `:bg` for unstyled panes. Complete themes should explicitly set
+this slot (use `:transparent` to disable it), since theme maps update only the
+slots they contain.
+
 Only slots present in the map change. `:primary`, `:dim`, `:transparent`,
 and a few other aliases are always available. A slot name that does not
 exist in the Rust `Theme` struct falls back to the widget default with no
