@@ -184,6 +184,11 @@ pub struct BufferTextStyle {
     pub bold: bool,
 }
 
+/// The reactive fields a subtree's render read. Shared: a subtree rendered
+/// inside another effect's run inherits that effect's list, so every node
+/// under a large root holds the same (often thousands of fields) list.
+pub type SubtreeDependencies = Arc<[ReactiveFieldKey]>;
+
 #[derive(Debug, Clone)]
 pub struct CommittedSubtreeSnapshot {
     pub stable_widget_id: Option<u64>,
@@ -191,7 +196,7 @@ pub struct CommittedSubtreeSnapshot {
     pub parent_subtree_root_id: Option<u64>,
     pub stable_key: Option<String>,
     pub widget_type: Option<String>,
-    pub reactive_dependencies: Vec<ReactiveFieldKey>,
+    pub reactive_dependencies: SubtreeDependencies,
     pub tree: Value,
     pub children: Vec<Arc<CommittedSubtreeSnapshot>>,
 }
@@ -227,8 +232,7 @@ pub struct CommittedBufferUiSnapshot {
     pub root: Arc<CommittedSubtreeSnapshot>,
     pub root_stable_widget_id: Option<u64>,
     pub root_subtree_root_id: Option<u64>,
-    pub field_to_subtree_roots: HashMap<ReactiveFieldKey, Vec<u64>>,
-    pub subtree_root_dependencies: HashMap<u64, Vec<ReactiveFieldKey>>,
+    pub subtree_root_dependencies: HashMap<u64, SubtreeDependencies>,
     pub subtree_roots: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
     pub widgets: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
 }
@@ -254,7 +258,6 @@ impl PartialEq for CommittedBufferUiSnapshot {
             && self.root_subtree_root_id == other.root_subtree_root_id
             && widget_tree_values_equal(&self.tree, &other.tree)
             && (Arc::ptr_eq(&self.root, &other.root) || self.root == other.root)
-            && self.field_to_subtree_roots == other.field_to_subtree_roots
             && self.subtree_root_dependencies == other.subtree_root_dependencies
             && node_maps_equal(&self.subtree_roots, &other.subtree_roots)
             && node_maps_equal(&self.widgets, &other.widgets)
@@ -1126,7 +1129,7 @@ impl Buffer {
         subtree_root_id: u64,
         tree: Value,
         source: Option<BufferId>,
-        reactive_dependencies: Vec<ReactiveFieldKey>,
+        reactive_dependencies: impl Into<SubtreeDependencies>,
     ) -> bool {
         let Some(snapshot) = self.committed_ui_snapshot.take() else {
             return false;
@@ -1650,24 +1653,21 @@ impl CommittedBufferUiSnapshot {
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> Self {
         crate::vm::freeze_widget_tree(&tree);
-        let root = CommittedSubtreeSnapshot::from_tree(tree.clone(), &reactive_dependencies);
+        let root = CommittedSubtreeSnapshot::from_tree_with_dependency_lookup(
+            tree.clone(),
+            &reactive_dependencies.into(),
+            &HashMap::new(),
+        );
         let mut subtree_roots = HashMap::new();
         let mut widgets = HashMap::new();
-        let mut field_to_subtree_roots = HashMap::new();
         let mut subtree_root_dependencies = HashMap::new();
-        root.collect_indexes(
-            &mut subtree_roots,
-            &mut widgets,
-            &mut field_to_subtree_roots,
-            &mut subtree_root_dependencies,
-        );
+        root.collect_indexes(&mut subtree_roots, &mut widgets, &mut subtree_root_dependencies);
         Self {
             source_buffer_id,
             tree,
             root_stable_widget_id: root.stable_widget_id,
             root_subtree_root_id: root.subtree_root_id,
             root,
-            field_to_subtree_roots,
             subtree_root_dependencies,
             subtree_roots,
             widgets,
@@ -1690,11 +1690,25 @@ impl CommittedBufferUiSnapshot {
         )
     }
 
+    /// The subtree roots whose render read `field`, in tree order. Computed
+    /// on demand: an eager field index cost every full-tree commit one entry
+    /// per (root, field) pair, which inherited lists made huge.
     pub fn subtree_roots_for_field(&self, field: &ReactiveFieldKey) -> Vec<u64> {
-        self.field_to_subtree_roots
-            .get(field)
-            .cloned()
-            .unwrap_or_default()
+        fn walk(node: &CommittedSubtreeSnapshot, field: &ReactiveFieldKey, out: &mut Vec<u64>) {
+            if is_subtree_boundary(node.subtree_root_id, node.parent_subtree_root_id)
+                && let Some(root_id) = node.subtree_root_id
+                && node.reactive_dependencies.contains(field)
+                && !out.contains(&root_id)
+            {
+                out.push(root_id);
+            }
+            for child in &node.children {
+                walk(child, field, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.root, field, &mut out);
+        out
     }
 
     /// True when replacing `subtree_root_id` with `tree` (and the given
@@ -1715,7 +1729,7 @@ impl CommittedBufferUiSnapshot {
         };
         self.subtree_root_dependencies
             .get(&subtree_root_id)
-            .is_some_and(|deps| deps.as_slice() == reactive_dependencies)
+            .is_some_and(|deps| &deps[..] == reactive_dependencies)
             && widget_tree_flush_identical(&existing.tree, tree)
     }
 
@@ -1739,7 +1753,7 @@ impl CommittedBufferUiSnapshot {
     pub fn dependencies_for_subtree_root(&self, root_id: u64) -> Vec<ReactiveFieldKey> {
         self.subtree_root_dependencies
             .get(&root_id)
-            .cloned()
+            .map(|deps| deps.to_vec())
             .unwrap_or_default()
     }
 
@@ -1754,7 +1768,7 @@ impl CommittedBufferUiSnapshot {
         self,
         subtree_root_id: u64,
         replacement_tree: Value,
-        reactive_dependencies: Vec<ReactiveFieldKey>,
+        reactive_dependencies: impl Into<SubtreeDependencies>,
     ) -> Option<Self> {
         if self
             .subtree_replace_failure_reason(subtree_root_id, &replacement_tree)
@@ -1767,8 +1781,9 @@ impl CommittedBufferUiSnapshot {
         let previous_root = Arc::clone(&self.root);
         let source_buffer_id = self.source_buffer_id;
         let mut dependency_lookup = self.subtree_root_dependencies;
+        let reactive_dependencies: SubtreeDependencies = reactive_dependencies.into();
         for root_id in collect_subtree_root_ids(&replacement_tree) {
-            dependency_lookup.insert(root_id, reactive_dependencies.clone());
+            dependency_lookup.insert(root_id, Arc::clone(&reactive_dependencies));
         }
         Some(Self::from_tree_with_dependency_lookup_reusing(
             merged_tree,
@@ -1840,8 +1855,9 @@ impl CommittedBufferUiSnapshot {
         let source_buffer_id = self.source_buffer_id;
         let mut dependency_lookup = self.subtree_root_dependencies;
         for replacement in valid_replacements {
+            let reactive_dependencies: SubtreeDependencies = replacement.reactive_dependencies.into();
             for root_id in collect_subtree_root_ids(replacement.tree) {
-                dependency_lookup.insert(root_id, replacement.reactive_dependencies.to_vec());
+                dependency_lookup.insert(root_id, Arc::clone(&reactive_dependencies));
             }
         }
         Some(Self::from_tree_with_dependency_lookup_reusing(
@@ -1855,7 +1871,7 @@ impl CommittedBufferUiSnapshot {
     fn from_tree_with_dependency_lookup(
         tree: Value,
         source_buffer_id: Option<BufferId>,
-        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        dependency_lookup: &HashMap<u64, SubtreeDependencies>,
     ) -> Self {
         Self::from_tree_with_dependency_lookup_reusing(tree, source_buffer_id, dependency_lookup, None)
     }
@@ -1868,33 +1884,26 @@ impl CommittedBufferUiSnapshot {
     fn from_tree_with_dependency_lookup_reusing(
         tree: Value,
         source_buffer_id: Option<BufferId>,
-        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        dependency_lookup: &HashMap<u64, SubtreeDependencies>,
         previous_root: Option<&Arc<CommittedSubtreeSnapshot>>,
     ) -> Self {
         crate::vm::freeze_widget_tree(&tree);
         let root = CommittedSubtreeSnapshot::from_tree_reusing(
             tree.clone(),
-            &[],
+            &SubtreeDependencies::from([]),
             dependency_lookup,
             previous_root,
         );
         let mut subtree_roots = HashMap::new();
         let mut widgets = HashMap::new();
-        let mut field_to_subtree_roots = HashMap::new();
         let mut subtree_root_dependencies = HashMap::new();
-        root.collect_indexes(
-            &mut subtree_roots,
-            &mut widgets,
-            &mut field_to_subtree_roots,
-            &mut subtree_root_dependencies,
-        );
+        root.collect_indexes(&mut subtree_roots, &mut widgets, &mut subtree_root_dependencies);
         Self {
             source_buffer_id,
             tree,
             root_stable_widget_id: root.stable_widget_id,
             root_subtree_root_id: root.subtree_root_id,
             root,
-            field_to_subtree_roots,
             subtree_root_dependencies,
             subtree_roots,
             widgets,
@@ -1929,7 +1938,7 @@ fn replacement_has_valid_replaced_ancestor(
 
 impl CommittedSubtreeSnapshot {
     pub fn from_tree(tree: Value, reactive_dependencies: &[ReactiveFieldKey]) -> Arc<Self> {
-        Self::from_tree_with_dependency_lookup(tree, reactive_dependencies, &HashMap::new())
+        Self::from_tree_with_dependency_lookup(tree, &reactive_dependencies.into(), &HashMap::new())
     }
 
     /// Like `from_tree_with_dependency_lookup`, reusing `previous`'s child
@@ -1940,8 +1949,8 @@ impl CommittedSubtreeSnapshot {
     /// dependencies it already carried.
     fn from_tree_reusing(
         tree: Value,
-        reactive_dependencies: &[ReactiveFieldKey],
-        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        reactive_dependencies: &SubtreeDependencies,
+        dependency_lookup: &HashMap<u64, SubtreeDependencies>,
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
         let stable_widget_id = prop_u64_from_value(&tree, "__stable-widget-id");
@@ -1951,7 +1960,7 @@ impl CommittedSubtreeSnapshot {
         let widget_type = prop_widget_type_from_value(&tree);
         let subtree_dependencies = subtree_root_id
             .and_then(|root_id| dependency_lookup.get(&root_id).cloned())
-            .unwrap_or_else(|| reactive_dependencies.to_vec());
+            .unwrap_or_else(|| Arc::clone(reactive_dependencies));
         let previous_cells = previous
             .map(|previous| child_value_cells(&previous.tree))
             .unwrap_or_default();
@@ -1993,8 +2002,8 @@ impl CommittedSubtreeSnapshot {
 
     fn from_tree_with_dependency_lookup(
         tree: Value,
-        reactive_dependencies: &[ReactiveFieldKey],
-        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        reactive_dependencies: &SubtreeDependencies,
+        dependency_lookup: &HashMap<u64, SubtreeDependencies>,
     ) -> Arc<Self> {
         let stable_widget_id = prop_u64_from_value(&tree, "__stable-widget-id");
         let subtree_root_id = prop_u64_from_value(&tree, "__subtree-root-id");
@@ -2003,7 +2012,7 @@ impl CommittedSubtreeSnapshot {
         let widget_type = prop_widget_type_from_value(&tree);
         let subtree_dependencies = subtree_root_id
             .and_then(|root_id| dependency_lookup.get(&root_id).cloned())
-            .unwrap_or_else(|| reactive_dependencies.to_vec());
+            .unwrap_or_else(|| Arc::clone(reactive_dependencies));
         let children = value_children(&tree)
             .into_iter()
             .map(|child| {
@@ -2030,8 +2039,7 @@ impl CommittedSubtreeSnapshot {
         self: &Arc<Self>,
         subtree_roots: &mut HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
         widgets: &mut HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
-        field_to_subtree_roots: &mut HashMap<ReactiveFieldKey, Vec<u64>>,
-        subtree_root_dependencies: &mut HashMap<u64, Vec<ReactiveFieldKey>>,
+        subtree_root_dependencies: &mut HashMap<u64, SubtreeDependencies>,
     ) {
         if is_subtree_boundary(self.subtree_root_id, self.parent_subtree_root_id)
             && let Some(root_id) = self.subtree_root_id
@@ -2041,24 +2049,13 @@ impl CommittedSubtreeSnapshot {
                 .or_insert_with(|| Arc::clone(self));
             subtree_root_dependencies
                 .entry(root_id)
-                .or_insert_with(|| self.reactive_dependencies.clone());
-            for field in &self.reactive_dependencies {
-                let roots = field_to_subtree_roots.entry(field.clone()).or_default();
-                if !roots.contains(&root_id) {
-                    roots.push(root_id);
-                }
-            }
+                .or_insert_with(|| Arc::clone(&self.reactive_dependencies));
         }
         if let Some(widget_id) = self.stable_widget_id {
             widgets.insert(widget_id, Arc::clone(self));
         }
         for child in &self.children {
-            child.collect_indexes(
-                subtree_roots,
-                widgets,
-                field_to_subtree_roots,
-                subtree_root_dependencies,
-            );
+            child.collect_indexes(subtree_roots, widgets, subtree_root_dependencies);
         }
     }
 }
@@ -2793,6 +2790,41 @@ mod tests {
                 field: "steps".to_string(),
             }],
         ));
+    }
+
+    /// Subtrees rendered inside a root's run inherit its dependency list.
+    /// It is shared, not copied per node: a large custom UI's root reads
+    /// thousands of fields, and per-node copies plus an eager per-field
+    /// index made each full-tree commit of the active buffer cost hundreds
+    /// of milliseconds.
+    #[test]
+    fn inherited_subtree_dependencies_are_shared_and_queried_on_demand() {
+        let deps: Vec<ReactiveFieldKey> = (0..3000)
+            .map(|i| ReactiveFieldKey::new("ns", &format!("field-{i}")))
+            .collect();
+        let tree = widget(
+            "root",
+            1,
+            1,
+            (0..200)
+                .map(|i| widget_with_parent("knob", 10 + i, 10 + i, 1, Vec::new()))
+                .collect(),
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(tree, Some(1), deps.clone());
+        let root_deps = &snapshot.root.reactive_dependencies;
+        assert_eq!(root_deps.len(), 3000);
+        for child in &snapshot.root.children {
+            assert!(
+                std::sync::Arc::ptr_eq(&child.reactive_dependencies, root_deps),
+                "a subtree inherits the root's list by sharing it"
+            );
+        }
+        let roots = snapshot.subtree_roots_for_field(&deps[1234]);
+        assert_eq!(roots.len(), 201, "the root and every inheriting subtree");
+        assert_eq!(roots[0], 1, "tree order: the root first");
+        assert!(snapshot
+            .subtree_roots_for_field(&ReactiveFieldKey::new("ns", "unread"))
+            .is_empty());
     }
 
     #[test]
