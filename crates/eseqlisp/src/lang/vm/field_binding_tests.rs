@@ -571,6 +571,77 @@ fn a_global_the_code_defines_under_a_removed_namespace_name_reads_normally() {
     assert!(compile_errors(&mut vm, "EXPORT.open").starts_with("EXPORT.open was removed"));
 }
 
+fn parse_exprs(code: &str) -> Vec<crate::parser::Expression> {
+    use crate::parser::{ASTParser, Parser};
+    ASTParser::new(Parser::new(code.to_string()).parse().expect("tokens"))
+        .parse()
+        .expect("exprs")
+}
+
+/// The stale user-tier instrument UI helper (`md-snare`'s engine index)
+/// that the custom instrument UI unit used to splice in with every other
+/// instrument's UI.
+const STALE_INSTRUMENT_UI_HELPER: &str = r#"
+(def mds-engine-index ()
+  (let ((p (custom-ui-current-param "engine")))
+    (let ((e (if p (round (if (get p :value-field)
+                              (reactive-get "SEQ" (get p :value-field))
+                              (reactive-value (custom-ui-param-value p))))
+                 1)))
+      (if (= e 2) 2 1))))
+"#;
+
+#[test]
+fn removed_form_uses_reports_what_the_compiler_rejects_without_compiling() {
+    use crate::compiler::removed_form_uses;
+    let mut vm = vm();
+    // Each one is exactly the compile error the source raises.
+    for code in [
+        STALE_INSTRUMENT_UI_HELPER,
+        "(def f () (map bind-nth (list)))",
+        "(list SEQ.a.b)",
+        "(set! SEQV.x 1)",
+        "#'AGENT.a.b",
+        "(def f () (bind \"x\") (reactive-set \"SEQ\" \"y\" 1))",
+    ] {
+        let found = removed_form_uses(&parse_exprs(code)).join("; ");
+        assert!(!found.is_empty(), "{code}");
+        assert_eq!(found, compile_errors(&mut vm, code), "{code}");
+    }
+    // Names the source binds itself, quoted data and `reactive-value` (a
+    // deprecation, not an error) are not reported.
+    for code in [
+        "(def g () (bind \"late\")) (def bind (name) name) (g)",
+        "(let ((reactive-get (lambda (a b) b))) (reactive-get 1 2))",
+        "(def f (bind-seq) (bind-seq 1))",
+        "(def AGENT (dict :status 2)) AGENT.status",
+        "(let ((SEQ (dict :x 1))) SEQ.x)",
+        "(list '(bind x) 'SEQ.x)",
+        "(def v () (reactive-value 1))",
+        "THEME.accent",
+    ] {
+        assert_eq!(removed_form_uses(&parse_exprs(code)), Vec::<String>::new(), "{code}");
+    }
+}
+
+#[test]
+fn a_stale_source_dropped_by_removed_form_uses_no_longer_fails_a_spliced_unit() {
+    // A host splicing independent sources into one unit (the custom
+    // instrument UIs): one stale source used to fail the whole unit.
+    let good = "(def good-ui () 7)";
+    let mut vm = vm();
+    let spliced = format!("{good}\n{STALE_INSTRUMENT_UI_HELPER}");
+    assert!(compile_errors(&mut vm, &spliced).starts_with("reactive-get was removed"));
+    assert!(vm.global_value("eseq.vanilla/good-ui").is_none());
+    // Dropping what removed_form_uses reports keeps the rest loading.
+    let kept: Vec<&str> = [good, STALE_INSTRUMENT_UI_HELPER]
+        .into_iter()
+        .filter(|source| crate::compiler::removed_form_uses(&parse_exprs(source)).is_empty())
+        .collect();
+    assert_eq!(kept, vec![good]);
+    assert_eq!(eval(&mut vm, &format!("{}\n(good-ui)", kept.join("\n"))), Value::Number(7.0));
+}
+
 #[test]
 fn a_registered_namespace_of_a_removed_name_still_reads() {
     // A host (or test) that registers its own namespace under one of the

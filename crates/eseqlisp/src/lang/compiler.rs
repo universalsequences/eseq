@@ -62,6 +62,138 @@ fn removed_namespace_message(path: &str, write: bool) -> String {
     }
 }
 
+/// The removed binding forms (see [`REMOVED_BINDING_FORMS`]) and removed
+/// host namespace paths (see [`REMOVED_HOST_NAMESPACES`]) that `exprs`
+/// use, as the compile errors they would raise, found without compiling.
+///
+/// For a host that splices many independent sources into one unit (the
+/// custom instrument and effect UIs): a compile error fails the whole
+/// unit, so one stale source (a user instrument still calling
+/// `reactive-get`) would take every other source down with it. The host
+/// drops the stale source instead. Conservative: a name the sources bind
+/// anywhere (a `def…` name, a parameter, a `let` name) is not reported, so
+/// a source that defines its own `bind` keeps working; anything this
+/// misses still fails in the compiler as before.
+pub fn removed_form_uses(exprs: &[Expression]) -> Vec<String> {
+    fn bind_symbols(expr: Option<&Expression>, bound: &mut HashSet<String>) {
+        if let Some(Expression::List(names)) = expr {
+            for name in names {
+                match name {
+                    Expression::Symbol(name) => {
+                        bound.insert(name.clone());
+                    }
+                    // A `let` binding pair: `(name value)`.
+                    Expression::List(pair) => {
+                        if let Some(Expression::Symbol(name)) = pair.first() {
+                            bound.insert(name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Pass 1: every name the sources bind, whatever its scope.
+    let mut bound = HashSet::new();
+    let mut stack: Vec<&Expression> = exprs.iter().collect();
+    while let Some(expr) = stack.pop() {
+        let items = match expr {
+            Expression::List(items) => items,
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => {
+                stack.push(inner);
+                continue;
+            }
+            _ => continue,
+        };
+        match items.first() {
+            Some(Expression::Symbol(head)) if head.starts_with("def") => {
+                if let Some(Expression::Symbol(name)) = items.get(1) {
+                    bound.insert(name.clone());
+                }
+                // `(def name (params) body…)`; `(def name (value))` has no body.
+                if items.len() >= 4 {
+                    bind_symbols(items.get(2), &mut bound);
+                }
+            }
+            Some(Expression::Symbol(head)) if matches!(head.as_str(), "lambda" | "fn") => {
+                bind_symbols(items.get(1), &mut bound);
+            }
+            Some(Expression::Symbol(head)) if head.starts_with("let") => {
+                bind_symbols(items.get(1), &mut bound);
+            }
+            _ => {}
+        }
+        stack.extend(items.iter());
+    }
+
+    // Pass 2: the uses, in source order, each message once.
+    #[derive(Clone, Copy)]
+    enum Position { Read, Write, Binding }
+    let mut messages: Vec<String> = Vec::new();
+    let mut stack: Vec<(&Expression, Position)> =
+        exprs.iter().rev().map(|expr| (expr, Position::Read)).collect();
+    while let Some((expr, position)) = stack.pop() {
+        let message = match expr {
+            Expression::Symbol(name) => {
+                if let Some((form, message)) =
+                    REMOVED_BINDING_FORMS.iter().find(|(form, _)| form == name)
+                {
+                    (!bound.contains(*form)).then(|| message.to_string())
+                } else if let Some((head, rest)) = name.split_once('.')
+                    && REMOVED_HOST_NAMESPACES.contains(&head)
+                    && !bound.contains(head)
+                    && !rest.is_empty()
+                {
+                    Some(match position {
+                        Position::Read => removed_namespace_message(name, false),
+                        Position::Write => removed_namespace_message(name, true),
+                        Position::Binding => {
+                            let field = rest.split('.').next().unwrap_or_default();
+                            format!(
+                                "#'{head}.{field} was removed; bind an eseq.kinds instance field \
+                                 instead, e.g. #'transport.playing or #'t.volume"
+                            )
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => {
+                stack.push((inner, Position::Read));
+                None
+            }
+            Expression::List(items) => {
+                let position_of_second = match items.first() {
+                    Some(Expression::Symbol(head)) if head == "set!" => Position::Write,
+                    Some(Expression::Symbol(head)) if head == crate::parser::FUNCTION_FORM => {
+                        Position::Binding
+                    }
+                    _ => Position::Read,
+                };
+                for (index, item) in items.iter().enumerate().rev() {
+                    let position = if index == 1 { position_of_second } else { Position::Read };
+                    stack.push((item, position));
+                }
+                None
+            }
+            // A quoted list or symbol is data, not code.
+            _ => None,
+        };
+        if let Some(message) = message
+            && !messages.contains(&message)
+        {
+            messages.push(message);
+        }
+    }
+    messages
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReactiveChunkKind { Derived, View, Observer }
 
