@@ -183,8 +183,7 @@
 
 (def rack-macro-control (track rm)
   (let ((id rm.index)
-        (target (dict :track track :target "rack-macro" :param-idx rm.index))
-        (has-locks rm.has-locks))
+        (target (dict :track track :target "rack-macro" :param-idx rm.index)))
     (box :key (str "rack-macro-" id) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
@@ -194,14 +193,17 @@
           (text-input :debug-name (str "rack-macro-name-" id)
             :width 5.2 :height 0.9 :font-size 8.5 :value rm.name
             :on-change (lambda (name) (set! rm.name name))))
+        ;; The instrument panel has no subtree of its own, so a by-value
+        ;; read here would sit in the *fx* root: the dot and the knob's lock
+        ;; state are bound (the menu reads has-locks on the click).
         (box :debug-name (str "rack-macro-control-" id)
-          :plock-any (if has-locks 1 0)
-          :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+          :plock-any #'rm.has-locks
+          :on-right-click (lambda (event) (pc/open-target-plock-menu event target rm.has-locks))
           (knob-number :debug-name (str "rack-macro-knob-" id)
             :value #'rm.value :min 0 :max 1 :decimals 2
             :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
-            :plock-active (if rm.locked 1 0)
-            :plock-default (if rm.locked #'rm.base #'rm.value)
+            :plock-active #'rm.locked
+            :plock-default #'rm.base
             :plock-color-r (pc/param-plock-color-r)
             :plock-color-g (pc/param-plock-color-g)
             :plock-color-b (pc/param-plock-color-b)
@@ -695,7 +697,11 @@
           (number-picker :debug-name "instrument-base-note" :width 3.5 :height 0.7
             :noui true :font-size 9 :decimals 0 :step 1
             :value (pc/fx-param-value p) :min (get p :min) :max (get p :max)
-            :text-color (pc/param-plock-text-color false p)
+            :text-color :dim
+            :plock-active (pc/param-plock-active-prop false p)
+            :plock-color-r (pc/param-plock-color-r)
+            :plock-color-g (pc/param-plock-color-g)
+            :plock-color-b (pc/param-plock-color-b)
             :on-change (lambda (v) (pc/fx-set-instrument-value p v)))))
       (box :width 0 :height 0))))
 

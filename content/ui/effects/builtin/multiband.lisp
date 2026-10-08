@@ -17,12 +17,10 @@
    fx-toggle-effect-value
    instrument-param-base-value
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
-   param-plock-default
-   param-plock-text-color))
+   param-plock-default))
 (import eseq.effects.param-grid :refer (fx-param-grid))
 (import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
 
@@ -59,8 +57,8 @@
     :mod-offset (eseq.effects.param-controls/param-mod-offset p)
     :mod-scale (eseq.effects.param-controls/param-mod-scale p)
     :font-size 9.0 :label-font-size 8.0
-    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :text-color :dim :label-color :dim
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-default (eseq.effects.param-controls/param-plock-default fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -75,8 +73,8 @@
     :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
-    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :text-color :dim :label-color :dim
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-default (eseq.effects.param-controls/param-plock-default fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -90,7 +88,7 @@
     (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals decimals :unit unit-text
     :noui true :font-size 9.0 :text-color color
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -118,7 +116,7 @@
     :width w :height 1.0 :padding 0 :font-size 8.0
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (button-on) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

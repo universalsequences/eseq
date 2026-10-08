@@ -105,7 +105,7 @@
   (section-of (rt/custom-ui-scope-name) 0))
 
 (def set-selected-section-for-scope (scope-name section)
-  (select-section! scope-name section))
+  (select-section! scope-name section 0))
 
 (def custom-ui-select-section-in-scope (scope section)
   (set-selected-section-for-scope (get scope :name) section))

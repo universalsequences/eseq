@@ -109,6 +109,22 @@ pub struct UiWorkCounters {
     pub relayout_subtree: u64,
 }
 
+impl UiWorkCounters {
+    /// The work done since the `before` snapshot.
+    pub fn since(&self, before: &Self) -> Self {
+        Self {
+            full_buffer_reruns: self.full_buffer_reruns.saturating_sub(before.full_buffer_reruns),
+            subtree_reruns: self.subtree_reruns.saturating_sub(before.subtree_reruns),
+            reevaluated_subtree_roots: self
+                .reevaluated_subtree_roots
+                .saturating_sub(before.reevaluated_subtree_roots),
+            relayout_reused: self.relayout_reused.saturating_sub(before.relayout_reused),
+            relayout_full: self.relayout_full.saturating_sub(before.relayout_full),
+            relayout_subtree: self.relayout_subtree.saturating_sub(before.relayout_subtree),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
     pub changed: bool,

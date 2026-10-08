@@ -71,9 +71,13 @@
   (let ((entry (first (filter |item| (= (get item :scope) scope) section-choice.sections))))
     (if entry (get entry :section) default)))
 
-;; Select `section` in `scope` (a no-op when it is selected already).
-(def select-section! (scope section)
-  (unless (= (section-of scope nil) section)
+;; Select `section` in `scope` (a no-op when it is selected already, or when
+;; `scope` has no entry and `section` is the `default` it displays). The
+;; sections are read by value in the *fx* root, so a write re-runs it: a
+;; custom UI selects its knob's section on every edit, and storing the
+;; default on a scope's first touch re-ran the buffer on that first drag.
+(def select-section! (scope section &optional (default nil))
+  (unless (= (section-of scope default) section)
     (set! section-choice.sections
       (cons (dict :scope scope :section section)
         (filter |item| (not (= (get item :scope) scope)) section-choice.sections)))))

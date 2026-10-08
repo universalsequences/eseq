@@ -116,6 +116,8 @@ pub(crate) fn sync_reactive_tick(
         &mut ctx.frame.watched_sampler_voice_ids,
     );
     let reactive_sync_started = Instant::now();
+    let sync_work_before = ui_profile_enabled().then(|| editor.runtime_mut().ui_work_counters());
+    let mut sync_mark = SyncMark::start();
     {
         let playing = ctx.shared.state.transport.playing.load(Ordering::Relaxed);
         let bpm = ctx.shared.state.transport.bpm.load(Ordering::Relaxed);
@@ -263,6 +265,7 @@ pub(crate) fn sync_reactive_tick(
         let mut refresh_visible_sequencer_after_cycle = false;
         let mut refresh_visible_mixer_after_cycle = false;
         let mut refresh_visible_samples_after_cycle = false;
+        sync_mark.checkpoint("pre-invalidations");
         let typed_invalidations = ctx.shared.ui_invalidations.drain();
         if apply_ui_invalidations(
             typed_invalidations,
@@ -278,6 +281,7 @@ pub(crate) fn sync_reactive_tick(
         ) {
             needs_reactive_cycle = true;
         }
+        sync_mark.checkpoint("apply-invalidations");
         // Edit-focus refresh (clip-edit-target spec 3): project the
         // App-resolved target into the cell the `seq-piano-roll-action`
         // native reads. The piano roll's own fields are host kinds
@@ -411,6 +415,7 @@ pub(crate) fn sync_reactive_tick(
             }
             needs_reactive_cycle = true;
         }
+        sync_mark.checkpoint("invalidations-to-epoch");
         let ui_ep = ctx.shared.ui_epoch.load(Ordering::Relaxed);
         if ui_ep != ctx.frame.prev_ui_epoch {
             if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
@@ -481,6 +486,7 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_ui_epoch = ui_ep;
             needs_reactive_cycle = true;
         }
+        sync_mark.checkpoint("ui-epoch");
         {
             let analysis_generation = app.sample_analysis.cache().generation();
             if analysis_generation != ctx.frame.prev_sampler_analysis_generation {
@@ -634,6 +640,7 @@ pub(crate) fn sync_reactive_tick(
             needs_reactive_cycle = true;
         }
 
+        sync_mark.checkpoint("epoch-to-cycle");
         if needs_reactive_cycle {
             let profile_cycle = profile_pattern_reactive_cycle;
             let cycle_total_started = Instant::now();
@@ -662,6 +669,11 @@ pub(crate) fn sync_reactive_tick(
                 refresh_samples_elapsed = started.elapsed();
             }
             editor.mark_needs_redraw();
+            note_sync_phase("reactive-cycle", reactive_elapsed);
+            note_sync_phase("side-effects", side_effects_elapsed);
+            note_sync_phase("refresh-sequencer", refresh_seq_elapsed);
+            note_sync_phase("refresh-mixer", refresh_mixer_elapsed);
+            note_sync_phase("refresh-samples", refresh_samples_elapsed);
             if profile_cycle {
                 eprintln!(
                     "[pattern-switch-profile][reactive-cycle] total={:.2}ms reactive={:.2}ms side_effects={:.2}ms refresh_seq={:.2}ms refresh_mixer={:.2}ms refresh_samples={:.2}ms refresh_seq_flag={} refresh_mixer_flag={} refresh_samples_flag={}",
@@ -694,13 +706,19 @@ pub(crate) fn sync_reactive_tick(
         modulator_phases: &ctx.meters.cached_modulator_phases,
         modulator_levels: &ctx.meters.cached_modulator_levels,
     };
+    sync_mark.checkpoint("reactive-cycle-total");
     let host_kinds = &mut ctx.frame.host_kinds;
     host_kinds.set_plock_preview(ctx.gesture.preview_plock_variant.as_ref());
-    if host_kinds.sync(app, editor.runtime_mut(), ctx.shared, &meters) {
+    let kinds_changed = host_kinds.sync(app, editor.runtime_mut(), ctx.shared, &meters);
+    sync_mark.checkpoint("host-kinds");
+    if kinds_changed {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }
-    ui_loop_stats.note_sync(reactive_sync_started.elapsed());
+    sync_mark.checkpoint("host-kinds-side-effects");
+    let work = sync_work_before.map(|before| editor.runtime_mut().ui_work_counters().since(&before));
+    ui_loop_stats.note_sync(reactive_sync_started.elapsed(), work);
+
 }
 
 /// Drop a p-lock variant preview (`GestureState::preview_plock_variant`)

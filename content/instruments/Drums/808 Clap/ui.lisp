@@ -32,7 +32,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 
 ;; A named region shares its visible SDF with a larger independent grab area.

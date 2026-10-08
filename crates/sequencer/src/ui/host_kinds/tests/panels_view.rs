@@ -452,6 +452,34 @@ fn adsr_gesture_flags_are_per_scope_and_a_drag_only_repaints() {
     assert_eq!(h.buffer_tree("*adsr-triton*").1, triton_revision);
 }
 
+/// A custom UI selects its knob's section on every edit
+/// (`custom-ui-param-change-callback-s`), and the sections are read by value
+/// in the *fx* root. A scope never clicked shows section 0 without storing
+/// it, so its first knob touch must not store it either: that write re-ran
+/// the whole buffer on the first drag. A real switch still re-renders.
+#[test]
+fn a_custom_ui_knob_touch_in_the_shown_section_reruns_nothing() {
+    let mut h = distro();
+    h.eval_all(
+        r#"(effect-buffer "*sections*"
+             (label (str (eseq.effects.state/section-of "syn" 0))))"#,
+    );
+    h.show_all();
+    let touch = |h: &mut Harness, section: i32| {
+        let before = h.rt().ui_work_counters();
+        h.eval_all(&format!(
+            "(eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (dict :name \"syn\") {section})"
+        ));
+        h.show_all();
+        h.rt().ui_work_counters().full_buffer_reruns - before.full_buffer_reruns
+    };
+    assert_eq!(touch(&mut h, 0), 0, "the first touch, in the shown section");
+    assert_eq!(touch(&mut h, 0), 0);
+    assert_eq!(touch(&mut h, 2), 1, "a switch re-renders");
+    assert_eq!(touch(&mut h, 2), 0);
+    assert_eq!(touch(&mut h, 0), 1, "and back");
+}
+
 /// Track 2's Filter and its cutoff param (`flt`, `cutoff`), and the
 /// cutoff's instance.
 fn filter_cutoff(h: &mut Harness) -> InstanceId {
@@ -499,6 +527,55 @@ fn editing_a_param_repaints_without_rebuilding_the_panels() {
     assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
 }
 
+/// A param's first p-lock (a drag with a step selected) lights its knob's
+/// presence dot through the wrapper box's bound `:plock-any`: the wrapper
+/// evaluates outside the knob's subtree (an instrument's in the *fx* root
+/// itself), so reading has-locks there by value re-ran the whole buffer and
+/// relaid it out from the root on that first edit.
+#[test]
+fn a_first_p_lock_lights_the_dot_without_rerunning_the_fx_buffer() {
+    let mut h = sampler_with_filter();
+    let cutoff = filter_cutoff(&mut h);
+    h.eval_all(
+        "(def smp (first (filter (lambda (d) (= d.slot -1)) t2.devices))) \
+         (def start (first (filter (lambda (p) (= p.name \"start\")) smp.params)))",
+    );
+    let start = h.panel_instance("start");
+    h.shared.selected_steps.lock().unwrap().insert(0);
+    h.sync();
+    h.show_all();
+    let dot = |h: &Harness, param: InstanceId| {
+        read_float_slot(&h.bound_slot("plock-any", param, "has-locks").0)
+    };
+    // The first lock mints a step variant, so the variant views (the
+    // *step* p-lock table, the accent's sync) follow it; the panels must not.
+    h.eval_all("(rerender-log! true)");
+    for (param, lock) in [
+        (start, "(lock-param! start (list (nth t2.steps 0)) 40)"),
+        (cutoff, "(lock-param! cutoff (list (nth t2.steps 0)) 1234)"),
+    ] {
+        assert_eq!(dot(&h, param), 0.0, "{lock}: no lock yet");
+        h.rerender_reasons();
+        h.eval_all(lock);
+        h.drain_and_sync();
+        h.show_all();
+        assert_eq!(dot(&h, param), 1.0, "{lock}: the dot lights");
+        let fx: Vec<String> = h
+            .rerender_reasons()
+            .into_iter()
+            .filter(|line| line.contains("(*fx*)"))
+            .collect();
+        assert!(
+            !fx.iter().any(|line| line.contains("effect (*fx*)")),
+            "{lock}: the *fx* buffer re-ran: {fx:?}"
+        );
+        assert!(
+            !fx.iter().any(|line| line.contains(".has-locks")),
+            "{lock}: the dot re-rendered instead of repainting: {fx:?}"
+        );
+    }
+}
+
 /// eseq-0l17.82: adding or removing an effect rebuilds the panels, which
 /// lay out from the track's devices.
 #[test]
@@ -541,17 +618,43 @@ impl Harness {
     /// The `:value-index` slot of the dropdown in the *fx* buffer bound to
     /// `param`'s value, and the buffer's revision.
     fn option_slot(&self, param: InstanceId) -> (Arc<std::sync::atomic::AtomicU64>, u64) {
+        self.bound_slot("value-index", param, "value")
+    }
+
+    /// The slot of the *fx* buffer widget whose `prop` binds `param`'s
+    /// `field`, and the buffer's revision.
+    fn bound_slot(
+        &self,
+        prop: &str,
+        param: InstanceId,
+        field: &str,
+    ) -> (Arc<std::sync::atomic::AtomicU64>, u64) {
         let (fx, revision) = self.buffer_tree("*fx*");
-        let mut dropdowns = Vec::new();
-        widgets_with_prop(&fx, "value-index", &mut dropdowns);
-        let dropdown = dropdowns
+        let mut widgets = Vec::new();
+        widgets_with_prop(&fx, prop, &mut widgets);
+        let widget = widgets
             .iter()
-            .find(|props| bound(props, "value-index") == Some((param, "value".to_string())))
-            .unwrap_or_else(|| panic!("a dropdown binds the option param's value"));
-        let Value::ReactiveRef { slot, .. } = &dropdown["value-index"] else {
+            .find(|props| bound(props, prop) == Some((param, field.to_string())))
+            .unwrap_or_else(|| panic!("a widget's {prop} binds the param's {field}"));
+        let Value::ReactiveRef { slot, .. } = &widget[prop] else {
             unreachable!("bound")
         };
         (slot.clone(), revision)
+    }
+
+    /// The re-render reasons logged since the last call (turn the log on
+    /// with `(rerender-log! true)`).
+    fn rerender_reasons(&mut self) -> Vec<String> {
+        let Value::List(reasons) = self.eval_all("(rerender-reasons)") else {
+            panic!("rerender-reasons is a list")
+        };
+        reasons
+            .iter()
+            .filter_map(|reason| match &*reason.borrow() {
+                Value::String(line) => Some(line.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn panel_instance(&mut self, code: &str) -> InstanceId {
@@ -645,4 +748,102 @@ fn a_synced_delay_time_edit_rebuilds_no_panel() {
     h.show_all();
     assert_eq!(read_float_slot(&slot), target, "the division follows the edit");
     assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
+}
+
+/// A knob drag while playing and recording latches a live print and prints
+/// its value onto the steps the playhead passes, minting and relabeling
+/// variants as it goes. The latch shows through the wrapper box's bound
+/// `:selected` (the print overlay) and the dot through `:plock-any`, so
+/// starting or ending it re-renders nothing; a printed step re-renders the
+/// knob's own subtree and, in *step*, the variant strip and the changed
+/// chip, never the *fx* root or the whole p-lock panel.
+#[test]
+fn a_live_print_drag_rerenders_neither_the_fx_root_nor_the_plock_panel() {
+    use crate::step_print::{tick_step_print, try_latch_param_print, PrintTarget};
+    let mut h = sampler_with_filter();
+    let _ = filter_cutoff(&mut h);
+    h.eval_all(
+        "(def smp (first (filter (lambda (d) (= d.slot -1)) t2.devices))) \
+         (def start (first (filter (lambda (p) (= p.name \"start\")) smp.params)))",
+    );
+    let start = num(h.eval_all("start.index")) as usize;
+    let slot_idx = num(h.eval_all("flt.slot")) as usize;
+    let cutoff = num(h.eval_all("cutoff.index")) as usize;
+    h.set_playing(true);
+    h.shared.recording.store(true, Ordering::Relaxed);
+    h.shared.state.transport.track_playheads[2].store(0, Ordering::Relaxed);
+    h.sync();
+    h.show_all();
+    h.eval_all("(rerender-log! true)");
+    for (name, target) in [
+        ("start", PrintTarget::Instrument { param_idx: start }),
+        ("cutoff", PrintTarget::Effect { slot_idx, param_idx: cutoff }),
+    ] {
+        h.rerender_reasons();
+        assert!(try_latch_param_print(&h.shared, 2, &[(target, 0.4)]));
+        h.drain_and_sync();
+        h.show_all();
+        assert_eq!(h.rerender_reasons(), Vec::<String>::new(), "{name}: the latch only repaints");
+        for step in 1..4u32 {
+            h.shared.state.transport.track_playheads[2].store(step, Ordering::Relaxed);
+            tick_step_print(&mut h.app, &h.shared);
+            h.drain_and_sync();
+            h.show_all();
+            let lines = h.rerender_reasons();
+            assert!(
+                !lines.iter().any(|line| line.contains("effect (*fx*)")
+                    || line.contains("step-track-plocks-panel")),
+                "{name} step {step}: {lines:?}"
+            );
+        }
+        h.shared.step_print.lock().unwrap().disarm();
+        h.drain_and_sync();
+        h.show_all();
+        assert_eq!(h.rerender_reasons(), Vec::<String>::new(), "{name}: the disarm only repaints");
+    }
+}
+
+/// Playing over p-locked steps (eseq-rpuh): a knob binds its lock
+/// state (`:plock-active` to param.locked, `:plock-default` to param.base)
+/// and colors its own value text while locked, so the playhead crossing into
+/// and out of a locked step repaints the knob instead of re-rendering it.
+/// By value, every locked knob of an open panel re-rendered each time. One
+/// instrument knob (the sampler's decay) and one builtin effect knob (the
+/// Filter's cutoff).
+#[test]
+fn playing_over_locked_steps_repaints_the_knobs() {
+    let mut h = sampler_with_filter();
+    let cutoff = filter_cutoff(&mut h);
+    h.eval_all(
+        "(def smp (first (filter (lambda (d) (= d.slot -1)) t2.devices))) \
+         (def decay (first (filter (lambda (p) (= p.name \"decay\")) smp.params))) \
+         (lock-param! decay (list (nth t2.steps 0)) (* 0.5 (+ decay.min decay.max))) \
+         (lock-param! cutoff (list (nth t2.steps 0)) 1234)",
+    );
+    h.drain_and_sync();
+    let decay = h.panel_instance("decay");
+    let lock_slot = |h: &Harness, param: InstanceId| h.bound_slot("plock-active", param, "locked").0;
+    // Steps 0 (locked) and 2 (not) trigger: an off step holds the lock
+    // before it, so the playhead reaching step 2 drops the lock.
+    let pattern = &h.shared.state.pattern.patterns[2];
+    pattern.set_step_active(0, true);
+    pattern.set_step_active(2, true);
+    h.play_panels_at(2, 0);
+    let (decay_lock, cutoff_lock) = (lock_slot(&h, decay), lock_slot(&h, cutoff));
+    h.eval_all("(rerender-log! true)");
+    h.rerender_reasons();
+    for (step, locked) in [(2, 0.0), (0, 1.0), (2, 0.0)] {
+        h.play_panels_at(2, step);
+        assert_eq!(read_float_slot(&decay_lock), locked, "step {step}: decay");
+        assert_eq!(read_float_slot(&cutoff_lock), locked, "step {step}: cutoff");
+        let fx: Vec<String> = h
+            .rerender_reasons()
+            .into_iter()
+            .filter(|line| line.contains("(*fx*)"))
+            .collect();
+        assert!(
+            !fx.iter().any(|line| line.contains(".locked") || line.contains(".has-locks")),
+            "step {step}: a knob re-rendered on its lock state: {fx:?}"
+        );
+    }
 }

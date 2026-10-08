@@ -175,8 +175,8 @@
         :mod-range-9-slot (pc/instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (pc/instrument-param-knob-mod-depth-prop p 9)
         :selected-mod-slot (pc/instrument-selected-mod-slot-prop p)
         :font-size 10.5 :label-font-size 10
-        :text-color (pc/param-plock-text-color false p) :label-color :dim
-        :plock-active (if (pc/param-plock-active? false p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (pc/param-plock-active-prop false p)
         :plock-default (pc/param-plock-default false p)
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
@@ -196,8 +196,8 @@
           :noui true
           :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 1
           :font-size 10.5
-          :text-color (pc/param-plock-text-color false p) :edit-color :yellow
-          :plock-active (if (pc/param-plock-active? false p) 1 0)
+          :text-color :dim :edit-color :yellow
+          :plock-active (pc/param-plock-active-prop false p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
@@ -214,7 +214,7 @@
         :background-color (if (pc/fx-param-on? p) :control-on-bg :sampler-toggle-off-bg)
         :color (if (pc/fx-param-on? p) :control-on-fg :dim)
         :border-color :transparent
-        :plock-active (if (pc/param-plock-active? false p) 1 0)
+        :plock-active (pc/param-plock-active-prop false p)
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
@@ -231,7 +231,7 @@
         :bg-color :sampler-dropdown-bg
         :border-color :gray
         :border-width 0.05
-        :plock-active (if (pc/param-plock-active? false p) 1 0)
+        :plock-active (pc/param-plock-active-prop false p)
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
@@ -300,7 +300,7 @@
     :active-color :yellow
     :border-color :transparent
     :color :dim
-    :plock-active (if (pc/param-plock-active? false mode) 1 0)
+    :plock-active (pc/param-plock-active-prop false mode)
     :plock-color-r (pc/param-plock-color-r)
     :plock-color-g (pc/param-plock-color-g)
     :plock-color-b (pc/param-plock-color-b)
@@ -380,8 +380,8 @@
           :mod-range-9-slot (pc/instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (pc/instrument-param-knob-mod-depth-prop p 9)
           :selected-mod-slot (pc/instrument-selected-mod-slot-prop p)
           :font-size 10.5 :label-font-size 10
-          :text-color (pc/param-plock-text-color false p) :label-color :dim
-          :plock-active (if (pc/param-plock-active? false p) 1 0)
+          :text-color :dim :label-color :dim
+          :plock-active (pc/param-plock-active-prop false p)
           :plock-default (pc/param-plock-default false p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)

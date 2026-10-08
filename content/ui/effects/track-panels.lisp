@@ -199,7 +199,7 @@
         (color (if v v.color (plock-base-color)))
         (current (= selection.plock-variant chip-label))
         (c (color-rgba color 1.0)))
-    (box :key (str "track-plock-chip-" (if v "variant" "def") "-" chip-label)
+    (box :debug-name (str "track-plock-chip-" (if v "variant" "def") "-" chip-label)
       :height 1.0
       :width 4.00
       :align :baseline
@@ -321,10 +321,17 @@
           (label "p-locks" :height 1 :bg :transparent :color :dim :font-size 8)
           )
         
-        (wrap :key "track-plock-variant-strip"
-          :width :fill :gap 0.18 :row-gap 0.04 :align :start
-          ;; The def chip (nil), then the track's variants.
-          (each (if t (cons nil t.variants) (list)) |v idx| (plock-chip v)))
+        ;; Variants mint and relabel live while a drag prints locks, so the
+        ;; strip is a subtree (the variant list re-renders it, not the lock
+        ;; table) and each chip one of its own, keyed by its variant (a
+        ;; variant's color or name re-renders its chip; a new variant
+        ;; reuses the others).
+        (subtree :key "track-plock-variant-strip"
+          (wrap :width :fill :gap 0.18 :row-gap 0.04 :align :start
+            ;; The def chip (nil), then the track's variants.
+            (each (if t (cons nil t.variants) (list)) |v idx|
+              (subtree :key (if v (list "track-plock-chip-variant" v) "track-plock-chip-def")
+                (plock-chip v)))))
         (if (> (len selection.plock-rows) 0)
           (v-stack :key "track-plock-table" :width :fill :gap 0.1
             (h-stack :key "track-plock-table-header" :width :fill :gap plock-col-gap

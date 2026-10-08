@@ -43,7 +43,8 @@
         custom-ui-param-base-max-prop
         custom-ui-param-plock-active?
         custom-ui-param-plock-default
-        custom-ui-param-plock-text-color
+        custom-ui-param-plock-active-prop
+        custom-ui-param-knob-text-color
         custom-ui-param-mod-highlighted?
         custom-ui-param-knob-mod-slot-prop
         custom-ui-param-knob-mod-depth-prop
@@ -279,10 +280,13 @@
 (def custom-ui-param-plock-default (p)
   (pc/param-plock-default (param-fx p) p))
 
-;; P-lock colour, else the process accent when a step process is mapped to
-;; this param (eseq-p1kg), else `:dim`.
-(def custom-ui-param-plock-text-color (p)
-  (pc/param-process-text-color (param-fx p) p))
+;; A knob's bound lock state and lock-free text color (pc/param-plock-active-prop).
+(def custom-ui-param-plock-active-prop (p)
+  (pc/param-plock-active-prop (param-fx p) p))
+
+(def custom-ui-param-knob-text-color (p)
+  (pc/param-knob-text-color (param-fx p) p))
+
 
 ;; Process effective value / clamp flag for the knob dot and picker bar
 ;; (eseq-p1kg); see `pc/param-process-value`.

@@ -16,7 +16,6 @@
 (import eseq.effects.param-controls :refer
   (fx-param-on-for?
    fx-set-effect-value
-   param-plock-active?
    param-plock-color-r
    param-plock-color-g
    param-plock-color-b))
@@ -76,7 +75,7 @@
         :value-index (eseq.effects.param-controls/param-option-index fx mode-p)
                       :options (get mode-p :options)
                       :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx mode-p v))
-                      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx mode-p) 1 0)
+                      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx mode-p)
                       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
                       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
                       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -92,7 +91,7 @@
                   (dropdown :value (eseq.effects.builtin.filter-core/builtin-fx-filter-sync-label fx lfo-sync-p)
                     :options '("free" "sync")
                     :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx lfo-sync-p (if (= v "sync") 1 0)))
-                    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx lfo-sync-p) 1 0)
+                    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx lfo-sync-p)
                     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
                     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
                     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

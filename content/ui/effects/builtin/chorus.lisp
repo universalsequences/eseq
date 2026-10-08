@@ -43,10 +43,10 @@
             :mod-range-2-slot (pc/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (pc/param-knob-mod-depth-prop fx p 2)
             :mod-range-3-slot (pc/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (pc/param-knob-mod-depth-prop fx p 3)
             :selected-mod-slot (pc/param-selected-mod-slot-prop fx p)
-            :plock-active (if (pc/param-plock-active? fx p) 1 0)
+            :plock-active (pc/param-plock-active-prop fx p)
             :plock-default (pc/param-plock-default fx p)
             :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
-            :text-color (pc/param-plock-text-color fx p) :label-color :dim
+            :text-color :dim :label-color :dim
             :color :blue :font-size 9.5 :label-font-size 9
             :width 7.0 :height 3.15 :knob-size 2.0
             :on-change |v| (pc/param-set-control-value fx p v)))))))

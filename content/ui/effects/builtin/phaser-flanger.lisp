@@ -25,12 +25,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value
    param-set-option))
@@ -77,8 +75,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -103,8 +101,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 7.5
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -121,7 +119,7 @@
       :background-color (if selected (mode-on-color) :mixer-control-bg)
       :color (if selected :black :dim)
     :border-color :transparent
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -165,8 +163,8 @@
         (label "ntch" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
           :min 1 :max 12 :step 1 :decimals 0
-          :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :noui true :font-size 9.5 :text-color :dim
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -181,7 +179,7 @@
         :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-option fx p v))
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -205,7 +203,7 @@
 
 (def mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
   (box :width 16.0 :height 9.55 :padding 0.36
-       :background-color :bg :corner-radius 16
+       :background-color :mixer-control-bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
       (mode-row fx mode-p)
@@ -219,7 +217,7 @@
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -231,7 +229,7 @@
     :background-color (if (= current label-text) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (= current label-text) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -266,7 +264,7 @@
     :background-color (if (= current label-text) (wave-on-color) :mixer-control-bg)
     :color (if (= current label-text) :black :dim)
     :border-color :transparent
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -283,7 +281,7 @@
 
 (def lfo-box (fx sync-p rate-p div-p shape-p)
   (box :width 10.6 :height 9.55 :padding 0.30
-       :background-color :bg :corner-radius 16
+       :background-color :mixer-control-bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (label "LFO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (sync-button fx sync-p)
@@ -302,7 +300,7 @@
     :width 1.45 :height 1.05 :padding 0 :font-size 9.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -310,7 +308,7 @@
 
 (def sweep-box (fx amount-p feedback-p invert-p stereo-p)
   (box :width 10.0 :height 9.55 :padding 0.36
-       :background-color :bg :corner-radius 7
+       :background-color :mixer-control-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "SWEEP" :font-size 8.0 :width 9.0 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
@@ -325,7 +323,7 @@
 
 (def out-box (fx warmth-p mix-p output-p)
   (box :width 5.3 :height 9.55 :padding 0.30
-       :background-color :bg :corner-radius 7
+       :background-color :mixer-control-bg :corner-radius 7
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
       (parameter-knob fx "output" output-p 1)

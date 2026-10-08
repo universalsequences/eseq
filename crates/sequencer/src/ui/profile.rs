@@ -1,5 +1,59 @@
 use super::*;
 
+/// A sync slower than this prints its phases (`ESEQLISP_PROFILE_UI`).
+const SLOW_SYNC: Duration = Duration::from_millis(16);
+/// Phases shorter than this are left off the slow-sync line.
+const LISTED_PHASE: Duration = Duration::from_micros(500);
+
+thread_local! {
+    /// The current reactive sync's phases, in the order they ran: the
+    /// reactive tick and the host kinds record them, `UiLoopStats::note_sync` prints them
+    /// when the sync was slow and clears them either way.
+    static SYNC_PHASES: std::cell::RefCell<Vec<(&'static str, Duration)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn ui_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_PROFILE_UI").is_some())
+}
+
+/// Record one phase of the current reactive sync (a no-op unless profiling).
+pub(crate) fn note_sync_phase(name: &'static str, elapsed: Duration) {
+    if ui_profile_enabled() {
+        SYNC_PHASES.with(|phases| phases.borrow_mut().push((name, elapsed)));
+    }
+}
+
+/// A running phase timer over the current reactive sync; reads no clock
+/// unless profiling.
+pub(crate) struct SyncMark(Option<Instant>);
+
+impl SyncMark {
+    pub(crate) fn start() -> Self {
+        Self(ui_profile_enabled().then(Instant::now))
+    }
+
+    /// Record the time since the last checkpoint as phase `name`.
+    pub(crate) fn checkpoint(&mut self, name: &'static str) {
+        if let Some(mark) = &mut self.0 {
+            note_sync_phase(name, mark.elapsed());
+            *mark = Instant::now();
+        }
+    }
+}
+
+/// Run `f` as one phase of the current reactive sync.
+pub(crate) fn sync_phase<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    if !ui_profile_enabled() {
+        return f();
+    }
+    let started = Instant::now();
+    let value = f();
+    note_sync_phase(name, started.elapsed());
+    value
+}
+
 pub(crate) struct UiLoopStats {
     pub(crate) benchmark: ui_benchmark::UiBenchmark,
     enabled: bool,
@@ -28,7 +82,7 @@ impl UiLoopStats {
     pub(crate) fn new() -> Self {
         Self {
             benchmark: ui_benchmark::UiBenchmark::default(),
-            enabled: std::env::var_os("ESEQLISP_PROFILE_UI").is_some(),
+            enabled: ui_profile_enabled(),
             window_start: Instant::now(),
             events: 0,
             syncs: 0,
@@ -76,10 +130,30 @@ impl UiLoopStats {
         self.maybe_emit();
     }
 
-    pub(crate) fn note_sync(&mut self, elapsed: Duration) {
+    /// One reactive sync took `elapsed`; `work` is the UI work counters'
+    /// change over it (what re-ran and relaid out), for the slow-sync line.
+    pub(crate) fn note_sync(
+        &mut self,
+        elapsed: Duration,
+        work: Option<eseqlisp::runtime::UiWorkCounters>,
+    ) {
         self.benchmark.note_sync();
+        let phases = SYNC_PHASES.with(|phases| std::mem::take(&mut *phases.borrow_mut()));
         if !self.enabled {
             return;
+        }
+        if elapsed >= SLOW_SYNC {
+            let listed = phases
+                .iter()
+                .filter(|(_, phase)| *phase >= LISTED_PHASE)
+                .map(|(name, phase)| format!("{name}={:.2}ms", duration_ms(*phase)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let work = work.map_or(String::new(), |work| format!(" {work:?}"));
+            eprintln!(
+                "[ui-profile][slow-sync] total={:.2}ms {listed}{work}",
+                duration_ms(elapsed)
+            );
         }
         self.reactive_sync += elapsed;
         self.last_sync = elapsed;

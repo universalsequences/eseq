@@ -9380,11 +9380,16 @@ use panel_kinds_seed::*;
         editor.set_active_buffer(buffer_id);
         editor.set_layout_viewport(180, 20);
 
+        // The print overlay is the wrapper box's bound :selected state (its
+        // selected colors), so a latch repaints rather than re-renders.
         let print_wrappers = |editor: &mut eseqlisp::Editor| -> usize {
             let layout = editor.widget_layout().expect("overlay layout");
             let mut nodes = Vec::new();
-            collect_layout_nodes_by_debug_name(&layout, "param-print-wrapper", &mut nodes);
-            nodes.len()
+            collect_layout_nodes_by_debug_name(&layout, "param-plock-any-wrapper", &mut nodes);
+            nodes
+                .iter()
+                .filter(|node| layout_prop_number(node, "selected") == Some(1.0))
+                .count()
         };
         let flagged_boxes = |editor: &mut eseqlisp::Editor| -> usize {
             fn walk(node: &eseqlisp::layout::LayoutNode, count: &mut usize) {
@@ -12179,6 +12184,7 @@ use panel_kinds_seed::*;
     fn value_map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<f64> {
         map.get(key).and_then(|value| match &*value.borrow() {
             Value::Number(value) => Some(*value),
+            Value::ReactiveRef { slot, .. } => Some(eseqlisp::reactive::read_float_slot(slot)),
             _ => None,
         })
     }
@@ -20368,9 +20374,11 @@ use panel_kinds_seed::*;
             .expect("p-lock panel should render");
         let table = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-table")
             .expect("p-lock table should render");
-        let variant_strip = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-variant-strip")
+        // The strip and each chip are subtrees (their roots carry the
+        // subtree key); a chip is keyed by its variant, so it is found by name.
+        let variant_strip = find_layout_node_by_stable_key_suffix(&layout, "track-plock-variant-strip")
             .expect("variant strip should render");
-        let current_chip = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-chip-variant-B")
+        let current_chip = find_layout_node_by_debug_name(&layout, "track-plock-chip-variant-B")
             .expect("current variant chip should render");
 
         assert_finite_nonzero_rect(table, "p-lock table");
@@ -39023,7 +39031,13 @@ use panel_kinds_seed::*;
         let Value::List(bands) = &curve.props["bands"] else { panic!("follow bands"); };
         let band = bands[0].borrow();
         let Value::Map(band) = &*band else { panic!("follow band"); };
-        assert_eq!(*band["freq"].borrow(), Value::Number(2000.0));
+        // The band binds Filter 1's cutoff and draws it at the offset's
+        // ratio (:freq-scale), so a moving cutoff only repaints the curve.
+        assert_eq!(
+            value_map_number(band, "freq").zip(value_map_number(band, "freq-scale"))
+                .map(|(freq, scale)| freq * scale),
+            Some(2000.0)
+        );
         let event = Value::Map([
             ("type", Value::Keyword("commit-band".into())),
             ("id", Value::Number(0.0)), ("freq", Value::Number(4000.0)), ("q", Value::Number(1.0)),

@@ -2871,6 +2871,7 @@ impl HostKinds {
             shared: &shared_kinds,
             changed: false,
         };
+        let mut mark = SyncMark::start();
         let revision = ModelRevision::capture(app, &sources);
         let variant_tint = revision.variant_tint;
         let groups_moved = app.groups != self.model_groups;
@@ -2914,52 +2915,53 @@ impl HostKinds {
                 self.model = None;
             }
         }
-        self.sync_device_model(&mut pusher, app);
-        self.refresh_sampler_playheads(&mut pusher, app);
-        self.sync_sampler_media(&mut pusher, app);
-        self.sync_sound_bindings(&mut pusher, app);
-        self.sync_macro_model(&mut pusher, app);
-        self.sync_lane_model(&mut pusher);
-        self.sync_cell_model(&mut pusher, app);
-        self.sync_rack_clips(&mut pusher, app);
-        self.sync_rack_model(&mut pusher, app);
-        self.sync_groove_library(&mut pusher, app);
-        self.sync_song_model(&mut pusher, app);
-        self.sync_song_pushed(&mut pusher, app);
-        self.sync_song_pending(&mut pusher, app);
-        self.sync_governed(&mut pusher, app);
+        mark.checkpoint("kinds-model-due");
+        sync_phase("sync-device-model", || self.sync_device_model(&mut pusher, app));
+        sync_phase("refresh-sampler-playheads", || self.refresh_sampler_playheads(&mut pusher, app));
+        sync_phase("sync-sampler-media", || self.sync_sampler_media(&mut pusher, app));
+        sync_phase("sync-sound-bindings", || self.sync_sound_bindings(&mut pusher, app));
+        sync_phase("sync-macro-model", || self.sync_macro_model(&mut pusher, app));
+        sync_phase("sync-lane-model", || self.sync_lane_model(&mut pusher));
+        sync_phase("sync-cell-model", || self.sync_cell_model(&mut pusher, app));
+        sync_phase("sync-rack-clips", || self.sync_rack_clips(&mut pusher, app));
+        sync_phase("sync-rack-model", || self.sync_rack_model(&mut pusher, app));
+        sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
+        sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
+        sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));
+        sync_phase("sync-song-pending", || self.sync_song_pending(&mut pusher, app));
+        sync_phase("sync-governed", || self.sync_governed(&mut pusher, app));
         let note_syncs = self.shared.borrow().notes.syncs;
-        self.sync_piano_roll(&mut pusher, app);
-        self.sync_graph_model(&mut pusher, app);
-        self.sync_network_model(&mut pusher, app);
-        self.sync_generator_model(&mut pusher, app);
-        self.sync_presented(&mut pusher, app, &variant_tint);
-        self.sync_transport_queue(&mut pusher, app);
-        self.sync_bus_mixer(&mut pusher, app);
-        self.sync_compiling(&mut pusher, app);
-        self.sync_rack_slot(&mut pusher, app);
-        self.sync_plock_rows(&mut pusher, app, &revision);
+        sync_phase("sync-piano-roll", || self.sync_piano_roll(&mut pusher, app));
+        sync_phase("sync-graph-model", || self.sync_graph_model(&mut pusher, app));
+        sync_phase("sync-network-model", || self.sync_network_model(&mut pusher, app));
+        sync_phase("sync-generator-model", || self.sync_generator_model(&mut pusher, app));
+        sync_phase("sync-presented", || self.sync_presented(&mut pusher, app, &variant_tint));
+        sync_phase("sync-transport-queue", || self.sync_transport_queue(&mut pusher, app));
+        sync_phase("sync-bus-mixer", || self.sync_bus_mixer(&mut pusher, app));
+        sync_phase("sync-compiling", || self.sync_compiling(&mut pusher, app));
+        sync_phase("sync-rack-slot", || self.sync_rack_slot(&mut pusher, app));
+        sync_phase("sync-plock-rows", || self.sync_plock_rows(&mut pusher, app, &revision));
         let selection_changed = self.selection.refresh(&sources);
         // The live fields share one read of what several of them derive
         // from (the track selection, the p-lock display steps).
         self.shared.borrow_mut().tick = Some(live::TickMemo::default());
-        self.sync_track_live(&mut pusher, selection_changed);
-        self.sync_send_live(&mut pusher);
-        self.sync_device_live(&mut pusher);
-        self.sync_tensor_live(&mut pusher);
-        self.sync_variant_live(&mut pusher);
-        self.sync_rack_macro_live(&mut pusher);
-        self.sync_lane_live(&mut pusher);
-        self.sync_bus_live(&mut pusher);
-        self.sync_route_live(&mut pusher);
-        self.sync_group_live(&mut pusher);
-        self.sync_cell_live(&mut pusher);
-        self.sync_rack_live(&mut pusher);
-        self.sync_graph_live(&mut pusher);
-        self.sync_table_editor(&mut pusher);
-        self.sync_network_live(&mut pusher);
-        self.sync_generator_live(&mut pusher);
-        self.sync_transport_live(&mut pusher);
+        sync_phase("sync-track-live", || self.sync_track_live(&mut pusher, selection_changed));
+        sync_phase("sync-send-live", || self.sync_send_live(&mut pusher));
+        sync_phase("sync-device-live", || self.sync_device_live(&mut pusher));
+        sync_phase("sync-tensor-live", || self.sync_tensor_live(&mut pusher));
+        sync_phase("sync-variant-live", || self.sync_variant_live(&mut pusher));
+        sync_phase("sync-rack-macro-live", || self.sync_rack_macro_live(&mut pusher));
+        sync_phase("sync-lane-live", || self.sync_lane_live(&mut pusher));
+        sync_phase("sync-bus-live", || self.sync_bus_live(&mut pusher));
+        sync_phase("sync-route-live", || self.sync_route_live(&mut pusher));
+        sync_phase("sync-group-live", || self.sync_group_live(&mut pusher));
+        sync_phase("sync-cell-live", || self.sync_cell_live(&mut pusher));
+        sync_phase("sync-rack-live", || self.sync_rack_live(&mut pusher));
+        sync_phase("sync-graph-live", || self.sync_graph_live(&mut pusher));
+        sync_phase("sync-table-editor", || self.sync_table_editor(&mut pusher));
+        sync_phase("sync-network-live", || self.sync_network_live(&mut pusher));
+        sync_phase("sync-generator-live", || self.sync_generator_live(&mut pusher));
+        sync_phase("sync-transport-live", || self.sync_transport_live(&mut pusher));
         let singletons = [
             (ENGINE, &*ENGINE_LIVE),
             (SONG, &*SONG_LIVE),
@@ -2978,13 +2980,16 @@ impl HostKinds {
         self.sync_selection(&mut pusher, selection_changed);
         self.shared.borrow_mut().tick = None;
         let mut changed = pusher.changed;
+        mark = SyncMark::start();
         if self.shared.borrow().notes.syncs != note_syncs {
             // The notes of a track the piano roll view waits to fit arrive.
             changed |= apply_pending_piano_roll_fit(rt);
         }
+        mark.checkpoint("kinds-piano-roll-fit");
         if changed {
             rt.run_reactive_cycle();
         }
+        mark.checkpoint("kinds-cycle");
         changed
     }
 

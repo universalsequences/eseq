@@ -180,7 +180,11 @@ fn prop_bands(props: &HashMap<String, Value>) -> Vec<ResponseBand> {
             Some(ResponseBand {
                 id: map_num(&map, "id", 0.0).round() as i32,
                 band_type: map_string(&map, "type", "bell"),
-                freq: map_num(&map, "freq", 1_000.0).clamp(band_freq_min, band_freq_max),
+                // `freq-scale` lets a band bind a param and draw at a fixed
+                // ratio of it (a filter that follows another's cutoff), so
+                // the bound value moving repaints instead of re-rendering.
+                freq: (map_num(&map, "freq", 1_000.0) * map_num(&map, "freq-scale", 1.0))
+                    .clamp(band_freq_min, band_freq_max),
                 freq_min: band_freq_min,
                 freq_max: band_freq_max,
                 gain: map_num(&map, "gain", 0.0).clamp(band_gain_min, band_gain_max),

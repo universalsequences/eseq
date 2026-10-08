@@ -28,12 +28,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 
@@ -83,9 +81,9 @@
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
         :track-color :mixer-strip-selected-bg
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -111,9 +109,9 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :track-color :mixer-strip-selected-bg
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -139,7 +137,7 @@
           :noui true :font-size 10.2
           :text-color :accent
           :edit-color :yellow
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -241,7 +239,7 @@
       :options (get p :options)
       :debug-name "reverb-mode-dropdown"
       :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :chevron-color :accent
       :badge-color :none

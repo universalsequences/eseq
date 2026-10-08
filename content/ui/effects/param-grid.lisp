@@ -67,7 +67,7 @@
                    :background-color :transparent
                    :border-color :transparent
                    :color :white
-                   :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                   :plock-active (pc/param-plock-active-prop fx p)
                    :plock-color-r (pc/param-plock-color-r)
                    :plock-color-g (pc/param-plock-color-g)
                    :plock-color-b (pc/param-plock-color-b)
@@ -80,7 +80,7 @@
                 :value-index (pc/param-option-index fx p)
                 :options (get p :options)
                 :on-change (lambda (v) (pc/param-set-option fx p v))
-                :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                :plock-active (pc/param-plock-active-prop fx p)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
@@ -90,8 +90,8 @@
                 :decimals (if (get p :integer-option-fallback) 0 2)
                 :process-value (pc/param-process-value-for fx p)
                 :process-clamped (pc/param-process-clamped-for fx p)
-                :noui true :font-size 12 :text-color (pc/param-process-text-color fx p)
-                :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                :noui true :font-size 12 :text-color (pc/param-knob-text-color fx p)
+                :plock-active (pc/param-plock-active-prop fx p)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
@@ -282,7 +282,7 @@
           :width 4.2 :height 1.05 :padding 0 :font-size 10.0
           :background-color (if (pc/fx-param-on-for? fx p) :control-on-bg :mixer-control-bg)
           :color (if (pc/fx-param-on-for? fx p) :control-on-fg :dim)
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
@@ -302,7 +302,7 @@
           :value-index (pc/param-option-index fx p)
           :options (get p :options)
           :on-change (lambda (v) (pc/param-set-option fx p v))
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
@@ -323,8 +323,8 @@
           :process-value (pc/param-process-value-for fx p)
           :unit (pc/param-control-unit fx p)
           :font-size 10.0 :label-font-size 8.8
-          :text-color (pc/param-process-text-color fx p) :label-color :dim
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :text-color (pc/param-knob-text-color fx p) :label-color :dim
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-default (pc/param-plock-default fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
@@ -353,8 +353,8 @@
             :decimals decimals :unit unit
             :noui true :font-size 10.0
             :text-align :center
-            :text-color (pc/param-plock-text-color fx p) :edit-color :yellow
-            :plock-active (if (pc/param-plock-active? fx p) 1 0)
+            :text-color :dim :edit-color :yellow
+            :plock-active (pc/param-plock-active-prop fx p)
             :plock-color-r (pc/param-plock-color-r)
             :plock-color-g (pc/param-plock-color-g)
             :plock-color-b (pc/param-plock-color-b)

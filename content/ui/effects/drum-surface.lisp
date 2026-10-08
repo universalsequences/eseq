@@ -32,7 +32,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color (ink p) :edit-color (ink p) :cursor-color (ink p)
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p)))))))
 (def knob (spec section)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (nth spec 0) (nth spec 1)

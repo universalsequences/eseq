@@ -38,7 +38,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
@@ -58,7 +58,7 @@
             :value-index-offset (get p :min) :options options
             :text-color ink :chevron-color ink :badge-color :transparent
             :bg-color surface :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -113,15 +113,20 @@
     (subtree :key (str "heat-filter-curve-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
       (let ((mode (round mode))
             (follow (and (= section 6) (> follow 0.5))))
+        ;; Following, the band binds Filter 1's cutoff and draws it at the
+        ;; offset's ratio (:freq-scale): a p-locked cutoff moving under the
+        ;; playhead repaints the curve instead of re-rendering it.
         (let ((frequency (if follow
-                (clamp (* first-cutoff
-                  (pow 2 (eseq.effects.custom-ui-runtime/custom-ui-param-value offset))) 30 22000)
-                (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut))))
+                first-cutoff
+                (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut)))
+              (freq-scale (if follow
+                (pow 2 (eseq.effects.custom-ui-runtime/custom-ui-param-value offset))
+                1)))
           (response-curve-editor :width 20 :height 2.2 :mode :filter
             :debug-name (str "heat-" prefix "-response")
             :bands (map (lambda (id)
               (dict :id id :type (nth '("lowpass" "bandpass" "notch" "highpass") (floor (/ mode 2)))
-                :freq frequency
+                :freq frequency :freq-scale freq-scale
                 :freq-min 30 :freq-max 22000
                 :q (eseq.effects.custom-ui-runtime/custom-ui-param-binding q) :q-min 0.1 :q-max 100 :q-taper :log
                 :q-curve-power (if (or (= mode 1) (= mode 7)) 0.5 1)
@@ -404,7 +409,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 0 p)))))))
 (def heat-screen-num (name title)
   (heat-screen-value name title 2 0.01 false))
@@ -423,7 +428,7 @@
             :value-index-offset (get p :min) :options options
             :text-color (heat-ink) :chevron-color (heat-ink) :badge-color :transparent
             :bg-color (heat-accent) :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

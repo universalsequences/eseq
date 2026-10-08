@@ -41,7 +41,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color text-ink :edit-color text-ink :cursor-color text-ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 (def details (specs section)
   (v-stack :gap 0.15

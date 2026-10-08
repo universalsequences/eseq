@@ -20,12 +20,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
@@ -164,7 +162,7 @@
             :active-color :eq8-active-text
             :color :dim
             :active (get band-map :enabled)
-            :plock-active (if (eseq.effects.param-controls/param-plock-active? fx enabled-p) 1 0)
+            :plock-active (eseq.effects.param-controls/param-plock-active-prop fx enabled-p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -189,8 +187,8 @@
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :track-color :mixer-strip-bg
         :font-size 8.8 :label-font-size 8.6
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -218,7 +216,7 @@
           :border-color :buffer-bg
           :badge-color :eq8-badge-bg
           :chevron-color :black
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx type-p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

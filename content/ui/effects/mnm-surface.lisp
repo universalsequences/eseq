@@ -32,7 +32,7 @@
           :text-align :left
           :text-color (mnm-ink p) :edit-color (mnm-ink p) :cursor-color (mnm-ink p)
           :plock-style :underline
-          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))
 (def mnm-write (scope name value)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))

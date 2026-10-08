@@ -229,15 +229,14 @@ fn custom_controls_keep_owners_across_step_selection() {
                 "{key}"
             );
             assert_eq!(value_map_number(payload, "value"), Some(value), "{key}");
+            // A knob binds its lock state (param.locked): read the binding.
             assert_eq!(
-                control.props.get("plock-active"),
-                Some(&Value::Number(
-                    if is_selected && (!effect_only || target == "effect") {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                )),
+                eseqlisp::widget_render::get_f32_prop(&control.props, "plock-active", f32::NAN),
+                if is_selected && (!effect_only || target == "effect") {
+                    1.0
+                } else {
+                    0.0
+                },
                 "{key} must follow its own lock projection"
             );
             assert!(

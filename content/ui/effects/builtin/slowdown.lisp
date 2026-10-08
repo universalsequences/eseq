@@ -28,10 +28,10 @@
           :mod-range-2-slot (pc/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (pc/param-knob-mod-depth-prop fx p 2)
           :mod-range-3-slot (pc/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (pc/param-knob-mod-depth-prop fx p 3)
           :selected-mod-slot (pc/param-selected-mod-slot-prop fx p)
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-default (pc/param-plock-default fx p)
           :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
-          :text-color (pc/param-plock-text-color fx p) :label-color :dim
+          :text-color :dim :label-color :dim
           :font-size 9.5 :label-font-size 9.0
           :width 5.4 :height 3.15 :knob-size 2.0
           :on-change |v| (pc/param-set-control-value fx p v)))))))
@@ -41,7 +41,7 @@
     (dropdown :value (if (pc/fx-param-on-for? fx p) "Beat sync" "Free time")
       :options '("Beat sync" "Free time")
       :debug-name "slowdown-clock" :width 8.0 :height 1.15 :font-size 10
-      :plock-active (if (pc/param-plock-active? fx p) 1 0)
+      :plock-active (pc/param-plock-active-prop fx p)
       :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
       :on-change |value| (pc/fx-set-effect-value fx p (if (= value "Beat sync") 1 0)))))
 
@@ -56,7 +56,7 @@
           :value (if selected (nth selected 0) "Varispeed")
           :options (map |row| (nth row 0) modes)
           :width 9.6 :height 1.15 :font-size 10
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
           :on-change |label|
             (let ((row (nth (filter |row| (= (nth row 0) label) modes) 0)))
@@ -75,7 +75,7 @@
           :options (if selected (map |row| (nth row 0) divisions)
                      (cons "Custom" (map |row| (nth row 0) divisions)))
           :width 8.0 :height 1.15 :font-size 10
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
           :on-change |label|
             (let ((row (nth (filter |row| (= (nth row 0) label) divisions) 0)))

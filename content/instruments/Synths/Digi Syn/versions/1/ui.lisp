@@ -35,7 +35,7 @@
           :value-index-offset (get p :min) :options options
           :text-color ink :chevron-color ink :badge-color :transparent
           :bg-color surface :border-color :transparent
-          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -86,7 +86,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
@@ -104,9 +104,9 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p)
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p)
             :text-align :left
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

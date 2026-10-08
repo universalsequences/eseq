@@ -64,7 +64,6 @@
         param-plock-color-r
         param-plock-color-g
         param-plock-color-b
-        param-plock-text-color
         param-control-min
         param-control-max
         param-control-unit
@@ -95,7 +94,8 @@
         param-process-clamped-for
         param-process-mapped?
         param-process-mapped-for?
-        param-process-text-color
+        param-plock-active-prop
+        param-knob-text-color
         param-base-min-prop
         param-base-max-prop
         param-selected-mod-slot-prop
@@ -737,6 +737,14 @@
   (let ((prm (dv/param-of fx p)))
     (if prm prm.has-locks false)))
 
+;; The dot as a box's `:plock-any` binding. A wrapper evaluates outside the
+;; knob's subtree (an instrument's in the *fx* root itself), so reading
+;; has-locks there by value re-rendered and relaid out the whole buffer on a
+;; param's first p-lock; bound, the dot only repaints.
+(def param-plock-any-binding (fx p)
+  (let ((prm (dv/param-of fx p)))
+    (if prm #'prm.has-locks false)))
+
 ;; --- Right-click "clear p-locks" menu (bead eseq-1gy6) ---------------------
 ;; One menu shared by every param control: open at the right-click's grid
 ;; point, on the key tuple of the param whose knob was right-clicked (the
@@ -749,9 +757,8 @@
 ;; clicks meant for the real one.
 ;;
 ;; A param with no p-locks has nothing to offer, so its right-click is a no-op
-;; and no empty menu opens. The wrappers only bind :on-right-click on the
-;; branches that already draw a box, which is every branch that can carry the
-;; presence dot; the bare-body fast path stays free of a wrapper.
+;; and no empty menu opens. Every wrapper branch that can carry the presence
+;; dot draws a box with the dot bound and binds :on-right-click on it.
 (def-kind plock-menu
   :key ()
   :state ((open false)
@@ -827,18 +834,41 @@
         :key (str "param-plock-menu-" (get action :id))
         :on-select (lambda (event) (clear-param-plocks (get action :id)))))))
 
-;; Live print latch (bead eseq-4seq): this param is the one being held while
-;; play+record writes its value onto passing steps (param.printing is false
-;; unless the transport plays and records).
-(def param-print-latched? (fx p)
+;; Live print latch (bead eseq-4seq): param.printing marks the param held
+;; while play+record writes its value onto passing steps. The print overlay
+;; is a wrapper box's `:selected` binding (its selected colors are the
+;; overlay), so a latch only repaints: read by value, the wrapper (outside
+;; the knob's subtree) re-ran the *fx* root when a drag started printing and
+;; again when it stopped.
+(def param-print-binding (fx p)
   (let ((prm (dv/param-of fx p)))
-    (if prm prm.printing false)))
+    (if prm #'prm.printing false)))
+
+(def param-print-bg (rgba 0.04 0.20 0.26 0.92))
 
 ;; The value a locked control shows as its unlocked one: the param's own
-;; value.
+;; value, bound. A control draws it only while its lock shows, so it needs
+;; no by-value read of `locked` (which re-rendered the control each time the
+;; playhead crossed into or out of a locked step).
 (def param-plock-default (fx p)
   (let ((prm (dv/param-of fx p)))
-    (if (and prm prm.locked) #'prm.base (fx-param-value-for fx p))))
+    (if prm #'prm.base (fx-param-value-for fx p))))
+
+;; A knob's `:plock-active`, bound to param.locked so playing over locked
+;; steps repaints the knob instead of re-rendering it. The keys and mods
+;; tabs decide it by value (a key lock, or no lock shown), as before; those
+;; are view switches, not per-step changes.
+(def param-plock-active-prop (fx p)
+  (if (or (and (not fx) (instrument-keys-active?)) (param-mods-open? fx))
+    (if (param-plock-active? fx p) 1 0)
+    (let ((prm (dv/param-of fx p)))
+      (if prm #'prm.locked 0))))
+
+;; A knob's value text color when no lock shows: a knob draws its text in
+;; the p-lock color itself while `:plock-active` is set, so this reads no
+;; lock state.
+(def param-knob-text-color (fx p)
+  (if (param-process-mapped-for? fx p) :process-lane-accent :dim))
 
 ;; The p-lock accent: the color of the step variant the selected step plays,
 ;; else the default lock color. One effect (below) follows the current
@@ -867,10 +897,6 @@
 (effect-buffer "*plock-color-sync*"
   (do (sync-plock-color!) nil))
 
-(def param-plock-text-color (fx p)
-  (if (param-plock-active? fx p)
-    (rgba plock-color.r plock-color.g plock-color.b 1.0)
-    :dim))
 
 ;; ── Control ranges and setters ──
 
@@ -1013,7 +1039,7 @@
           :corner-radius 8
           :border-width 0
           :macro-owned 1
-          :plock-any (if (param-plock-any? fx p) 1 0)
+          :plock-any (param-plock-any-binding fx p)
           :capture-pointer true
           :on-click (lambda (info) false)
           :on-right-click (lambda (event) (open-param-plock-menu event fx p))
@@ -1031,45 +1057,42 @@
               :on-right-click (lambda (event) (open-param-plock-menu event fx p))
               body))
           body)
-        ;; Print overlay outranks the mods-tab box: while the knob is being
-        ;; recorded onto passing steps that is the only thing worth saying
-        ;; about it. Same box treatment as macro map mode, p-lock accent.
-        (if (param-print-latched? fx p)
-          (subtree :key (str key "-plock-print")
-            (box :debug-name "param-print-wrapper"
-              :background-color (rgba 0.04 0.20 0.26 0.92)
+        ;; The print overlay (param-print-binding) outranks the mods-tab
+        ;; box's colors: while the knob is being recorded onto passing steps
+        ;; that is the only thing worth saying about it.
+        (if (and (param-mods-open? fx) (get p :modulatable))
+          (subtree :key key
+            (box :background-color (param-mod-bg fx p)
+              :border-color (param-mod-border fx p)
               :corner-radius 8
               :border-width 1
-              :border-color :widget-plock-accent
-              :plock-any (if (param-plock-any? fx p) 1 0)
-              :padding 0
+              :plock-any (param-plock-any-binding fx p)
+              :selected (param-print-binding fx p)
+              :selected-background-color param-print-bg
+              :selected-border-color :widget-plock-accent
+              :padding 0.08
+              :on-double-click (lambda (info) (param-toggle-modulation fx p))
               :on-right-click (lambda (event) (open-param-plock-menu event fx p))
               body))
-          (if (and (param-mods-open? fx) (get p :modulatable))
-            (subtree :key key
-              (box :background-color (param-mod-bg fx p)
-                :border-color (param-mod-border fx p)
-                :corner-radius 8
-                :border-width 1
-                :plock-any (if (param-plock-any? fx p) 1 0)
-                :padding 0.08
-                :on-double-click (lambda (info) (param-toggle-modulation fx p))
-                :on-right-click (lambda (event) (open-param-plock-menu event fx p))
-                body))
-            ;; Neutral state: only pay for a wrapper box when there is a dot
-            ;; to draw on it. That box is also the right-click target: a param
-            ;; with no p-locks has nothing to clear, so the fast path needs no
-            ;; handler either.
-            (if (param-plock-any? fx p)
-              (subtree :key (str key "-plock-any")
-                (box :debug-name "param-plock-any-wrapper"
-                  :background-color :transparent
-                  :corner-radius 8
-                  :border-width 0
-                  :plock-any 1
-                  :on-right-click (lambda (event) (open-param-plock-menu event fx p))
-                  body))
-              body)))))))
+          (param-plock-wrapper fx p body))))))
+
+;; A param control's neutral wrapper: a borderless box carrying the bound
+;; p-lock dot and print overlay, so a param's first p-lock or a print latch
+;; repaints it and re-renders nothing. It is also the right-click target;
+;; the menu reads has-locks when the click lands, a no-op for a param with
+;; nothing to clear.
+(def param-plock-wrapper (fx p body)
+  (box :debug-name "param-plock-any-wrapper"
+    :background-color :transparent
+    :corner-radius 8
+    :border-width 1
+    :border-color :transparent
+    :plock-any (param-plock-any-binding fx p)
+    :selected (param-print-binding fx p)
+    :selected-background-color param-print-bg
+    :selected-border-color :widget-plock-accent
+    :on-right-click (lambda (event) (open-param-plock-menu event fx p))
+    body))
 
 (def fx-param-numeric-value (p)
   (fx-param-numeric-value-for (param-owner-fx p) p))
@@ -1173,13 +1196,6 @@
 (def param-process-clamped (p) (param-process-clamped-for (param-owner-fx p) p))
 (def param-process-mapped? (p) (param-process-mapped-for? (param-owner-fx p) p))
 
-;; P-lock colour wins (the step override is the more specific state); a
-;; process-mapped param otherwise reads in the process accent so the user can
-;; tell it is being generatively driven even while the offset is zero.
-(def param-process-text-color (fx p)
-  (if (param-plock-active? fx p)
-    (rgba plock-color.r plock-color.g plock-color.b 1.0)
-    (if (param-process-mapped-for? fx p) :process-lane-accent :dim)))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
@@ -1270,7 +1286,7 @@
            :corner-radius 8
            :border-width 0
            :macro-owned 1
-           :plock-any (if (param-plock-any? false p) 1 0)
+           :plock-any (param-plock-any-binding false p)
            :capture-pointer true
            :on-click (lambda (info) false)
            :on-right-click (lambda (event) (open-param-plock-menu event false p))
@@ -1288,35 +1304,18 @@
              :on-right-click (lambda (event) (open-param-plock-menu event false p))
           body))
       body)
-    ;; See param-mod-wrapper: printing outranks the mods-tab box.
-    (if (param-print-latched? false p)
-      (subtree :key (str key "-plock-print")
-        (box :debug-name "param-print-wrapper"
-             :background-color (rgba 0.04 0.20 0.26 0.92)
+    ;; See param-mod-wrapper: the boxes bind their dot and print overlay.
+    (if (and instrument-view.mods-open (get p :modulatable))
+      (subtree :key key
+        (box :background-color (instrument-param-mod-bg p)
              :corner-radius 8
              :border-width 1
-             :border-color :widget-plock-accent
-             :plock-any (if (param-plock-any? false p) 1 0)
-             :padding 0
+             :plock-any (param-plock-any-binding false p)
+             :selected (param-print-binding false p)
+             :selected-background-color param-print-bg
+             :selected-border-color :widget-plock-accent
+             :padding 0.08
+             :on-double-click (lambda (info) (param-toggle-modulation false p))
              :on-right-click (lambda (event) (open-param-plock-menu event false p))
           body))
-      (if (and instrument-view.mods-open (get p :modulatable))
-        (subtree :key key
-          (box :background-color (instrument-param-mod-bg p)
-               :corner-radius 8
-               :border-width 1
-               :plock-any (if (param-plock-any? false p) 1 0)
-               :padding 0.08
-               :on-double-click (lambda (info) (param-toggle-modulation false p))
-               :on-right-click (lambda (event) (open-param-plock-menu event false p))
-            body))
-        (if (param-plock-any? false p)
-          (subtree :key (str key "-plock-any")
-            (box :debug-name "param-plock-any-wrapper"
-                 :background-color :transparent
-                 :corner-radius 8
-                 :border-width 0
-                 :plock-any 1
-                 :on-right-click (lambda (event) (open-param-plock-menu event false p))
-              body))
-          body)))))))
+      (param-plock-wrapper false p body))))))
