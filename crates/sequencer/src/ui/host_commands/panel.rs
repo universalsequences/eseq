@@ -25,7 +25,7 @@
 //! each, a value or range drag's `set!`s join one), with its refreshes.
 
 use super::devices::{addressed, lock_steps, Addressed, StepLocks};
-use super::instrument_params::{key_variant_command, sync_instrument_tensor_display};
+use super::instrument_params::key_variant_command;
 use super::step_history::{stamp_step_variant, step_list, variant_edit_applied};
 use super::track_settings::SetValue;
 use super::ScriptEdit;
@@ -56,12 +56,12 @@ pub(super) fn handle(
         return;
     };
     let result = match name {
-        "set-device-tensor" => tensor_edit(map, app, editor, ctx),
+        "set-device-tensor" => tensor_edit(map, app, ctx),
         "stamp-variant" => stamp_variant(map, app, ctx),
         "stamp-key-variant" => stamp_key_variant(map, app, ctx),
         "set-macro" => macro_edit(map, app, ctx),
-        "set-rack-macro" => rack_macro_edit(map, app, editor, ctx),
-        "set-macro-mapping" => mapping_edit(map, app, editor, ctx),
+        "set-rack-macro" => rack_macro_edit(map, app, ctx),
+        "set-macro-mapping" => mapping_edit(map, app, ctx),
         "set-rack-macro-locks" | "clear-rack-macro-locks" => {
             rack_macro_lock_edit(name, map, app, editor, ctx)
         }
@@ -90,7 +90,6 @@ fn track_device(app: &app::App, map: &Payload) -> Result<(usize, DeviceSlot), St
 fn tensor_edit(
     map: &Payload,
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     let (track, device) = track_device(app, map)?;
@@ -122,11 +121,6 @@ fn tensor_edit(
     }
     let script = ScriptEdit::begin(app, ctx, true);
     let changed = script.apply(app, command);
-    if changed && device == DeviceSlot::Instrument {
-        let current_track = ctx.shared.current_track.load(Ordering::Relaxed);
-        let selected = &ctx.shared.selected_steps;
-        sync_instrument_tensor_display(editor, app, track, tensor_idx, current_track, selected);
-    }
     script.end(app, ctx, changed);
     Ok(())
 }
@@ -394,7 +388,6 @@ fn with_rack_macro<R>(
 fn rack_macro_edit(
     map: &Payload,
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     use sequencer::sequencer::RackMacroField;
@@ -406,7 +399,7 @@ fn rack_macro_edit(
         "value" => RackMacroField::Value(value.number(0.0, 1.0)? as f32),
         other => return Err(format!("a rack macro has no settable field {other}")),
     };
-    record_rack_macro_edit(app, editor, ctx, track, id, field)
+    record_rack_macro_edit(app, ctx, track, id, field)
 }
 
 /// A host kind setter's rack macro edit: `field` of rack macro `id` of
@@ -414,7 +407,6 @@ fn rack_macro_edit(
 /// one entry), then the rack panel's refresh.
 fn record_rack_macro_edit(
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
@@ -426,8 +418,7 @@ fn record_rack_macro_edit(
         RackMacroField::Name(_) | RackMacroField::Curve { .. } => false,
     };
     let shared = ctx.shared;
-    let fields = (&shared.selected_steps, &*shared.ui_epoch);
-    rack_macro_edit_reactive(editor, app, (track, id), field, fields, |app, field| {
+    rack_macro_edit_reactive(app, field, &shared.ui_epoch, |app, field| {
         ScriptEdit::run(app, ctx, continuous, |app| {
             app.apply_rack_macro_edit(track, id, field)
         })
@@ -484,12 +475,7 @@ fn rack_macro_lock_edit(
         ctx,
         locks,
         command,
-        |editor, app, ctx, rows| {
-            let shared = ctx.shared;
-            let (state, selected, epoch) =
-                (&shared.state, &shared.selected_steps, &shared.ui_epoch);
-            refresh_rack_macro_plock_reactive(editor, app, state, track, id, selected, epoch, rows);
-        },
+        |_, _, ctx, rows| refresh_rack_macro_plock_reactive(&ctx.shared.ui_epoch, rows),
     );
     Ok(())
 }
@@ -501,7 +487,6 @@ fn rack_macro_lock_edit(
 fn mapping_edit(
     map: &Payload,
     app: &mut app::App,
-    editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) -> Result<(), String> {
     let mapping_idx = map_usize(map, "mapping").ok_or("needs :mapping")?;
@@ -604,7 +589,7 @@ fn mapping_edit(
         }
         other => return Err(format!("a mapping has no settable field {other}")),
     };
-    record_rack_macro_edit(app, editor, ctx, track, id, field)
+    record_rack_macro_edit(app, ctx, track, id, field)
 }
 
 /// A mapping's range as its `min` / `max` setters see it (shared by the

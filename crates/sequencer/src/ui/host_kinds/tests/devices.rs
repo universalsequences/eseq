@@ -87,7 +87,7 @@ fn legacy(h: &Harness, field: &str) -> Option<Value> {
 }
 
 #[test]
-fn midi_devices_read_after_sync_and_match_the_legacy_fields() {
+fn midi_devices_read_after_sync() {
     let mut h = Harness::new();
     assert_eq!(h.add_midi_fx(0, "transpose-range"), 0);
     assert_eq!(h.add_midi_fx(0, "arp"), 1);
@@ -131,12 +131,7 @@ fn midi_devices_read_after_sync_and_match_the_legacy_fields() {
         h.eval_all("(list mn.base mn.value mn.locked)"),
         h.eval_all("(list -5 -5 false)")
     );
-    // The legacy value field shows the same.
-    sync_midi_fx_param_value_field(h.editor.runtime_mut(), &h.shared.state, 0, 0, MIN, None);
-    let field = midi_fx_param_value_field(0, 0, MIN, "min");
-    assert_eq!(legacy(&h, &field), Some(h.eval_all("mn.value")));
-    // A lock at the selected step shows on the current track, as the
-    // legacy field does.
+    // A lock at the selected step shows on the current track.
     h.eval_all("(lock-param! mn (list (nth t0.steps 3)) 7)");
     h.drain_and_sync();
     h.shared.state.pattern.patterns[0].set_step_active(3, true);
@@ -145,8 +140,6 @@ fn midi_devices_read_after_sync_and_match_the_legacy_fields() {
         h.eval_all("(list mn.value mn.locked mn.has-locks mn.base)"),
         h.eval_all("(list 7 true true -5)")
     );
-    sync_midi_fx_param_value_field(h.editor.runtime_mut(), &h.shared.state, 0, 0, MIN, Some(3));
-    assert_eq!(legacy(&h, &field), Some(Value::Number(7.0)));
 }
 
 #[test]
@@ -245,10 +238,6 @@ fn bus_devices_read_after_sync_and_set_through_history() {
             r#"(list "cutoff" "Hz" {base} {base} false false)"#
         ))
     );
-    // The legacy value field shows the same.
-    sync_bus_effect_param_value_field(h.editor.runtime_mut(), &h.app, bus, slot, CUTOFF);
-    let field = bus_effect_param_value_field(bus, slot, CUTOFF, "cutoff");
-    assert_eq!(legacy(&h, &field), Some(h.eval_all("bc.value")));
     // The base: its own undo entry, the shared bus copy follows.
     let before = h.app.history.undo_len();
     h.eval_all("(set! bc.base 1500)");
@@ -263,7 +252,6 @@ fn bus_devices_read_after_sync_and_set_through_history() {
         h.eval_all("(list bc.base bc.value)"),
         h.eval_all("(list 1500 1500)")
     );
-    assert_eq!(legacy(&h, &field), Some(Value::Number(1500.0)));
     app::edit::undo(&mut h.app);
     assert_eq!(h.app.buses[bus].effect_slots[slot].defaults[CUTOFF], base);
     // A drag view's set!s while the pointer is down join one entry.
@@ -299,9 +287,10 @@ fn bus_devices_read_after_sync_and_set_through_history() {
     ));
     h.drain();
     assert_eq!(h.app.buses[bus].effect_slots[slot].defaults[choice], next);
-    assert!(
-        h.shared.fx_epoch.load(Ordering::Relaxed) > epoch,
-        "panel rebuilt"
+    assert_eq!(
+        h.shared.fx_epoch.load(Ordering::Relaxed),
+        epoch,
+        "an option or toggle edit rebuilds no panel (its text is live)"
     );
     // Bus effects take no p-locks.
     h.fails("(lock-param! bc (list) 300)", "bus effects take no p-locks");
@@ -341,11 +330,6 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
         h.eval_all(r#"(list "%" 100)"#)
     );
     assert!((num(h.eval_all("start.base")) - f64::from(stored) * 100.0).abs() < 1e-3);
-    // The legacy rack panel field shows the same.
-    sync_rack_slot_instrument_param_value_field(h.editor.runtime_mut(), &h.app, 2, 0, START, None);
-    let field = rack_slot_instrument_param_value_field(2, 0, START, "start");
-    let shown = num(legacy(&h, &field).expect("legacy rack field"));
-    assert!((shown - num(h.eval_all("start.value"))).abs() < 1e-3);
     // The base through history (display units), undone.
     let before = h.app.history.undo_len();
     h.eval_all("(set! start.base 50)");
@@ -1077,18 +1061,6 @@ fn rack_slot_strip_controls_read_their_base_display_and_lock_state() {
             slot.gain, slot.pan
         ))
     );
-    // The legacy rack strip field shows the same value.
-    for (param, field) in [
-        (RackSlotParam::Gain, "rs.gain-display"),
-        (RackSlotParam::Mute, "rs.muted-display"),
-    ] {
-        sync_rack_slot_control_value_field(h.editor.runtime_mut(), &h.app, 2, 0, param, Some(2));
-        assert_eq!(
-            legacy(&h, &rack_slot_value_field(2, 0, param)),
-            Some(h.eval_all(field)),
-            "{field}"
-        );
-    }
     // While playing with no selection: the playing step's.
     h.shared.selected_steps.lock().unwrap().clear();
     let transport = &h.shared.state.transport;
@@ -1631,18 +1603,6 @@ fn rack_slot_base_note_and_voices_read_their_base_display_and_lock_state() {
             slot.instrument_base_note_offset
         ))
     );
-    // The legacy rack slot value fields show the same values.
-    for (param, field) in [
-        (RackSlotParam::BaseNote, "rs.base-note-display"),
-        (RackSlotParam::MaxPolyphony, "rs.voices-display"),
-    ] {
-        sync_rack_slot_control_value_field(h.editor.runtime_mut(), &h.app, 2, 0, param, Some(2));
-        assert_eq!(
-            legacy(&h, &rack_slot_value_field(2, 0, param)),
-            Some(h.eval_all(field)),
-            "{field}"
-        );
-    }
     // Any other device: its own value, never locked (a track instrument's
     // base note; 0 else).
     let offsets = &h.shared.state.pattern.instrument_base_note_offsets;
@@ -1731,9 +1691,6 @@ fn rack_slot_base_note_and_voices_setters_follow_the_value_rule_through_history(
     assert_eq!(offset(&h), 0.0);
     assert_eq!(h.app.history.undo_len(), before + 1);
     assert_eq!(rs_base_note(&mut h), 12.0);
-    // The legacy value field is repainted (rack_slot_strip_applied).
-    let field = rack_slot_value_field(2, 0, RackSlotParam::BaseNote);
-    assert_eq!(legacy(&h, &field), Some(Value::Number(12.0)));
     // The current value is a no-op.
     h.eval_all("(set! rs.base-note 12)");
     h.drain();
@@ -2021,4 +1978,96 @@ fn a_script_strip_lock_beside_a_strip_gain_drag_survives_the_drags_undo() {
     app::edit::redo(&mut h.app);
     app::edit::redo(&mut h.app);
     assert_eq!(state(&h), (0.8, true));
+}
+
+/// The panel layout's device fields (eseq-0l17.82) from the host:
+/// `strip-macros` follows a rack macro mapping a slot's strip control onto
+/// it and off it (the rack macro sync), `node-id` is an effect's graph node
+/// and 0 for an instrument, `host-modulatable` a descriptor's macro tag.
+#[test]
+fn panel_device_fields_follow_the_host() {
+    use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget};
+    let mut h = Harness::new();
+    h.rack_track();
+    let chorus = h.add_effect(0, "Chorus");
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def fx (first (let ((t (track 0))) t.devices)))",
+    );
+    assert_eq!(h.eval_all("rs.strip-macros"), h.eval_all("(list)"));
+    let id = RackMacroId::from_index(0).expect("macro 1");
+    h.app
+        .map_rack_macro(
+            2,
+            id,
+            RackMacroMapping {
+                target: RackMacroTarget::SlotParam { slot: 0, param: "pan".to_string() },
+                range_min: 0.0,
+                range_max: 1.0,
+                curve: RackMacroCurve::Linear,
+            },
+        )
+        .expect("map the slot's pan");
+    h.sync();
+    assert_eq!(h.eval_all("rs.strip-macros"), h.eval_all(r#"(list "pan")"#));
+    assert_eq!(h.eval_all("rk.strip-macros"), h.eval_all("(list)"), "only a slot lists them");
+    assert!(h.app.unmap_rack_macro(2, id, 0));
+    h.sync();
+    assert_eq!(h.eval_all("rs.strip-macros"), h.eval_all("(list)"));
+
+    // node-id: the chain effect's graph node; an instrument (the rack) has none.
+    let node = h.shared.state.pattern.effect_chains[0][chorus].node_id.load(Ordering::Relaxed);
+    assert!(node > 0, "the Chorus runs on a graph node");
+    assert_eq!(h.eval_all("fx.node-id"), Value::Number(f64::from(node)));
+    assert_eq!(h.eval_all("rk.node-id"), Value::Number(0.0));
+
+    // host-modulatable: the Chorus's macro-tagged params, and only those.
+    let desc = h.app.graph.effect_descriptors[0][chorus].clone();
+    let tagged: Vec<Value> = (desc.params.iter())
+        .map(|param| Value::Bool(param.is_host_modulatable()))
+        .collect();
+    assert!(tagged.contains(&Value::Bool(true)) && tagged.contains(&Value::Bool(false)));
+    let read = h.eval_all("(map (lambda (p) p.host-modulatable) fx.params)");
+    assert_eq!(items(&read), tagged);
+}
+
+/// An EQ8 band drag on a drum rack slot's effect (`set-rack-slot-effect-
+/// param-batch`, the curve editor's one batch per drag event) lands as one
+/// coherent band: after each event's kinds sync, the band's frequency, gain
+/// and q params all read that event's values (the panels bind them).
+#[test]
+fn a_rack_slot_eq8_drag_reads_one_coherent_band_through_the_kinds() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    let add = h.eval(r#"(dict :track 2 :rack-slot 0 :name "EQ8" :builtin true)"#);
+    h.command("add-rack-slot-effect", add);
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def eq (first rs.devices))
+         (def band (lambda () (let ((f (nth eq.params 3)) (g (nth eq.params 4)) (q (nth eq.params 5)))
+                                 (list f.name f.value g.value q.value))))",
+    );
+    assert_eq!(h.eval_all("eq.type"), s("EQ8"));
+    // Observe the band, as the panel does.
+    h.eval_all(r#"(effect-buffer "*eq-band*" (label (str (band))))"#);
+    h.show_all();
+    for frequency in [200.0, 400.0, 800.0] {
+        let batch = h.eval(&format!(
+            "(dict :track 2 :rack-slot 0 :effect-slot 0 :updates (list \
+               (dict :param-idx 3 :value {frequency}) (dict :param-idx 4 :value 6) \
+               (dict :param-idx 5 :value 1.5)))"
+        ));
+        h.command("set-rack-slot-effect-param-batch", batch);
+        h.sync();
+        let read = items(&h.eval_all("(band)"));
+        assert_eq!(
+            read[1..].to_vec(),
+            vec![Value::Number(frequency), Value::Number(6.0), Value::Number(1.5)],
+            "the band reads this drag event's values ({:?})",
+            read[0]
+        );
+    }
 }

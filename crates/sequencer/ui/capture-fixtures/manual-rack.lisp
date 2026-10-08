@@ -6,4 +6,4 @@
   (rack-slot-macro 0 0 0 gain 0.5 1.5))
 (def capture-after-sync ()
   (eseq.effects.state/rack-panel-set-view
-      (get (nth SEQ.instrument-panel 0) :track-id) true true false))
+      (get (eseq.effects.panel-data/current-instrument-panel) :track-id) true true false))

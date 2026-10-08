@@ -162,7 +162,7 @@
       (host-command
         (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
         (dict :slot-idx (get fx :slot-idx)
-              :target-node-id (get fx :target-node-id)
+              :target-node-id (eseq.effects.devices/fx-node-id fx)
               :updates (eseq.effects.param-controls/effect-param-updates fx pairs)
               :commit commit?)))))
 
@@ -236,7 +236,8 @@
 
 (def mode-dropdown (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mode")
-    (dropdown :value (get p :text-value)
+    (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
       :options (get p :options)
       :debug-name "reverb-mode-dropdown"
       :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))

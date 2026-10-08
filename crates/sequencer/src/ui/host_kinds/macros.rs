@@ -1,7 +1,7 @@
 //! Macros (spec §14.2g, stage 7b-3): the project's macros (`macro`,
 //! `project.macros`), a drum rack's macros
-//! (`rack-macro`, the rack instrument device's `macros`, legacy
-//! `SEQ.instrument-panel :macros`), and what each drives (`macro-mapping`).
+//! (`rack-macro`, the rack instrument device's `macros`), and what each
+//! drives (`macro-mapping`).
 //!
 //! **Identity.** Project macros are positional (`(index)`), the instance
 //! kept by macro id across reorders (`registry::reconcile`) and replaced on
@@ -490,6 +490,14 @@ impl HostKinds {
                 pusher.push(*id, f::RACK_MACRO_MAPPINGS, instance_list(mappings));
             }
             pusher.push(instrument, f::DEVICE_MACROS, instance_list(ids));
+            // Each slot's strip controls a macro maps (`device.strip-macros`).
+            for (slot_idx, _) in rack.into_iter().flat_map(|rack| rack.slots.iter().enumerate()) {
+                let did = DeviceSlot::RackSlot(slot_idx).did(app, track);
+                if let Some(slot) = pusher.rt.keyed_instance(DEVICE, &[track_id, did]) {
+                    let names = strip_macros(rack.expect("a rack holds these slots"), slot_idx);
+                    pusher.push(slot, f::DEVICE_STRIP_MACROS, names);
+                }
+            }
         }
         drop(racks);
         if changed || all {

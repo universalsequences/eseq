@@ -43,8 +43,7 @@
 //! live fields: the device live loop collects the observed ones and reads
 //! them all under one rack lock per tick ([`DeviceState::push_strips`]); a
 //! cold read takes the lock for its one field ([`device_strip_field`]). The
-//! shown value is `rack_slot_control_value` (shared with the legacy rack
-//! panel fields) at the displayed step (the current track's selected step,
+//! shown value is `rack_slot_control_value` at the displayed step (the current track's selected step,
 //! else its playing step). Any other device reads its own value, never
 //! locked: a track instrument's base note (an atomic, no lock), else 0.
 
@@ -338,6 +337,13 @@ fn push_device(
         DeviceSlot::RackSlot(_) => instrument_display_name(&model.name),
         _ => model.name.clone(),
     };
+    // What a custom UI dispatches on: a track instrument's full name (the
+    // instrument panel's, folder and pin included), a rack slot's raw name.
+    let instrument_name = match model.device {
+        DeviceSlot::Instrument => instrument_panel_name(app, owner),
+        DeviceSlot::RackSlot(_) => model.name.clone(),
+        _ => String::new(),
+    };
     let builtin = match model.device {
         DeviceSlot::Effect(_) | DeviceSlot::RackEffect { .. } | DeviceSlot::BusEffect(_) => {
             sequencer::effects::is_builtin_effect(&model.name)
@@ -351,6 +357,7 @@ fn push_device(
     pusher.push(id, f::DEVICE_CONTAINER, instance_or_nil(model.container));
     pusher.push(id, f::DEVICE_VOICES, number(model.voices as f64));
     pusher.push(id, f::DEVICE_DISPLAY_NAME, Value::String(display_name));
+    pusher.push(id, f::DEVICE_INSTRUMENT_NAME, Value::String(instrument_name));
     if model.device != DeviceSlot::Instrument {
         // A track instrument's is computed while observed
         // (`HostKinds::sync_sound_bindings`).
@@ -364,7 +371,7 @@ fn push_device(
 impl HostKinds {
     /// Each observed track instrument's `sound-binding`
     /// (`App::sound_binding_label`, which takes the scenes lock): recomputed
-    /// at each model sync (the legacy panels' at each rebuild) or when it
+    /// at each model sync or when it
     /// starts being observed; an unobserved one keeps its last value ("" from
     /// its registration). Any other device's is empty, pushed with its model
     /// fields.
@@ -393,7 +400,7 @@ impl HostKinds {
 }
 
 /// `device.meter`: the selector a `device-meter` takes for the device's
-/// output (the legacy panel dicts' `:meter`), by its family and position
+/// output (the panel dicts' `:meter`), by its family and position
 /// (`owner`: its track's, or its bus's); nil for a MIDI effect.
 fn device_meter(app: &app::App, owner: usize, device: DeviceSlot) -> Value {
     let index = ("index", owner as f64);
@@ -923,6 +930,37 @@ fn other_strip_field(
         (Some(param), _) => rack_slot_control_reactive_value(param, own),
         (None, _) => number(own),
     })
+}
+
+/// `device.strip-macros` of slot `slot_idx` of `rack`: its strip controls
+/// (in [`RackSlotParam::ALL`] order) some macro of the rack maps (the rack
+/// panel's macro dot); the rack macro sync pushes it.
+///
+/// [`RackSlotParam::ALL`]: sequencer::sequencer::RackSlotParam::ALL
+pub(crate) fn strip_macros(
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    slot_idx: usize,
+) -> Value {
+    let mapped = |name: &str| {
+        (rack.macros.iter().flat_map(|m| &m.mappings)).any(|mapping| {
+            matches!(&mapping.target,
+                sequencer::sequencer::RackMacroTarget::SlotParam { slot, param }
+                    if *slot == slot_idx && param == name)
+        })
+    };
+    let names = sequencer::sequencer::RackSlotParam::ALL.map(|param| param.name());
+    list_value(
+        names
+            .into_iter()
+            .filter(|name| mapped(name))
+            .map(|name| Value::String(name.to_string())),
+    )
+}
+
+/// `device.node-id`: an effect's graph node (a track chain, bus or drum
+/// rack slot effect's), 0 while it has none and for any other device.
+pub(super) fn device_node_id(sources: &KindsHandles, device: &DeviceSource) -> Value {
+    number(effect_node(sources, device).map_or(0.0, f64::from))
 }
 
 /// Track `track`'s instrument base note offset (0 for a track gone).

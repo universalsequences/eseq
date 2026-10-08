@@ -55,9 +55,9 @@
 (def param (params band suffix)
   (eseq.effects.builtin.filter-core/builtin-fx-param params (str "b" (+ band 1) " " suffix)))
 
-(def band-type (p)
+(def band-type (fx p)
   (if p
-    (get p :text-value)
+    (eseq.effects.param-controls/fx-param-text-value-for fx p)
     "bell"))
 
 ;; Band `band`'s editor dict (`selected-band`: the panel's selected band).
@@ -69,7 +69,7 @@
         (q-p (param params band "q")))
     (dict
       :id band
-      :type (band-type type-p)
+      :type (band-type fx type-p)
       :freq (eseq.effects.param-controls/fx-param-value-for fx freq-p)
       :freq-min (eseq.effects.param-controls/param-control-min fx freq-p)
       :freq-max (eseq.effects.param-controls/param-control-max fx freq-p)
@@ -210,7 +210,8 @@
     (box :width 43.2 :height 1.65 :padding 0.24
       :corner-radius 7
       (h-stack :gap 0.44 :align :baseline
-        (dropdown :value (get type-p :text-value)
+        (dropdown :value (eseq.effects.param-controls/param-option-label fx type-p)
+        :value-index (eseq.effects.param-controls/param-option-index fx type-p)
           :options (get type-p :options)
           :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
           :bg-color :mixer-strip-bg

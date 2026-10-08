@@ -82,15 +82,6 @@ pub(crate) fn read_track_peak_levels(
         .collect()
 }
 
-/// A device's `:meter` selector for the FX panel's `device-meter`: the
-/// device's identity (kind + indices, the `LiveAudioSourceSelector` dict
-/// shape), never its graph node, which a rebuild can replace while the panel
-/// keeps its dicts. The live-audio poller resolves it to the current output
-/// node every pass.
-pub(crate) fn device_meter_source(kind: &str, fields: &[(&str, f64)]) -> Rc<RefCell<Value>> {
-    value_cell(device_meter_value(kind, fields))
-}
-
 /// A device output meter's selector (a `device-meter`'s `:source`): its
 /// family and position. Shared by the panel dicts' `:meter` and the host
 /// kinds' `device.meter`.
@@ -195,14 +186,6 @@ pub(crate) fn read_bus_peak_levels(
             meter_display_level(peak)
         })
         .collect()
-}
-
-pub(crate) fn modulator_phase_field(track: usize) -> String {
-    format!("modulator-phase-{track}")
-}
-
-pub(crate) fn modulator_level_field(track: usize) -> String {
-    format!("modulator-level-{track}")
 }
 
 pub(crate) fn read_modulator_display_values(
@@ -412,14 +395,6 @@ pub(crate) struct EffectModValues {
     pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
 }
 
-/// Reactive field carrying one modulator slot's cycle position (1-based
-/// `slot_number`, matching the panel's `:slot`). Published for every sampled
-/// modulator node, assigned or not, so the source editor can show the LFO the
-/// user is designing before anything is routed to it.
-pub(crate) fn effect_mod_slot_phase_field(node_id: i32, slot_number: usize) -> String {
-    format!("fx-mod-slot-phase-{node_id}-{slot_number}")
-}
-
 /// Marker-less default for every slot phase field.
 pub(crate) const NO_SLOT_PHASES: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT] =
     [sequencer::instruments::voice_modulator::DISPLAY_PHASE_NONE as f64;
@@ -462,27 +437,6 @@ impl ModulatorSlotDisplay {
         values: [0.0; sequencer::instruments::voice_modulator::SLOT_COUNT],
         phases: NO_SLOT_PHASES,
     };
-}
-
-/// Reactive field carrying one param's modulation *offset* — how far the live
-/// effective value sits from the param's base, in the base's own units. Sparse
-/// by construction: only declared modulation destinations of live effects ever
-/// get a field.
-pub(crate) fn effect_mod_offset_field(node_id: i32, param_idx: usize) -> String {
-    format!("fx-mod-offset-{node_id}-{param_idx}")
-}
-
-/// Reactive field carrying one param's absolute effective value, for curve
-/// visualizers. Same sparsity as the offset field.
-pub(crate) fn effect_mod_value_field(node_id: i32, param_idx: usize) -> String {
-    format!("fx-mod-value-{node_id}-{param_idx}")
-}
-
-/// Reactive field carrying one param's *multiplicative* displacement, for
-/// exponential destinations. Exactly `1.0` for additive ones, so a knob that
-/// reads it always has a usable factor.
-pub(crate) fn effect_mod_scale_field(node_id: i32, param_idx: usize) -> String {
-    format!("fx-mod-scale-{node_id}-{param_idx}")
 }
 
 /// Quantize an effective value so audio-rate jitter below a pixel of travel
@@ -759,8 +713,8 @@ fn effect_mod_values_for_slot(
 /// `selected_step` is the raw step selection, not a resolved p-lock step: the
 /// base value has to match what the knob's own value field shows, which means
 /// `displayed_plock_step` semantics (selection, else the track's live playhead
-/// step while playing) and macro-engine overrides. See
-/// `sync_track_effect_param_value_field`, which this deliberately mirrors —
+/// step while playing) and macro-engine overrides. See the `param` kind's
+/// `value` live field, which this deliberately mirrors —
 /// otherwise a macro driving cutoff, or a p-lock passing under the playhead,
 /// moves the knob but not the overlay.
 pub(crate) fn read_mod_display_values(
@@ -833,7 +787,7 @@ pub(crate) fn read_mod_display_values(
                 continue;
             }
             // Bus knobs read defaults only — no p-locks, no macro engine (see
-            // `sync_bus_effect_param_value_field`). Mirror that exactly so the
+            // the `param` kind's `value` for a bus effect). Mirror that exactly so the
             // overlay and the knob never disagree.
             let value_of = |idx: usize| -> f32 {
                 slot.defaults
@@ -940,112 +894,6 @@ pub(crate) struct InstrumentModValues {
     pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
 }
 
-/// Reactive field carrying one instrument param's modulation offset. Matches
-/// the `fx-instrument-param-*` naming: the FX-tile panel shows one instrument
-/// at a time, so these are relative to the selected track.
-pub(crate) fn fx_instrument_mod_offset_field(param_idx: usize) -> String {
-    format!("fx-instrument-mod-offset-{param_idx}")
-}
-
-/// Reactive field carrying one instrument param's absolute effective value,
-/// for curve visualizers.
-/// Reactive field carrying the value a process OUT port last wrote onto one
-/// instrument param, in the param's display units (what the knob shows).
-/// Track-keyed like the instrument panel's value fields. Only params the
-/// scheduler has actually written get a field; the panel gates the overlay
-/// on a live binding besides.
-pub(crate) fn instrument_proc_value_field(track: usize, param_idx: usize) -> String {
-    format!("inst-proc-value-{track}-{param_idx}")
-}
-
-/// `1` when that write hit the param's range end and was clamped, else `0`.
-pub(crate) fn instrument_proc_clamped_field(track: usize, param_idx: usize) -> String {
-    format!("inst-proc-clamped-{track}-{param_idx}")
-}
-
-/// Republish the scheduler's process effective-value feed as reactive fields,
-/// delta-only against `previous` (which is updated in place). Returns whether
-/// any reactive effect went dirty.
-pub(crate) fn sync_process_effective_param_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &SequencerState,
-    previous: &mut HashMap<(usize, usize), (f32, bool)>,
-) -> bool {
-    let mut effects_dirty = false;
-    for ((track, param_idx), entry) in state.process_effective_params() {
-        let Some(pdesc) = app
-            .graph
-            .instrument_descriptors
-            .get(track)
-            .and_then(|desc| desc.params.get(param_idx))
-        else {
-            continue;
-        };
-        let value = pdesc.stored_to_user(entry.value);
-        let next = (value, entry.clamped);
-        if previous.get(&(track, param_idx)) == Some(&next) {
-            continue;
-        }
-        let was = previous.insert((track, param_idx), next);
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &instrument_proc_value_field(track, param_idx),
-                Value::Number(value as f64),
-            )
-            .effects_dirty;
-        if was.map(|(_, clamped)| clamped) != Some(entry.clamped) {
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &instrument_proc_clamped_field(track, param_idx),
-                    Value::Number(if entry.clamped { 1.0 } else { 0.0 }),
-                )
-                .effects_dirty;
-        }
-    }
-    effects_dirty
-}
-
-pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
-    format!("fx-instrument-mod-value-{param_idx}")
-}
-
-/// Multiplicative displacement for exponential destinations; see
-/// `effect_mod_scale_field`.
-pub(crate) fn fx_instrument_mod_scale_field(param_idx: usize) -> String {
-    format!("fx-instrument-mod-scale-{param_idx}")
-}
-
-/// One modulator slot's cycle position for the FX-tile instrument panel's
-/// source editor; see `effect_mod_slot_phase_field`.
-pub(crate) fn fx_instrument_mod_slot_phase_field(slot_number: usize) -> String {
-    format!("fx-instrument-mod-slot-phase-{slot_number}")
-}
-
-/// Track-keyed twin of `fx_instrument_mod_slot_phase_field`.
-pub(crate) fn instrument_mod_slot_phase_field(track: usize, slot_number: usize) -> String {
-    format!("instrument-mod-slot-phase-{track}-{slot_number}")
-}
-
-/// Track-keyed variants, for the sampler panel. It is a separate builder whose
-/// param maps address their values as `instrument-param-{track}-*` rather than
-/// the FX-tile panel's un-tracked `fx-instrument-param-*`, and it is built for
-/// tracks other than the selected one, so it needs fields that name their
-/// track. Both namespaces carry the same sample.
-pub(crate) fn instrument_mod_offset_field(track: usize, param_idx: usize) -> String {
-    format!("inst-mod-offset-{track}-{param_idx}")
-}
-
-pub(crate) fn instrument_mod_value_field(track: usize, param_idx: usize) -> String {
-    format!("inst-mod-value-{track}-{param_idx}")
-}
-
-pub(crate) fn instrument_mod_scale_field(track: usize, param_idx: usize) -> String {
-    format!("inst-mod-scale-{track}-{param_idx}")
-}
-
 /// One rack slot's live modulation display values (eseq-hpc). A rack track has
 /// no instrument of its own — each slot does — and the panel shows one slot at
 /// a time, so this names the slot it was sampled for.
@@ -1056,30 +904,6 @@ pub(crate) struct RackSlotModValues {
     pub values: Vec<ParamModValue>,
     /// See `EffectModValues::slot_phases`.
     pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
-}
-
-/// Reactive fields for a rack slot's params, keyed by track *and* slot the way
-/// the rack panel's own value fields are.
-pub(crate) fn rack_slot_mod_offset_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
-    format!("rack-mod-offset-{track}-{slot_idx}-{param_idx}")
-}
-
-pub(crate) fn rack_slot_mod_value_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
-    format!("rack-mod-value-{track}-{slot_idx}-{param_idx}")
-}
-
-pub(crate) fn rack_slot_mod_scale_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
-    format!("rack-mod-scale-{track}-{slot_idx}-{param_idx}")
-}
-
-/// One modulator slot's cycle position for the rack slot's source editor; see
-/// `effect_mod_slot_phase_field`.
-pub(crate) fn rack_slot_mod_slot_phase_field(
-    track: usize,
-    slot_idx: usize,
-    slot_number: usize,
-) -> String {
-    format!("rack-mod-slot-phase-{track}-{slot_idx}-{slot_number}")
 }
 
 /// Sample the selected track's selected rack slot, if it declares any

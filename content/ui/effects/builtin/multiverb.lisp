@@ -237,7 +237,7 @@
         (mode-button fx mode-p 1 "Hall")
         (mode-button fx mode-p 2 "Quad")
         (mode-button fx mode-p 3 "Mod"))
-      (label (get mode-p :text-value) :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
+      (label (eseq.effects.param-controls/fx-param-text-value-for fx mode-p) :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (box :height 0.25)
       (label "FACTORY" :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (h-stack :gap 0.14

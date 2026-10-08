@@ -125,15 +125,6 @@ pub(super) fn handle(
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "instrument-panel",
-                                    build_instrument_panel_value(
-                                        &app,
-                                        track,
-                                        &selected_steps,
-                                    ),
-                                );
                                 sync_sidebar_browser(rt, &app, track);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();

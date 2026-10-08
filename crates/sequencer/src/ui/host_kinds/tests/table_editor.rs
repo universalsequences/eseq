@@ -10,7 +10,7 @@ const REFER_TE: &str = "(import eseq.kinds :refer (track buses table-editor \
                         table-editor-op! table-editor-add-node! table-editor-frame! \
                         table-editor-undo! table-editor-redo! table-editor-save!))";
 
-/// The fields, in the order [`legacy_fields`] lists the legacy map's.
+/// The fields, in the order [`session_fields`] lists the session map's.
 const FIELDS: &str = "(list te.open te.frames te.selected-frame te.selected-frame-normalized \
                       te.can-undo te.can-redo te.dirty te.op-count \
                       te.band-kind te.band-freq te.band-gain te.band-q)";
@@ -92,9 +92,9 @@ impl Harness {
     }
 }
 
-/// The legacy `:editor` map as the kind's fields: the band's entries flat,
+/// The session map ([`session_editor`]) as the kind's fields: the band's entries flat,
 /// the closed defaults where the map (or its band) is absent.
-fn legacy_fields(editor: &Value) -> Vec<Value> {
+fn session_fields(editor: &Value) -> Vec<Value> {
     if *editor == Value::Nil {
         let (no, zero) = (Value::Bool(false), Value::Number(0.0));
         let mut closed = vec![no.clone(), zero.clone(), zero.clone(), zero.clone()];
@@ -116,21 +116,48 @@ fn legacy_fields(editor: &Value) -> Vec<Value> {
     fields
 }
 
-/// The legacy track effect panel's `:editor` for track 0's slot.
-fn legacy_track_editor(h: &Harness, slot: usize) -> Value {
-    let effects = items(&build_effects_value(
-        &h.shared.state,
-        0,
-        &h.app.graph.effect_descriptors,
-        &h.shared.selected_steps,
-    ));
-    get(&effects[slot], "editor")
+/// The editor session as a map (the band nested), when it is bound to
+/// effect node `node_id`; nil otherwise: what the kind's fields must read.
+fn session_editor(node_id: u32) -> Value {
+    let Some(ui) = fte::session_ui_state().filter(|ui| ui.node_id as u32 == node_id) else {
+        return Value::Nil;
+    };
+    let band = ui.band.map(|node| {
+        let curve = node.curve_band();
+        map_value([
+            ("kind", s(curve.kind.tag())),
+            ("freq", Value::Number(curve.freq)),
+            ("gain", Value::Number(curve.gain)),
+            ("q", Value::Number(curve.q)),
+        ])
+    });
+    let mut entries = vec![
+        ("open", Value::Bool(true)),
+        ("frames", Value::Number(ui.frames as f64)),
+        ("selected-frame", Value::Number(ui.selected_frame as f64)),
+        (
+            "selected-frame-normalized",
+            Value::Number(ui.selected_frame_normalized()),
+        ),
+        ("can-undo", Value::Bool(ui.can_undo)),
+        ("can-redo", Value::Bool(ui.can_redo)),
+        ("dirty", Value::Bool(ui.dirty)),
+        ("op-count", Value::Number(ui.op_count as f64)),
+    ];
+    entries.extend(band.map(|band| ("band", band)));
+    map_value(entries)
+}
+
+/// The editor session as track 0's effect in `slot` sees it.
+fn track_editor(h: &Harness, slot: usize) -> Value {
+    let chain = &h.shared.state.pattern.effect_chains[0];
+    session_editor(chain[slot].node_id.load(Ordering::Relaxed))
 }
 
 /// The kind's fields read by value, and (observed) its cells, match the
-/// legacy map.
-fn assert_parity(h: &mut Harness, legacy: &Value, context: &str) {
-    let expected = legacy_fields(legacy);
+/// session.
+fn assert_parity(h: &mut Harness, session: &Value, context: &str) {
+    let expected = session_fields(session);
     assert_eq!(items(&h.eval_te(FIELDS)), expected, "{context}: by value");
     assert_eq!(h.te_cells(), expected, "{context}: pushed");
 }
@@ -158,14 +185,14 @@ fn te_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-fn the_table_editor_reads_like_the_legacy_editor_map() {
+fn the_table_editor_reads_the_editor_session() {
     let _lock = te_lock();
     let mut h = Harness::new();
     close_session();
     let (slot, node) = h.track_filter_table();
-    // Closed: the defaults, the device nil, the legacy map absent.
-    assert_eq!(legacy_track_editor(&h, slot), Value::Nil);
-    assert_eq!(items(&h.eval_te(FIELDS)), legacy_fields(&Value::Nil));
+    // Closed: the defaults, the device nil, no session map.
+    assert_eq!(track_editor(&h, slot), Value::Nil);
+    assert_eq!(items(&h.eval_te(FIELDS)), session_fields(&Value::Nil));
     assert_eq!(h.eval_te("te.device"), Value::Nil);
     observe(&mut h);
     assert_parity(&mut h, &Value::Nil, "closed");
@@ -173,26 +200,26 @@ fn the_table_editor_reads_like_the_legacy_editor_map() {
     h.act("(table-editor-open! ft)");
     assert_eq!(fte::session_ui_state().map(|ui| ui.node_id), Some(node));
     assert_eq!(h.eval_te("(= te.device ft)"), Value::Bool(true));
-    let legacy = legacy_track_editor(&h, slot);
-    assert_ne!(legacy, Value::Nil);
-    assert_parity(&mut h, &legacy, "open");
+    let session = track_editor(&h, slot);
+    assert_ne!(session, Value::Nil);
+    assert_parity(&mut h, &session, "open");
     assert_eq!(h.eval_te("te.band-kind"), s(""), "no band before a node");
 
     // A band, then the frame selection: every field follows.
     h.act(r#"(table-editor-add-node! "notch")"#);
     h.act("(table-editor-frame! 12)");
-    let legacy = legacy_track_editor(&h, slot);
-    assert_eq!(get(&get(&legacy, "band"), "kind"), s("notch"));
-    assert_parity(&mut h, &legacy, "a band");
+    let session = track_editor(&h, slot);
+    assert_eq!(get(&get(&session, "band"), "kind"), s("notch"));
+    assert_parity(&mut h, &session, "a band");
     assert_eq!(h.eval_te("te.selected-frame"), Value::Number(12.0));
-    // A non-band op hides the band, as the legacy map drops it.
+    // A non-band op hides the band, as the session map drops it.
     h.act(r#"(table-editor-op! "tilt" :value -3)"#);
-    let legacy = legacy_track_editor(&h, slot);
-    assert_eq!(get(&legacy, "band"), Value::Nil);
-    assert_parity(&mut h, &legacy, "a tilt");
+    let session = track_editor(&h, slot);
+    assert_eq!(get(&session, "band"), Value::Nil);
+    assert_parity(&mut h, &session, "a tilt");
     h.act("(table-editor-undo!)");
-    let legacy = legacy_track_editor(&h, slot);
-    assert_parity(&mut h, &legacy, "undone");
+    let session = track_editor(&h, slot);
+    assert_parity(&mut h, &session, "undone");
     assert_eq!(
         h.eval_te("(list te.can-undo te.can-redo)"),
         h.eval_te("(list true true)")
@@ -227,10 +254,9 @@ fn a_bus_filter_tables_session_names_its_bus_device() {
     observe(&mut h);
     h.act(r#"(table-editor-open! bft) (table-editor-add-node! "peak")"#);
     assert_eq!(h.eval_te("(= te.device bft)"), Value::Bool(true));
-    let effects = items(&build_bus_effects_value(&h.app));
-    let legacy = get(&items(&effects[bus])[slot], "editor");
-    assert_eq!(get(&get(&legacy, "band"), "kind"), s("peak"));
-    assert_parity(&mut h, &legacy, "bus");
+    let session = session_editor(h.app.buses[bus].effect_slots[slot].node_id);
+    assert_eq!(get(&get(&session, "band"), "kind"), s("peak"));
+    assert_parity(&mut h, &session, "bus");
 
     // An engine swap rebuilds the node and carries the session across;
     // the bus mirror the device's node is read from lags it (the event
@@ -321,7 +347,7 @@ fn the_table_editor_actions_apply_like_the_legacy_commands() {
     assert_eq!((ui().op_count, ui().dirty), (0, false));
 
     // A band drag: change auditions without an edit, commit adds one, a
-    // second commit replaces it (the legacy command's coalescing).
+    // second commit replaces it (the session command's coalescing).
     h.act(r#"(table-editor-band! "peak" 96 6 2)"#);
     assert_eq!(ui().op_count, 0, "a change is a preview");
     h.act(r#"(table-editor-band! "peak" 96 6 2 :phase "commit")"#);

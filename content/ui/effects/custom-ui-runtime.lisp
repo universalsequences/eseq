@@ -183,7 +183,7 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
+                :target-node-id (dv/fx-node-id fx)
                 :updates (pc/effect-param-updates fx pairs)
                 :commit (not (get env :active))))
         (if (and (not fx) (not (pc/instrument-rack-target? (nth (nth pairs 0) 0))))

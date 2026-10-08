@@ -136,7 +136,8 @@
     :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))
 
 (def option (fx p w)
-  (dropdown :value (get p :text-value)
+  (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
     :options (get p :options)
     :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -200,7 +201,7 @@
       :source (effect-source fx)
       :stage stage
       ;; Effective-value bindings, not snapshot values: knob drags update the
-      ;; value field in place and do not rebuild the panel, and the effective
+      ;; param in place and do not rebuild the panel, and the effective
       ;; value follows an LFO on amount/bias (eseq-hpc), falling back to the
       ;; base value when nothing is modulating.
       :shaper (eseq.effects.param-controls/param-effective-value shaper-p)
@@ -256,7 +257,7 @@
       (label "FEEDBACK" :font-size 8.0 :width 6.4 :color :dim :bg :transparent)
       (subtree :key "roar-fb-mode-control"
         (option fx fbmode-p 5.4))
-      (if (= (get fbmode-p :text-value) "note")
+      (if (= (eseq.effects.param-controls/fx-param-text-value-for fx fbmode-p) "note")
         (subtree :key "roar-fb-div-control"
           (option fx fbdiv-p 5.4))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "time" fbtime-p))

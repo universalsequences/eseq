@@ -41,10 +41,10 @@
 
 ;; NOTE: no drag "live echo" state here on purpose. The curve editor renders
 ;; its own in-flight drag from widget-local state (LIVE_BANDS in
-;; response_curve_editor.rs) and the knob/readout values arrive through the
-;; host's targeted SEQV param-value fields (`sync_effect_param_batch_display`),
-;; which dirty exactly the bound widgets. Mirroring the drag into `defstate`
-;; globals instead re-ran the whole effect panel on every mouse move.
+;; response_curve_editor.rs) and the knob/readout values bind their params
+;; (`#'prm.value`, which the host kinds push), which dirties exactly the bound
+;; widgets. Mirroring the drag into `defstate` globals instead re-ran the
+;; whole effect panel on every mouse move.
 
 (def builtin-fx-param (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
@@ -84,7 +84,7 @@
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
     :id 0
-    :type (filter-mode-type (get mode-p :text-value))
+    :type (filter-mode-type (eseq.effects.param-controls/fx-param-text-value-for fx mode-p))
     :freq (filter-cutoff-value fx cutoff-p)
     :freq-min (eseq.effects.param-controls/param-control-min fx cutoff-p)
     :freq-max (eseq.effects.param-controls/param-control-max fx cutoff-p)
@@ -120,7 +120,7 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
+                :target-node-id (eseq.effects.devices/fx-node-id fx)
                 :updates (eseq.effects.param-controls/effect-param-updates fx
                   (list (list cutoff-p (get event :freq)) (list resonance-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
@@ -172,7 +172,8 @@
   (subtree :key (builtin-fx-param-subtree-key fx p "opt")
     (h-stack :gap 0.22 :align :center
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-      (dropdown :value (get p :text-value)
+      (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -306,8 +307,9 @@
 
 (def builtin-fx-filter-mini-option (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mini-opt")
-    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
-      (dropdown :value current
+    (do
+      (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

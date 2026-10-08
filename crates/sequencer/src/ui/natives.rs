@@ -3339,36 +3339,11 @@ pub(crate) fn init_runtime(
                             .collect::<Vec<_>>(),
                     ),
                 ),
-                ("bus-effects", build_bus_effects_value(&app)),
                 (
                     "track-device-chains",
                     build_track_device_chains_value(&app, &state),
                 ),
                 ("bus-device-chains", build_bus_device_chains_value(&app)),
-                (
-                    "effects",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_effects_value(&state, 0, &effect_descriptors, &selected_steps)
-                    },
-                ),
-                (
-                    "midi-effects",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_midi_effects_value(&state, 0, &selected_steps)
-                    },
-                ),
-                (
-                    "instrument-panel",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_instrument_panel_value(&app, 0, &selected_steps)
-                    },
-                ),
                 ("instrument-active-notes", Value::List(vec![])),
                 ("track-params", build_track_params(&state, 0)),
                 (
@@ -3464,9 +3439,6 @@ pub(crate) fn init_runtime(
     crate::midi_dispatch::register_device_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
-    if track_count > 0 {
-        sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
-    }
 
     // ── Native functions ──
 
@@ -5324,7 +5296,6 @@ pub(crate) fn init_runtime(
     let descs = effect_descriptors.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
-    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -5387,18 +5358,6 @@ pub(crate) fn init_runtime(
                     }
                 }
             }
-            if let Some(name) = descs
-                .get(track)
-                .and_then(|d| d.get(slot_idx))
-                .and_then(|d| d.params.get(param_idx))
-                .map(|p| p.name.as_str())
-            {
-                reactive_bindings.write_float(
-                    "SEQ",
-                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
-                    clamped as f64,
-                );
-            }
             clamped_values.push(Value::Number(clamped as f64));
             ui_inv.push(UiInvalidation::TrackFx {
                 track,
@@ -5425,7 +5384,6 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
-    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair-live", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -5490,18 +5448,6 @@ pub(crate) fn init_runtime(
                         );
                     }
                 }
-            }
-            if let Some(name) = descs
-                .get(track)
-                .and_then(|d| d.get(slot_idx))
-                .and_then(|d| d.params.get(param_idx))
-                .map(|p| p.name.as_str())
-            {
-                reactive_bindings.write_float(
-                    "SEQ",
-                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
-                    clamped as f64,
-                );
             }
             clamped_values.push(Value::Number(clamped as f64));
         }

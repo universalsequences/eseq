@@ -6,12 +6,13 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
-(import eseq.kinds :refer (tracks engine))
+(import eseq.kinds :refer (tracks buses engine selection))
 (import eseq.drum-rack-v2)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.instrument-panel :as ip)
+(import eseq.effects.panel-data :as pd)
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
@@ -44,15 +45,22 @@
         :active (if engine.compiling 1 0)
         :width 12 :height 0.3))))
 
-;; COMPAT (eseq-0l17.22): the panels lay out from the host's panel dicts
-;; (SEQ.instrument-panel, SEQ.midi-effects, SEQ.effects, SEQ.bus-effects:
-;; their params, sources, slots); every value they show comes from the
-;; kinds (eseq.effects.devices). This module and eseq.effects/device-panel
-;; are their only readers.
+;; The effects the selected bus shows (none while no bus is selected), as
+;; devices: each panel's dict (eseq.effects.panel-data) is built inside its
+;; own subtree, so an option param's label it shows re-renders that panel
+;; alone.
 (def selected-bus-effects ()
   (if (pw/has-selected-bus?)
-    (nth SEQ.bus-effects eseq.seq-core-state/selected-bus)
+    (pd/bus-effects (nth (buses) eseq.seq-core-state/selected-bus))
     '()))
+
+;; Bus effect `d`'s panel and its output meter.
+(def bus-effect-panel (d)
+  (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+    (subtree :key (str "bus-fx-panel-" d.bus.index "-" d.slot "-" d.name)
+      (let ((fx (pd/fx-panel-of d)))
+        (ep/fx-panel (get fx :name) (get fx :params) fx)))
+    (pf/device-output-meter d.meter)))
 
 (def drop-placeholder-panel ()
   (box :debug-name "fx-drop-placeholder-panel"
@@ -169,21 +177,15 @@
       (eseq.sequencer/rack-pad-context-menu)
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
-      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
-        (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
-          (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
-            (ep/fx-panel (get fx :name) (get fx :params) fx))
-          (pf/device-output-meter (get fx :meter))))
+      (each (selected-bus-effects) |d slot-idx|
+        (bus-effect-panel d))
       (drop-placeholder-panel))))
 
 (def bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
-      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
-        (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
-          (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
-            (ep/fx-panel (get fx :name) (get fx :params) fx))
-          (pf/device-output-meter (get fx :meter))))
+      (each (selected-bus-effects) |d slot-idx|
+        (bus-effect-panel d))
       (drop-placeholder-panel))))
 
 ;; Keep this as a macro rather than a normal function. Custom instrument/effect
@@ -192,27 +194,39 @@
 (defmacro track-selection-panel ()
   `(v-stack :padding 0.05 :gap 1
     (h-stack :gap 0.5
-      (each SEQ.instrument-panel |inst inst-idx|
+      ;; An effect's panel dict (eseq.effects.panel-data) is built inside
+      ;; its own subtree, so a structural change re-renders that panel
+      ;; alone. The instrument's is built inline: a custom instrument UI
+      ;; sets its render scope (`synth-ui-current-inst`, the selected
+      ;; section) as the tree evaluates, which a subtree re-render of the
+      ;; panel alone loses; its dict reads no value or text (only which
+      ;; source settings show), so it moves on a structural change only.
+      (each (pd/track-instrument-devices selection.track) |d inst-idx|
         (h-stack :gap 0.5 :height st/fx-fixed-panel-height :align :stretch
-          (if (= (get inst :type) "rack")
-            (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
-              (ip/instrument-panel inst)
-              (if (st/rack-panel-selected-chain-open inst)
-                (h-stack :debug-name "rack-selected-chain-fx"
-                  :gap 1 :height st/fx-fixed-panel-height :align :stretch
-                  (ip/rack-selected-fx-panel inst)
-                  (ip/rack-slot-fx-drop-panel inst)
-                  (ip/rack-slot-track-fx-divider))
-                (box :width 0 :height 0)))
-            (ip/instrument-panel inst))
-          (pf/device-output-meter (get inst :meter))))
-      (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
-        (ep/midi-fx-panel (get fx :name) (get fx :params) fx))
-      (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
+          (do
+            (let ((inst (pd/instrument-panel-of d.track d)))
+              (if (= (get inst :type) "rack")
+                (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
+                  (ip/instrument-panel inst)
+                  (if (st/rack-panel-selected-chain-open inst)
+                    (h-stack :debug-name "rack-selected-chain-fx"
+                      :gap 1 :height st/fx-fixed-panel-height :align :stretch
+                      (ip/rack-selected-fx-panel inst)
+                      (ip/rack-slot-fx-drop-panel inst)
+                      (ip/rack-slot-track-fx-divider))
+                    (box :width 0 :height 0)))
+                (ip/instrument-panel inst))))
+          (pf/device-output-meter d.meter)))
+      (each (pd/track-midi-effects selection.track) |d slot-idx|
+        (subtree :key (str "midi-fx-panel-" d.slot "-" d.name)
+          (let ((fx (pd/fx-panel-of d)))
+            (ep/midi-fx-panel (get fx :name) (get fx :params) fx))))
+      (each (pd/track-effects selection.track) |d slot-idx|
         (h-stack :gap 0.5 :height st/fx-fixed-panel-height :align :stretch
-          (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
-            (ep/fx-panel (get fx :name) (get fx :params) fx))
-          (pf/device-output-meter (get fx :meter))))
+          (subtree :key (str "audio-fx-panel-" d.slot "-" d.name)
+            (let ((fx (pd/fx-panel-of d)))
+              (ep/fx-panel (get fx :name) (get fx :params) fx)))
+          (pf/device-output-meter d.meter)))
       (track-drop-placeholder-panel))))
 
 (effect-buffer "*track*"

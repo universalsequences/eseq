@@ -54,6 +54,8 @@
         fx-param-value-for
         fx-param-numeric-value-for
         fx-param-text-value-for
+        param-option-index
+        param-option-label
         param-plock-active?
         param-plock-context-menu
         open-target-plock-menu
@@ -425,8 +427,7 @@
   (let ((owner (dict :fx (dict :name (get fx :name) :slot-idx (get fx :slot-idx)
                                :track-idx (get fx :track-idx) :bus-idx (get fx :bus-idx)
                                :rack-slot (get fx :rack-slot) :rack-fx (get fx :rack-fx)
-                               :bus-fx (get fx :bus-fx) :midi-fx (get fx :midi-fx)
-                               :target-node-id (get fx :target-node-id)))))
+                               :bus-fx (get fx :bus-fx) :midi-fx (get fx :midi-fx)))))
     (merge fx :params
       (map (lambda (p) (merge (dv/with-prm fx p) :custom-ui-owner owner)) (get fx :params)))))
 
@@ -528,10 +529,10 @@
         (if (seq-has-selection?) "set-midi-fx-plock" "set-midi-fx-param")
         (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value stored))
       (if (seq-has-selection?)
-        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) stored (get fx :target-node-id))
+        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) stored (dv/fx-node-id fx))
         (host-command "set-effect-param"
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
+                :target-node-id (dv/fx-node-id fx)
                 :param-idx (get p :idx) :value stored))))))))
 
 (def fx-toggle-instrument-value (p)
@@ -679,6 +680,36 @@
           (if (and prm options)
             (fx-param-option-at options prm.value)
             (get p :text-value)))))))
+
+;; The binding a dropdown of p shows its option at (`:value-index`, which
+;; rounds and clamps like `fx-param-option-at`): the param's value, when
+;; the value indexes p's options: all of its own enum's, or a list the dict
+;; says its value indexes (`:index-options`, the synced Delay's divisions).
+;; Nil otherwise (the keys tab, a dict that leaves options out), and the
+;; dropdown shows `fx-param-text-value-for` instead. Bound, the label
+;; follows an edit or a p-lock under the playhead without re-rendering
+;; the panel.
+(def param-option-indexed? (fx p)
+  (let ((options (get p :options))
+        (prm (dv/param-of fx p)))
+    (if (and prm options
+             (not (and (not fx) (instrument-keys-active?)))
+             (or (get p :index-options)
+                 (and (= prm.type "enum") (= (len options) (len prm.options)))))
+      true
+      false)))
+
+;; (A binding read as a value is its value: test the predicate, never the
+;; binding, or the dropdown's subtree reads the param's value.)
+(def param-option-index (fx p)
+  (if (param-option-indexed? fx p)
+    (let ((prm (dv/param-of fx p))) #'prm.value)
+    nil))
+
+;; The label a dropdown of p shows by value: none while it is bound
+;; (`param-option-index`).
+(def param-option-label (fx p)
+  (if (param-option-indexed? fx p) "" (fx-param-text-value-for fx p)))
 
 (def param-plock-row-target (fx)
   (if fx
@@ -901,7 +932,7 @@
               (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
               (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
           (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
+                :target-node-id (dv/fx-node-id fx)
                 :param-idx (get p :idx) :label label))))
     (fx-set-instrument-option p label)))
 

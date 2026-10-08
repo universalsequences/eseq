@@ -75,7 +75,7 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
+                :target-node-id (eseq.effects.devices/fx-node-id fx)
                 :updates (eseq.effects.param-controls/effect-param-updates fx
                   (list (list freq-p (get event :freq)) (list q-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
@@ -95,9 +95,8 @@
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p))))
 
-;; `current` must come from fx-param-text-value-for, not (get p :text-value):
-;; the params dict is frozen at panel build, so the raw text-value never sees a
-;; p-locked division — the :value-field SEQV binding does.
+;; `current` comes from fx-param-text-value-for: the param's live text
+;; (or the division at its value), so a p-locked division shows.
 (def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 1.12 :padding 0 :font-size 8.0

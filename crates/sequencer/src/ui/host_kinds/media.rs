@@ -12,9 +12,8 @@
 //! - **Effect tables** (`device.table-name`, `table-options`, `table-mode`,
 //!   `table-engine`, `table-data-key`, `ir-name`): a Filter Table's and a
 //!   Convolution Reverb's, from the effect node's registries (no `App`;
-//!   `EffectTableFields`, shared with the legacy panels), live; the table
-//!   asset list is listed and built once per (UI epoch, FX epoch, content
-//!   library epoch), the legacy panel's rebuild gate, and pushed to an
+//!   `EffectTableFields`), live; the table asset list is listed and built
+//!   once per (UI epoch, FX epoch, content library epoch) and pushed to an
 //!   observer only when that key moved or it starts observing.
 //! - **Sampler media** (`device.sample-buffer`, `sample-duration`,
 //!   `start-time`, `end-time`, `slices`, `slice-active`, `onsets`,
@@ -27,9 +26,9 @@
 //!   sample rate its seconds are in) and the slices (those, the slice mode
 //!   and sensitivity at the displayed step, the slice edits). Each observed
 //!   device's keys are compared in place every tick, and only a group that
-//!   moved (or a field that starts being observed) is recomputed (sharing
-//!   the legacy panels' `sampler_waveform_sample`, `sampler_slices`,
-//!   `SamplerAnalysis`) and pushed, a list only when it differs;
+//!   moved (or a field that starts being observed) is recomputed
+//!   (`sampler_waveform_sample`, `sampler_slices`, `SamplerAnalysis`) and
+//!   pushed, a list only when it differs;
 //!   `start-time` / `end-time` are compared every tick (a start drag moves
 //!   no counter); a rack slot's are read under the rack lock, and the
 //!   sample loads after it is released. Every device reads the no-sampler defaults from its
@@ -112,7 +111,7 @@ pub(super) fn is_table_field(key: FieldKey) -> bool {
 }
 
 /// The table options' cache key: (UI epoch, FX epoch, content library
-/// epoch), the legacy panel's rebuild gate.
+/// epoch).
 pub(super) type TableOptionsKey = (usize, usize, u64);
 
 /// The table asset stems a Filter Table loads (`table-options`), listed

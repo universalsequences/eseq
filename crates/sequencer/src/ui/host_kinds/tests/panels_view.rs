@@ -3,7 +3,10 @@
 //! state), ported to the kinds (kind-bindings spec §13 stage 8,
 //! eseq-0l17.14).
 
-use super::views::{assert_ported, distro, instance_bindings, legacy_forms, widgets_with_prop};
+use super::views::{
+    assert_ported, bound, distro, instance_bindings, legacy_forms, tree_has_string_prop,
+    widgets_with_prop,
+};
 use super::*;
 
 /// The ported files that read host kinds.
@@ -180,30 +183,31 @@ fn ported_panels_use_no_legacy_binding_forms() {
     assert!(count > 20, "found only {count} built-in panels");
 }
 
+/// The device panels' layout (eseq-0l17.82): the *fx* buffer and
+/// eseq.effects/device-panel lay out from the devices, params and racks
+/// through eseq.effects.panel-data; no file reads a panel dict from SEQ.
+const PORTED_82: [(&str, &str); 2] = [
+    (
+        "ui/effects/buffers.lisp",
+        include_str!("../../../../../../content/ui/effects/buffers.lisp"),
+    ),
+    (
+        "ui/effects/panel-data.lisp",
+        include_str!("../../../../../../content/ui/effects/panel-data.lisp"),
+    ),
+];
+
 #[test]
-fn panel_layout_keeps_its_compat_reads() {
-    // COMPAT (eseq-0l17.22): the panels lay out from the host's panel dicts
-    // (SEQ.instrument-panel / midi-effects / effects / bus-effects), read by
-    // the *fx* buffer and eseq.effects/device-panel alone. (The p-lock table
-    // reads selection.plock-rows since eseq-0l17.74: PORTED.)
-    for (file, source, forms) in [
-        (
-            "ui/effects/buffers.lisp",
-            include_str!("../../../../../../content/ui/effects/buffers.lisp"),
-            vec!["SEQ."],
-        ),
-        (
-            "ui/effects/index.lisp",
-            include_str!("../../../../../../content/ui/effects/index.lisp"),
-            vec!["SEQ."],
-        ),
-    ] {
-        assert_eq!(legacy_forms(source), forms, "{file}");
-    }
+fn panel_layout_reads_the_kinds() {
+    assert_ported(&PORTED_82);
+    let index = include_str!("../../../../../../content/ui/effects/index.lisp");
+    assert_eq!(legacy_forms(index), Vec::<&str>::new(), "ui/effects/index.lisp");
+    // Not vacuous: the scanner flags the reads these files had.
+    assert_eq!(legacy_forms("(each SEQ.instrument-panel |inst| inst)"), vec!["SEQ."]);
 }
 
 /// A distro harness showing track 2 (a sampler, with a Filter effect) in
-/// the *fx* buffer, its panels published as the tick does while *fx* shows.
+/// the *fx* buffer.
 fn sampler_with_filter() -> Harness {
     let mut h = distro();
     h.app
@@ -216,25 +220,12 @@ fn sampler_with_filter() -> Harness {
 }
 
 impl Harness {
-    /// Make `track` current and publish its instrument and effect panel
-    /// dicts, as the tick does while *fx* shows.
+    /// Make `track` current, its chain synced (the panels lay out from its
+    /// devices), and show the buffers.
     fn publish_panels(&mut self, track: usize) {
         self.shared.current_track.store(track, Ordering::Relaxed);
         self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
         self.sync();
-        let instrument =
-            build_instrument_panel_value(&self.app, track, &self.shared.selected_steps);
-        let effects = build_effects_value(
-            &self.shared.state,
-            track,
-            &self.app.graph.effect_descriptors,
-            &self.shared.selected_steps,
-        );
-        let rt = self.editor.runtime_mut();
-        rt.set_reactive_value_patch("SEQ", "current-track", Value::Number(track as f64));
-        rt.set_reactive_value_patch("SEQ", "instrument-panel", instrument);
-        rt.set_reactive_value_patch("SEQ", "effects", effects);
-        rt.run_reactive_cycle();
         self.show_all();
         self.sync();
         self.show_all();
@@ -290,12 +281,12 @@ fn a_percent_param_shows_display_units_and_sets_stored_ones() {
     // display units (eseq.kinds, spec §14.2b), the dict included.
     let mut h = sampler_with_filter();
     let wet = h.eval_all(
-        "(let ((fx (first (filter (lambda (fx) (= (get fx :name) \"Filter\")) SEQ.effects)))) \
+        "(let ((fx (first (filter (lambda (fx) (= (get fx :name) \"Filter\")) (eseq.effects.panel-data/current-effect-panels))))) \
            (first (filter (lambda (p) (= (get p :name) \"wet\")) (get fx :params))))",
     );
     assert_eq!(get(&wet, "max"), Value::Number(100.0), "{wet:?}");
     let stored = h.eval_all(
-        "(let ((fx (first (filter (lambda (fx) (= (get fx :name) \"Filter\")) SEQ.effects)))) \
+        "(let ((fx (first (filter (lambda (fx) (= (get fx :name) \"Filter\")) (eseq.effects.panel-data/current-effect-panels))))) \
            (let ((p (first (filter (lambda (p) (= (get p :name) \"wet\")) (get fx :params))))) \
              (eseq.effects.devices/param-stored-value fx (eseq.effects.devices/param-of fx p) 40)))",
     );
@@ -306,7 +297,8 @@ fn a_percent_param_shows_display_units_and_sets_stored_ones() {
 /// as `p` (its panel dict) and `prm` (its kinds param).
 fn bind_effect_param(h: &mut Harness, name: &str, param: &str) {
     h.eval_all(&format!(
-        "(def fx (first (filter (lambda (fx) (= (get fx :name) \"{name}\")) SEQ.effects))) \
+        "(def fx (first (filter (lambda (fx) (= (get fx :name) \"{name}\")) \
+           (eseq.effects.panel-data/current-effect-panels)))) \
          (def p (first (filter (lambda (p) (= (get p :name) \"{param}\")) (get fx :params)))) \
          (def prm (eseq.effects.devices/param-of fx p)) \
          (def lane (first prm.mod-targets)) \
@@ -458,4 +450,199 @@ fn adsr_gesture_flags_are_per_scope_and_a_drag_only_repaints() {
     assert_eq!(flags(&h, "*adsr-triton*"), [0.0]);
     assert_eq!(h.buffer_tree("*adsr-core*").1, core_revision);
     assert_eq!(h.buffer_tree("*adsr-triton*").1, triton_revision);
+}
+
+/// Track 2's Filter and its cutoff param (`flt`, `cutoff`), and the
+/// cutoff's instance.
+fn filter_cutoff(h: &mut Harness) -> InstanceId {
+    h.eval_all(
+        "(def t2 (track 2)) \
+         (def flt (first (filter (lambda (d) (= d.name \"Filter\")) t2.devices))) \
+         (def cutoff (first (filter (lambda (p) (= p.name \"cutoff\")) flt.params)))",
+    );
+    match h.eval_all("cutoff") {
+        Value::Instance(id) => id,
+        other => panic!("no cutoff param: {other:?}"),
+    }
+}
+
+/// eseq-0l17.82: the panels lay out from the kinds, and a param's value is
+/// a binding: editing it repaints the knob and rebuilds no panel.
+#[test]
+fn editing_a_param_repaints_without_rebuilding_the_panels() {
+    let mut h = sampler_with_filter();
+    let cutoff = filter_cutoff(&mut h);
+    let (fx, revision) = h.buffer_tree("*fx*");
+    assert!(
+        tree_has_string_prop(&fx, "debug-name", "audio-fx-panel-root-0-Filter"),
+        "the Filter's panel shows"
+    );
+    let mut knobs = Vec::new();
+    widgets_with_prop(&fx, "value", &mut knobs);
+    let knob = knobs
+        .iter()
+        .find(|knob| bound(knob, "value") == Some((cutoff, "value".to_string())))
+        .expect("a control binds cutoff.value");
+    let Value::ReactiveRef { slot, .. } = &knob["value"] else {
+        unreachable!("bound")
+    };
+    let slot = slot.clone();
+    let before = read_float_slot(&slot);
+    let target = if (before - 1234.0).abs() < 1.0 { 2345.0 } else { 1234.0 };
+    h.eval_all(&format!("(set! cutoff.base {target})"));
+    h.drain_and_sync();
+    h.show_all();
+    assert!(
+        (read_float_slot(&slot) - target).abs() < 1e-3,
+        "the knob repaints the new value"
+    );
+    assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
+}
+
+/// eseq-0l17.82: adding or removing an effect rebuilds the panels, which
+/// lay out from the track's devices.
+#[test]
+fn adding_or_removing_an_effect_rebuilds_the_panels() {
+    let mut h = sampler_with_filter();
+    let (fx, revision) = h.buffer_tree("*fx*");
+    let chorus = |slot: usize| format!("audio-fx-panel-root-{slot}-Chorus");
+    let slot = h.app.add_builtin_effect_sync(2, "Chorus").expect("chorus");
+    assert!(!tree_has_string_prop(&fx, "debug-name", &chorus(slot)));
+    h.publish_panels(2);
+    let (fx, added) = h.buffer_tree("*fx*");
+    assert_ne!(added, revision, "the panels rebuild");
+    assert!(
+        tree_has_string_prop(&fx, "debug-name", &chorus(slot)),
+        "the Chorus panel shows"
+    );
+    h.app
+        .graph_controller()
+        .delete_custom_effect_slot(2, slot)
+        .expect("delete");
+    h.publish_panels(2);
+    let (fx, removed) = h.buffer_tree("*fx*");
+    assert_ne!(removed, added, "the panels rebuild");
+    assert!(!tree_has_string_prop(&fx, "debug-name", &chorus(slot)));
+    assert!(tree_has_string_prop(&fx, "debug-name", "audio-fx-panel-root-0-Filter"));
+}
+
+impl Harness {
+    /// Play with track `track`'s playhead at `step`, synced and shown.
+    fn play_panels_at(&mut self, track: usize, step: usize) {
+        let transport = &self.shared.state.transport;
+        transport.playing.store(true, Ordering::Relaxed);
+        transport.track_playheads[track].store(step as u32, Ordering::Relaxed);
+        self.sync();
+        self.show_all();
+        self.sync();
+        self.show_all();
+    }
+
+    /// The `:value-index` slot of the dropdown in the *fx* buffer bound to
+    /// `param`'s value, and the buffer's revision.
+    fn option_slot(&self, param: InstanceId) -> (Arc<std::sync::atomic::AtomicU64>, u64) {
+        let (fx, revision) = self.buffer_tree("*fx*");
+        let mut dropdowns = Vec::new();
+        widgets_with_prop(&fx, "value-index", &mut dropdowns);
+        let dropdown = dropdowns
+            .iter()
+            .find(|props| bound(props, "value-index") == Some((param, "value".to_string())))
+            .unwrap_or_else(|| panic!("a dropdown binds the option param's value"));
+        let Value::ReactiveRef { slot, .. } = &dropdown["value-index"] else {
+            unreachable!("bound")
+        };
+        (slot.clone(), revision)
+    }
+
+    fn panel_instance(&mut self, code: &str) -> InstanceId {
+        match self.eval_all(code) {
+            Value::Instance(id) => id,
+            other => panic!("{code}: not an instance: {other:?}"),
+        }
+    }
+}
+
+/// eseq-0l17.82: an option param p-locked on two steps shows each step's
+/// option as the playhead steps onto it, through its dropdown's bound index:
+/// the *fx* buffer's tree is not rebuilt (no panel reads the option by
+/// value).
+#[test]
+fn a_p_locked_instrument_option_steps_under_the_playhead_without_rebuilding() {
+    let mut h = sampler_with_filter();
+    h.eval_all(
+        "(def t2 (track 2)) (def inst (first t2.devices)) \
+         (def lp (first (filter (lambda (p) (= p.name \"loop\")) inst.params))) \
+         (lock-param! lp (list (nth t2.steps 0)) 0) \
+         (lock-param! lp (list (nth t2.steps 1)) 1)",
+    );
+    h.drain_and_sync();
+    let lp = h.panel_instance("lp");
+    assert_eq!(h.eval_all("lp.type"), s("enum"));
+    h.play_panels_at(2, 0);
+    let (slot, revision) = h.option_slot(lp);
+    assert_eq!(read_float_slot(&slot), 0.0);
+    h.play_panels_at(2, 1);
+    assert_eq!(read_float_slot(&slot), 1.0, "the dropdown shows step 1's option");
+    assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
+    h.play_panels_at(2, 0);
+    assert_eq!(read_float_slot(&slot), 0.0);
+    assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
+}
+
+/// The same for an option param of a drum rack slot's effect (the rack's
+/// selected chain, each effect's panel in its own subtree).
+#[test]
+fn a_p_locked_rack_slot_effect_option_steps_under_the_playhead_without_rebuilding() {
+    let mut h = distro();
+    h.rack_track();
+    h.sync();
+    let add = h.eval(r#"(dict :track 2 :rack-slot 0 :name "Filter" :builtin true)"#);
+    h.command("add-rack-slot-effect", add);
+    let select = h.eval("(dict :track 2 :slot 0)");
+    h.command("select-rack-slot", select);
+    h.publish_panels(2);
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices)) \
+         (def flt (first rs.devices)) \
+         (def opt (first (filter (lambda (p) (= p.name \"lfo wave\")) flt.params))) \
+         (eseq.effects.state/rack-panel-set-view (str t2.tid) false false true) \
+         (lock-param! opt (list (nth t2.steps 0)) 0) \
+         (lock-param! opt (list (nth t2.steps 1)) 1)",
+    );
+    h.drain_and_sync();
+    let opt = h.panel_instance("opt");
+    assert_eq!(h.eval_all("opt.type"), s("enum"));
+    assert!(num(h.eval_all("flt.node-id")) > 0.0, "the slot's Filter runs");
+    h.play_panels_at(2, 0);
+    let (slot, revision) = h.option_slot(opt);
+    assert_eq!(read_float_slot(&slot), 0.0);
+    h.play_panels_at(2, 1);
+    assert_eq!(read_float_slot(&slot), 1.0, "the dropdown shows step 1's option");
+    assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
+}
+
+/// A synced Delay's time picks a division: editing it moves the dropdown's
+/// bound index and rebuilds no panel (the dict reads no value).
+#[test]
+fn a_synced_delay_time_edit_rebuilds_no_panel() {
+    let mut h = sampler_with_filter();
+    h.app.add_builtin_effect_sync(2, "Delay").expect("delay");
+    h.publish_panels(2);
+    h.eval_all(
+        "(def t2 (track 2)) \
+         (def dly (first (filter (lambda (d) (= d.name \"Delay\")) t2.devices))) \
+         (def sync (nth dly.params 1)) (def time (nth dly.params 2)) \
+         (set! sync.base 1)",
+    );
+    h.drain_and_sync();
+    h.publish_panels(2);
+    assert_eq!(h.eval_all("sync.name"), s("synced"));
+    let time = h.panel_instance("time");
+    let (slot, revision) = h.option_slot(time);
+    let target = if read_float_slot(&slot) == 3.0 { 5.0 } else { 3.0 };
+    h.eval_all(&format!("(set! time.base {target})"));
+    h.drain_and_sync();
+    h.show_all();
+    assert_eq!(read_float_slot(&slot), target, "the division follows the edit");
+    assert_eq!(h.buffer_tree("*fx*").1, revision, "no panel rebuilt");
 }

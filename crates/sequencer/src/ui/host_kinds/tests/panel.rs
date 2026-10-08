@@ -50,89 +50,103 @@ const SAMPLER: &str = "(def t0 (track 0)) (def flt (first t0.devices)) \
                        (def start (device-param inst \"start\"))";
 
 #[test]
-fn param_placement_and_lanes_match_the_sampler_panel() {
+fn param_placement_and_lanes_follow_the_sampler_descriptor() {
     let (mut h, _) = Harness::with_devices();
     h.eval_panel(SAMPLER);
-    let panel = build_instrument_panel_value(&h.app, 2, &h.shared.selected_steps);
-    let panel = items(&panel).remove(0);
-    let fields = |h: &mut Harness, idx: usize| {
+    // Literal expectations for the builtin sampler (its descriptor's layout
+    // as the panel shows it), so a placement rule change shows up here.
+    let read = |h: &mut Harness, idx: usize| {
         let code = format!(
             "(let ((p (nth inst.params {idx}))) (list p.section p.label p.mod-slot p.visible))"
         );
         items(&h.eval_panel(&code))
     };
-    let mut seen = HashSet::new();
-    let mut lanes_seen = 0;
-    for (list, section) in [("synth", "main"), ("mod", "mod")] {
-        for param in items(&get(&panel, list)) {
-            let Some(idx) = index_of(&param) else {
-                continue; // the base note row
-            };
-            seen.insert(idx);
-            let read = fields(&mut h, idx);
-            assert_eq!(read[0], s(section), "param {idx} in {list}");
-            assert_eq!(read[1], get(&param, "name"), "param {idx}'s label");
-            assert_eq!(read[3], Value::Bool(true));
-            // The lanes onto it, as the panel lists them.
-            let lanes = items(&get(&param, "mod-targets"));
-            let code = format!(
-                "(let ((p (nth inst.params {idx}))) \
-                 (map (lambda (mt) (list (if mt.source mt.source.index -1) mt.depth.index \
-                 mt.depth-min mt.depth-max mt.unit mt.param.index mt.slot)) p.mod-targets))"
+    let row = |section: &str, label: &str, slot: f64, visible: bool| {
+        vec![s(section), s(label), Value::Number(slot), Value::Bool(visible)]
+    };
+    assert_eq!(h.eval_panel("(len inst.params)"), Value::Number(145.0));
+    let main = [
+        "attack", "release", "start", "end", "enabled", "reverse", "loop", "xfade", "sr",
+        "warp", "mode", "bpm", "speed", "scrub",
+    ];
+    for (idx, name) in main.iter().enumerate() {
+        assert_eq!(read(&mut h, idx), row("main", name, 0.0, true), "param {idx}");
+    }
+    // The tail: warp settings and the host-only slice controls (the slice
+    // mode, its sensitivity and base note, eseq-0l17.82's re-added check).
+    let tail = ["smooth", "preserve", "fill", "decay", "slice", "sens", "slice base"];
+    for (at, name) in tail.iter().enumerate() {
+        assert_eq!(read(&mut h, 134 + at), row("main", name, 0.0, true), "param {}", 134 + at);
+    }
+    // Each source's type param (labelled `type`) and the settings its type
+    // uses at the defaults: Mod 1 an LFO (its division only while synced),
+    // Mod 2 an envelope, Mod 3 random, Mod 4 drift.
+    let settings = [
+        "rate", "sync", "division", "shape", "pulse width", "retrigger", "attack", "decay",
+        "sustain", "release", "rate", "sync", "division", "slew", "rate", "sync", "division",
+    ];
+    let shown: [&[usize]; 4] = [&[0, 1, 3, 4, 5], &[6, 7, 8, 9], &[10, 11, 13], &[14, 15]];
+    for slot in 0..4 {
+        let base = 14 + slot * 18;
+        let source = (slot + 1) as f64;
+        assert_eq!(read(&mut h, base), row("source", "type", source, true), "Mod {source}'s type");
+        for (at, label) in settings.iter().enumerate() {
+            let visible = shown[slot].contains(&at);
+            assert_eq!(
+                read(&mut h, base + 1 + at),
+                row("source", label, source, visible),
+                "Mod {source}'s setting {at}"
             );
-            let kinds = items(&h.eval_panel(&code));
-            assert_eq!(kinds.len(), lanes.len(), "param {idx}'s lanes");
-            lanes_seen += lanes.len();
-            for (lane, kind) in lanes.iter().zip(&kinds) {
-                let kind = items(kind);
-                let source = match get(lane, "source-idx") {
-                    Value::Nil => Value::Number(-1.0),
-                    source => source,
-                };
-                assert_eq!(kind[0], source);
-                assert_eq!(kind[1], get(lane, "depth-idx"));
-                assert_eq!(kind[2], get(lane, "depth-min"));
-                assert_eq!(kind[3], get(lane, "depth-max"));
-                let unit = get(lane, "depth-unit");
-                assert_eq!(kind[4], if unit == Value::Nil { s("") } else { unit });
-                assert_eq!(kind[5], Value::Number(idx as f64));
-                if get(lane, "source-idx") == Value::Nil {
-                    assert_eq!(kind[6], get(lane, "source-slot"));
-                }
-            }
         }
     }
-    assert!(lanes_seen > 0, "the sampler declares modulation lanes");
-    // The modulation sources: each slot's type param and the settings its
-    // type uses.
-    for section in items(&get(&panel, "sources")) {
-        let slot = num(get(&section, "slot"));
-        let listed = std::iter::once(get(&section, "source-param"))
-            .filter(|param| *param != Value::Nil)
-            .chain(items(&get(&section, "params")));
-        for param in listed {
-            let idx = index_of(&param).expect("a source param has an index");
-            seen.insert(idx);
-            let read = fields(&mut h, idx);
-            assert_eq!(read[0], s("source"), "source param {idx}");
-            assert_eq!(read[1], get(&param, "name"));
-            assert_eq!(read[2], Value::Number(slot));
-            assert_eq!(read[3], Value::Bool(true), "source param {idx} shows");
+    // Each LFO's phase, after the tail: shown for Mod 1's LFO only.
+    for slot in 0..4 {
+        let visible = slot == 0;
+        assert_eq!(read(&mut h, 141 + slot), row("source", "phase", (slot + 1) as f64, visible));
+    }
+    // The lane params, under the mods editor.
+    assert_eq!(read(&mut h, 86), row("mod", "speed src", 0.0, true));
+    assert_eq!(read(&mut h, 133), row("mod", "end lane 4 amt", 0.0, true));
+    // The lanes onto a param: (source, depth, depth-min, depth-max, unit,
+    // slot), four each.
+    let lanes = |h: &mut Harness, idx: usize| {
+        let code = format!(
+            "(let ((p (nth inst.params {idx}))) \
+             (map (lambda (mt) (list (if mt.source mt.source.index -1) mt.depth.index \
+             mt.depth-min mt.depth-max mt.unit mt.param.index mt.slot)) p.mod-targets))"
+        );
+        items(&h.eval_panel(&code))
+    };
+    for (idx, first, range, unit) in [
+        (2, 118, 100.0, "%"),
+        (3, 126, 100.0, "%"),
+        (8, 102, 42100.0, "Hz"),
+        (11, 110, 380.0, "bpm"),
+        (12, 86, 8.0, ""),
+        (13, 94, 100.0, "%"),
+    ] {
+        let read = lanes(&mut h, idx);
+        assert_eq!(read.len(), 4, "param {idx}'s lanes");
+        for (lane, kind) in read.iter().enumerate() {
+            let source = (first + 2 * lane) as f64;
+            assert_eq!(
+                items(kind),
+                vec![
+                    Value::Number(source),
+                    Value::Number(source + 1.0),
+                    Value::Number(-range),
+                    Value::Number(range),
+                    s(unit),
+                    Value::Number(idx as f64),
+                    Value::Number(0.0),
+                ],
+                "param {idx}'s lane {lane}"
+            );
         }
     }
-    // Everything else is hidden plumbing or a setting its source's type
-    // does not use.
-    let count = h.app.graph.instrument_descriptors[2].params.len();
-    let mut unseen = 0;
-    for idx in (0..count).filter(|idx| !seen.contains(idx)) {
-        unseen += 1;
-        let read = fields(&mut h, idx);
-        let hidden = read[0] == s("hidden");
-        let unused_source = read[0] == s("source") && read[3] == Value::Bool(false);
-        assert!(hidden || unused_source, "param {idx}: {read:?}");
-    }
-    assert!(unseen > 0, "the sampler has hidden or unused params");
-}
+    for idx in [0, 1, 4, 5, 6, 7, 9, 10, 14, 86] {
+        assert!(lanes(&mut h, idx).is_empty(), "param {idx} has no lanes");
+    }}
 
 #[test]
 fn param_visible_follows_the_source_type_and_is_computed_only_while_observed() {
@@ -327,11 +341,6 @@ fn process_mapping_follows_the_track_process_chain() {
     h.sync();
     h.sync();
     assert_eq!(h.panel_scans(), scans);
-    // The legacy panel marks the same param.
-    let panel = build_instrument_panel_value(&h.app, 2, &h.shared.selected_steps);
-    let synth = items(&get(&items(&panel)[0], "synth"));
-    let start = synth.iter().find(|p| index_of(p) == Some(START)).unwrap();
-    assert_eq!(get(start, "process-mapped"), Value::Bool(true));
     edit(&mut h, false);
     assert_eq!(h.slot("mapped"), 0.0, "a disabled slot writes nothing");
     assert!((h.slot("written") - base).abs() < 1e-3);
@@ -413,11 +422,6 @@ fn base_note_sets_through_history_and_rejects_bad_values() {
     assert_eq!(offset(&h), 12.0);
     assert_eq!(h.slot("note"), 12.0);
     assert_eq!(h.app.history.undo_len(), before + 1);
-    // The legacy field shows it too.
-    let rt = h.editor.runtime_mut();
-    sync_instrument_base_note_value_field(rt, &h.app, 2);
-    let legacy = rt.reactive_field_value("SEQ", &instrument_base_note_value_field(2));
-    assert_eq!(legacy.cloned(), Some(Value::Number(12.0)));
     // Absolute: the same value is no new entry.
     h.eval_panel("(set! inst.base-note 12)");
     h.drain_and_sync();
@@ -1018,15 +1022,6 @@ fn rack_macros_read_set_and_map_onto_the_slot_params() {
     h.eval_panel("(set! rm.base 0.75)");
     h.drain_and_sync();
     assert_eq!(read(&mut h), (0.75, 0.75, 0.0, 0.0));
-    let legacy_value = |h: &mut Harness| {
-        let step = selected_plock_step(&h.shared.selected_steps);
-        let step = displayed_plock_step(&h.app.state, 2, step);
-        let rt = h.editor.runtime_mut();
-        sync_rack_macro_value_field(rt, &h.app, 2, id, step);
-        let field = rack_macro_value_field(2, 1);
-        rt.reactive_field_value("SEQ", &field).cloned()
-    };
-    assert_eq!(legacy_value(&mut h), Some(Value::Number(0.75)));
     let command = app::AppCommand::SetRackMacroPlockMulti {
         track: 2,
         steps: vec![3],
@@ -1050,7 +1045,6 @@ fn rack_macros_read_set_and_map_onto_the_slot_params() {
     assert_eq!(h.frame.host_kinds.macros.rack_live_locks, locks + 1);
     h.sync();
     assert_eq!(h.frame.host_kinds.macros.rack_live_locks, locks + 2);
-    assert_eq!(legacy_value(&mut h), Some(Value::Number(0.25)));
     // A rename is the rack panel's live text edit; a mapping's range is in
     // its target's display units.
     h.eval_panel(r#"(set! rm.name "Tone") (set! rmm.max 80)"#);
@@ -1351,14 +1345,6 @@ fn rack_macro_locks_set_and_clear_the_steps_that_differ_through_history() {
         h.eval_panel("(list rm.value rm.base rm.locked rm.has-locks)"),
         h.eval_panel("(list 0.25 0 true true)")
     );
-    // The rack panel's knob field follows at once.
-    let field = rack_macro_value_field(2, 1);
-    let shown = h
-        .editor
-        .runtime()
-        .reactive_field_value("SEQ", &field)
-        .cloned();
-    assert_eq!(shown, Some(Value::Number(0.25)));
     // Steps already holding the lock, or none to clear, are left alone.
     h.eval_panel("(lock-rack-macro! rm (list s2 s5) 0.25) (unlock-rack-macro! rm (list s7))");
     h.drain();
@@ -1498,16 +1484,6 @@ fn a_selected_neurons_override_shows_in_the_param_value() {
     assert_eq!((h.slot("locked"), h.slot("overridden")), (1.0, 1.0));
     h.shared.selected_steps.lock().unwrap().clear();
     h.sync();
-    // The legacy field shows the same.
-    let selection = h.shared.selected_neural_neurons.lock().unwrap().clone();
-    let rt = h.editor.runtime_mut();
-    let selection = Some(&selection);
-    sync_track_effect_param_value_field_with_neural_selection(
-        rt, &h.app, 0, slot, CUTOFF, None, selection,
-    );
-    let field = track_effect_param_value_field(0, slot, CUTOFF, "cutoff");
-    let legacy = rt.reactive_field_value("SEQ", &field);
-    assert_eq!(legacy.cloned(), Some(Value::Number(1234.0)));
     h.shared.selected_neural_neurons.lock().unwrap().clear();
     h.sync();
     assert!((h.slot("value") - base).abs() < 1e-3);

@@ -169,22 +169,9 @@ fn param_fields_read_after_sync_for_instrument_and_effect_params() {
     let effect_id = effect_id.expect("a recorded add binds the instance id");
     assert_eq!(h.eval_all("flt.did"), Value::Number(effect_id.0 as f64));
     assert_eq!(h.eval_all("t0.tid"), Value::Number(track_id.0 as f64));
-    // A value read matches the legacy panel field (Hz: no unit change).
-    let step = displayed_plock_step(
-        &h.shared.state,
-        0,
-        selected_plock_step(&h.shared.selected_steps),
-    );
-    let rt = h.editor.runtime_mut();
-    sync_track_effect_param_value_field(rt, &h.app, 0, 0, CUTOFF, step);
-    let legacy = rt
-        .reactive_field_value(
-            "SEQ",
-            &track_effect_param_value_field(0, 0, CUTOFF, "cutoff"),
-        )
-        .cloned()
-        .expect("legacy cutoff field");
-    assert_eq!(legacy, h.eval_all("cutoff.value"));
+    // A value read is the slot's own value (Hz: no unit change).
+    let own = h.shared.state.pattern.effect_chains[0][0].defaults.get(CUTOFF);
+    assert_eq!(h.eval_all("cutoff.value"), Value::Number(f64::from(own)));
 }
 
 #[test]
@@ -289,20 +276,6 @@ fn param_value_follows_the_selected_or_playing_steps_lock() {
     h.shared.current_track.store(0, Ordering::Relaxed);
     h.sync();
     check(&mut h, 500.0, true, "track 0 current again");
-    let step = displayed_plock_step(
-        &h.shared.state,
-        0,
-        selected_plock_step(&h.shared.selected_steps),
-    );
-    let rt = h.editor.runtime_mut();
-    sync_track_effect_param_value_field(rt, &h.app, 0, 0, CUTOFF, step);
-    let legacy = rt
-        .reactive_field_value(
-            "SEQ",
-            &track_effect_param_value_field(0, 0, CUTOFF, "cutoff"),
-        )
-        .cloned();
-    assert_eq!(legacy, Some(Value::Number(500.0)));
     // A clear (through the setter) empties has-locks.
     h.eval_all("(unlock-param! cutoff (list (nth t0.steps 4)))");
     h.drain_and_sync();
@@ -561,10 +534,20 @@ fn script_param_edits_keep_their_own_undo_entries_beside_a_user_drag() {
     assert_eq!(h.filter_slot(slot).defaults.get(CUTOFF), base);
 }
 
+/// eseq-0l17.82: an option or toggle edit bumps no epoch (no model field
+/// derives from its value): its `text`, and which source settings show
+/// (`visible`), are live fields the next sync pushes. The sampler's slice
+/// settings, which re-derive the slice markers, still bump them.
 #[test]
-fn an_enum_or_boolean_base_set_rebuilds_the_legacy_panel() {
+fn an_option_or_toggle_edit_bumps_no_epoch_and_its_text_and_visible_follow() {
     let (mut h, _) = Harness::with_devices();
     h.eval_all(DEVICES);
+    h.eval_all(
+        r#"(def mod1 (device-param inst "mod1_source"))
+           (def lfo-rate (device-param inst "mod1_lfo_rate"))
+           (def env-attack (device-param inst "mod1_env_attack"))
+           (def sens (device-param inst "sens"))"#,
+    );
     let epochs = |h: &Harness| {
         (
             h.shared.fx_epoch.load(Ordering::Relaxed),
@@ -577,12 +560,37 @@ fn an_enum_or_boolean_base_set_rebuilds_the_legacy_panel() {
     assert_eq!(epochs(&h), before, "a continuous param rebinds its readout");
     h.eval_all("(set! loop-mode.base 3)");
     h.drain();
-    let after = epochs(&h);
-    assert!(after.0 > before.0 && after.1 > before.1, "an enum rebuilds");
+    assert_eq!(epochs(&h).0, before.0, "an option edit bumps no fx epoch");
     h.eval_all("(set! enabled.base false)");
     h.drain();
-    let last = epochs(&h);
-    assert!(last.0 > after.0 && last.1 > after.1, "a boolean rebuilds");
+    assert_eq!(epochs(&h).0, before.0, "a toggle edit bumps no fx epoch");
+    h.sync();
+    let options = items(&h.eval_all("loop-mode.options"));
+    assert_eq!(h.eval_all("loop-mode.text"), options[3], "the option's text follows");
+    assert_eq!(h.eval_all("enabled.value"), Value::Number(0.0));
+    // A source type flip: the envelope's settings show, the LFO's hide.
+    assert_eq!(
+        h.eval_all("(list lfo-rate.visible env-attack.visible)"),
+        h.eval_all("(list true false)")
+    );
+    let env = items(&h.eval_all("mod1.options"))
+        .iter()
+        .position(|option| *option == s("env"))
+        .expect("the sources offer an envelope");
+    h.eval_all(&format!("(set! mod1.base {env})"));
+    h.drain();
+    assert_eq!(epochs(&h).0, before.0, "a source type flip bumps no fx epoch");
+    h.sync();
+    assert_eq!(h.eval_all("mod1.text"), s("env"));
+    assert_eq!(
+        h.eval_all("(list lfo-rate.visible env-attack.visible)"),
+        h.eval_all("(list false true)")
+    );
+    // The slice sensitivity re-derives the markers: it bumps them.
+    h.eval_all("(set! sens.base 0.25)");
+    h.drain();
+    let after = epochs(&h);
+    assert!(after.0 > before.0 && after.1 > before.1, "sens re-derives the slices");
 }
 
 #[test]

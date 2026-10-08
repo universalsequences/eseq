@@ -112,21 +112,6 @@ pub(super) fn handle(
                                     },
                                 );
                             }
-                            sync_instrument_param_authoring_display(
-                                &mut editor,
-                                InstrumentParamDisplaySync {
-                                    app: &app,
-                                    state: &state,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    current_track_idx: track,
-                                    param_idx,
-                                    display_step: None,
-                                    sync_plock_presence: false,
-                                    sync_sampler_times: true,
-                                },
-                            );
                         }
                     }
                 }
@@ -434,21 +419,7 @@ pub(super) fn handle(
                             );
                         }
                         if wrote_neural_plock {
-                            sync_instrument_param_authoring_display(
-                                &mut editor,
-                                InstrumentParamDisplaySync {
-                                    app: &app,
-                                    state: &state,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    current_track_idx: track,
-                                    param_idx,
-                                    display_step: None,
-                                    sync_plock_presence: false,
-                                    sync_sampler_times: false,
-                                },
-                            );
+                            // The override shows through the param's value.
                         } else if selected.is_empty() {
                             app::apply_command(
                                 &mut app,
@@ -458,15 +429,6 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            if sync_fx_instrument_param_value_field(
-                                editor.runtime_mut(),
-                                &app,
-                                track,
-                                param_idx,
-                                None,
-                            ) {
-                                editor.mark_needs_redraw();
-                            }
                         } else {
                             app::apply_command(
                                 &mut app,
@@ -477,28 +439,8 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            let display_step = displayed_plock_step(
-                                &state,
-                                track,
-                                selected_plock_step(&selected_steps),
-                            );
-                            sync_instrument_param_authoring_display(
-                                &mut editor,
-                                InstrumentParamDisplaySync {
-                                    app: &app,
-                                    state: &state,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    current_track_idx: track,
-                                    param_idx,
-                                    display_step,
-                                    sync_plock_presence: true,
-                                    sync_sampler_times: false,
-                                },
-                            );
+                            sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
                         }
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -528,7 +470,7 @@ pub(super) fn handle(
                             labels.iter().position(|item| item == &label)
                         {
                             let value = selected_idx as f32;
-                            let (neural_selection, wrote_neural_plock, neural_history_before) =
+                            let (_, wrote_neural_plock, neural_history_before) =
                                 record_selected_neural_instrument_plock(
                                     &mut editor,
                                     &state,
@@ -553,22 +495,6 @@ pub(super) fn handle(
                                     },
                                 );
                             }
-                            sync_instrument_param_authoring_display(
-                                &mut editor,
-                                InstrumentParamDisplaySync {
-                                    app: &app,
-                                    state: &state,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    current_track_idx: track,
-                                    param_idx,
-                                    display_step: None,
-                                    sync_plock_presence: false,
-                                    sync_sampler_times: false,
-                                },
-                            );
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -596,7 +522,7 @@ pub(super) fn handle(
                         .cloned()
                     {
                         let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                        let (neural_selection, wrote_neural_plock, neural_history_before) =
+                        let (_, wrote_neural_plock, neural_history_before) =
                             record_selected_neural_instrument_plock(
                                 &mut editor,
                                 &state,
@@ -628,36 +554,15 @@ pub(super) fn handle(
                                 },
                             );
                         }
-                        let display_step = displayed_plock_step(
-                            &state,
-                            track,
-                            selected_plock_step(&selected_steps),
-                        );
-                        sync_instrument_param_authoring_display(
-                            &mut editor,
-                            InstrumentParamDisplaySync {
-                                app: &app,
-                                state: &state,
-                                selected_steps: &selected_steps,
-                                selection: &neural_selection,
-                                track,
-                                current_track_idx: track,
-                                param_idx,
-                                display_step,
-                                // Publish the row list only when the row set can
-                                // have changed (first write of this lock, or a
-                                // neural override). Later drag events repaint
-                                // through the bound value field.
-                                sync_plock_presence: !wrote_neural_plock,
-                                sync_sampler_times: true,
-                            },
-                        );
-                        // Same policy as "set-instrument-param": a continuous
-                        // p-lock drag is fully covered by the targeted display
-                        // syncs above. Bumping the epochs per drag event forced
-                        // `SEQ.instrument-panel` to be rebuilt, which reruns the
-                        // whole *fx* widget source (~30ms) to move one number.
-                        // Only structural params (bool/enum) still need it.
+                        if !wrote_neural_plock {
+                            sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
+                        }
+                        // Same policy as "set-instrument-param": a p-lock drag
+                        // repaints through the param it binds (the host kinds
+                        // push its value). Bumping the epochs per drag event
+                        // reran the whole *fx* widget source (~30ms) to move
+                        // one number; only a param whose value redefines model
+                        // data (`param_change_needs_fx_rebuild`) bumps them.
                         if param_change_needs_fx_rebuild(&desc) {
                             fx_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -716,15 +621,6 @@ pub(super) fn handle(
                                 },
                             );
                         }
-                        sync_instrument_tensor_display(
-                            editor,
-                            &app,
-                            track,
-                            tensor_idx,
-                            track,
-                            &selected_steps,
-                        );
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -754,7 +650,7 @@ pub(super) fn handle(
                             labels.iter().position(|item| item == &label)
                         {
                             let value = selected_idx as f32;
-                            let (neural_selection, wrote_neural_plock, neural_history_before) =
+                            let (_, wrote_neural_plock, neural_history_before) =
                                 record_selected_neural_instrument_plock(
                                     &mut editor,
                                     &state,
@@ -786,27 +682,9 @@ pub(super) fn handle(
                                     },
                                 );
                             }
-                            let display_step = displayed_plock_step(
-                                &state,
-                                track,
-                                selected_plock_step(&selected_steps),
-                            );
-                            sync_instrument_param_authoring_display(
-                                &mut editor,
-                                InstrumentParamDisplaySync {
-                                    app: &app,
-                                    state: &state,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    current_track_idx: track,
-                                    param_idx,
-                                    display_step,
-                                    sync_plock_presence: !wrote_neural_plock,
-                                    sync_sampler_times: false,
-                                },
-                            );
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            if !wrote_neural_plock {
+                                sync_instrument_plock_presence_display(&mut editor, &app, &state, track);
+                            }
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -828,11 +706,6 @@ pub(super) fn handle(
                             track,
                             value: clamped,
                         },
-                    );
-                    sync_current_instrument_base_note_authoring_display(
-                        &mut editor,
-                        &app,
-                        track,
                     );
                 }
             }
@@ -891,31 +764,6 @@ pub(super) fn handle(
 /// The command stamping key-lock variant `key` onto `notes` of `track`'s
 /// instrument, or clearing those keys' variant locks (`None`). Shared by
 /// `stamp-key-lock-variant` and the host kinds' `stamp-key-variant`.
-/// After an instrument tensor edit on `track`: resync the legacy tensor
-/// field the panel binds (the current track's panel-relative one, else the
-/// track's own) at the displayed step. Shared by
-/// `set-instrument-tensor-cell` and the host kinds' `set-device-tensor`.
-pub(super) fn sync_instrument_tensor_display(
-    editor: &mut Editor,
-    app: &app::App,
-    track: usize,
-    tensor_idx: usize,
-    current_track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) {
-    let step = selected_plock_step(selected_steps);
-    let display_step = displayed_plock_step(&app.state, track, step);
-    let rt = editor.runtime_mut();
-    let dirty = match track == current_track {
-        true => sync_fx_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step),
-        false => sync_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step),
-    };
-    if dirty {
-        editor.refresh_runtime_side_effects();
-        editor.mark_needs_redraw();
-    }
-}
-
 pub(super) fn key_variant_command(
     track: usize,
     notes: Vec<u8>,
@@ -925,20 +773,6 @@ pub(super) fn key_variant_command(
         None => app::AppCommand::ClearInstrumentKeyLockVariantsForNotes { track, notes },
         Some(key) => app::AppCommand::StampInstrumentKeyLockVariant { track, notes, key },
     }
-}
-
-/// Publish both the track-qualified binding and the current FX panel's
-/// track-relative binding, then process the reactive edit immediately.  The
-/// base-note control is authored from the FX panel, so updating only the
-/// track-qualified field leaves its visible knob stale until a later full
-/// panel sync (for example, a transport restart).
-fn sync_current_instrument_base_note_authoring_display(
-    editor: &mut Editor,
-    app: &app::App,
-    track: usize,
-) {
-    let dirty = sync_fx_instrument_base_note_value_field(editor.runtime_mut(), app, track);
-    flush_reactive_display_edit(editor, dirty);
 }
 
 #[cfg(test)]
@@ -1008,76 +842,6 @@ mod tests {
             .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
             .collect(),
         )
-    }
-
-    fn reactive_number(editor: &Editor, field: &str) -> f64 {
-        match editor.runtime().reactive_field_value("SEQ", field) {
-            Some(Value::Number(n)) => *n,
-            other => panic!("SEQ.{field} should be a number, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn base_note_authoring_sync_repaints_the_current_instrument_knob_immediately() {
-        const TRACK: usize = 0;
-        const VALUE: f32 = 7.0;
-
-        let state = Arc::new(sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        ));
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = app::App::new(
-            state,
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        app.tracks = vec!["Track 1".to_string()];
-        app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-
-        let track_field = instrument_base_note_value_field(TRACK);
-        let fx_field = fx_instrument_base_note_value_field();
-        let mut runtime = Runtime::new();
-        runtime.set_layout_viewport(40, 10);
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                (track_field.as_str(), Value::Number(0.0)),
-                (fx_field, Value::Number(0.0)),
-            ],
-            true,
-        );
-        runtime
-            .eval_str(
-                r#"(effect
-                     (label "base note"
-                       :active (bind "SEQ" "fx-instrument-base-note")))"#,
-            )
-            .expect("mount a widget bound to the visible base-note field");
-        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
-        editor.clear_needs_redraw();
-
-        app.state.pattern.instrument_base_note_offsets[TRACK]
-            .store(VALUE.to_bits(), Ordering::Relaxed);
-        sync_current_instrument_base_note_authoring_display(&mut editor, &app, TRACK);
-
-        assert_eq!(reactive_number(&editor, &track_field), VALUE as f64);
-        assert_eq!(reactive_number(&editor, fx_field), VALUE as f64);
-        assert!(
-            editor.needs_redraw(),
-            "the bound knob must be redrawn in the same authoring dispatch"
-        );
     }
 
     /// The step grids draw a step's p-lock tick and tint from the kinds'
@@ -1203,7 +967,6 @@ mod tests {
             step_clipboard: Arc::new(Mutex::new(None)),
             ui_epoch: ui_epoch.clone(),
             fx_epoch: fx_epoch.clone(),
-            fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),

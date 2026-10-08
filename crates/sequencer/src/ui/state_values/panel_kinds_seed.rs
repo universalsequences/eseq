@@ -6,14 +6,15 @@ use super::*;
 use crate::host_kinds::tests::{get, items};
 
 /// The kinds behind a host-less panel harness (kind-bindings spec §13
-/// stage 8, eseq-0l17.14): eseq.effects reads every param value from an
-/// eseq.kinds param, so [`seed_panel_kinds`] publishes, from the panel
-/// dicts a test set (`SEQ.instrument-panel`, `SEQ.effects`,
-/// `SEQ.midi-effects`), the current track, its instrument and effect
-/// devices, their params (with their modulation lanes) and tensors, as
-/// the host-kinds tick does. `fields` maps each dict's legacy
-/// `:value-field` (and a lane's source and depth fields) to the instance
-/// that replaced it, so a test drives a value with [`set_panel_param`].
+/// stage 8, eseq-0l17.14, .82): the panels lay out from eseq.kinds
+/// devices and params (eseq.effects.panel-data), so [`seed_panel_kinds`]
+/// publishes, from a test's panel description ([`PanelSeed`]), the
+/// current track, its instrument and effect devices, their params (with
+/// their modulation lanes) and tensors, as the host-kinds tick does;
+/// [`seed_app_panels`] publishes them from an `App`. `fields` maps a test
+/// dict's handle name (its `:value-field`, a lane's source and depth
+/// fields: test-local names, nothing publishes them) to the instance it
+/// stands for, so a test drives a value with [`set_panel_param`].
 #[derive(Default)]
 pub(super) struct PanelKinds {
     pub(super) fields: HashMap<String, eseqlisp::vm::InstanceId>,
@@ -94,31 +95,81 @@ pub(super) fn field_ids(
     instance_ids(rt.instance_field(id, field).unwrap_or(Value::Nil))
 }
 
-/// Every param dict of a device dict: its params and synth params, its
-/// modulation sources' params, the sampler's mod params.
-pub(super) fn device_param_dicts(device: &Value) -> Vec<Value> {
+/// Where a param dict of a test's panel description sits on its panel: the
+/// main controls (`:params`, `:synth`), a modulation lane's own params
+/// (`:mod`), or modulation source `slot`'s settings (`:sources`).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Placement {
+    Main,
+    Mod,
+    Source(f64),
+}
+
+/// Every param dict of a test's device description, with its placement:
+/// its params and synth params, the mod params, its modulation sources'
+/// settings.
+pub(super) fn device_param_dicts(device: &Value) -> Vec<(Value, Placement)> {
     let mut dicts = Vec::new();
-    for key in ["params", "synth", "mod"] {
-        dicts.extend(dict_items(dict_value(device, key)));
+    for key in ["params", "synth"] {
+        dicts.extend(dict_items(dict_value(device, key)).into_iter().map(|d| (d, Placement::Main)));
     }
+    dicts.extend(dict_items(dict_value(device, "mod")).into_iter().map(|d| (d, Placement::Mod)));
     for section in dict_items(dict_value(device, "sources")) {
-        dicts.extend(dict_items(dict_value(&section, "params")));
-        dicts.extend(dict_value(&section, "source-param"));
+        let slot = Placement::Source(dict_number(&section, "slot").unwrap_or(0.0));
+        dicts.extend(dict_items(dict_value(&section, "params")).into_iter().map(|d| (d, slot)));
+        // A source's type param is labelled `type` (its section reads it so).
+        dicts.extend(dict_value(&section, "source-param").map(|d| match d {
+            Value::Map(map) => {
+                let mut map = map.clone();
+                map.insert("label".into(), Rc::new(RefCell::new(Value::String("type".into()))));
+                (Value::Map(map), slot)
+            }
+            d => (d, slot),
+        }));
     }
     dicts
 }
 
+/// A test's panel description (the dicts the panels used to read from
+/// `SEQ.instrument-panel`, `SEQ.effects`, `SEQ.midi-effects` and
+/// `SEQ.bus-effects`): [`seed_panel_kinds`] publishes the kinds the panels
+/// lay out from (eseq.effects.panel-data), as the host kinds do.
+pub(super) struct PanelSeed {
+    /// The current track's instrument panel, a list of none or one.
+    pub(super) instrument_panel: Value,
+    /// Its chain effects.
+    pub(super) effects: Value,
+    pub(super) midi_effects: Value,
+    /// Each bus's effects, one list per bus.
+    pub(super) bus_effects: Value,
+}
+
+impl Default for PanelSeed {
+    fn default() -> Self {
+        Self {
+            instrument_panel: test_list(Vec::new()),
+            effects: test_list(Vec::new()),
+            midi_effects: test_list(Vec::new()),
+            bus_effects: test_list(Vec::new()),
+        }
+    }
+}
+
 /// Register device `did` of `track` (a track or bus instance) and its
 /// params from `dicts`.
+/// Register device `did` of `track` (a track or bus instance) at chain
+/// position `slot` in `role`, with the device fields of `device` (a test's
+/// panel or effect description: its name, type, display name, meter,
+/// modulators) and its params from `dicts` (placed as their lists put
+/// them).
 pub(super) fn seed_panel_device(
     rt: &mut Runtime,
     kinds: &mut PanelKinds,
-    track: eseqlisp::vm::InstanceId,
-    did: u64,
-    slot: f64,
-    name: &str,
-    dicts: &[Value],
+    (track, did, slot, role): (eseqlisp::vm::InstanceId, u64, f64, &str),
+    device_dict: &Value,
+    dicts: &[(Value, Placement)],
 ) -> eseqlisp::vm::InstanceId {
+    let name = dict_string(device_dict, "name").unwrap_or_default();
     let device = rt
         .register_keyed_instance("eseq.kinds:device", &[track, did])
         .unwrap();
@@ -134,26 +185,56 @@ pub(super) fn seed_panel_device(
         (parent, Value::Instance(track)),
         ("slot", Value::Number(slot)),
         ("did", Value::Number(did as f64)),
+        ("role", Value::String(role.into())),
+        ("name", Value::String(name.clone())),
         (
-            "role",
-            Value::String(if slot < 0.0 { "instrument" } else { "effect" }.into()),
+            "type",
+            Value::String(dict_string(device_dict, "type").unwrap_or_else(|| name.clone())),
         ),
-        ("name", Value::String(name.into())),
-        ("type", Value::String(name.into())),
+        ("instrument-name", Value::String(name.clone())),
+        (
+            "display-name",
+            Value::String(dict_string(device_dict, "display-name").unwrap_or(name)),
+        ),
+        ("meter", dict_value(device_dict, "meter").unwrap_or(Value::Nil)),
+        ("builtin", Value::Bool(truthy(dict_value(device_dict, "builtin")))),
+        ("enabled", Value::Bool(true)),
+        // A running effect (rack slot effects list only those).
+        (
+            "node-id",
+            Value::Number(dict_number(device_dict, "target-node-id").unwrap_or(1.0)),
+        ),
     ] {
         set_field(rt, device, field, value);
     }
-    let indexed: Vec<(usize, &Value)> = dicts
+    let modulators: Vec<_> = dict_items(dict_value(device_dict, "modulators"))
         .iter()
-        .filter_map(|dict| dict_number(dict, "idx").map(|idx| (idx as usize, dict)))
+        .enumerate()
+        .map(|(index, modulator)| {
+            let id = keyed_or_registered(rt, "eseq.kinds:modulator", &[device, index as u64]);
+            set_field(rt, id, "device", Value::Instance(device));
+            set_field(rt, id, "index", Value::Number(index as f64));
+            let slot = dict_number(modulator, "slot").unwrap_or(0.0);
+            set_field(rt, id, "slot", Value::Number(slot));
+            let label = dict_string(modulator, "label").unwrap_or_default();
+            set_field(rt, id, "label", Value::String(label));
+            id
+        })
+        .collect();
+    set_field(rt, device, "modulators", instance_list(modulators));
+    let indexed: Vec<(usize, &Value, Placement)> = dicts
+        .iter()
+        .filter_map(|(dict, placement)| {
+            dict_number(dict, "idx").map(|idx| (idx as usize, dict, *placement))
+        })
         .collect();
     let lanes: Vec<Value> = dicts
         .iter()
-        .flat_map(|dict| dict_items(dict_value(dict, "mod-targets")))
+        .flat_map(|(dict, _)| dict_items(dict_value(dict, "mod-targets")))
         .collect();
     let count = indexed
         .iter()
-        .map(|(idx, _)| idx + 1)
+        .map(|(idx, ..)| idx + 1)
         .chain(lanes.iter().flat_map(|lane| {
             ["source-idx", "depth-idx"]
                 .into_iter()
@@ -173,8 +254,9 @@ pub(super) fn seed_panel_device(
         .collect();
     // A value the test published under the legacy field wins over the
     // dict's own (the legacy field was what the panels read).
-    for &(index, dict) in &indexed {
+    for &(index, dict, placement) in &indexed {
         let param = params[index];
+        seed_param_placement(rt, param, dict, placement);
         let value = published_number(published_via(rt, dict, "value-field"))
             .or_else(|| dict_number(dict, "value"))
             .unwrap_or(0.0);
@@ -187,15 +269,6 @@ pub(super) fn seed_panel_device(
             if let Some(bound) = dict_number(dict, field) {
                 set_field(rt, param, field, Value::Number(bound));
             }
-        }
-        if let Some(name) = dict_string(dict, "name") {
-            set_field(rt, param, "name", Value::String(name));
-        }
-        if let Some(unit) = dict_string(dict, "unit") {
-            set_field(rt, param, "unit", Value::String(unit));
-        }
-        if let Some(text) = dict_string(dict, "text-value") {
-            set_field(rt, param, "text", Value::String(text));
         }
         if let Some(field) = dict_string(dict, "value-field") {
             kinds.fields.insert(field, param);
@@ -261,6 +334,74 @@ pub(super) fn seed_panel_device(
     }
     set_field(rt, device, "params", instance_list(params));
     device
+}
+
+/// A param dict's descriptor fields where `placement` puts it, as the host
+/// kinds push them at registration: its name (a mod param's with its `mod `
+/// prefix) and label, `section`, `mod-slot`, `visible`, `type` (a dict's
+/// `:boolean`, an option list's enum), `options` (an unresolved reference:
+/// `asset-options`), `text`, `unit`, the UI metadata, and
+/// `host-modulatable` (`:modulatable` with no lane).
+fn seed_param_placement(
+    rt: &mut Runtime,
+    param: eseqlisp::vm::InstanceId,
+    dict: &Value,
+    placement: Placement,
+) {
+    let shown = dict_string(dict, "name").unwrap_or_default();
+    let (section, name, mod_slot) = match placement {
+        Placement::Main => ("main", shown.clone(), 0.0),
+        Placement::Mod => ("mod", format!("mod {shown}"), 0.0),
+        Placement::Source(slot) => ("source", shown.clone(), slot),
+    };
+    let options = dict_value(dict, "options");
+    let labels = match &options {
+        Some(Value::List(_)) => options.clone(),
+        _ => None,
+    };
+    let kind = match (truthy(dict_value(dict, "boolean")), &labels) {
+        (true, _) => "boolean",
+        (false, Some(_)) => "enum",
+        (false, None) => "continuous",
+    };
+    let text = dict_string(dict, "text-value").unwrap_or_else(|| {
+        let at = dict_number(dict, "value").unwrap_or(0.0).round().max(0.0) as usize;
+        match labels.as_ref().map(|labels| dict_items(Some(labels.clone()))) {
+            Some(labels) => match labels.get(at) {
+                Some(Value::String(label)) => label.clone(),
+                _ => String::new(),
+            },
+            None => String::new(),
+        }
+    });
+    let metadata = |key| Value::String(dict_string(dict, key).unwrap_or_default());
+    let lanes = !dict_items(dict_value(dict, "mod-targets")).is_empty();
+    let host_modulatable = truthy(dict_value(dict, "modulatable")) && !lanes;
+    for (field, value) in [
+        ("name", Value::String(name)),
+        ("label", Value::String(dict_string(dict, "label").unwrap_or(shown))),
+        ("section", Value::String(section.into())),
+        ("mod-slot", Value::Number(mod_slot)),
+        ("visible", Value::Bool(true)),
+        ("type", Value::String(kind.into())),
+        ("options", labels.clone().unwrap_or_else(|| test_list(Vec::new()))),
+        (
+            "asset-options",
+            match options {
+                Some(map @ Value::Map(_)) => map,
+                _ => Value::Nil,
+            },
+        ),
+        ("text", Value::String(text)),
+        ("unit", metadata("unit")),
+        ("group", metadata("group")),
+        ("env", metadata("env")),
+        ("role", metadata("role")),
+        ("display-name", metadata("display-name")),
+        ("host-modulatable", Value::Bool(host_modulatable)),
+    ] {
+        set_field(rt, param, field, value);
+    }
 }
 
 /// Mapping `index` of macro `owner` (a `macro`, or with `rack` a
@@ -962,7 +1103,12 @@ pub(super) fn seed_panel_key_locks(
     }
 }
 
-pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
+/// The kinds behind a host-less panel harness: from `seed` (a test's panel
+/// description), the current track, its instrument (a drum rack's slots,
+/// their effects and macros) and effect devices, its MIDI effects, each
+/// bus's effects, their params with their lanes, the track settings and the
+/// p-lock state, as the host kinds publish them.
+pub(super) fn seed_panel_kinds(editor: &mut Editor, seed: &PanelSeed) -> PanelKinds {
     let mut kinds = PanelKinds::default();
     let rt = editor.runtime_mut();
     if !has_host_kinds(rt) {
@@ -987,18 +1133,26 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
     let selection = kind_singleton_rt(rt, "selection");
     let track = tracks[current];
     set_field(rt, selection, "track", Value::Instance(track));
+    set_field(rt, selection, "rack-slot", Value::Number(-1.0));
     let mut devices = Vec::new();
-    if let Some(inst) = dict_items(published(rt, "instrument-panel"))
-        .into_iter()
-        .next()
+    let instrument = dict_items(Some(seed.instrument_panel.clone())).into_iter().next();
+    if let Some(inst) = instrument
+        .as_ref()
         .filter(|inst| dict_value(inst, "slots").is_some())
     {
         // A drum rack: its slots, the selected slot's instrument and
         // every slot's effects, and its macros.
-        let name = dict_string(&inst, "name").unwrap_or_default();
-        let rack = seed_panel_device(rt, &mut kinds, track, 0, -1.0, &name, &[]);
-        let selected = dict_value(&inst, "selected-instrument");
-        let slots: Vec<_> = dict_items(dict_value(&inst, "slots"))
+        if let Some(tid) = dict_string(inst, "track-id").and_then(|tid| tid.parse::<f64>().ok()) {
+            set_field(rt, track, "tid", Value::Number(tid));
+        }
+        if let Some(name) = dict_string(inst, "name") {
+            set_field(rt, track, "name", Value::String(name));
+        }
+        let selected_slot = dict_number(inst, "selected-slot").unwrap_or(-1.0);
+        set_field(rt, selection, "rack-slot", Value::Number(selected_slot));
+        let rack = seed_panel_device(rt, &mut kinds, (track, 0, -1.0, "instrument"), inst, &[]);
+        let selected = dict_value(inst, "selected-instrument");
+        let slots: Vec<_> = dict_items(dict_value(inst, "slots"))
             .iter()
             .map(|slot| {
                 let idx = dict_number(slot, "idx").unwrap_or(0.0);
@@ -1006,17 +1160,22 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
                     .as_ref()
                     .filter(|selected| dict_number(selected, "rack-slot") == Some(idx));
                 let dicts = selected.map(device_param_dicts).unwrap_or_default();
-                let slot_name = dict_string(slot, "name").unwrap_or_default();
+                let mut description = selected.cloned().unwrap_or_else(|| slot.clone());
+                for key in ["name", "type", "display-name"] {
+                    if let (Value::Map(map), Some(value)) = (&mut description, dict_value(slot, key)) {
+                        map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+                    }
+                }
                 let device = seed_panel_device(
                     rt,
                     &mut kinds,
-                    track,
-                    3000 + idx as u64,
-                    idx,
-                    &slot_name,
+                    (track, 3000 + idx as u64, idx, "rack-slot"),
+                    &description,
                     &dicts,
                 );
                 set_field(rt, device, "container", Value::Instance(rack));
+                let enabled = dict_value(slot, "enabled") != Some(Value::Bool(false));
+                set_field(rt, device, "enabled", Value::Bool(enabled));
                 if let Some(selected) = selected {
                     seed_device_media(rt, &mut kinds, selected, device);
                 }
@@ -1024,14 +1183,12 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
                     .iter()
                     .map(|fx| {
                         let effect_slot = dict_number(fx, "slot-idx").unwrap_or(0.0);
-                        let fx_name = dict_string(fx, "name").unwrap_or_default();
+                        let did = 4000 + (idx as u64) * 100 + effect_slot as u64;
                         let effect = seed_panel_device(
                             rt,
                             &mut kinds,
-                            track,
-                            4000 + (idx as u64) * 100 + effect_slot as u64,
-                            effect_slot,
-                            &fx_name,
+                            (track, did, effect_slot, "rack-effect"),
+                            fx,
                             &device_param_dicts(fx),
                         );
                         set_field(rt, effect, "container", Value::Instance(device));
@@ -1044,30 +1201,35 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
             })
             .collect();
         set_field(rt, rack, "devices", instance_list(slots.iter().copied()));
-        for (slot, &device) in dict_items(dict_value(&inst, "slots")).iter().zip(&slots) {
+        for (slot, &device) in dict_items(dict_value(inst, "slots")).iter().zip(&slots) {
             seed_rack_slot_strip(rt, &mut kinds, slot, device);
         }
-        seed_panel_rack_macros(rt, &mut kinds, &inst, rack, &slots);
+        seed_panel_rack_macros(rt, &mut kinds, inst, rack, &slots);
         devices.push(rack);
-    } else if let Some(inst) = dict_items(published(rt, "instrument-panel"))
-        .into_iter()
-        .next()
-    {
-        let name = dict_string(&inst, "name").unwrap_or_default();
-        let dicts = device_param_dicts(&inst);
-        let device = seed_panel_device(rt, &mut kinds, track, 0, -1.0, &name, &dicts);
-        let tensors: Vec<_> = dict_items(dict_value(&inst, "tensors"))
+    } else if let Some(inst) = instrument.as_ref() {
+        let dicts = device_param_dicts(inst);
+        let device = seed_panel_device(rt, &mut kinds, (track, 0, -1.0, "instrument"), inst, &dicts);
+        let tensors: Vec<_> = dict_items(dict_value(inst, "tensors"))
             .iter()
             .map(|tensor| {
                 let index = dict_number(tensor, "idx").unwrap_or(0.0) as u64;
                 let id = rt
                     .register_keyed_instance("eseq.kinds:tensor", &[device, index])
                     .unwrap();
-                let cells = dict_number(tensor, "rows").unwrap_or(0.0)
-                    * dict_number(tensor, "cols").unwrap_or(0.0);
-                let zeros = vec![Value::Number(0.0); cells as usize];
+                let (rows, cols) = (
+                    dict_number(tensor, "rows").unwrap_or(0.0),
+                    dict_number(tensor, "cols").unwrap_or(0.0),
+                );
+                let zeros = vec![Value::Number(0.0); (rows * cols) as usize];
                 set_field(rt, id, "device", Value::Instance(device));
                 set_field(rt, id, "index", Value::Number(index as f64));
+                set_field(rt, id, "rows", Value::Number(rows));
+                set_field(rt, id, "cols", Value::Number(cols));
+                for key in ["name", "min", "max"] {
+                    if let Some(value) = dict_value(tensor, key) {
+                        set_field(rt, id, key, value);
+                    }
+                }
                 set_field(rt, id, "values", test_list(zeros.clone()));
                 set_field(rt, id, "base", test_list(zeros));
                 if let Some(field) = dict_string(tensor, "value-field") {
@@ -1077,49 +1239,32 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
             })
             .collect();
         set_field(rt, device, "tensors", instance_list(tensors));
-        seed_panel_key_locks(rt, &inst, track, device);
-        seed_device_media(rt, &mut kinds, &inst, device);
+        seed_panel_key_locks(rt, inst, track, device);
+        seed_device_media(rt, &mut kinds, inst, device);
         devices.push(device);
     }
-    for (position, fx) in dict_items(published(rt, "effects")).iter().enumerate() {
+    for (position, fx) in dict_items(Some(seed.effects.clone())).iter().enumerate() {
         let slot = dict_number(fx, "slot-idx").unwrap_or(position as f64);
-        let name = dict_string(fx, "name").unwrap_or_default();
         let dicts = device_param_dicts(fx);
-        let device = seed_panel_device(
-            rt,
-            &mut kinds,
-            track,
-            1000 + slot as u64,
-            slot,
-            &name,
-            &dicts,
-        );
+        let address = (track, 1000 + slot as u64, slot, "effect");
+        let device = seed_panel_device(rt, &mut kinds, address, fx, &dicts);
         seed_effect_tables(rt, fx, device);
         devices.push(device);
     }
     set_field(rt, track, "devices", instance_list(devices));
-    let midi: Vec<_> = dict_items(published(rt, "midi-effects"))
+    let midi: Vec<_> = dict_items(Some(seed.midi_effects.clone()))
         .iter()
         .enumerate()
         .map(|(position, fx)| {
             let slot = dict_number(fx, "slot-idx").unwrap_or(position as f64);
-            let name = dict_string(fx, "name").unwrap_or_default();
-            let dicts = device_param_dicts(fx);
-            seed_panel_device(
-                rt,
-                &mut kinds,
-                track,
-                2000 + slot as u64,
-                slot,
-                &name,
-                &dicts,
-            )
+            let address = (track, 2000 + slot as u64, slot, "midi-fx");
+            seed_panel_device(rt, &mut kinds, address, fx, &device_param_dicts(fx))
         })
         .collect();
     set_field(rt, track, "midi-devices", instance_list(midi));
-    // Each bus's effects (SEQ.bus-effects: one list per bus), on the
-    // harness's own buses when it publishes them.
-    let bus_effects = dict_items(published(rt, "bus-effects"));
+    // Each bus's effects (one list per bus), on the harness's own buses
+    // when it publishes them.
+    let bus_effects = dict_items(Some(seed.bus_effects.clone()));
     if bus_effects
         .iter()
         .any(|effects| !dict_items(Some(effects.clone())).is_empty())
@@ -1140,16 +1285,9 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
                 .enumerate()
                 .map(|(position, fx)| {
                     let slot = dict_number(fx, "slot-idx").unwrap_or(position as f64);
-                    let name = dict_string(fx, "name").unwrap_or_default();
-                    let device = seed_panel_device(
-                        rt,
-                        &mut kinds,
-                        *bus,
-                        5000 + slot as u64,
-                        slot,
-                        &name,
-                        &device_param_dicts(fx),
-                    );
+                    let address = (*bus, 5000 + slot as u64, slot, "bus-effect");
+                    let device =
+                        seed_panel_device(rt, &mut kinds, address, fx, &device_param_dicts(fx));
                     seed_effect_tables(rt, fx, device);
                     device
                 })
@@ -1180,6 +1318,385 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor) -> PanelKinds {
         }
     });
     kinds
+}
+
+/// The kinds behind a host-less panel harness built on a real `App`: the
+/// current track (`track`), its instrument (a drum rack's slots, their
+/// effects and macros) and chain effects, its MIDI effects and each bus's
+/// effects, their params from the devices' descriptors and their own values
+/// (no p-lock: the harness selects none), as the host kinds publish them.
+pub(super) fn seed_app_panels(editor: &mut Editor, app: &app::App, track: usize) -> PanelKinds {
+    use crate::host_kinds::seed_device_params;
+    use sequencer::sequencer::{InstrumentType, RackSlotParam};
+    let mut kinds = PanelKinds::default();
+    let rt = editor.runtime_mut();
+    if !has_host_kinds(rt) {
+        return kinds;
+    }
+    rt.set_reactive("SEQ", "current-track", Value::Number(track as f64));
+    let mut tracks = project_list(rt, "tracks");
+    if tracks.len() <= track {
+        tracks = register_kind_range(rt, "eseq.kinds:track", app.tracks.len().max(track + 1));
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "tracks", instance_list(tracks.iter().copied()));
+    }
+    for (index, &id) in tracks.iter().enumerate() {
+        set_field(rt, id, "index", Value::Number(index as f64));
+        let tid = app.track_registry.id_at(index).map_or(index as f64, |id| id.0 as f64);
+        set_field(rt, id, "tid", Value::Number(tid));
+        let name = app.tracks.get(index).cloned().unwrap_or_default();
+        set_field(rt, id, "name", Value::String(name));
+        set_field(rt, id, "selected", Value::Bool(index == track));
+    }
+    let selection = kind_singleton_rt(rt, "selection");
+    let track_id = tracks[track];
+    set_field(rt, selection, "track", Value::Instance(track_id));
+    let state = &app.state;
+    // A device of `track_id` (or a bus) with its params from `desc` at the
+    // stored values `value`.
+    let device = |rt: &mut Runtime,
+                      owner: eseqlisp::vm::InstanceId,
+                      (did, slot, role, kind): (u64, DeviceSlot, &str, &str),
+                      (name, display): (&str, &str),
+                      desc: &sequencer::effects::EffectDescriptor,
+                      value: &dyn Fn(usize) -> f32| {
+        let id = keyed_or_registered(rt, "eseq.kinds:device", &[owner, did]);
+        let parent = match role {
+            "bus-effect" => "bus",
+            _ => "track",
+        };
+        let meter = match slot {
+            DeviceSlot::Instrument => device_meter_value("track", &[("index", track as f64)]),
+            DeviceSlot::Effect(at) => device_meter_value(
+                "track-effect",
+                &[("index", track as f64), ("slot", at as f64)],
+            ),
+            DeviceSlot::RackSlot(at) => device_meter_value(
+                "rack-slot",
+                &[("index", track as f64), ("rack-slot", at as f64)],
+            ),
+            DeviceSlot::RackEffect { rack_slot, slot } => device_meter_value(
+                "rack-effect",
+                &[
+                    ("index", track as f64),
+                    ("rack-slot", rack_slot as f64),
+                    ("slot", slot as f64),
+                ],
+            ),
+            _ => Value::Nil,
+        };
+        for (field, value) in [
+            (parent, Value::Instance(owner)),
+            ("slot", Value::Number(slot.chain_slot() as f64)),
+            ("did", Value::Number(did as f64)),
+            ("role", Value::String(role.into())),
+            ("type", Value::String(kind.into())),
+            ("name", Value::String(name.into())),
+            ("instrument-name", Value::String(name.into())),
+            ("display-name", Value::String(display.into())),
+            ("builtin", Value::Bool(sequencer::effects::is_builtin_effect(name))),
+            ("enabled", Value::Bool(true)),
+            ("node-id", Value::Number(1.0)),
+            ("meter", meter),
+        ] {
+            set_field(rt, id, field, value);
+        }
+        // A reseed's descriptor may differ (another effect in the slot):
+        // fresh params, as the host kinds replace them.
+        for param in field_ids(rt, id, "params") {
+            rt.drop_instance(param);
+        }
+        let params = seed_device_params(rt, id, slot, desc);
+        let shown = sequencer::instruments::voice_modulator::selected_source_param_indices(
+            &desc.params,
+            |idx, _| value(idx),
+        );
+        for (index, &param) in params.iter().enumerate() {
+            let pdesc = &desc.params[index];
+            let user = Value::Number(f64::from(DeviceSlot::to_user(pdesc, value(index))));
+            let text = match &pdesc.kind {
+                sequencer::effects::ParamKind::Boolean if value(index) >= 0.5 => "on",
+                sequencer::effects::ParamKind::Boolean => "off",
+                _ => pdesc.option_label(value(index)).unwrap_or(""),
+            };
+            let section = rt.instance_field(param, "section").unwrap_or(Value::Nil);
+            let visible = match section {
+                Value::String(section) if section == "source" => shown.contains(&index),
+                Value::String(section) => section != "hidden",
+                _ => false,
+            };
+            for (field, value) in [
+                ("value", user.clone()),
+                ("base", user.clone()),
+                ("mod-value", user.clone()),
+                ("process-value", user),
+                ("mod-scale", Value::Number(1.0)),
+                ("text", Value::String(text.into())),
+                ("visible", Value::Bool(visible)),
+                ("locked", Value::Bool(false)),
+                ("has-locks", Value::Bool(false)),
+            ] {
+                set_field(rt, param, field, value);
+            }
+        }
+        let modulators: Vec<_> = (desc.instrument_modulators.iter())
+            .enumerate()
+            .map(|(index, modulator)| {
+                let m = keyed_or_registered(rt, "eseq.kinds:modulator", &[id, index as u64]);
+                set_field(rt, m, "device", Value::Instance(id));
+                set_field(rt, m, "index", Value::Number(index as f64));
+                set_field(rt, m, "slot", Value::Number(modulator.slot as f64));
+                set_field(rt, m, "label", Value::String(modulator.label.clone()));
+                m
+            })
+            .collect();
+        set_field(rt, id, "modulators", instance_list(modulators));
+        id
+    };
+    let mut chain = Vec::new();
+    let instrument_type = app.graph.track_instrument_types.get(track).copied();
+    if instrument_type == Some(InstrumentType::Rack) {
+        let rack = state.pattern.rack_tracks.lock().unwrap()[track].clone().expect("a rack");
+        let display = instrument_panel_display_name(app, track);
+        let empty = sequencer::effects::EffectDescriptor::empty_custom_slot();
+        let rack_id = device(
+            rt,
+            track_id,
+            (0, DeviceSlot::Instrument, "instrument", "rack"),
+            (&app.tracks[track], &display),
+            &empty,
+            &|_| 0.0,
+        );
+        let selected = app.selected_rack_slot_index_for_rack(track, &rack);
+        set_field(rt, selection, "rack-slot", Value::Number(selected.map_or(-1.0, |s| s as f64)));
+        let mut slots = Vec::new();
+        for (idx, slot) in rack.slots.iter().enumerate() {
+            let raw = rack_slot_raw_name(app, idx, slot);
+            let desc = app.rack_slot_descriptor(slot).cloned().unwrap_or_else(|| empty.clone());
+            let kind = instrument_type_label(slot.instrument_type);
+            let sd = device(
+                rt,
+                track_id,
+                (3000 + idx as u64, DeviceSlot::RackSlot(idx), "rack-slot", kind),
+                (&raw, &instrument_display_name(&raw)),
+                &desc,
+                &|i| {
+                    let default = desc.params.get(i).map_or(0.0, |p| p.default);
+                    rack_slot_instrument_param_display(&rack, idx, slot, default, i, None).0
+                },
+            );
+            set_field(rt, sd, "container", Value::Instance(rack_id));
+            set_field(rt, sd, "enabled", Value::Bool(slot.enabled));
+            set_field(rt, sd, "voices", Value::Number(slot.max_polyphony as f64));
+            for (param, field) in [
+                (RackSlotParam::BaseNote, "base-note-display"),
+                (RackSlotParam::Gain, "gain-display"),
+                (RackSlotParam::Pan, "pan-display"),
+                (RackSlotParam::MaxPolyphony, "voices-display"),
+            ] {
+                let shown = rack_slot_control_value(&rack, idx, slot, param, None);
+                set_field(rt, sd, field, Value::Number(f64::from(shown)));
+            }
+            for (param, field) in [
+                (RackSlotParam::Mute, "muted-display"),
+                (RackSlotParam::Solo, "soloed-display"),
+            ] {
+                let shown = rack_slot_control_value(&rack, idx, slot, param, None);
+                set_field(rt, sd, field, Value::Bool(shown > 0.5));
+            }
+            // As the host's rack macro sync pushes it.
+            set_field(rt, sd, "strip-macros", crate::host_kinds::strip_macros(&rack, idx));
+            let effects: Vec<_> = (slot.effect_descriptors.iter())
+                .zip(&slot.effect_slots)
+                .enumerate()
+                .filter(|(_, (desc, effect))| !desc.name.is_empty() && effect.node_id != 0)
+                .map(|(at, (desc, effect))| {
+                    let fx = device(
+                        rt,
+                        track_id,
+                        (
+                            4000 + (idx as u64) * 100 + at as u64,
+                            DeviceSlot::RackEffect { rack_slot: idx, slot: at },
+                            "rack-effect",
+                            &desc.name,
+                        ),
+                        (&desc.name, &desc.name),
+                        desc,
+                        &|i| {
+                            let default = desc.params.get(i).map_or(0.0, |p| p.default);
+                            super::rack_panel::rack_effect_param_display(
+                                &rack, idx, at, effect, default, i, None,
+                            )
+                            .0
+                        },
+                    );
+                    set_field(rt, fx, "container", Value::Instance(sd));
+                    fx
+                })
+                .collect();
+            set_field(rt, sd, "devices", instance_list(effects));
+            slots.push(sd);
+        }
+        set_field(rt, rack_id, "devices", instance_list(slots.iter().copied()));
+        let macros: Vec<_> = (rack.macros.iter())
+            .enumerate()
+            .map(|(index, rack_macro)| {
+                let id = keyed_or_registered(rt, "eseq.kinds:rack-macro", &[rack_id, index as u64]);
+                set_field(rt, id, "device", Value::Instance(rack_id));
+                set_field(rt, id, "index", Value::Number(index as f64));
+                set_field(rt, id, "name", Value::String(rack_macro.name.clone()));
+                let value = Value::Number(f64::from(rack_macro.value));
+                set_field(rt, id, "value", value.clone());
+                set_field(rt, id, "base", value);
+                set_field(rt, id, "locked", Value::Bool(false));
+                set_field(rt, id, "has-locks", Value::Bool(false));
+                let mappings: Vec<_> = (rack_macro.mappings.iter())
+                    .enumerate()
+                    .map(|(position, mapping)| {
+                        let row = seed_mapping_row(rt, id, true, position);
+                        let target = match &mapping.target {
+                            sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                                slot,
+                                param_index,
+                                ..
+                            } => slots.get(*slot).and_then(|sd| {
+                                field_ids(rt, *sd, "params").get(*param_index).copied()
+                            }),
+                            sequencer::sequencer::RackMacroTarget::SlotEffectParam {
+                                slot,
+                                effect_slot,
+                                param_index,
+                                ..
+                            } => slots.get(*slot).and_then(|sd| {
+                                let effect = field_ids(rt, *sd, "devices").into_iter().find(|fx| {
+                                    rt.instance_field(*fx, "slot")
+                                        == Ok(Value::Number(*effect_slot as f64))
+                                })?;
+                                field_ids(rt, effect, "params").get(*param_index).copied()
+                            }),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            set_field(rt, row, "target", Value::Instance(target));
+                        }
+                        row
+                    })
+                    .collect();
+                set_field(rt, id, "mappings", instance_list(mappings));
+                id
+            })
+            .collect();
+        set_field(rt, rack_id, "macros", instance_list(macros));
+        chain.push(rack_id);
+    } else if let (Some(kind), Some(desc)) =
+        (instrument_type, app.graph.instrument_descriptors.get(track))
+    {
+        let slot = &state.pattern.instrument_slots[track];
+        let name = instrument_panel_name(app, track);
+        let id = device(
+            rt,
+            track_id,
+            (0, DeviceSlot::Instrument, "instrument", instrument_type_label(kind)),
+            (&name, &instrument_panel_display_name(app, track)),
+            desc,
+            &|i| slot.defaults.get(i),
+        );
+        chain.push(id);
+    }
+    if let Some(descs) = app.graph.effect_descriptors.get(track) {
+        for (at, desc) in descs.iter().enumerate().filter(|(_, d)| !d.name.is_empty()) {
+            let slot = state.pattern.effect_chains.get(track).and_then(|chain| chain.get(at));
+            let default = |i: usize| desc.params.get(i).map_or(0.0, |p| p.default);
+            let id = device(
+                rt,
+                track_id,
+                (1000 + at as u64, DeviceSlot::Effect(at), "effect", &desc.name),
+                (&desc.name, &desc.name),
+                desc,
+                &|i| match slot {
+                    Some(slot) if i < slot.num_params.load(Ordering::Relaxed) as usize => {
+                        slot.defaults.get(i)
+                    }
+                    _ => default(i),
+                },
+            );
+            chain.push(id);
+        }
+    }
+    set_field(rt, track_id, "devices", instance_list(chain));
+    let library = sequencer::lisp_host::load_midi_fx_descriptors();
+    let midi_chain = state.pattern.track_params[track].midi_fx_chain();
+    let midi: Vec<_> = midi_fx_device_chain(&midi_chain, &library)
+        .into_iter()
+        .map(|(at, desc)| {
+            let slot = state.pattern.midi_fx_slots.get(track).and_then(|s| s.get(at));
+            device(
+                rt,
+                track_id,
+                (2000 + at as u64, DeviceSlot::MidiFx(at), "midi-fx", &desc.name),
+                (&desc.name, &desc.name),
+                desc,
+                &|i| slot.map_or(0.0, |slot| slot.defaults.get(i)),
+            )
+        })
+        .collect();
+    set_field(rt, track_id, "midi-devices", instance_list(midi));
+    if !app.buses.is_empty() {
+        let mut buses = project_list(rt, "buses");
+        if buses.len() < app.buses.len() {
+            buses = register_kind_range(rt, "eseq.kinds:bus", app.buses.len());
+            let project = kind_singleton_rt(rt, "project");
+            set_field(rt, project, "buses", instance_list(buses.iter().copied()));
+        }
+        for (index, (bus, channel)) in buses.iter().zip(&app.buses).enumerate() {
+            set_field(rt, *bus, "index", Value::Number(index as f64));
+            set_field(rt, *bus, "bid", Value::Number(channel.id.0 as f64));
+            let devices: Vec<_> = (channel.effect_descriptors.iter())
+                .enumerate()
+                .filter(|(_, d)| !d.name.is_empty())
+                .map(|(at, desc)| {
+                    let slot = channel.effect_slots.get(at);
+                    let id = device(
+                        rt,
+                        *bus,
+                        (5000 + at as u64, DeviceSlot::BusEffect(at), "bus-effect", &desc.name),
+                        (&desc.name, &desc.name),
+                        desc,
+                        &|i| slot.and_then(|slot| slot.defaults.get(i).copied()).unwrap_or(0.0),
+                    );
+                    if let Some(slot) = slot {
+                        seed_node_tables(rt, id, &desc.name, slot.node_id as i32);
+                    }
+                    id
+                })
+                .collect();
+            set_field(rt, *bus, "devices", instance_list(devices));
+        }
+    }
+    seed_track_settings(rt, &mut kinds, track_id);
+    seed_panel_locks(rt, track_id);
+    rt.run_reactive_cycle();
+    kinds
+}
+
+/// Effect device `id`'s graph node and its table fields (a Filter
+/// Table's, a Convolution Reverb's IR), from the node's registries as the
+/// host kinds read them.
+fn seed_node_tables(rt: &mut Runtime, id: eseqlisp::vm::InstanceId, name: &str, node: i32) {
+    set_field(rt, id, "node-id", Value::Number(f64::from(node)));
+    if !EffectTableFields::applies(name) {
+        return;
+    }
+    let fields = EffectTableFields::of(name, node);
+    for (key, value) in [
+        ("table-name", &fields.name),
+        ("table-mode", &fields.mode),
+        ("table-engine", &fields.engine),
+        ("table-data-key", &fields.data_key),
+        ("ir-name", &fields.ir_name),
+    ] {
+        set_field(rt, id, key, Value::String(value.clone().unwrap_or_default()));
+    }
 }
 
 /// The legacy value field a control's binding stands for: a seeded
@@ -1241,6 +1758,83 @@ pub(super) fn set_seeded_field(editor: &mut Editor, field: &str, value: Value) {
         }
         _ => set_field(rt, id, kind_field, value),
     }
+    rt.run_reactive_cycle();
+}
+
+/// The instance and field a control's `#'` binding reads, if it binds an
+/// instance field.
+pub(super) fn bound_instance(value: Option<&Value>) -> Option<(eseqlisp::vm::InstanceId, String)> {
+    let Some(Value::ReactiveRef {
+        namespace, field, ..
+    }) = value
+    else {
+        return None;
+    };
+    let id = namespace.strip_prefix("%instance/")?.parse().ok()?;
+    Some((id, field.clone()))
+}
+
+/// An enum param's `text` follows its value (clamped into its options), as
+/// the host-kinds tick derives it.
+fn set_enum_text(rt: &mut Runtime, id: eseqlisp::vm::InstanceId, value: &Value) {
+    let (Ok(Value::String(kind)), Value::Number(n)) = (rt.instance_field(id, "type"), value) else {
+        return;
+    };
+    if kind != "enum" {
+        return;
+    }
+    let labels = dict_items(rt.instance_field(id, "options").ok());
+    if labels.is_empty() {
+        return;
+    }
+    let at = (n.round().max(0.0) as usize).min(labels.len() - 1);
+    if let Value::String(label) = &labels[at] {
+        set_field(rt, id, "text", Value::String(label.clone()));
+    }
+}
+
+/// Whether a control's value binds a device's base note (the panel's
+/// base-note row, which edits through `set-instrument-base-note`).
+pub(super) fn binds_base_note(value: Option<&Value>) -> bool {
+    bound_instance(value).is_some_and(|(_, field)| field == "base-note-display")
+}
+
+/// The base-note controls among `controls` (the panel's base-note row, a
+/// surface's own note picker): each sets the base note
+/// (`set-instrument-base-note`), never a param; how many there are.
+pub(super) fn check_base_note_controls(
+    editor: &mut Editor,
+    controls: &[&eseqlisp::layout::LayoutNode],
+    context: &str,
+) -> usize {
+    let base: Vec<_> = (controls.iter())
+        .filter(|control| binds_base_note(control.props.get("value")))
+        .collect();
+    for control in &base {
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        editor.drain_host_commands();
+        let on_change = control.props["on-change"].clone();
+        editor.runtime_mut().invoke(on_change, vec![Value::Number(3.0)]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "set-instrument-base-note")),
+            "{context}: the base-note control sets the base note: {commands:?}"
+        );
+    }
+    base.len()
+}
+
+/// Push param `id`'s value (its base and modulated value too), as the
+/// host-kinds tick does.
+pub(super) fn set_param_value(editor: &mut Editor, id: eseqlisp::vm::InstanceId, value: Value) {
+    let rt = editor.runtime_mut();
+    for name in ["value", "base"] {
+        set_field(rt, id, name, value.clone());
+    }
+    set_mod_value(rt, id, value);
     rt.run_reactive_cycle();
 }
 
@@ -1350,6 +1944,7 @@ pub(super) fn set_panel_param(editor: &mut Editor, kinds: &PanelKinds, field: &s
 /// Param `id`'s modulated value and its ratio form (`mod-ratio`: / 100 for
 /// a percent param), as the host-kinds tick pushes them.
 fn set_mod_value(rt: &mut Runtime, id: eseqlisp::vm::InstanceId, value: Value) {
+    set_enum_text(rt, id, &value);
     let percent = matches!(rt.instance_field(id, "percent"), Ok(Value::Bool(true)));
     let ratio = match (&value, percent) {
         (Value::Number(n), true) => Value::Number(n / 100.0),

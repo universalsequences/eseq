@@ -5,18 +5,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[test]
 fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
     let mut app = test_app_with_rack_panel_and_slot_fx();
-    let selected = Arc::new(Mutex::new(HashSet::new()));
     let mut editor = full_grid_editor_for_scroll_tests();
-    let panel = build_instrument_panel_value(&app, 0, &selected);
-    editor.runtime_mut().set_reactive("SEQ", "instrument-panel", panel.clone());
-    sync_all_rack_macro_name_fields(editor.runtime_mut(), &app);
-    sync_rack_macro_value_fields(editor.runtime_mut(), &app, 0, None);
     editor.runtime_mut().eval_str(r#"
         (set-layout (list :buf "*fx*" :hide-status true))
     "#).unwrap();
     // The rack's macros are eseq.kinds rack-macros: the name field shows
     // rm.name, which the host pushes after each rename lands.
-    seed_panel_kinds(&mut editor);
+    seed_app_panels(&mut editor, &app, 0);
     let rack = {
         let rt = editor.runtime();
         rt.keyed_instance("eseq.kinds:device", &[kind_track(rt, 0), 0])
@@ -85,7 +80,7 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
                 unreachable!()
             };
             let epoch = AtomicUsize::new(0);
-            apply_rack_macro_rename_host_command(&mut editor, &mut app, &rename, &selected, &epoch);
+            apply_rack_macro_rename_host_command(&mut app, &rename, &epoch);
             // The host kinds push the new name (rm.name) after the edit
             // lands, as the frame's sync does before the next key.
             set_field(
@@ -105,7 +100,6 @@ fn rack_macro_typing_preserves_caret_and_only_rerenders_the_name() {
         let after = editor.runtime().ui_work_counters();
         assert_eq!(after.full_buffer_reruns, before.full_buffer_reruns, "typing must not rerun a panel");
         assert_eq!(after.subtree_reruns - before.subtree_reruns, u64::from(edited), "only the name subtree needs rebuilding");
-        assert_eq!(editor.runtime_mut().eval_str("SEQ.instrument-panel").unwrap(), Some(panel.clone()));
         app.state.with_project_scenes(|scenes| {
             let pattern = scenes.effective_pattern_id(0).unwrap();
             assert_eq!(scenes.track_pools[0].rack_macros(pattern).unwrap()[0].name, expected);

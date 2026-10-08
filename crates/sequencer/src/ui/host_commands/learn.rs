@@ -35,7 +35,6 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let current_track = ctx.shared.current_track.load(Ordering::Relaxed);
     match name {
         "open-learn-patch" => {
             if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
@@ -66,9 +65,7 @@ pub(super) fn handle(
         "set-learn-target" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let path = extract_string_from_payload(&payload, "path")
                 .filter(|path| !path.is_empty())
@@ -145,9 +142,7 @@ pub(super) fn handle(
             }
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 show_error(editor, "No instrument patch editor is active".to_string());
@@ -183,9 +178,7 @@ pub(super) fn handle(
         "stop-learn-job" => {
             let preview_cleared = clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(pending) = ctx.sessions.pending_learn_job.as_mut() else {
                 if preview_cleared {
@@ -204,9 +197,7 @@ pub(super) fn handle(
         "replan-learn-job" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 return;
@@ -261,9 +252,7 @@ pub(super) fn handle(
         "close-learn-patch" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             if let Some(pending) = ctx.sessions.pending_learn_job.take() {
                 let _ = pending.job.cancel();

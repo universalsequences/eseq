@@ -560,12 +560,8 @@ fn mini_daw_opens_the_selected_tracks_instrument_panel_in_the_top_tile() {
     h.app.graph_controller().add_blank_sampler_track();
     h.shared.current_track.store(2, Ordering::Relaxed);
     h.load_mini_daw();
-    // The host publishes the selected track's panel while *fx* is visible,
-    // as the tick does there.
-    let panel = build_instrument_panel_value(&h.app, 2, &h.shared.selected_steps);
-    let rt = h.editor.runtime_mut();
-    rt.set_reactive_value_patch("SEQ", "instrument-panel", panel);
-    rt.run_reactive_cycle();
+    // The panel lays out from the kinds (eseq.effects.panel-data).
+    h.sync();
     h.show_all();
     assert_eq!(h.eval("(eseq.effects/device-panel nil)"), Value::Nil);
     h.eval("(let ((t2 (nth (tracks) 2))) (do (set! view.open-device (first t2.devices)) nil))");

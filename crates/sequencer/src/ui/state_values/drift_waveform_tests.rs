@@ -63,6 +63,12 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
     );
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -71,10 +77,6 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),
             ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(inst)])),
-            ("bus-effects", test_list(vec![])),
         ],
         true,
     );
@@ -110,7 +112,7 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         .runtime_mut()
         .eval_str(&read_ui_source("effects.lisp").unwrap())
         .unwrap();
-    seed_panel_kinds(&mut editor);
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("{status}");

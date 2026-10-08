@@ -70,10 +70,9 @@ use sequencer::app;
 
 use super::natives;
 use super::state_values::{
-    build_accumulator_names, build_effects_value, build_instrument_panel_value,
-    build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
+    build_accumulator_names, build_step_has_plocks, build_steps_value, build_track_ids,
     build_track_names, load_instrument_preset_into_track, push_solo_mutes,
-    set_current_track_reactive, sync_all_track_sequencer_state, sync_fx_param_binding_fields,
+    set_current_track_reactive, sync_all_track_sequencer_state,
     sync_sidebar_browser, sync_step_param_lists, sync_track_mixer_state, sync_track_name_state,
     sync_track_params, sync_track_peak_fields,
 };
@@ -513,29 +512,8 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
     sync_track_peak_fields(rt, cached_track_peak_levels);
-    rt.set_reactive(
-        "SEQ",
-        "effects",
-        build_effects_value(
-            state,
-            selected,
-            &app.graph.effect_descriptors,
-            selected_steps,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "midi-effects",
-        build_midi_effects_value(state, selected, selected_steps),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected, selected_steps),
-    );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, state, selected, selected_steps);
-    sync_fx_param_binding_fields(rt, app, state, selected, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
@@ -560,7 +538,6 @@ pub(crate) fn apply_dropped_instrument_preset(
     track: usize,
     preset: &str,
     current_track: &Arc<AtomicUsize>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) {
     if let Err(error) = load_instrument_preset_into_track(app, track, preset) {
@@ -569,11 +546,6 @@ pub(crate) fn apply_dropped_instrument_preset(
     }
     let selected = current_track.load(Ordering::Relaxed);
     let rt = editor.runtime_mut();
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected, selected_steps),
-    );
     sync_sidebar_browser(rt, app, selected);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -624,28 +596,7 @@ pub(crate) fn finish_swapped_instrument_track(
         sync_all_track_sequencer_state(rt, state, app);
         rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
         sync_step_param_lists(rt, state, selected_track);
-        rt.set_reactive(
-            "SEQ",
-            "effects",
-            build_effects_value(
-                state,
-                selected_track,
-                &app.graph.effect_descriptors,
-                selected_steps,
-            ),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "midi-effects",
-            build_midi_effects_value(state, selected_track, selected_steps),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(app, selected_track, selected_steps),
-        );
         sync_track_params(rt, state, selected_track, selected_steps);
-        sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
         rt.set_reactive(
             "SEQ",
             "step-has-plocks",

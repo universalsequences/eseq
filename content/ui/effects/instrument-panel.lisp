@@ -3,6 +3,7 @@
 
 (import eseq.macro-state :as ms :refer (macro-arm))
 (import eseq.effects.devices :as dv)
+(import eseq.effects.panel-data :as pd)
 (import eseq.view-kit :refer (listed?))
 (import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
@@ -388,16 +389,8 @@
               :builtin (get payload :builtin))))))
 
 ;; Slot controls are separate from instrument params, but use the same macro
-;; dot: a macro of the rack (inst, its panel) mapped onto the control.
-(def rack-slot-param-macro-owned? (inst slot param)
-  (> (len (filter |macro|
-    (> (len (filter |mapping|
-      (and (= (get mapping :kind) "rack-slot")
-           (= (get mapping :rack-slot) (get slot :idx))
-           (= (get mapping :param) param))
-      (get macro :mappings))) 0)
-    (get inst :macros))) 0))
-
+;; dot: a macro of the rack mapped onto the control (the slot device's
+;; strip-macros), as their p-lock dot reads its strip-locks.
 (def rack-slot-param-wrapper (inst slot sd param body)
   (let ((target (nth (filter |target| (= (get target :name) param)
                       (get slot :param-targets)) 0))
@@ -405,7 +398,7 @@
     (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
       :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
       :background-color :transparent
-      :macro-owned (if (rack-slot-param-macro-owned? inst slot param) 1 0)
+      :macro-owned (if (listed? param sd.strip-macros) 1 0)
       :plock-any (if has-locks 1 0)
       :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
       body)))
@@ -557,16 +550,21 @@
   (let ((slot-idx (get inst :selected-slot)))
     (if (< slot-idx 0)
       (box :width 0 :height 0)
-      (let ((slot (nth (get inst :slots) slot-idx)))
-        (if (= (len (get slot :effects)) 0)
-          (box :width 0 :height 0)
-          (h-stack :debug-name "rack-slot-fx-panel"
-                   :height st/fx-fixed-panel-height :gap 1 :align :stretch
-            (each (get slot :effects) |fx fx-idx|
-              (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
-                (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
-                  (ep/fx-panel (get fx :name) (get fx :params) fx))
-                (pf/device-output-meter (get fx :meter))))))))))
+      ;; The selected slot's running effects, each panel's dict built in its
+      ;; own subtree (eseq.effects.panel-data), as a bus effect's.
+      (subtree :key (str "rack-selected-fx-" (get inst :track) "-" slot-idx)
+        (let ((effects (pd/rack-slot-effect-devices
+                         (dv/rack-slot-device (get inst :track) slot-idx))))
+          (if (= (len effects) 0)
+            (box :width 0 :height 0)
+            (h-stack :debug-name "rack-slot-fx-panel"
+                     :height st/fx-fixed-panel-height :gap 1 :align :stretch
+              (each effects |d fx-idx|
+                (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+                  (subtree :key (str "rack-slot-fx-" d.slot "-" d.name)
+                    (let ((fx (pd/fx-panel-of d)))
+                      (ep/fx-panel (get fx :name) (get fx :params) fx)))
+                  (pf/device-output-meter d.meter))))))))))
 
 (def rack-slot-fx-drop-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))

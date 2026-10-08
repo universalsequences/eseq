@@ -29,6 +29,12 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(poseidon_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -37,10 +43,6 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),
             ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(poseidon_inst)])),
-            ("bus-effects", test_list(vec![])),
         ],
         true,
     );
@@ -67,7 +69,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         .eval_str(&custom_ui_source)
         .expect("load poseidon custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-    let kinds = seed_panel_kinds(&mut editor);
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("poseidon fx lisp status after refresh: {status}");
@@ -196,7 +198,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         editor.refresh_runtime_side_effects();
         // Read the scoped selection via the same dispatcher used by the panel.
         let selected = editor.runtime_mut().eval_str(r#"
-            (do (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+            (do (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                 eseq.vanilla/custom-ui-selected-section)
         "#).unwrap();
         assert_eq!(selected, Some(Value::Number(owner as f64)));

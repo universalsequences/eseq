@@ -258,25 +258,8 @@ fn step_variant_names_the_variant_instance_the_step_plays() {
 const DEVICES_X: &str = "(def t0 (track 0)) (def flt (first t0.devices)) \
                          (def t2 (track 2)) (def inst (first t2.devices))";
 
-/// The legacy instrument panel's entry for `track`.
-fn legacy_instrument(h: &Harness, track: usize) -> Value {
-    let panel = build_instrument_panel_value(&h.app, track, &h.shared.selected_steps);
-    items(&panel).remove(0)
-}
-
-/// The legacy effects panel's slot maps of `track`.
-fn legacy_effects(h: &Harness, track: usize) -> Vec<Value> {
-    let descriptors = &h.app.graph.effect_descriptors;
-    items(&build_effects_value(
-        &h.shared.state,
-        track,
-        descriptors,
-        &h.shared.selected_steps,
-    ))
-}
-
 #[test]
-fn the_panel_header_reads_like_the_legacy_panel_dicts() {
+fn the_panel_header_reads_its_name_binding_meter_and_modulators() {
     let (mut h, slot) = Harness::with_devices();
     h.eval_x(DEVICES_X);
     // The sound binding is computed while observed ("" until then).
@@ -284,24 +267,20 @@ fn the_panel_header_reads_like_the_legacy_panel_dicts() {
     h.eval_x(r#"(effect-buffer "*binding*" (label inst.sound-binding))"#);
     h.show_all();
     h.sync();
-    for (device, track) in [("inst", 2)] {
-        let legacy = legacy_instrument(&h, track);
-        let expected = instrument_panel_display_name(&h.app, track);
-        assert_eq!(h.eval_x(&format!("{device}.display-name")), s(&expected));
-        if get(&legacy, "display-name") != Value::Nil {
-            assert_eq!(s(&expected), get(&legacy, "display-name"));
-        }
-        let binding = match get(&legacy, "sound-binding") {
-            Value::Nil => s(""),
-            label => label,
-        };
-        assert_eq!(h.eval_x(&format!("{device}.sound-binding")), binding);
-        assert_eq!(h.eval_x(&format!("{device}.meter")), get(&legacy, "meter"));
-    }
-    let effects = legacy_effects(&h, 0);
-    let filter = &effects[slot];
-    assert_eq!(h.eval_x("flt.meter"), get(filter, "meter"));
-    assert_eq!(h.eval_x("flt.display-name"), get(filter, "name"));
+    let expected = instrument_panel_display_name(&h.app, 2);
+    assert_eq!(h.eval_x("inst.display-name"), s(&expected));
+    let binding = h.app.sound_binding_label(2).unwrap_or_default();
+    assert_eq!(h.eval_x("inst.sound-binding"), s(&binding));
+    let meter = device_meter_value("track", &[("index", 2.0)]);
+    assert_eq!(h.eval_x("inst.meter"), meter);
+    // The full name a custom UI dispatches on (a sampler's is the panel's).
+    let name = instrument_panel_name(&h.app, 2);
+    assert_eq!(h.eval_x("inst.instrument-name"), s(&name));
+    assert_eq!(h.eval_x("flt.instrument-name"), s(""));
+    let meter = device_meter_value("track-effect", &[("index", 0.0), ("slot", slot as f64)]);
+    assert_eq!(h.eval_x("flt.meter"), meter);
+    let filter = h.app.graph.effect_descriptors[0][slot].name.clone();
+    assert_eq!(h.eval_x("flt.display-name"), s(&filter));
     assert_eq!(h.eval_x("flt.sound-binding"), s(""));
     // The fixed modulators: the descriptor's, as the panels list them.
     let desc = h.app.graph.effect_descriptors[0][slot].clone();
@@ -330,8 +309,7 @@ fn the_panel_header_reads_like_the_legacy_panel_dicts() {
         h.eval_x("(let ((m (first flt.modulators))) m.label)"),
         s("LFO")
     );
-    let legacy = legacy_instrument(&h, 2);
-    let modulators = items(&get(&legacy, "modulators"));
+    let modulators = h.app.graph.instrument_descriptors[2].instrument_modulators.clone();
     assert_eq!(
         h.eval_x("(len inst.modulators)"),
         Value::Number(modulators.len() as f64)
@@ -339,19 +317,22 @@ fn the_panel_header_reads_like_the_legacy_panel_dicts() {
     for (at, modulator) in modulators.iter().enumerate() {
         let code = format!("(let ((m (nth inst.modulators {at}))) (list m.slot m.label))");
         let row = items(&h.eval_x(&code));
-        assert_eq!(row[0], get(modulator, "slot"));
-        assert_eq!(row[1], get(modulator, "label"));
+        assert_eq!(row[0], Value::Number(modulator.slot as f64));
+        assert_eq!(row[1], s(&modulator.label));
     }
     // A drum rack slot: its own meter and display name.
     let mut h = Harness::new();
     h.rack_track();
     h.sync();
     h.eval_x("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
-    let legacy = legacy_instrument(&h, 2);
-    let selected = get(&legacy, "selected-instrument");
-    assert_eq!(h.eval_x("rs.meter"), get(&selected, "meter"));
-    assert_eq!(h.eval_x("rs.display-name"), get(&selected, "display-name"));
-    assert_eq!(h.eval_x("rk.display-name"), get(&legacy, "display-name"));
+    let meter = device_meter_value("rack-slot", &[("index", 2.0), ("rack-slot", 0.0)]);
+    assert_eq!(h.eval_x("rs.meter"), meter);
+    let raw = h.eval_x("rs.name");
+    assert_eq!(h.eval_x("rs.instrument-name"), raw);
+    let Value::String(raw) = raw else { panic!("a slot name") };
+    assert_eq!(h.eval_x("rs.display-name"), s(&instrument_display_name(&raw)));
+    let rack = instrument_panel_display_name(&h.app, 2);
+    assert_eq!(h.eval_x("rk.display-name"), s(&rack));
 }
 
 #[test]
@@ -403,7 +384,7 @@ fn a_modulators_envelope_reads_the_meter_cache_while_observed() {
 // ── param UI metadata ──────────────────────────────────────────────────
 
 #[test]
-fn param_ui_metadata_reads_like_the_legacy_param_maps() {
+fn param_ui_metadata_reads_the_descriptors() {
     use sequencer::effects::{ParamAssetOptions, ParamUiMetadata};
     let (mut h, slot) = Harness::with_devices();
     h.eval_x(DEVICES_X);
@@ -441,21 +422,6 @@ fn param_ui_metadata_reads_like_the_legacy_param_maps() {
         h.eval_x("p.asset-options"),
         param_asset_options_value(options)
     );
-    // Legacy parity (the effects panel's param map).
-    let effects = legacy_effects(&h, 0);
-    let param = items(&get(&effects[slot], "params"))
-        .into_iter()
-        .find(|param| get(param, "idx") == Value::Number(cutoff as f64))
-        .expect("the cutoff map");
-    for (field, key) in [
-        ("group", "group"),
-        ("env", "env"),
-        ("role", "role"),
-        ("display-name", "display-name"),
-        ("asset-options", "options"),
-    ] {
-        assert_eq!(h.eval_x(&format!("p.{field}")), get(&param, key), "{field}");
-    }
 }
 
 // ── effect tables ──────────────────────────────────────────────────────
@@ -482,16 +448,18 @@ fn effect_tables_read_the_node_registries_while_observed() {
     let fields = "(list tbl.table-name tbl.table-mode tbl.table-engine tbl.table-data-key \
                   tbl.table-options tbl.ir-name)";
     let read = items(&h.eval_x(fields));
-    let effects = legacy_effects(&h, 0);
-    let legacy = &effects[slot];
-    assert_eq!(read[0], get(legacy, "table-name"));
+    let table = EffectTableFields::of(filter_table::NAME, node);
+    let text = |field: Option<String>| s(&field.unwrap_or_default());
     assert_eq!(read[0], s("Pad"));
-    assert_eq!(read[1], get(legacy, "table-mode"));
-    assert_eq!(read[2], get(legacy, "table-engine"));
-    assert_eq!(read[3], get(legacy, "table-data-key"));
-    assert_eq!(read[4], get(legacy, "table-options"));
+    assert_eq!(read[0], text(table.name));
+    assert_eq!(read[1], text(table.mode));
+    assert_eq!(read[2], text(table.engine));
+    assert_eq!(read[3], text(table.data_key));
+    // The table assets the Filter Table can load, as listed.
+    let stems = sequencer::effects::filter_table_asset::list_asset_stems();
+    let options: Vec<Value> = stems.iter().map(|stem| s(stem)).collect();
+    assert_eq!(items(&read[4]), options);
     assert_eq!(read[5], s(""), "a Filter Table has no IR");
-    assert_eq!(h.eval_x("ir.ir-name"), get(&effects[reverb], "ir-name"));
     assert_eq!(h.eval_x("ir.ir-name"), s("No IR"));
     assert_eq!(
         h.eval_x("(list ir.table-name ir.table-options)"),
@@ -513,7 +481,7 @@ fn effect_tables_read_the_node_registries_while_observed() {
         pushes,
         "idle ticks push no table-options"
     );
-    assert_eq!(h.eval_x("tbl.table-options"), get(legacy, "table-options"));
+    assert_eq!(items(&h.eval_x("tbl.table-options")), options);
     // A moved epoch lists them again and pushes them once.
     h.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
     h.sync();
@@ -613,28 +581,17 @@ fn sampler_media_read_like_the_sampler_panel_while_observed() {
     h.sync();
     assert_eq!(media_reads(&h), [reads[0] + 1, reads[1] + 1, reads[2] + 1]);
     let read = items(&h.eval_x(fields));
-    let legacy = items(&build_sampler_panel_value(
-        &h.app,
-        2,
-        &h.shared.selected_steps,
-    ))
-    .remove(0);
-    for (at, key) in [
-        (0, "buffer"),
-        (1, "duration"),
-        (2, "start-time"),
-        (3, "end-time"),
-        (4, "slices"),
-        (5, "slice-active"),
-        (6, "onsets"),
-        (7, "analysis-status"),
-        (8, "analysis-message"),
-        (9, "analysis-bpm"),
-        (10, "analysis-confidence"),
-        (11, "downbeat-time"),
-    ] {
-        assert_eq!(read[at], get(&legacy, key), "{key}");
-    }
+    assert_ne!(read[0], Value::Nil, "the sample's buffer");
+    assert!((num(read[2].clone()) - 0.25).abs() < 1e-6, "the start, in seconds");
+    let end = f64::from(instrument.defaults.get(3));
+    assert!((num(read[3].clone()) - end).abs() < 1e-6, "the end, in seconds");
+    assert_eq!(items(&read[5]).len(), items(&read[4]).len());
+    assert_eq!(read[6], h.eval_x("(list 0 0.25 0.5 0.75)"));
+    assert_eq!(read[7], s("ready"));
+    assert_eq!(read[8], s("120.0 BPM"));
+    assert_eq!(read[9], Value::Number(120.0));
+    assert!((num(read[10].clone()) - 0.75).abs() < 1e-6);
+    assert_eq!(read[11], Value::Number(0.25));
     assert!(!items(&read[4]).is_empty(), "slices in slice mode");
     assert!(
         (num(read[1].clone()) - 1.0).abs() < 1e-6,
@@ -705,22 +662,14 @@ fn a_rack_slot_samplers_selection_reads_like_the_rack_panel() {
     );
     h.show_all();
     h.sync();
-    let legacy = legacy_instrument(&h, 2);
-    let selected = get(&legacy, "selected-instrument");
-    for (field, key) in [
-        ("start-time", "start-time"),
-        ("end-time", "end-time"),
-        ("sample-duration", "duration"),
-        ("slices", "slices"),
-        ("slice-active", "slice-active"),
-    ] {
-        assert_eq!(
-            h.eval_x(&format!("rs.{field}")),
-            get(&selected, key),
-            "{field}"
-        );
-    }
+    // A one second sample: the selection in seconds.
+    assert_eq!(h.eval_x("rs.sample-duration"), Value::Number(1.0));
     assert_eq!(h.eval_x("rs.start-time"), Value::Number(0.25));
+    assert_eq!(h.eval_x("rs.end-time"), Value::Number(0.75));
+    assert_eq!(
+        h.eval_x("(len rs.slice-active)"),
+        h.eval_x("(len rs.slices)")
+    );
     // The rack edit moves the selection.
     assert!(h
         .app

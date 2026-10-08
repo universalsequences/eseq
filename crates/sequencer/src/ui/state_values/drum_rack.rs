@@ -1,15 +1,5 @@
 use super::*;
 
-pub(super) fn rack_slot_type_name(slot: &sequencer::sequencer::RackSlotSnapshot) -> &'static str {
-    match slot.instrument_type {
-        sequencer::sequencer::InstrumentType::Empty => "empty",
-        sequencer::sequencer::InstrumentType::Sampler => "sampler",
-        sequencer::sequencer::InstrumentType::Custom => "custom",
-        sequencer::sequencer::InstrumentType::Modulator => "modulator",
-        sequencer::sequencer::InstrumentType::Rack => "rack",
-    }
-}
-
 pub(crate) fn rack_slot_raw_name(
     app: &app::App,
     slot_idx: usize,
@@ -50,32 +40,6 @@ pub(crate) fn drum_rack_pad_label(pad_note: i32) -> String {
         _ => "B",
     };
     format!("{name}{}", 4 + pad_note.div_euclid(12))
-}
-
-/// Publishes the rack's global slot selection for the rack panel without
-/// rebuilding the sequencer tree.
-pub(crate) fn sync_all_rack_slot_selection_binding_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-) -> bool {
-    let racks = app.state.pattern.rack_tracks.lock().unwrap();
-    let mut dirty = false;
-    for (track, rack) in racks.iter().enumerate() {
-        let Some(rack) = rack.as_ref() else {
-            continue;
-        };
-        let selected_slot = app.selected_rack_slot_index_for_rack(track, rack);
-        for slot_idx in 0..rack.slots.len() {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &rack_slot_selected_field(track, slot_idx),
-                    Value::Bool(Some(slot_idx) == selected_slot),
-                )
-                .effects_dirty;
-        }
-    }
-    dirty
 }
 
 // ── Pad trigger lights (eseq-4b5.16) ────────────────────────────────────

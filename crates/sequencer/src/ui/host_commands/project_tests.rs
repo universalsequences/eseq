@@ -60,7 +60,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         step_clipboard: Arc::new(Mutex::new(None)),
         ui_epoch: ui_epoch.clone(),
         fx_epoch: Arc::new(AtomicUsize::new(0)),
-        fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations: ui_invalidations.clone(),
         active_delete_target: active_delete_target.clone(),
         active_delete_target_version: active_delete_target_version.clone(),

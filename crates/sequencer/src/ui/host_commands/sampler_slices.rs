@@ -176,24 +176,14 @@ pub(super) fn handle(
         Ok(_) => {
             if operation != "move" {
                 app.publish_all_sampler_analysis_runtime();
+            } else if rack_slot.is_none() {
+                // A track sampler plays the moved marker at once (the legacy
+                // panel rebuild published it as a side effect).
+                app.publish_sampler_analysis_runtime(track);
             }
-            // `effects_dirty` means the reactive effects still have to be RUN;
-            // `refresh_runtime_side_effects` alone does not run them, so the
-            // new `:slices` never reached the widget tree and an applied,
-            // stored marker move stayed invisible until an unrelated edit
-            // (turning `sens`) forced a full cycle. Mirror
-            // `reactive_sync::flush_reactive_display_edit`: cycle, refresh,
-            // redraw.
-            let result = editor.runtime_mut().set_reactive(
-                "SEQ",
-                "instrument-panel",
-                build_instrument_panel_value(app, track, &ctx.shared.selected_steps),
-            );
-            if result.effects_dirty || result.widgets_dirty {
-                editor.runtime_mut().run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-            }
+            // The sampler's markers (`device.slices`) follow on the host
+            // kinds' next sync.
+            editor.mark_needs_redraw();
         }
         Err(error) => editor.handle_host_event(HostEvent::Error(format!(
             "sampler slice edit failed: {error:?}"

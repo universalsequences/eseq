@@ -2,15 +2,8 @@ use super::*;
 use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget};
 
 fn show_track(editor: &mut Editor, app: &app::App, track: usize) {
-    let selected = Arc::new(Mutex::new(HashSet::new()));
-    let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "current-track", Value::Number(track as f64));
-    rt.set_reactive("SEQ", "instrument-panel", build_instrument_panel_value(app, track, &selected));
-    sync_rack_macro_value_fields(rt, app, track, None);
-    sync_rack_panel_param_value_fields(rt, app, track, None);
-    rt.run_reactive_cycle();
     // The rack's devices and macros, as the host kinds push them.
-    seed_panel_kinds(editor);
+    seed_app_panels(editor, app, track);
     editor.refresh_runtime_side_effects();
 }
 

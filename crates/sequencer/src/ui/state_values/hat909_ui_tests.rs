@@ -29,6 +29,12 @@ fn hat909_performance_controls_and_envelopes_are_bound_and_visible() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(hat909_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -37,10 +43,6 @@ fn hat909_performance_controls_and_envelopes_are_bound_and_visible() {
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),
             ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(hat909_inst)])),
-            ("bus-effects", test_list(vec![])),
         ],
         true,
     );
@@ -67,7 +69,7 @@ fn hat909_performance_controls_and_envelopes_are_bound_and_visible() {
         .eval_str(&custom_ui_source)
         .expect("load hat909 custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-    seed_panel_kinds(&mut editor);
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("hat909 fx lisp status after refresh: {status}");

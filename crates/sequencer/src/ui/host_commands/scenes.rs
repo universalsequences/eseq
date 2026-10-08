@@ -106,9 +106,7 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
-    let fx_value_epoch = ctx.shared.fx_value_epoch.clone();
     let active_delete_target = ctx.shared.active_delete_target.clone();
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
@@ -537,18 +535,8 @@ pub(super) fn handle(
             let launch_observe_elapsed = launch_observe_started.elapsed();
             let fx_resync_started = Instant::now();
             // Assigning into the current scene live-restores the pattern's
-            // params + sample; the generic pattern-epoch sync covers
-            // steps/params/mixer but not the fx and instrument-panel
-            // values, so bump fx_value_epoch and let the SAME tick cycle
-            // carry them via the in-place value patch. (This used to resync
-            // inline with its own reactive cycle + side-effects pass when
-            // *fx* was visible — a whole extra ~35ms cycle at 20-clip pool
-            // scale for surfaces the tick's fx branch republishes anyway.
-            // Launches restore VALUES only, never panel structure, so the
-            // patch path is safe here; structural edits use fx_epoch.)
-            if scene == app.state.current_scene_index() {
-                fx_value_epoch.fetch_add(1, Ordering::Relaxed);
-            }
+            // params + sample: the panels bind the params' live values (the
+            // host kinds), so there is no fx panel state to resync here.
             if profile {
                 eprintln!(
                     "[set-scene-cell-profile] total={:.2}ms mutation={:.2}ms run_modes={:.2}ms defaults={:.2}ms launch_observe={:.2}ms fx_resync={:.2}ms",
@@ -736,8 +724,6 @@ pub(super) fn handle(
 
             let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-            let selected_neural_snapshot =
-                selected_neural_neurons.lock().unwrap().clone();
             let rt = editor.runtime_mut();
             sync_shared_track_collapsed(&track_collapsed, &app);
             sync_track_name_state(rt, &mut *ctx.track_names, &app);
@@ -749,39 +735,9 @@ pub(super) fn handle(
             sync_track_mixer_state(rt, &app, &state);
             sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
             if fx_visible {
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(
-                        &state,
-                        ct,
-                        &app.graph.effect_descriptors,
-                        &selected_steps,
-                    ),
-                );
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "midi-effects",
-                    build_midi_effects_value(&state, ct, &selected_steps),
-                );
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, ct, &selected_steps),
-                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-            } else {
-                fx_value_epoch.fetch_add(1, Ordering::Relaxed);
             }
             sync_track_params(rt, &state, ct, &selected_steps);
-            sync_fx_param_binding_fields_with_neural_selection(
-                rt,
-                &app,
-                &state,
-                ct,
-                &selected_steps,
-                Some(&selected_neural_snapshot),
-            );
             rt.set_reactive(
                 "SEQ",
                 "step-has-plocks",
@@ -867,12 +823,8 @@ pub(super) fn handle(
                     let mut sync_step_params_elapsed = Duration::ZERO;
                     let mut sync_mixer_elapsed = Duration::ZERO;
                     let mut sync_fx_lists_elapsed = Duration::ZERO;
-                    let mut sync_effects_elapsed = Duration::ZERO;
-                    let mut sync_midi_effects_elapsed = Duration::ZERO;
-                    let mut sync_instrument_panel_elapsed = Duration::ZERO;
                     let mut sync_accumulators_elapsed = Duration::ZERO;
                     let mut sync_track_params_elapsed = Duration::ZERO;
-                    let mut sync_fx_bindings_elapsed = Duration::ZERO;
                     let mut sync_plocks_sidebar_elapsed = Duration::ZERO;
                     let mut reactive_elapsed = Duration::ZERO;
                     let mut side_effects_elapsed = Duration::ZERO;
@@ -913,57 +865,14 @@ pub(super) fn handle(
                         let started = Instant::now();
                         if fx_visible {
                             let sub_started = Instant::now();
-                            rt.set_reactive_value_patch(
-                                "SEQ",
-                                "effects",
-                                build_effects_value(
-                                    &state,
-                                    ct,
-                                    &app.graph.effect_descriptors,
-                                    &selected_steps,
-                                ),
-                            );
-                            sync_effects_elapsed = sub_started.elapsed();
-
-                            let sub_started = Instant::now();
-                            rt.set_reactive_value_patch(
-                                "SEQ",
-                                "midi-effects",
-                                build_midi_effects_value(&state, ct, &selected_steps),
-                            );
-                            sync_midi_effects_elapsed = sub_started.elapsed();
-
-                            let sub_started = Instant::now();
-                            rt.set_reactive_value_patch(
-                                "SEQ",
-                                "instrument-panel",
-                                build_instrument_panel_value(&app, ct, &selected_steps),
-                            );
-                            sync_instrument_panel_elapsed = sub_started.elapsed();
-
-                            let sub_started = Instant::now();
                             *accumulator_names.lock().unwrap() =
                                 build_accumulator_names(&app);
                             sync_accumulators_elapsed = sub_started.elapsed();
-                        } else {
-                            fx_value_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                         sync_fx_lists_elapsed = started.elapsed();
                         let started = Instant::now();
-                        let selected_neural_snapshot =
-                            selected_neural_neurons.lock().unwrap().clone();
                         sync_track_params(rt, &state, ct, &selected_steps);
                         sync_track_params_elapsed = started.elapsed();
-                        let started = Instant::now();
-                        sync_fx_param_binding_fields_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            ct,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
-                        sync_fx_bindings_elapsed = started.elapsed();
                         let started = Instant::now();
                         rt.set_reactive(
                             "SEQ",
@@ -992,7 +901,7 @@ pub(super) fn handle(
                     }
                     if profile_switch {
                         eprintln!(
-                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                            "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms accumulators={:.2}ms track_params={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
                             idx,
                             pattern_changed,
                             duration_ms(profile_total_started.elapsed()),
@@ -1006,12 +915,8 @@ pub(super) fn handle(
                             duration_ms(sync_step_params_elapsed),
                             duration_ms(sync_mixer_elapsed),
                             duration_ms(sync_fx_lists_elapsed),
-                            duration_ms(sync_effects_elapsed),
-                            duration_ms(sync_midi_effects_elapsed),
-                            duration_ms(sync_instrument_panel_elapsed),
                             duration_ms(sync_accumulators_elapsed),
                             duration_ms(sync_track_params_elapsed),
-                            duration_ms(sync_fx_bindings_elapsed),
                             duration_ms(sync_plocks_sidebar_elapsed),
                             duration_ms(reactive_elapsed),
                             duration_ms(side_effects_elapsed),
@@ -1264,38 +1169,8 @@ pub(super) fn handle(
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(
-                        &state,
-                        ct,
-                        &app.graph.effect_descriptors,
-                        &selected_steps,
-                    ),
-                );
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "midi-effects",
-                    build_midi_effects_value(&state, ct, &selected_steps),
-                );
-                rt.set_reactive_value_patch(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, ct, &selected_steps),
-                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                let selected_neural_snapshot =
-                    selected_neural_neurons.lock().unwrap().clone();
                 sync_track_params(rt, &state, ct, &selected_steps);
-                sync_fx_param_binding_fields_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    ct,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -1425,7 +1300,6 @@ mod tests {
             step_clipboard: Arc::new(Mutex::new(None)),
             ui_epoch: Arc::new(AtomicUsize::new(0)),
             fx_epoch: Arc::new(AtomicUsize::new(0)),
-            fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),

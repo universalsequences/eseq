@@ -4,7 +4,7 @@
 
 (def capture-after-sync ()
   (let ((em eseq.effects.state/effect-mods))
-    (let ((fx (nth (filter |fx| (= (get fx :name) "spectral-tamer") SEQ.effects) 0)))
+    (let ((fx (nth (filter |fx| (= (get fx :name) "spectral-tamer") (eseq.effects.panel-data/current-effect-panels)) 0)))
       (set! em.chain "audio")
       (set! em.track 0)
       (set! em.slot (get fx :slot-idx))

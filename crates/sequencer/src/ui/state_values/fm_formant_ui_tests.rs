@@ -29,6 +29,12 @@ fn fm_formant_pages_expose_bound_visible_controls() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(fm_formant_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -37,10 +43,6 @@ fn fm_formant_pages_expose_bound_visible_controls() {
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),
             ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(fm_formant_inst)])),
-            ("bus-effects", test_list(vec![])),
         ],
         true,
     );
@@ -67,7 +69,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
         .eval_str(&custom_ui_source)
         .expect("load fm_formant custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-    let kinds = seed_panel_kinds(&mut editor);
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("fm_formant fx lisp status after refresh: {status}");
@@ -102,7 +104,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
     }
     for section in 0..24 {
         editor.runtime_mut().eval_str(&format!(r#"
-            (do (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+            (do (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                 ((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false))
         "#)).unwrap();
         editor.refresh_runtime_side_effects();

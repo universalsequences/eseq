@@ -152,7 +152,7 @@
 
 ;; Latched enum button: highlights when the param's current option matches.
 (def choice (fx p idx label-text w)
-  (let ((active (= (get p :text-value) (nth (get p :options) idx))))
+  (let ((active (= (eseq.effects.param-controls/fx-param-text-value-for fx p) (nth (get p :options) idx))))
     (button label-text
       :width w :height 1.05 :padding 0 :font-size 8.5
       :background-color (if active (control-on-color) :mixer-control-bg)
@@ -167,7 +167,8 @@
 ;; Option dropdown (harmonics, lfo wave, and the FM/AM sidechain source
 ;; pickers — same control the Compressor uses for its sidechain source).
 (def option (fx p w h fs)
-  (dropdown :value (get p :text-value)
+  (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
     :options (get p :options)
     :bg-color :mixer-strip-selected-bg
     :border-color :mixer-strip-border

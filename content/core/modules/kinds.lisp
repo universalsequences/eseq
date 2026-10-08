@@ -476,7 +476,7 @@
          (printing :bool  :doc "Held under a live print latch while playing and recording")
          ;; Panel placement (spec §14.2g).
          (label   :string :doc "The name the panel shows: a mod param without its mod prefix, a modulation source's setting by its role (type, rate, attack, …)")
-         (section :string :doc "main, mod (a modulation lane's own param), source (a modulation source's setting, of source mod-slot) or hidden (host plumbing)")
+         (section :string :doc "main, mod (a modulation lane's own param), source (a modulation source's setting, of source mod-slot) or hidden (host plumbing). An effect's (a track chain, bus or drum rack slot effect) has no mod: its modulation routing (a lane's depth, source and switch params) is hidden, a host-routed sidechain main")
          (mod-slot :int   :doc "The modulation source (1-4) a source param sets; 0 otherwise")
          (visible :bool   :doc "Shown: false for a hidden param and for a source param its source's type does not use")
          ;; The descriptor's UI metadata (spec §14.2l): empty when it has none.
@@ -485,6 +485,7 @@
          (role    :string :doc "Its role in that envelope (attack, decay, …)")
          (display-name :string :doc "The name the instrument's source spells it (name is the host id)")
          (asset-options :any :doc "An options reference that did not resolve: (dict :tensor :file :key …); nil otherwise (a resolved one is options)")
+         (host-modulatable :bool :doc "The descriptor opts it into project modulation with no lane of its own (an effect panel's macro mapping takes it)")
          ;; Modulation and process display.
          (mod-targets (list-of mod-target) :doc "The modulation lanes onto this param")
          (mod-offset :number :doc "How far modulation moves value now (display units); 0 while unmodulated or not sampled")
@@ -678,8 +679,11 @@
          (base-note-locked :bool :doc "base-note-display comes from a p-lock")
          (voices-display :int :doc "The voices shown (the rack panel's V picker); 0 for any other device")
          (strip-locks (list-of :string) :doc "The strip controls some step of a drum rack slot's track pattern locks (base-note, gain, pan, max-polyphony, mute, solo; the p-lock presence dot); empty for any other device")
+         (strip-macros (list-of :string) :doc "The strip controls of a drum rack slot some macro of its rack maps (the macro dot), in strip-locks' order; empty for any other device")
          ;; The panel header and its meters (spec §14.2l).
          (display-name :string :doc "The name the panel header shows: an instrument's or rack slot's without its folder or pin (a drum rack's track name, Sampler for a sampler), else name")
+         (instrument-name :string :doc "A track instrument's or drum rack slot's full name, folder and pin included (factory:Drums/808 Kick/; Modulator or Instrument for an unnamed one): what a custom UI dispatches on; empty for any other device")
+         (node-id :int :doc "An effect's graph node (a track chain, bus or drum rack slot effect's), which the effect commands check; 0 while it has none and for any other device")
          (sound-binding :string :doc "A track instrument's bound sound (the header badge): the patch name, else the binding's (Take 2 · bars 0-2, Pattern 2); empty when unbound or for any other device. Computed while observed (an unobserved one reads its last value, empty before)")
          (meter :any :doc "The device's output meter selector, a device-meter's :source (names the device, not a node); nil for a MIDI effect")
          (modulators (list-of modulator) :doc "An instrument's fixed modulation sources (its descriptor's); empty otherwise")

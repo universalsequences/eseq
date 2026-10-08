@@ -190,17 +190,11 @@ pub(crate) struct FrameDiffState {
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
-    pub(crate) prev_process_effective_params_version: u64,
-    /// Last published `(display value, clamped)` per `(track, param)` of the
-    /// process effective-value feed, so the tick only writes deltas.
-    pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,
     pub(crate) prev_track_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_ui_epoch: usize,
-    pub(crate) prev_fx_epoch: usize,
-    pub(crate) prev_fx_value_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
@@ -210,7 +204,6 @@ pub(crate) struct FrameDiffState {
     /// dropping that delete target un-highlights the non-current ones.
     pub(crate) prev_multi_track_selection: Vec<usize>,
     pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
-    pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
     /// overlay, clip kind): `(selected (track, clip id), clip source kind,
     /// committed-song revision)`. They are keyed off the clip SELECTION,
@@ -218,8 +211,6 @@ pub(crate) struct FrameDiffState {
     /// spec alone is not enough to decide whether they need republishing.
     pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
-    pub(crate) prev_selected_neural_neurons:
-        BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     pub(crate) prev_agent_generation_watermark: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_sampler_analysis_generation: u64,
@@ -289,12 +280,6 @@ pub(crate) struct SharedHandles {
     /// this for edits that change panel STRUCTURE (Boolean/Enum params drive
     /// conditional layout, add/remove effect, ...).
     pub(crate) fx_epoch: Arc<AtomicUsize>,
-    /// Value-only fx invalidation: the tick's fx branch republishes via
-    /// `set_reactive_value_patch` (in-place Number/Bool cell writes, NO dirty
-    /// marks — field bindings carry the visible updates). Only scene/clip
-    /// launch paths may bump this; anything that can change panel structure
-    /// must use `fx_epoch` instead.
-    pub(crate) fx_value_epoch: Arc<AtomicUsize>,
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
     pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     pub(crate) active_delete_target_version: Arc<AtomicUsize>,

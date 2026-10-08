@@ -139,9 +139,8 @@
     :source (analyzer-source fx)
     :tap-point :post-fx
     :fft-size 4096 :time-slices 64 :min-db -84 :max-db 0 :smoothing 0.72
-    ;; These must be the effective-value bindings, not the snapshot :value
-    ;; fields. Knob drags update :value-field in place and do not rebuild the
-    ;; panel, and `param-effective-value` follows an LFO on center/spread/blend
+    ;; These must be the effective-value bindings, not by-value reads. Knob
+    ;; drags update the param in place and do not rebuild the panel, and `param-effective-value` follows an LFO on center/spread/blend
     ;; (eseq-hpc), falling back to the base value when nothing is modulating.
     :mode (eseq.effects.param-controls/param-effective-value mode-p)
     :circuit (eseq.effects.param-controls/param-effective-value circuit-p)
@@ -178,7 +177,8 @@
   (subtree :key "phaser-flanger-circuit-control"
     (h-stack :gap 0.18 :align :center
       (label "circ" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-      (dropdown :value (get p :text-value)
+      (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-option fx p v))
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

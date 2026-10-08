@@ -1,23 +1,24 @@
 ;; eseq.effects.devices — the eseq.kinds device (and param) a panel dict
 ;; stands for.
 ;;
-;; The factory panels still lay out from the host's panel dicts (an
-;; instrument panel, an effect's `fx` dict, their param dicts), but every
-;; value they show comes from the kinds: the device a dict describes is
-;; looked up by the dict's own address (its track, chain slot, bus, rack
-;; slot), its params by descriptor index. Side-effect free, so any panel
-;; module can import it.
+;; The factory panels lay out from panel dicts (an instrument panel, an
+;; effect's `fx` dict, their param dicts) that eseq.effects.panel-data
+;; builds from the kinds, and every value they show comes from the kinds:
+;; the device a dict describes is looked up by the dict's own address (its
+;; track, chain slot, bus, rack slot), its params by descriptor index (or
+;; the `:prm` a param dict carries). Side-effect free, so any panel module
+;; can import it.
 ;;
 ;; Every lookup reads by value (a track's `devices`, a device's `params`):
-;; a panel re-renders when its device list or descriptor changes, as it did
-;; when the host rebuilt the panel dicts.
+;; a panel re-renders when its device list or descriptor changes.
 
 (module eseq.effects.devices)
 
 (import eseq.kinds :refer (track buses selection))
 
 (export track-at current-track-index instrument-of inst-device rack-slot-device fx-device
-        param-device param-of with-prm tensor-of base-note-param? param-stored-value)
+        param-device param-of with-prm tensor-of base-note-param? param-stored-value
+        fx-node-id)
 
 ;; The device of `devices` at chain position `slot` (-1: the instrument), or
 ;; nil.
@@ -72,6 +73,12 @@
             (if (get fx :midi-fx)
               (device-at t.midi-devices slot)
               (device-at t.devices slot))))))))
+
+;; The graph node of the effect `fx` stands for (the track effect commands
+;; check it), or nil. Read when a command goes, not by a render.
+(def fx-node-id (fx)
+  (let ((d (fx-device fx)))
+    (if d d.node-id nil)))
 
 ;; The device a param dict of an instrument panel belongs to: the drum rack
 ;; slot it names (`:rack-track`, `:rack-slot`), else the current track's

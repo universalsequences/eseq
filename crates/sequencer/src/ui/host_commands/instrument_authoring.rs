@@ -732,15 +732,6 @@ pub(super) fn handle(
                             "track-names",
                             build_track_names(&app.tracks),
                         );
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(
-                                &app,
-                                draft_track,
-                                &selected_steps,
-                            ),
-                        );
                         sync_sidebar_browser(rt, &app, draft_track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
@@ -1066,34 +1057,6 @@ pub(super) fn handle(
                                     "SEQ",
                                     "track-names",
                                     build_track_names(&ctx.track_names),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "instrument-panel",
-                                    build_instrument_panel_value(
-                                        &app,
-                                        ct,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "effects",
-                                    build_effects_value(
-                                        &state,
-                                        ct,
-                                        &app.graph.effect_descriptors,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "midi-effects",
-                                    build_midi_effects_value(
-                                        &state,
-                                        ct,
-                                        &selected_steps,
-                                    ),
                                 );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
@@ -1943,16 +1906,6 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(rt, "new-effect", &buf_name, None, EditorSurface::Patch);
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(
-                    &state,
-                    track,
-                    &app.graph.effect_descriptors,
-                    &selected_steps,
-                ),
-            );
             rt.run_reactive_cycle();
             if let Err(error) = rt.eval_str("(eseq.browser/refresh-buffer)") {
                 let _ = app
@@ -2147,16 +2100,6 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(rt, "new-effect", &buf_name, None, surface);
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(
-                    &state,
-                    track,
-                    &app.graph.effect_descriptors,
-                    &selected_steps,
-                ),
-            );
             rt.run_reactive_cycle();
             let _ = rt.eval_str("(eseq.browser/refresh-buffer)");
             editor.refresh_runtime_side_effects();
@@ -2337,16 +2280,6 @@ pub(super) fn handle(
                             "SEQ",
                             "available-effects",
                             build_available_effects(),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
                         );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
@@ -2570,29 +2503,10 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             present_editor_closed(rt);
             match session.target {
-                EffectEditTarget::Track { track, .. } => {
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                }
+                EffectEditTarget::Track { .. } => {}
                 EffectEditTarget::Bus { .. } => {
                     *bus_state.lock().unwrap() = app.buses.clone();
                     sync_bus_mixer_state(rt, &app);
-                    rt.set_reactive(
-                        "SEQ",
-                        "bus-effects",
-                        build_bus_effects_value_for_selection(
-                            &app,
-                            Some(&selected_steps),
-                        ),
-                    );
                 }
             }
             rt.run_reactive_cycle();
@@ -3168,16 +3082,6 @@ pub(super) fn handle(
                             {
                                 Ok(()) => {
                                     let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "effects",
-                                        build_effects_value(
-                                            &state,
-                                            track,
-                                            &app.graph.effect_descriptors,
-                                            &selected_steps,
-                                        ),
-                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     editor.refresh_visible_layouts_for_buffer_named(

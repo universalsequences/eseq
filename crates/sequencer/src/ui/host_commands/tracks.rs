@@ -143,7 +143,6 @@ pub(super) fn handle(
     let current_track = ctx.shared.current_track.clone();
     let selected_tracks = ctx.shared.selected_tracks.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -291,38 +290,8 @@ pub(super) fn handle(
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                rt.set_reactive(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(
-                        &state,
-                        idx,
-                        &app.graph.effect_descriptors,
-                        &selected_steps,
-                    ),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "midi-effects",
-                    build_midi_effects_value(&state, idx, &selected_steps),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, idx, &selected_steps),
-                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                let selected_neural_snapshot =
-                    selected_neural_neurons.lock().unwrap().clone();
                 sync_track_params(rt, &state, idx, &selected_steps);
-                sync_fx_param_binding_fields_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    idx,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -478,7 +447,6 @@ pub(super) fn handle(
                         &state,
                         &current_track,
                         &mut *ctx.track_names,
-                        &selected_steps,
                         lg_raw,
                         track,
                         None,
@@ -591,39 +559,9 @@ pub(super) fn handle(
                         sync_bus_mixer_state(rt, &app);
                         sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                         sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                selected,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(&state, selected, &selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(&app, selected, &selected_steps),
-                        );
                         *accumulator_names.lock().unwrap() =
                             build_accumulator_names(&app);
-                        let selected_neural_snapshot =
-                            selected_neural_neurons.lock().unwrap().clone();
                         sync_track_params(rt, &state, selected, &selected_steps);
-                        sync_fx_param_binding_fields_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            selected,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
                         rt.set_reactive(
                             "SEQ",
                             "step-has-plocks",
@@ -677,7 +615,6 @@ pub(super) fn handle(
                             track,
                             preset,
                             &current_track,
-                            &selected_steps,
                             &ui_epoch,
                         );
                         return;
@@ -800,7 +737,6 @@ pub(super) fn handle(
                                 track,
                                 preset,
                                 &current_track,
-                                &selected_steps,
                                 &ui_epoch,
                             );
                         }
@@ -833,7 +769,6 @@ pub(super) fn handle(
                                 track,
                                 preset,
                                 &current_track,
-                                &selected_steps,
                                 &ui_epoch,
                             );
                         }

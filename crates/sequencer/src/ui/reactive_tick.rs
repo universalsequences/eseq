@@ -77,102 +77,6 @@ fn sync_track_params_delta(
     sync_track_params(rt, state, track, selected_steps);
 }
 
-fn sync_fx_param_bindings_delta(
-    previous: &mut Option<ParamSyncRevision>,
-    revision: ParamSyncRevision,
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    selected_neural_neurons: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-) -> bool {
-    if !claim_param_sync_revision(previous, &revision) {
-        return false;
-    }
-    let dirty = sync_fx_param_binding_fields_with_neural_selection(
-        rt,
-        app,
-        state,
-        track,
-        selected_steps,
-        Some(selected_neural_neurons),
-    );
-    dirty
-}
-
-/// The slice of fx panel publication that buffers other than `*fx*` read:
-/// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`
-/// (content/ui/browser.lisp `rack-panel-open?`, content/ui/macros.lisp). It
-/// must stay current for the selected track even while `*fx*` is hidden.
-/// `SEQ.step-has-plocks` has no reader since the legacy step grid went
-/// (eseq-0l17.77); its publication goes with chunk A of eseq-0l17.22.
-pub(super) fn sync_shared_panel_state(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: Option<usize>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    structural: bool,
-) {
-    let instrument_panel = track.map_or_else(
-        || Value::List(vec![]),
-        |track| build_instrument_panel_value(app, track, selected_steps),
-    );
-    if structural {
-        rt.set_reactive("SEQ", "instrument-panel", instrument_panel);
-    } else {
-        rt.set_reactive_value_patch("SEQ", "instrument-panel", instrument_panel);
-    }
-    rt.set_reactive(
-        "SEQ",
-        "step-has-plocks",
-        track.map_or_else(
-            || Value::List(vec![]),
-            |track| build_step_has_plocks(state, track, &app.graph.effect_descriptors),
-        ),
-    );
-}
-
-pub(super) fn sync_fx_panel_state(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: Option<usize>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    structural: bool,
-) {
-    let publish = |rt: &mut Runtime, field: &str, value: Value| {
-        if structural {
-            rt.set_reactive("SEQ", field, value);
-        } else {
-            rt.set_reactive_value_patch("SEQ", field, value);
-        }
-    };
-    publish(
-        rt,
-        "effects",
-        track.map_or_else(
-            || Value::List(vec![]),
-            |track| build_effects_value(state, track, &app.graph.effect_descriptors, selected_steps),
-        ),
-    );
-    publish(
-        rt,
-        "midi-effects",
-        track.map_or_else(
-            || Value::List(vec![]),
-            |track| build_midi_effects_value(state, track, selected_steps),
-        ),
-    );
-    sync_shared_panel_state(rt, app, state, track, selected_steps, structural);
-    publish(
-        rt,
-        "bus-effects",
-        build_bus_effects_value_for_selection(app, Some(selected_steps)),
-    );
-}
-
 /// Post-event reactive sync + render: diffs sequencer/transport state against
 /// the previous frame, republishes reactives, and renders when dirty.
 /// Production control/UI synchronization, independent of presentation. Keeping
@@ -202,7 +106,6 @@ pub(crate) fn sync_reactive_tick(
         &mut editor,
         &ctx.shared.state,
         &ctx.shared.current_track,
-        &ctx.shared.selected_steps,
         &ctx.shared.fx_epoch,
         &ctx.shared.ui_epoch,
     );
@@ -246,22 +149,6 @@ pub(crate) fn sync_reactive_tick(
     if process_channel_values_version != ctx.frame.prev_process_channel_values_version {
         ctx.frame.prev_process_channel_values_version = process_channel_values_version;
         if editor.has_visible_inline_runtime_bindings() {
-            editor.mark_needs_redraw();
-        }
-    }
-    // Process → instrument param effective values (knob dot / picker bar):
-    // republish when the scheduler resolved a new write since the last frame.
-    let process_effective_params_version = ctx.shared.state.process_effective_params_version();
-    if process_effective_params_version != ctx.frame.prev_process_effective_params_version {
-        ctx.frame.prev_process_effective_params_version = process_effective_params_version;
-        let dirty = state_values::sync_process_effective_param_fields(
-            editor.runtime_mut(),
-            app,
-            &ctx.shared.state,
-            &mut ctx.frame.prev_process_effective_params,
-        );
-        if dirty {
-            editor.runtime_mut().run_reactive_cycle();
             editor.mark_needs_redraw();
         }
     }
@@ -484,21 +371,6 @@ pub(crate) fn sync_reactive_tick(
                 ctx.frame.prev_instrument_active_notes = active_notes;
             }
         }
-        if selected_neural_snapshot != ctx.frame.prev_selected_neural_neurons {
-            let revision =
-                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
-            needs_reactive_cycle |= sync_fx_param_bindings_delta(
-                &mut ctx.frame.fx_param_sync_revision,
-                revision,
-                editor.runtime_mut(),
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
-            );
-            ctx.frame.prev_selected_neural_neurons = selected_neural_snapshot.clone();
-        }
         // Track switch — rebuild everything
         if ct != ctx.frame.prev_current_track && !app.tracks.is_empty() {
             editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -544,63 +416,8 @@ pub(crate) fn sync_reactive_tick(
                 ct,
                 &ctx.shared.selected_steps,
             );
-            sync_fx_param_bindings_delta(
-                &mut ctx.frame.fx_param_sync_revision,
-                param_sync_revision,
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
-            );
-            // The selecting native already issued the structural fx
-            // revision for this owner change. Leave the panel values to
-            // that branch below instead of building them twice. Direct
-            // current-track writers that did not issue an fx revision
-            // still get a complete destination panel here.
-            let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-            let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
-            if fx_visible
-                && fx_ep == ctx.frame.prev_fx_epoch
-                && fx_value_ep == ctx.frame.prev_fx_value_epoch
-            {
-                sync_fx_panel_state(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    Some(ct),
-                    &ctx.shared.selected_steps,
-                    true,
-                );
-            } else {
-                if !fx_visible {
-                    // Both this frame's publication and the fx-epoch catch-up
-                    // branch below are gated on *fx* visibility, so nothing
-                    // else refreshes the panel state that non-*fx* buffers
-                    // read (*samples* / *macro-mappings* read
-                    // SEQ.instrument-panel). Publish that slice for the new
-                    // track now; the heavier *fx*-only lists still wait for
-                    // *fx* to be shown.
-                    sync_shared_panel_state(
-                        rt,
-                        &app,
-                        &ctx.shared.state,
-                        Some(ct),
-                        &ctx.shared.selected_steps,
-                        true,
-                    );
-                }
-                if fx_ep == ctx.frame.prev_fx_epoch {
-                    // No structural fx revision is pending, yet the panel was
-                    // not rebuilt above — either *fx* is hidden, or only a
-                    // value revision is pending (a value patch cannot carry
-                    // the new owner's panel STRUCTURE). Bump fx_epoch so the
-                    // fx-epoch branch rebuilds structurally: this frame if
-                    // visible, else on the first frame *fx* is shown again.
-                    ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            // The device panels lay out from the kinds
+            // (eseq.effects.panel-data), which follow the current track.
             sync_sidebar_browser(rt, &app, ct);
             ctx.frame.prev_current_track = ct;
             ctx.frame.prev_playhead = playhead;
@@ -655,18 +472,6 @@ pub(crate) fn sync_reactive_tick(
                     *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
                 }) {
                     ctx.gesture.preview_plock_variant = None;
-                }
-                if fx_visible {
-                    needs_reactive_cycle |= sync_fx_param_bindings_delta(
-                        &mut ctx.frame.fx_param_sync_revision,
-                        param_sync_revision,
-                        rt,
-                        &app,
-                        &ctx.shared.state,
-                        ct,
-                        &ctx.shared.selected_steps,
-                        &selected_neural_snapshot,
-                    );
                 }
             }
         }
@@ -741,26 +546,11 @@ pub(crate) fn sync_reactive_tick(
         // A binding move rewrites the mirror's devices without touching the
         // pattern epoch, so the panels would keep showing the old source's
         // knobs (and the old badge) until some unrelated edit republished
-        // them. Drive the same rebuild a device change does.
+        // them. Drive the same model sync a device change does (the host
+        // kinds re-key the devices and their params).
         if app.sound_binding_epoch != ctx.frame.prev_sound_binding_epoch {
             ctx.frame.prev_sound_binding_epoch = app.sound_binding_epoch;
             ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
-            // The FX panels carry their values in the `effects` map, but every
-            // instrument knob reads a per-param `SEQ` value field that only a
-            // param sync republishes — without this the instrument panel keeps
-            // the previous source's knob positions while the FX panel updates.
-            let revision =
-                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
-            needs_reactive_cycle |= sync_fx_param_bindings_delta(
-                &mut ctx.frame.fx_param_sync_revision,
-                revision,
-                editor.runtime_mut(),
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
-            );
         }
         needs_reactive_cycle |= crate::retrospective::sync(editor.runtime_mut(), &app);
         needs_reactive_cycle |= sync_song_state(editor.runtime_mut(), &app, &mut ctx.frame.song);
@@ -858,8 +648,6 @@ pub(crate) fn sync_reactive_tick(
                 previous_step,
                 current_step,
             );
-            let param_sync_revision = displayed_param_value_may_change
-                .then(|| capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot));
             let rt = editor.runtime_mut();
             if displayed_param_value_may_change {
                 needs_reactive_cycle |= sync_track_selection_param_binding_fields(
@@ -873,20 +661,6 @@ pub(crate) fn sync_reactive_tick(
                 *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
             }) {
                 ctx.gesture.preview_plock_variant = None;
-            }
-            if fx_visible {
-                if let Some(param_sync_revision) = param_sync_revision {
-                    needs_reactive_cycle |= sync_fx_param_bindings_delta(
-                        &mut ctx.frame.fx_param_sync_revision,
-                        param_sync_revision,
-                        rt,
-                        &app,
-                        &ctx.shared.state,
-                        ct,
-                        &ctx.shared.selected_steps,
-                        &selected_neural_snapshot,
-                    );
-                }
             }
         }
         ctx.frame.prev_current_track_playhead_visible = current_track_playhead_visible;
@@ -1023,7 +797,6 @@ pub(crate) fn sync_reactive_tick(
             let sync_step_params_elapsed;
             let sync_mixer_elapsed;
             let sync_track_params_elapsed;
-            let sync_fx_bindings_elapsed;
             let sync_plocks_sidebar_elapsed;
             let old_pattern_epoch = ctx.frame.prev_pattern_epoch;
             let selected_neural_snapshot =
@@ -1079,19 +852,6 @@ pub(crate) fn sync_reactive_tick(
             }
             sync_track_params_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_fx_param_bindings_delta(
-                &mut ctx.frame.fx_param_sync_revision,
-                param_sync_revision,
-                rt,
-                &app,
-                &ctx.shared.state,
-                ct,
-                &ctx.shared.selected_steps,
-                &selected_neural_snapshot,
-            );
-            sync_fx_bindings_elapsed = started.elapsed();
-            ctx.frame.prev_selected_neural_neurons = selected_neural_snapshot;
-            let started = Instant::now();
             rt.set_reactive(
                 "SEQ",
                 "step-has-plocks",
@@ -1101,7 +861,7 @@ pub(crate) fn sync_reactive_tick(
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
                 eprintln!(
-                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                    "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms plocks_sidebar={:.2}ms",
                     duration_ms(profile_total_started.elapsed()),
                     old_pattern_epoch,
                     epoch,
@@ -1112,7 +872,6 @@ pub(crate) fn sync_reactive_tick(
                     duration_ms(sync_step_params_elapsed),
                     duration_ms(sync_mixer_elapsed),
                     duration_ms(sync_track_params_elapsed),
-                    duration_ms(sync_fx_bindings_elapsed),
                     duration_ms(sync_plocks_sidebar_elapsed),
                 );
             }
@@ -1228,16 +987,6 @@ pub(crate) fn sync_reactive_tick(
                 }) {
                     ctx.gesture.preview_plock_variant = None;
                 }
-                sync_fx_param_bindings_delta(
-                    &mut ctx.frame.fx_param_sync_revision,
-                    param_sync_revision,
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.selected_steps,
-                    &selected_neural_snapshot,
-                );
                 rt.set_reactive(
                     "SEQ",
                     "selected-steps",
@@ -1293,29 +1042,6 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_ui_epoch = ui_ep;
             needs_reactive_cycle = true;
         }
-        let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
-        if fx_visible
-            && (fx_ep != ctx.frame.prev_fx_epoch
-                || fx_value_ep != ctx.frame.prev_fx_value_epoch)
-        {
-            // fx_epoch = STRUCTURAL invalidation (Boolean/Enum param edits,
-            // add/remove effect): full set_reactive so the *fx* root re-evals
-            // conditional layout. fx_value_epoch alone = value-only scene/clip
-            // launch: in-place patch, field bindings carry the visuals.
-            let structural = fx_ep != ctx.frame.prev_fx_epoch;
-            sync_fx_panel_state(
-                editor.runtime_mut(),
-                &app,
-                &ctx.shared.state,
-                (!app.tracks.is_empty()).then_some(ct),
-                &ctx.shared.selected_steps,
-                structural,
-            );
-            ctx.frame.prev_fx_epoch = fx_ep;
-            ctx.frame.prev_fx_value_epoch = fx_value_ep;
-            needs_reactive_cycle = true;
-        }
         {
             let analysis_generation = app.sample_analysis.cache().generation();
             if analysis_generation != ctx.frame.prev_sampler_analysis_generation {
@@ -1341,11 +1067,6 @@ pub(crate) fn sync_reactive_tick(
             if analysis_key != ctx.frame.prev_sampler_analysis_key {
                 if let Some((ct, _, _, _, _)) = analysis_key {
                     app.publish_sampler_analysis_runtime(ct);
-                    editor.runtime_mut().set_reactive(
-                        "SEQ",
-                        "instrument-panel",
-                        build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps),
-                    );
                     needs_reactive_cycle = true;
                 }
                 ctx.frame.prev_sampler_analysis_key = analysis_key;

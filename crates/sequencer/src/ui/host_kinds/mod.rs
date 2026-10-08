@@ -140,6 +140,10 @@ use generators::*;
 use graphs::*;
 use lanes::*;
 pub(crate) use live::KindsHandles;
+#[cfg(test)]
+pub(crate) use params::seed_device_params;
+#[cfg(test)]
+pub(crate) use devices::strip_macros;
 use live::*;
 use macros::*;
 use media::*;
@@ -1014,6 +1018,9 @@ pub(crate) mod f {
     pub(crate) const DEVICE_STRIP_LOCKS: FieldKey = (DEVICE, "strip-locks");
     pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
     pub(crate) const DEVICE_DISPLAY_NAME: FieldKey = (DEVICE, "display-name");
+    pub(crate) const DEVICE_INSTRUMENT_NAME: FieldKey = (DEVICE, "instrument-name");
+    pub(crate) const DEVICE_NODE_ID: FieldKey = (DEVICE, "node-id");
+    pub(crate) const DEVICE_STRIP_MACROS: FieldKey = (DEVICE, "strip-macros");
     pub(crate) const DEVICE_SOUND_BINDING: FieldKey = (DEVICE, "sound-binding");
     pub(crate) const DEVICE_METER: FieldKey = (DEVICE, "meter");
     pub(crate) const DEVICE_MODULATORS: FieldKey = (DEVICE, "modulators");
@@ -1095,6 +1102,7 @@ pub(crate) mod f {
     pub(crate) const PARAM_ROLE: FieldKey = (PARAM, "role");
     pub(crate) const PARAM_DISPLAY_NAME: FieldKey = (PARAM, "display-name");
     pub(crate) const PARAM_ASSET_OPTIONS: FieldKey = (PARAM, "asset-options");
+    pub(crate) const PARAM_HOST_MODULATABLE: FieldKey = (PARAM, "host-modulatable");
 
     pub(crate) const MOD_TARGET_PARAM: FieldKey = (MOD_TARGET, "param");
     pub(crate) const MOD_TARGET_INDEX: FieldKey = (MOD_TARGET, "index");
@@ -1526,9 +1534,16 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_BASE_NOTE_LOCKED, ":bool", Live),
     (f::DEVICE_VOICES_DISPLAY, ":int", Live),
     (f::DEVICE_STRIP_LOCKS, "(list-of :string)", Live),
+    // The strip controls a rack macro of the slot's rack maps
+    // (`devices::strip_macros`), pushed with the rack's macros
+    // (`macros::sync_rack_macros`).
+    (f::DEVICE_STRIP_MACROS, "(list-of :string)", Model),
     // The panel header (`DeviceModel`): pushed with the device's model
     // fields; `modulators` registered with its descriptor (`panel`).
     (f::DEVICE_DISPLAY_NAME, ":string", Model),
+    (f::DEVICE_INSTRUMENT_NAME, ":string", Model),
+    // The effect's graph node (`panel::effect_node`), read while observed.
+    (f::DEVICE_NODE_ID, ":int", Live),
     // Computed while observed (`devices::sync_sound_bindings`).
     (f::DEVICE_SOUND_BINDING, ":string", Model),
     (f::DEVICE_METER, ":any", Model),
@@ -1616,6 +1631,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_ROLE, ":string", Model),
     (f::PARAM_DISPLAY_NAME, ":string", Model),
     (f::PARAM_ASSET_OPTIONS, ":any", Model),
+    (f::PARAM_HOST_MODULATABLE, ":bool", Model),
     (f::MOD_TARGET_PARAM, "param", Model),
     (f::MOD_TARGET_INDEX, ":int", Model),
     (f::MOD_TARGET_SOURCE, "param", Model),
@@ -2529,7 +2545,6 @@ fn rgb(color: sequencer::track_color::TrackColor) -> Value {
 struct ModelRevision {
     ui_epoch: usize,
     fx_epoch: usize,
-    fx_value_epoch: usize,
     pattern_epoch: u64,
     song_row_mirror_epoch: u64,
     sound_binding_epoch: usize,
@@ -2563,7 +2578,6 @@ impl ModelRevision {
         Self {
             ui_epoch: shared.ui_epoch.load(Ordering::Relaxed),
             fx_epoch: shared.fx_epoch.load(Ordering::Relaxed),
-            fx_value_epoch: shared.fx_value_epoch.load(Ordering::Relaxed),
             pattern_epoch: app.state.transport.pattern_epoch.load(Ordering::Relaxed),
             song_row_mirror_epoch: app.song_row_mirror_epoch,
             sound_binding_epoch: app.sound_binding_epoch,

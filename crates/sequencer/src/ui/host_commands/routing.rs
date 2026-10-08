@@ -42,19 +42,16 @@ fn set_track_send_base(
 
 /// After a bus effect's param value landed (`set-bus-effect-param`, the
 /// host kinds' `param.base` of a bus effect): publish the bus runtime and
-/// the shared bus copy the natives and the host kinds read, refresh the
-/// legacy value field, and rebuild the panels when the param redefines them
-/// (an enum, a boolean).
+/// the shared bus copy the natives and the host kinds read, and bump the
+/// epochs when the param's value redefines model data
+/// (`param_change_needs_fx_rebuild`); the panels bind the param.
 pub(super) fn bus_effect_param_applied(
     app: &mut app::App,
-    editor: &mut Editor,
     shared: &SharedHandles,
-    (bus, slot, param): (usize, usize, usize),
     pdesc: Option<&sequencer::effects::ParamDescriptor>,
 ) {
     app.publish_bus_effect_runtime();
     *shared.bus_state.lock().unwrap() = app.buses.clone();
-    sync_bus_effect_param_value_field(editor.runtime_mut(), app, bus, slot, param);
     if let Some(pdesc) = pdesc {
         super::rebuild_panel_if_needed(shared, pdesc);
     }
@@ -73,18 +70,7 @@ pub(super) fn track_output_applied(
     let rt = editor.runtime_mut();
     sync_track_mixer_state(rt, app, &shared.state);
     if track == shared.current_track.load(Ordering::Relaxed) {
-        let selected_neural_snapshot = shared.selected_neural_neurons.lock().unwrap().clone();
-        let selected_steps = &shared.selected_steps;
-        let neural = Some(&selected_neural_snapshot);
-        sync_track_params(rt, &shared.state, track, selected_steps);
-        sync_fx_param_binding_fields_with_neural_selection(
-            rt,
-            app,
-            &shared.state,
-            track,
-            selected_steps,
-            neural,
-        );
+        sync_track_params(rt, &shared.state, track, &shared.selected_steps);
     }
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -469,9 +455,7 @@ pub(super) fn handle(
                         ) {
                             Ok(()) => bus_effect_param_applied(
                                 app,
-                                editor,
                                 ctx.shared,
-                                (bus_idx, slot_idx, param_idx),
                                 desc.as_ref(),
                             ),
                             Err(error) => editor.handle_host_event(HostEvent::Status(
@@ -618,14 +602,6 @@ pub(super) fn handle(
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     let rt = editor.runtime_mut();
                                     sync_bus_mixer_state(rt, &app);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "bus-effects",
-                                        build_bus_effects_value_for_selection(
-                                            &app,
-                                            Some(&selected_steps),
-                                        ),
-                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);

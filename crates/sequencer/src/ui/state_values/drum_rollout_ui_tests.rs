@@ -33,6 +33,12 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
     editor.runtime_mut().register_reactive("SEQV", vec![], true);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(hat909_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -41,10 +47,6 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
             ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])),
             ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(hat909_inst)])),
-            ("bus-effects", test_list(vec![])),
         ],
         true,
     );
@@ -71,7 +73,7 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
         .eval_str(&custom_ui_source)
         .expect("load hat909 custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-    let kinds = seed_panel_kinds(&mut editor);
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("hat909 fx lisp status after refresh: {status}");
@@ -211,7 +213,11 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
                     }
                 }
             }
-            for node in nodes {
+            // The base-note row (one, beside the param controls) edits the
+            // base note, not a param.
+            let label = format!("{instrument} {section}");
+            assert_eq!(check_base_note_controls(&mut editor, &nodes, &label), 1, "{label}");
+            for node in nodes.into_iter().filter(|node| !binds_base_note(node.props.get("value"))) {
                 assert!(matches!(node.props.get("value"), Some(Value::ReactiveRef { .. })), "{} bound", node.widget_type);
                 for locked in [false, true] {
                     editor.runtime_mut().register_native("seq-has-selection?", move |_args, _ctx| Ok(Value::Bool(locked)));

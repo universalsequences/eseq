@@ -7688,6 +7688,12 @@ use panel_kinds_seed::*;
         );
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -7696,10 +7702,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
-                ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
             ],
@@ -7723,7 +7725,7 @@ use panel_kinds_seed::*;
             .expect("install keys tab test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str("(do (let ((v eseq.effects.state/instrument-view)) (set! v.tab 1)) (let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69))))")
@@ -7815,22 +7817,22 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 "(eseq.effects.panel-bodies/instrument-key-lock-chip-current?
-                   (nth SEQ.instrument-panel 0)
-                   (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 0))",
+                   (eseq.effects.panel-data/current-instrument-panel)
+                   (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (eseq.effects.panel-data/current-instrument-panel)) 0))",
             )
             .expect("read default key-lock chip current state");
         assert_eq!(default_chip_current, Some(Value::Bool(true)));
         let default_value = editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))",
             )
             .expect("read default value with no key selected");
         assert_eq!(default_value, Some(Value::Number(0.5)));
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.7)",
+                "(eseq.effects.param-controls/param-set-control-value false (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1) 0.7)",
             )
             .expect("write default value with no key selected");
         let commands = editor.drain_host_commands();
@@ -7945,7 +7947,7 @@ use panel_kinds_seed::*;
         let variant_label = editor
             .runtime_mut()
             .eval_str(
-                "(let ((v (eseq.effects.panel-bodies/instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69))) v.label)",
+                "(let ((v (eseq.effects.panel-bodies/instrument-key-note-variant-row (eseq.effects.panel-data/current-instrument-panel) 69))) v.label)",
             )
             .expect("read key-lock note variant label");
         assert_eq!(variant_label, Some(Value::String("A".to_string())));
@@ -7953,7 +7955,7 @@ use panel_kinds_seed::*;
         let value = editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-numeric-value-for false (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))",
             )
             .expect("read key lock value");
         assert_eq!(value, Some(Value::Number(0.8)));
@@ -7961,7 +7963,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.effects.param-controls/param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.9)",
+                "(eseq.effects.param-controls/param-set-control-value false (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1) 0.9)",
             )
             .expect("write key lock value");
         let commands = editor.drain_host_commands();
@@ -7997,8 +7999,8 @@ use panel_kinds_seed::*;
             .eval_str(
                 "(do
                    (let ((v eseq.effects.state/key-lock-view)) (set! v.notes (list 69 72)))
-                   (eseq.effects.panel-bodies/instrument-key-lock-chip-click (nth SEQ.instrument-panel 0)
-                     (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 1)))",
+                   (eseq.effects.panel-bodies/instrument-key-lock-chip-click (eseq.effects.panel-data/current-instrument-panel)
+                     (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (eseq.effects.panel-data/current-instrument-panel)) 1)))",
             )
             .expect("stamp selected keys with variant chip");
         let commands = editor.drain_host_commands();
@@ -8036,6 +8038,12 @@ use panel_kinds_seed::*;
     fn fx_param_text_value_dereferences_bound_fields() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -8044,13 +8052,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
                 ("fx-instrument-param-0-mode", Value::Number(1.0)),
@@ -8075,7 +8076,7 @@ use panel_kinds_seed::*;
             .expect("install fx lisp test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
 
         let bound_param = r#"(dict :name "mode" :idx 0
                    :options (list "lowpass" "highpass" "bandpass")
@@ -8084,10 +8085,8 @@ use panel_kinds_seed::*;
         let mut inst = test_instrument_map();
         let param = editor.runtime_mut().eval_str(bound_param).unwrap().unwrap();
         inst.insert("synth".into(), Rc::new(RefCell::new(test_list(vec![param]))));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "instrument-panel", test_list(vec![Value::Map(inst)]));
-        let kinds = seed_panel_kinds(&mut editor);
+        panel_seed.instrument_panel = test_list(vec![Value::Map(inst)]);
+        let kinds = seed_panel_kinds(&mut editor, &panel_seed);
         set_panel_param(&mut editor, &kinds, "fx-instrument-param-0-mode", Value::Number(1.0));
         let label = editor
             .runtime_mut()
@@ -8267,18 +8266,6 @@ use panel_kinds_seed::*;
         inst.insert(
             "track".to_string(),
             Rc::new(RefCell::new(Value::Number(0.0))),
-        );
-        inst.insert(
-            "phase-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                modulator_phase_field(0).to_string(),
-            ))),
-        );
-        inst.insert(
-            "level-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                modulator_level_field(0).to_string(),
-            ))),
         );
         inst.insert(
             "synth".to_string(),
@@ -9359,94 +9346,6 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn sync_track_effect_param_value_field_uses_selected_plock_value() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let state = Arc::new(SequencerState::new(
-            1,
-            vec![vec![sequencer::effects::EffectSlotState::new(&desc, 0)]],
-        ));
-        state.pattern.effect_chains[0][0]
-            .defaults
-            .set(cutoff_idx, 5000.0);
-        state.pattern.effect_chains[0][0].set_plock(3, cutoff_idx, 1200.0);
-        let descriptors = vec![vec![desc.clone()]];
-        let mut app = test_app_for_track_visual_state(Arc::clone(&state));
-        app.graph.effect_descriptors = descriptors;
-        let field = track_effect_param_value_field(0, 0, cutoff_idx, &desc.params[cutoff_idx].name);
-        let mut runtime = Runtime::new();
-
-        sync_track_effect_param_value_field(&mut runtime, &app, 0, 0, cutoff_idx, Some(3));
-
-        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(1200.0));
-
-        sync_track_effect_param_value_field(&mut runtime, &app, 0, 0, cutoff_idx, None);
-
-        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(5000.0));
-    }
-
-    #[test]
-    fn sync_instrument_param_value_field_uses_selected_neuron_plock_value() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let resonance_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "resonance")
-            .expect("filter descriptor should include resonance");
-        let app = test_app_with_instrument_descriptor(desc.clone());
-        app.state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
-        app.state.pattern.instrument_slots[0]
-            .defaults
-            .set(resonance_idx, 0.2);
-        app.state
-            .edit_current_neural_networks(|networks| {
-                let mut network = sequencer::neural::ProjectNeuralNetwork {
-                    id: 11,
-                    name: "router".to_string(),
-                    num_neurons: 1,
-                    ..sequencer::neural::ProjectNeuralNetwork::default()
-                };
-                network.neurons[0].output_overrides.instrument =
-                    vec![sequencer::neural::ProjectParamOverride {
-                        target_track: 0,
-                        param_id: sequencer::neural::ParamNodeId {
-                            logical_id: 17,
-                            node_param_idx: desc.params[resonance_idx].node_param_idx,
-                        },
-                        param_index: resonance_idx,
-                        value: 0.75,
-                    }];
-                networks.push(network);
-                Ok(())
-            })
-            .unwrap();
-        let selection =
-            std::collections::BTreeSet::from([sequencer::lisp_host::SelectedNeuralNeuron {
-                pattern_idx: 0,
-                network_id: 11,
-                neuron_idx: 0,
-            }]);
-        let field =
-            instrument_param_value_field(0, resonance_idx, &desc.params[resonance_idx].name);
-        let mut runtime = Runtime::new();
-
-        sync_instrument_param_value_field_with_neural_selection(
-            &mut runtime,
-            &app,
-            0,
-            resonance_idx,
-            None,
-            Some(&selection),
-        );
-
-        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(0.75));
-    }
-
-    #[test]
     fn track_plocks_value_shows_selected_neuron_plocks() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
         let resonance_idx = desc
@@ -9528,204 +9427,6 @@ use panel_kinds_seed::*;
         assert_eq!(value, Some(0.75));
     }
 
-    #[test]
-    fn instrument_panel_uses_track_invariant_bound_value_field() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let mut app = test_app_with_instrument_descriptor(desc.clone());
-        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Custom];
-        app.state.pattern.instrument_slots[0]
-            .defaults
-            .set(cutoff_idx, 5000.0);
-        app.state.pattern.instrument_slots[0].set_plock(3, cutoff_idx, 1200.0);
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let value_field =
-            fx_instrument_param_value_field(cutoff_idx, &desc.params[cutoff_idx].name);
-        let mut runtime = Runtime::new();
-
-        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(value_param_number(&default_panel, "cutoff"), None);
-        assert!(
-            value_param_has_value_field(&default_panel, "cutoff", &value_field),
-            "custom instrument controls must use the current-fx-relative field"
-        );
-        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
-        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
-
-        selected_steps.lock().unwrap().insert(3);
-        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(default_panel, selected_panel);
-        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, Some(3));
-        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(1200.0));
-
-        selected_steps.lock().unwrap().clear();
-        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(default_panel, cleared_panel);
-        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
-        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
-    }
-
-    #[test]
-    fn instrument_panel_exposes_tensor_params_and_selected_step_matrix_value() {
-        fn tensor_map_owned(value: &Value, name: &str) -> Option<HashMap<String, Value>> {
-            match value {
-                Value::Map(map) => {
-                    if value_map_string(map, "name").as_deref() == Some(name)
-                        && map.contains_key("rows")
-                        && map.contains_key("cols")
-                    {
-                        return Some(
-                            map.iter()
-                                .map(|(key, value)| (key.clone(), value.borrow().clone()))
-                                .collect(),
-                        );
-                    }
-                    map.values()
-                        .find_map(|value| tensor_map_owned(&value.borrow(), name))
-                }
-                Value::List(items) => items
-                    .iter()
-                    .find_map(|value| tensor_map_owned(&value.borrow(), name)),
-                _ => None,
-            }
-        }
-
-        fn number_list(value: &Value) -> Vec<f64> {
-            let Value::List(items) = value else {
-                panic!("expected number list, got {value:?}");
-            };
-            items
-                .iter()
-                .map(|value| match &*value.borrow() {
-                    Value::Number(value) => *value,
-                    other => panic!("expected number, got {other:?}"),
-                })
-                .collect()
-        }
-
-        fn assert_numbers_close(actual: Vec<f64>, expected: &[f64]) {
-            assert_eq!(actual.len(), expected.len());
-            for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
-                assert!(
-                    (actual - expected).abs() < 0.000001,
-                    "value {idx} expected {expected}, got {actual}"
-                );
-            }
-        }
-
-        let desc = sequencer::effects::EffectDescriptor {
-            name: "tensor instrument".to_string(),
-            input_channels: 0,
-            output_channels: 2,
-            instrument_modulators: Vec::new(),
-            declared_latency_samples: None,
-            instrument_modulation_targets: Vec::new(),
-            tensor_params: vec![sequencer::effects::TensorParamDescriptor {
-                name: "strike_mask".to_string(),
-                shape: vec![2, 2],
-                cell_offset: 64,
-                default: vec![0.1, 0.2, 0.3, 0.4],
-                min: 0.0,
-                max: 1.0,
-            }],
-            params: Vec::new(),
-        };
-        let mut app = test_app_with_instrument_descriptor(desc);
-        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Custom];
-        app.state.pattern.instrument_slots[0]
-            .tensor_params
-            .set_plock_cell(5, 0, 2, 0.95)
-            .expect("tensor p-lock edit");
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let field = fx_instrument_tensor_value_field(0, "strike_mask");
-
-        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        let tensor = tensor_map_owned(&default_panel, "strike_mask").expect("tensor panel map");
-        assert_eq!(tensor.get("idx"), Some(&Value::Number(0.0)));
-        assert_eq!(tensor.get("rows"), Some(&Value::Number(2.0)));
-        assert_eq!(tensor.get("cols"), Some(&Value::Number(2.0)));
-        assert_eq!(tensor.get("min"), Some(&Value::Number(0.0)));
-        assert_eq!(tensor.get("max"), Some(&Value::Number(1.0)));
-        assert_eq!(
-            tensor.get("value-field"),
-            Some(&Value::String(field.clone()))
-        );
-        assert!(!tensor.contains_key("value"));
-
-        selected_steps.lock().unwrap().insert(5);
-        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(default_panel, selected_panel);
-
-        let mut runtime = Runtime::new();
-        sync_fx_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
-        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
-            panic!("SEQ should be a map");
-        };
-        let reactive_value = seq
-            .get(&field)
-            .unwrap_or_else(|| panic!("missing tensor field {field}"))
-            .borrow()
-            .clone();
-        assert_numbers_close(number_list(&reactive_value), &[0.1, 0.2, 0.95, 0.4]);
-    }
-
-    #[test]
-    fn sampler_panel_restores_value_field_after_selection_clears() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        let attack_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "attack")
-            .expect("sampler descriptor should include attack");
-        let app = test_app_with_sampler_descriptor(desc.clone());
-        app.state.pattern.instrument_slots[0]
-            .defaults
-            .set(attack_idx, 40.0);
-        app.state.pattern.instrument_slots[0].set_plock(3, attack_idx, 120.0);
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let value_field =
-            instrument_param_value_field(0, attack_idx, &desc.params[attack_idx].name);
-
-        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number_by_idx(&default_panel, "attack", attack_idx),
-            Some(40.0),
-            "unselected sampler panel should show the default attack value"
-        );
-        assert!(
-            value_param_has_value_field_by_idx(&default_panel, "attack", attack_idx, &value_field),
-            "unselected sampler panel should bind attack to its default value field"
-        );
-
-        selected_steps.lock().unwrap().insert(3);
-        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number_by_idx(&selected_panel, "attack", attack_idx),
-            Some(120.0),
-            "selected sampler panel should show the selected step p-lock"
-        );
-        assert!(
-            value_param_has_value_field_by_idx(&selected_panel, "attack", attack_idx, &value_field),
-            "selected sampler p-lock panel should keep a reactive display value field"
-        );
-
-        selected_steps.lock().unwrap().clear();
-        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number_by_idx(&cleared_panel, "attack", attack_idx),
-            Some(40.0),
-            "cleared selection should return sampler attack to its default value"
-        );
-        assert!(
-            value_param_has_value_field_by_idx(&cleared_panel, "attack", attack_idx, &value_field),
-            "cleared selection should restore sampler attack default value binding"
-        );
-    }
-
     fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> app::App {
         test_app_with_instrument_descriptor_on_tracks(desc, 1)
     }
@@ -9766,257 +9467,11 @@ use panel_kinds_seed::*;
         app
     }
 
-    /// A parameter batch names its own track (the host command reads it off
-    /// the payload), which need not be the track the *fx* panel is showing.
-    /// The current-track-relative `fx-instrument-param-*` fields belong to the
-    /// visible panel, so a batch for another track must leave them alone —
-    /// otherwise the visible knobs snap to the other track's values. Mirrors
-    /// the `track == current_track_idx` guard in `apply_ui_invalidations`.
-    #[test]
-    fn instrument_param_batch_display_skips_fx_fields_for_a_non_current_track() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let cutoff_name = desc.params[cutoff_idx].name.clone();
-        let app = test_app_with_instrument_descriptor_on_tracks(desc, 2);
-        app.state.pattern.instrument_slots[0]
-            .defaults
-            .set(cutoff_idx, 5000.0);
-        app.state.pattern.instrument_slots[1]
-            .defaults
-            .set(cutoff_idx, 1234.0);
-        let state = app.state.clone();
-        let selection = std::collections::BTreeSet::new();
-        let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff_name);
-        let track_1_field = instrument_param_value_field(1, cutoff_idx, &cutoff_name);
-        let mut editor =
-            eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-
-        reactive_sync::sync_instrument_param_batch_display(
-            &mut editor,
-            &app,
-            &state,
-            &selection,
-            1,
-            0,
-            &[cutoff_idx],
-            None,
-            false,
-        );
-        assert_eq!(
-            reactive_number(editor.runtime(), "SEQ", &track_1_field),
-            Some(1234.0),
-            "the track-addressed field always publishes"
-        );
-        assert_eq!(
-            reactive_number(editor.runtime(), "SEQ", &fx_field),
-            None,
-            "track 1's value must not reach the panel showing track 0"
-        );
-
-        reactive_sync::sync_instrument_param_batch_display(
-            &mut editor,
-            &app,
-            &state,
-            &selection,
-            1,
-            1,
-            &[cutoff_idx],
-            None,
-            false,
-        );
-        assert_eq!(
-            reactive_number(editor.runtime(), "SEQ", &fx_field),
-            Some(1234.0),
-            "the panel showing track 1 does get the fx-relative field"
-        );
-    }
-
     fn reactive_field(runtime: &Runtime, namespace: &str, field: &str) -> Option<Value> {
         let Some(Value::Map(map)) = runtime.global_value(namespace) else {
             return None;
         };
         map.get(field).map(|value| value.borrow().clone())
-    }
-
-    /// Buffers other than `*fx*` read a slice of the fx panel publication:
-    /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel` (the
-    /// legacy `*metal*` grid read `SEQ.step-has-plocks`, unread since
-    /// eseq-0l17.77 and still published until chunk A). The track-switch path publishes
-    /// that slice even while `*fx*` is hidden, so it must be exactly this
-    /// helper — and the full fx sync must still cover the same two fields.
-    #[test]
-    fn shared_panel_state_publishes_only_what_non_fx_buffers_read() {
-        let app = test_app_with_instrument_descriptor(
-            sequencer::effects::EffectDescriptor::builtin_filter(),
-        );
-        app.state.pattern.track_params[0].set_num_steps(16);
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], true);
-
-        super::super::reactive_tick::sync_shared_panel_state(
-            &mut runtime,
-            &app,
-            &app.state,
-            Some(0),
-            &selected_steps,
-            true,
-        );
-
-        let panel = reactive_field(&runtime, "SEQ", "instrument-panel")
-            .expect("the sidebars' instrument panel must be published while *fx* is hidden");
-        assert!(
-            matches!(&panel, Value::List(items) if !items.is_empty()),
-            "instrument-panel should carry the track's instrument: {panel:?}"
-        );
-        let plocks = reactive_field(&runtime, "SEQ", "step-has-plocks")
-            .expect("the step grid's p-lock flags must be published while *fx* is hidden");
-        assert!(
-            matches!(&plocks, Value::List(items) if items.len() >= 16),
-            "step-has-plocks should cover the track's steps: {plocks:?}"
-        );
-        for fx_only in ["effects", "midi-effects", "bus-effects"] {
-            assert!(
-                reactive_field(&runtime, "SEQ", fx_only).is_none(),
-                "{fx_only} is read only by *fx*, so the shared slice must skip it"
-            );
-        }
-
-        // Parity: the full sync is still a superset of the shared slice.
-        let mut fx_runtime = Runtime::new();
-        fx_runtime.register_reactive("SEQ", vec![], true);
-        super::super::reactive_tick::sync_fx_panel_state(
-            &mut fx_runtime,
-            &app,
-            &app.state,
-            Some(0),
-            &selected_steps,
-            true,
-        );
-        for field in [
-            "instrument-panel",
-            "step-has-plocks",
-            "effects",
-            "midi-effects",
-            "bus-effects",
-        ] {
-            assert!(
-                reactive_field(&fx_runtime, "SEQ", field).is_some(),
-                "the fx sync must still publish {field}"
-            );
-        }
-    }
-
-    #[test]
-    fn macro_effective_values_are_published_to_instrument_and_effect_controls() {
-        let instrument_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        let mut instrument_app = test_app_with_instrument_descriptor(instrument_desc.clone());
-        let instrument_id = instrument_app
-            .macro_engine
-            .create_macro("instrument", sequencer::macro_engine::MacroKind::Mapped)
-            .expect("instrument macro");
-        instrument_app
-            .macro_engine
-            .add_mapping(
-                instrument_id,
-                sequencer::macro_engine::MacroMapping::new_resolved(
-                    0,
-                    sequencer::process::ParamTarget::InstrumentParam {
-                        param: instrument_desc.params[0].name.clone(),
-                        param_id: None,
-                    },
-                    Some(0),
-                    10.0,
-                    30.0,
-                    sequencer::macro_engine::MacroCurve::Linear,
-                )
-                .expect("instrument mapping"),
-            )
-            .expect("unique instrument owner");
-        instrument_app.set_macro_value(instrument_id, 0.5);
-        let mut runtime = Runtime::new();
-        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, None);
-        let instrument_field = instrument_param_value_field(0, 0, &instrument_desc.params[0].name);
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &instrument_field),
-            Some(20.0)
-        );
-        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, Some(4));
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &instrument_field),
-            Some(20.0),
-            "a playing step without a p-lock must display the macro-effective value"
-        );
-        instrument_app.state.pattern.instrument_slots[0].set_plock(4, 0, 25.0);
-        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, Some(4));
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &instrument_field),
-            Some(25.0),
-            "an explicit playing-step p-lock must remain visible above the macro"
-        );
-        instrument_app.set_macro_value(instrument_id, 0.0);
-        sync_instrument_param_value_field(&mut runtime, &instrument_app, 0, 0, None);
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &instrument_field),
-            Some(10.0),
-            "continuous macro zero must display its mapped minimum, not the stored base"
-        );
-
-        let effect_desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let effect_state = Arc::new(SequencerState::new(
-            1,
-            vec![vec![sequencer::effects::EffectSlotState::new(
-                &effect_desc,
-                0,
-            )]],
-        ));
-        let mut effect_app = test_app_for_track_visual_state(Arc::clone(&effect_state));
-        effect_app.graph.effect_descriptors = vec![vec![effect_desc.clone()]];
-        let effect_id = effect_app
-            .macro_engine
-            .create_macro("effect", sequencer::macro_engine::MacroKind::Mapped)
-            .expect("effect macro");
-        effect_app
-            .macro_engine
-            .add_mapping(
-                effect_id,
-                sequencer::macro_engine::MacroMapping::new_resolved(
-                    0,
-                    sequencer::process::ParamTarget::EffectParam {
-                        slot: 0,
-                        effect: effect_desc.name.clone(),
-                        param: effect_desc.params[0].name.clone(),
-                        param_id: None,
-                    },
-                    Some(0),
-                    100.0,
-                    900.0,
-                    sequencer::macro_engine::MacroCurve::Linear,
-                )
-                .expect("effect mapping"),
-            )
-            .expect("unique effect owner");
-        effect_app.set_macro_value(effect_id, 0.5);
-        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, None);
-        let effect_field = track_effect_param_value_field(0, 0, 0, &effect_desc.params[0].name);
-        assert_eq!(reactive_number(&runtime, "SEQ", &effect_field), Some(500.0));
-        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, Some(4));
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &effect_field),
-            Some(500.0),
-            "a playing step without a p-lock must display the macro-effective effect value"
-        );
-        effect_state.pattern.effect_chains[0][0].set_plock(4, 0, 700.0);
-        sync_track_effect_param_value_field(&mut runtime, &effect_app, 0, 0, 0, Some(4));
-        assert_eq!(
-            reactive_number(&runtime, "SEQ", &effect_field),
-            Some(700.0),
-            "an explicit effect p-lock must remain visible above the macro"
-        );
     }
 
     #[test]
@@ -10211,20 +9666,13 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(0.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "effects",
-            test_list(vec![Value::Map(test_fx_map(
+        let mut panel_seed = PanelSeed::default();
+        panel_seed.effects = test_list(vec![Value::Map(test_fx_map(
                 "track-fx",
                 0,
                 vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
-            ))]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(test_instrument_map())]),
-        );
+            ))]);
+        panel_seed.instrument_panel = test_list(vec![Value::Map(test_instrument_map())]);
         for (field, value) in [
             ("track-plocks", test_list(vec![])),
             ("track-plock-variants", test_list(vec![])),
@@ -10241,7 +9689,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "recording", Value::Bool(true));
-        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
+        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read param control UI source");
             let overlays = editor.snapshot_file_backed_sources();
             let report = editor.runtime_mut().eval_source_transactional(
@@ -10252,7 +9700,7 @@ use panel_kinds_seed::*;
             assert!(report.success, "load {path}: {}", report.failure_message());
             editor.process_lisp_reload_report(report);
         }
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let instrument_param = seeded_param(&editor, -1.0, 0);
         let effect_param = seeded_param(&editor, 0.0, 0);
         editor
@@ -10263,10 +9711,10 @@ use panel_kinds_seed::*;
                   (box :padding 0
                     (h-stack :gap 1
                       (eseq.effects.param-controls/instrument-param-mod-wrapper
-                        (nth (get (nth SEQ.instrument-panel 0) :synth) 0)
+                        (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1)
                         "overlay-test-instrument"
                         (box :debug-name "overlay-test-body" :width 6 :height 4))
-                      (let ((fx (nth SEQ.effects 0)))
+                      (let ((fx (first (eseq.effects.panel-data/current-effect-panels))))
                         (eseq.effects.param-controls/param-mod-wrapper fx (nth (get fx :params) 0)
                           "overlay-test-effect"
                           (box :width 6 :height 4))))))
@@ -10372,20 +9820,13 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(0.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "effects",
-            test_list(vec![Value::Map(test_fx_map(
+        let mut panel_seed = PanelSeed::default();
+        panel_seed.effects = test_list(vec![Value::Map(test_fx_map(
                 "track-fx",
                 0,
                 vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
-            ))]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(test_instrument_map())]),
-        );
+            ))]);
+        panel_seed.instrument_panel = test_list(vec![Value::Map(test_instrument_map())]);
         for (field, value) in [
             ("track-plocks", test_list(vec![])),
             ("track-plock-variants", test_list(vec![])),
@@ -10403,7 +9844,7 @@ use panel_kinds_seed::*;
             editor.runtime_mut().set_reactive("SEQ", field, value);
         }
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
-        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
+        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read param control UI source");
             let overlays = editor.snapshot_file_backed_sources();
             let report = editor.runtime_mut().eval_source_transactional(
@@ -10416,7 +9857,7 @@ use panel_kinds_seed::*;
         }
         // Only the effect's param 0 carries automation; steps 1 and 3 of
         // the current track are selected (eseq.kinds).
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let effect_param = seeded_param(&editor, 0.0, 0);
         push_seeded(&mut editor, effect_param, "has-locks", Value::Bool(true));
         let rt = editor.runtime_mut();
@@ -10436,7 +9877,7 @@ use panel_kinds_seed::*;
             editor.runtime_mut().eval_str(
                 r#"(eseq.effects.param-controls/open-param-plock-menu
                      (dict :col 12 :row 5 :at (dict :col 12 :row 5)) false
-                     (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"#
+                     (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))"#
             ),
             Ok(Some(Value::Bool(false))),
             "right-click on an unlocked param must be a no-op"
@@ -10452,7 +9893,7 @@ use panel_kinds_seed::*;
         // The p-locked effect param opens the menu with both actions.
         assert_eq!(
             editor.runtime_mut().eval_str(
-                r#"(let ((fx (nth SEQ.effects 0)))
+                r#"(let ((fx (first (eseq.effects.panel-data/current-effect-panels))))
                      (eseq.effects.param-controls/open-param-plock-menu
                        (dict :col 12 :row 5 :at (dict :col 12 :row 5)) fx (nth (get fx :params) 0)))"#
             ),
@@ -10545,15 +9986,12 @@ use panel_kinds_seed::*;
             "modulatable".to_string(),
             Rc::new(RefCell::new(Value::Bool(true))),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "effects",
-            test_list(vec![Value::Map(test_fx_map(
+        let mut panel_seed = PanelSeed::default();
+        panel_seed.effects = test_list(vec![Value::Map(test_fx_map(
                 "track-fx",
                 0,
                 vec![Value::Map(effect_param)],
-            ))]),
-        );
+            ))]);
 
         let instrument = test_instrument_map();
         let synth = instrument
@@ -10573,13 +10011,17 @@ use panel_kinds_seed::*;
                 "modulatable".to_string(),
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
+            // An instrument param is modulatable through a lane.
+            cutoff.insert(
+                "mod-targets".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([(
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                )]))]))),
+            );
         }
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(instrument)]),
-        );
-        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
+        panel_seed.instrument_panel = test_list(vec![Value::Map(instrument)]);
+        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read macro mapping UI source");
             let overlays = editor.snapshot_file_backed_sources();
             let report = editor.runtime_mut().eval_source_transactional(
@@ -10591,7 +10033,7 @@ use panel_kinds_seed::*;
             editor.process_lisp_reload_report(report);
         }
         // The devices and project macro 7 as eseq.kinds publishes them.
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let cutoff = seeded_param(&editor, -1.0, 0);
         let rt = editor.runtime_mut();
         let project_macro = rt.register_keyed_instance("eseq.kinds:macro", &[0]).unwrap();
@@ -10612,10 +10054,10 @@ use panel_kinds_seed::*;
                     (subtree :key (eseq.effects.param-controls/param-macro-structure-key)
                       (h-stack :gap 1
                         (eseq.effects.param-controls/instrument-param-mod-wrapper
-                          (nth (get (nth SEQ.instrument-panel 0) :synth) 0)
+                          (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1)
                           "macro-test-instrument"
                           (box :width 6 :height 4))
-                        (let ((fx (nth SEQ.effects 0)))
+                        (let ((fx (first (eseq.effects.panel-data/current-effect-panels))))
                           (eseq.effects.param-controls/param-mod-wrapper fx (nth (get fx :params) 0)
                             "macro-test-effect"
                             (box :width 6 :height 4)))))))
@@ -10698,14 +10140,14 @@ use panel_kinds_seed::*;
         editor.refresh_runtime_side_effects();
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(eseq.effects.param-controls/instrument-param-control-min (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                "(eseq.effects.param-controls/instrument-param-control-min (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))"
             ),
             Ok(Some(Value::Number(0.0))),
             "mapping must not repurpose the device control's value domain"
         );
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(eseq.effects.param-controls/instrument-param-control-max (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                "(eseq.effects.param-controls/instrument-param-control-max (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))"
             ),
             Ok(Some(Value::Number(1.0)))
         );
@@ -10901,517 +10343,8 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn rack_instrument_panel_value_lists_layer_slots() {
-        let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-
-        assert!(value_contains_string(&panel, "rack"));
-        assert!(value_contains_string(&panel, "Layer Alpha"));
-
-        let Value::List(items) = &panel else {
-            panic!("rack panel should be a one-item list");
-        };
-        let Value::Map(rack) = &*items[0].borrow() else {
-            panic!("rack panel item should be a map");
-        };
-        assert_eq!(
-            rack.get("is-rack").map(|value| value.borrow().clone()),
-            Some(Value::Bool(true)),
-            "the browser reads this flag to tell an open rack panel from none"
-        );
-        assert_eq!(
-            rack.get("selected-slot")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(0.0))
-        );
-        let selected = rack
-            .get("selected-instrument")
-            .unwrap_or_else(|| panic!("rack panel should include selected instrument"));
-        let Value::Map(selected) = &*selected.borrow() else {
-            panic!("selected instrument should be a map");
-        };
-        assert_eq!(
-            selected.get("type").map(|value| value.borrow().clone()),
-            Some(Value::String("sampler".to_string()))
-        );
-        let Value::List(synth_params) = &*selected
-            .get("synth")
-            .expect("selected sampler should expose synth params")
-            .borrow()
-        else {
-            panic!("selected sampler synth params should be a list");
-        };
-        let mut found_attack = false;
-        for param in synth_params {
-            let param = param.borrow();
-            let Value::Map(param) = &*param else {
-                continue;
-            };
-            let is_attack = param
-                .get("idx")
-                .is_some_and(|value| matches!(*value.borrow(), Value::Number(idx) if (idx - 0.0).abs() < f64::EPSILON));
-            if is_attack {
-                found_attack = true;
-                assert_eq!(
-                    param.get("rack-track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    param.get("rack-slot").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-            }
-        }
-        assert!(found_attack, "selected sampler should expose attack param");
-    }
-
-    #[test]
-    fn rack_selected_sampler_panel_uses_selected_slot_plocks_and_marks_steps() {
-        fn rack_slot_value(panel: &Value, slot_idx: usize, key: &str) -> Option<Value> {
-            let Value::List(items) = panel else {
-                return None;
-            };
-            let Value::Map(rack) = &*items.first()?.borrow() else {
-                return None;
-            };
-            let Value::List(slots) = &*rack.get("slots")?.borrow() else {
-                return None;
-            };
-            let Value::Map(slot) = &*slots.get(slot_idx)?.borrow() else {
-                return None;
-            };
-            slot.get(key).map(|value| value.borrow().clone())
-        }
-
-        let mut app = test_app_with_rack_panel();
-        app.state.update_live_rack_slot(0, 0, |slot| {
-            assert!(
-                slot.param_plocks
-                    .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25)
-            );
-            slot.instrument_slot.defaults[8] = 44_100.0;
-            assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
-        });
-        let macro_id = sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1 id");
-        assert!(app.set_rack_macro_plock(0, macro_id, 4, 0.75));
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-
-        let default_panel = build_instrument_panel_value(&app, 0, &selected);
-        assert_eq!(
-            value_param_number_by_idx(&default_panel, "sr", 8),
-            Some(44_100.0),
-            "unselected rack sampler should show the sample-rate default"
-        );
-
-        selected.lock().unwrap().insert(3);
-        let selected_panel = build_instrument_panel_value(&app, 0, &selected);
-        assert_eq!(
-            value_param_number_by_idx(&selected_panel, "sr", 8),
-            Some(22_050.0),
-            "selected rack sampler should show the selected step p-lock"
-        );
-        assert_eq!(
-            rack_slot_value(&selected_panel, 0, "gain"),
-            Some(Value::Number(0.25)),
-            "selected rack row should show the selected step slot gain p-lock"
-        );
-        assert!(
-            track_step_has_plock(&app.state, 0, &app.graph.effect_descriptors, 3),
-            "rack slot p-locks should contribute to step p-lock markers"
-        );
-        assert!(
-            track_step_has_plock(&app.state, 0, &app.graph.effect_descriptors, 4),
-            "rack macro p-locks should contribute to step p-lock markers"
-        );
-        let marker_values = bool_list_values(&build_step_has_plocks(
-            &app.state,
-            0,
-            &app.graph.effect_descriptors,
-        ));
-        assert_eq!(
-            &marker_values[..16],
-            &[
-                false, false, false, true, true, false, false, false, false, false, false, false,
-                false, false, false, false,
-            ],
-            "rack slot instrument and macro p-locks should appear in the per-step marker list"
-        );
-        assert!(matches!(
-            build_step_plock_kinds(&app.state, 0),
-            Value::List(values) if matches!(*values[4].borrow(), Value::Number(kind) if kind == 2.0)
-        ));
-        assert!(matches!(
-            build_step_variant_color_channel(&app.state, 0, 0),
-            Value::List(values)
-                if matches!(*values[4].borrow(), Value::Number(red) if red > 0.0)
-        ));
-
-        selected.lock().unwrap().clear();
-        selected.lock().unwrap().insert(4);
-        let rows = value_list_maps(&build_track_plocks_value(&app, &app.state, 0, &selected));
-        let macro_row = rows
-            .iter()
-            .find(|row| {
-                matches!(
-                    row.get("target").map(|value| value.borrow().clone()),
-                    Some(Value::String(target)) if target == "rack-macro"
-                )
-            })
-            .expect("rack macro p-lock row");
-        assert!(matches!(
-            macro_row.get("param-idx").map(|value| value.borrow().clone()),
-            Some(Value::Number(value)) if value == 0.0
-        ));
-        assert!(matches!(
-            macro_row.get("value").map(|value| value.borrow().clone()),
-            Some(Value::Number(value)) if (value - 0.75).abs() < f64::EPSILON
-        ));
-        assert!(app.clear_rack_macro_plock(0, macro_id, 4));
-        assert!(!track_step_has_plock(
-            &app.state,
-            0,
-            &app.graph.effect_descriptors,
-            4
-        ));
-
-        selected.lock().unwrap().clear();
-        let cleared_panel = build_instrument_panel_value(&app, 0, &selected);
-        assert_eq!(
-            value_param_number_by_idx(&cleared_panel, "sr", 8),
-            Some(44_100.0),
-            "clearing selection should restore the rack sampler default display"
-        );
-        assert_eq!(
-            rack_slot_value(&cleared_panel, 0, "gain"),
-            Some(Value::Number(0.75)),
-            "clearing selection should restore the rack row default gain display"
-        );
-    }
-
-    #[test]
-    fn rack_sampler_waveform_resolves_content_store_reference_into_ui_buffer() {
-        struct RemoveFile(std::path::PathBuf);
-        impl Drop for RemoveFile {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
-        let file_name = format!(
-            "rack-waveform-content-ref-{}-{unique}.wav",
-            std::process::id()
-        );
-        let sample_path = sequencer::app_paths::app_paths()
-            .samples_dir()
-            .join(&file_name);
-        std::fs::create_dir_all(sample_path.parent().expect("sample store parent"))
-            .expect("create sample store");
-        let _sample_guard = RemoveFile(sample_path.clone());
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 8_000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(&sample_path, spec)
-            .expect("create content-addressed waveform fixture");
-        for sample in [0i16, 8_000, -8_000, 0] {
-            writer.write_sample(sample).expect("write waveform sample");
-        }
-        writer.finalize().expect("finalize waveform fixture");
-
-        let logical_ref = std::path::PathBuf::from("samples").join(&file_name);
-        assert!(!logical_ref.exists(), "fixture must exercise sample-store resolution");
-        let mut app = test_app_with_rack_panel();
-        app.register_loaded_sample_path("Layer Alpha", 42, logical_ref.clone());
-
-        let panel = build_instrument_panel_value(
-            &app,
-            0,
-            &Arc::new(Mutex::new(HashSet::new())),
-        );
-        let Value::List(racks) = &panel else {
-            panic!("rack panel should be a list");
-        };
-        let Value::Map(rack) = &*racks[0].borrow() else {
-            panic!("rack panel entry should be a map");
-        };
-        let Value::Map(instrument) = &*rack
-            .get("selected-instrument")
-            .expect("rack panel should expose its selected sampler")
-            .borrow()
-        else {
-            panic!("selected rack instrument should be a map");
-        };
-        let Value::Map(buffer) = &*instrument
-            .get("buffer")
-            .expect("resolved rack sample should reach the waveform UI")
-            .borrow()
-        else {
-            panic!("rack sampler buffer should be a map");
-        };
-        assert_eq!(
-            buffer
-                .get("registry-key")
-                .map(|value| value.borrow().clone()),
-            Some(Value::String(logical_ref.display().to_string())),
-            "the UI must retain the persisted content reference as its registry key"
-        );
-        assert_eq!(
-            buffer.get("frames").map(|value| value.borrow().clone()),
-            Some(Value::Number(4.0))
-        );
-        let registered = eseqlisp::audio::sample::get_registered_sample(
-            &logical_ref.display().to_string(),
-        ).expect("waveform sample should be registered under the model reference");
-        assert!(
-            registered.levels().iter().any(|level| !level.buckets.is_empty()),
-            "registered rack sample should carry waveform peak data"
-        );
-    }
-
-    #[test]
-    fn rack_sampler_waveform_selection_tracks_live_start_and_end_values() {
-        let app = test_app_with_rack_panel();
-        assert!(
-            app.state
-                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
-                    slot.instrument_slot.defaults[2] = 0.57;
-                    slot.instrument_slot.defaults[3] = 0.82;
-                },)
-        );
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        let Value::List(racks) = &panel else {
-            panic!("rack panel should be a list");
-        };
-        let Value::Map(rack) = &*racks[0].borrow() else {
-            panic!("rack panel entry should be a map");
-        };
-        let Value::Map(instrument) = &*rack
-            .get("selected-instrument")
-            .expect("rack panel should expose its selected sampler")
-            .borrow()
-        else {
-            panic!("selected rack instrument should be a map");
-        };
-        let start_field = rack_slot_sampler_selection_time_field(0, 0, "start");
-        let end_field = rack_slot_sampler_selection_time_field(0, 0, "end");
-        assert_eq!(
-            instrument
-                .get("start-time-field")
-                .map(|value| value.borrow().clone()),
-            Some(Value::String(start_field.clone()))
-        );
-        assert_eq!(
-            instrument
-                .get("end-time-field")
-                .map(|value| value.borrow().clone()),
-            Some(Value::String(end_field.clone()))
-        );
-
-        let mut runtime = Runtime::new();
-        sync_rack_panel_param_value_fields(&mut runtime, &app, 0, None);
-        assert_eq!(
-            runtime.eval_str(&format!("SEQ.{start_field}")),
-            Ok(Some(Value::Number(0.57_f32 as f64)))
-        );
-        assert_eq!(
-            runtime.eval_str(&format!("SEQ.{end_field}")),
-            Ok(Some(Value::Number(0.82_f32 as f64)))
-        );
-
-        assert!(
-            app.state
-                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
-                    .instrument_slot
-                    .defaults[2] = 0.25,)
-        );
-        sync_rack_slot_instrument_param_value_field(&mut runtime, &app, 0, 0, 2, None);
-        assert_eq!(
-            runtime.eval_str(&format!("SEQ.{start_field}")),
-            Ok(Some(Value::Number(0.25)))
-        );
-    }
-
-    #[test]
-    fn rack_sampler_panel_exposes_host_only_slice_controls() {
-        let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        let Value::List(racks) = &panel else {
-            panic!("rack panel should be a list");
-        };
-        let Value::Map(rack) = &*racks[0].borrow() else {
-            panic!("rack panel entry should be a map");
-        };
-        let Value::Map(instrument) = &*rack
-            .get("selected-instrument")
-            .expect("rack panel should expose its selected sampler")
-            .borrow()
-        else {
-            panic!("selected rack instrument should be a map");
-        };
-        let Value::List(params) = &*instrument
-            .get("synth")
-            .expect("rack sampler should expose synth params")
-            .borrow()
-        else {
-            panic!("rack sampler synth params should be a list");
-        };
-        let names: Vec<String> = params
-            .iter()
-            .filter_map(|param| match &*param.borrow() {
-                Value::Map(map) => match map.get("name").map(|name| name.borrow().clone()) {
-                    Some(Value::String(name)) => Some(name),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        for expected in ["slice", "sens", "slice base"] {
-            assert!(
-                names.iter().any(|name| name == expected),
-                "rack sampler panel should expose the host-only `{expected}` control, got {names:?}"
-            );
-        }
-        assert!(
-            matches!(
-                instrument.get("slices").map(|value| value.borrow().clone()),
-                Some(Value::List(_))
-            ),
-            "rack sampler panel should expose resolved slice markers"
-        );
-    }
-
-    #[test]
-    fn rack_macro_value_binding_follows_selected_step_then_playhead() {
-        let mut app = test_app_with_rack_panel();
-        let macro_id = sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1 id");
-        assert!(app.set_rack_macro_plock(0, macro_id, 3, 0.25));
-        assert!(app.set_rack_macro_plock(0, macro_id, 4, 0.75));
-        let selected = Arc::new(Mutex::new(HashSet::from([3])));
-        let mut runtime = Runtime::new();
-
-        let selected_display = displayed_plock_step(&app.state, 0, selected_plock_step(&selected));
-        assert_eq!(selected_display, Some(3));
-        sync_rack_macro_value_fields(&mut runtime, &app, 0, selected_display);
-        assert_eq!(
-            runtime
-                .eval_str("SEQ.track-0-rack-macro-0")
-                .expect("selected-step macro value"),
-            Some(Value::Number(0.25))
-        );
-
-        selected.lock().unwrap().clear();
-        app.state.transport.playing.store(true, Ordering::Relaxed);
-        app.state.transport.track_playheads[0].store(4, Ordering::Relaxed);
-        let playhead_display = displayed_plock_step(&app.state, 0, selected_plock_step(&selected));
-        assert_eq!(playhead_display, Some(4));
-        sync_rack_macro_value_fields(&mut runtime, &app, 0, playhead_display);
-        assert_eq!(
-            runtime
-                .eval_str("SEQ.track-0-rack-macro-0")
-                .expect("playhead macro value"),
-            Some(Value::Number(0.75))
-        );
-    }
-
-    #[test]
-    fn rack_selected_sampler_panel_exposes_mod_sources_and_targets() {
-        let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        let Value::List(items) = &panel else {
-            panic!("rack panel should be a one-item list");
-        };
-        let Value::Map(rack) = &*items[0].borrow() else {
-            panic!("rack panel item should be a map");
-        };
-        let selected = rack
-            .get("selected-instrument")
-            .unwrap_or_else(|| panic!("rack panel should include selected instrument"));
-        let Value::Map(selected) = &*selected.borrow() else {
-            panic!("selected instrument should be a map");
-        };
-        let Value::List(sources) = &*selected
-            .get("sources")
-            .expect("rack selected sampler should expose mod source sections")
-            .borrow()
-        else {
-            panic!("rack selected sampler sources should be a list");
-        };
-        assert_eq!(
-            sources.len(),
-            sequencer::instruments::voice_modulator::SLOT_COUNT,
-            "rack selected sampler should expose one source section per mod slot"
-        );
-        let Value::Map(first_source) = &*sources[0].borrow() else {
-            panic!("rack source section should be a map");
-        };
-        let source_param = first_source
-            .get("source-param")
-            .expect("rack source section should expose the source dropdown param");
-        let Value::Map(source_param) = &*source_param.borrow() else {
-            panic!("rack source dropdown param should be a map");
-        };
-        assert!(
-            matches!(
-                source_param
-                    .get("text-value")
-                    .map(|value| value.borrow().clone()),
-                Some(Value::String(label)) if !label.is_empty()
-            ),
-            "rack source dropdown should expose the selected source type"
-        );
-        assert_eq!(
-            source_param
-                .get("rack-track")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(0.0))
-        );
-        assert_eq!(
-            source_param
-                .get("rack-slot")
-                .map(|value| value.borrow().clone()),
-            Some(Value::Number(0.0))
-        );
-        let Value::List(options) = &*source_param
-            .get("options")
-            .expect("rack source dropdown should expose source type options")
-            .borrow()
-        else {
-            panic!("rack source dropdown options should be a list");
-        };
-        assert!(
-            options
-                .iter()
-                .any(|option| matches!(&*option.borrow(), Value::String(label) if label == "lfo")),
-            "rack source dropdown should include real source choices"
-        );
-        assert!(
-            value_param_has_key(&panel, "speed", "modulatable"),
-            "rack selected sampler speed should be marked modulatable"
-        );
-        assert!(
-            value_param_has_key(&panel, "speed", "mod-targets"),
-            "rack selected sampler speed should expose modulation target metadata"
-        );
-    }
-
-    #[test]
     fn metal_seq_rack_selected_sampler_sample_rate_knob_uses_rack_slot_plock_when_steps_selected() {
         let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        selected.lock().unwrap().insert(3);
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
@@ -11425,10 +10358,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", rack_panel),
-                ("bus-effects", test_list(vec![])),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -11451,7 +10380,7 @@ use panel_kinds_seed::*;
             .expect("install selected-step rack fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_app_panels(&mut editor, &app, 0);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("rack fx lisp status after refresh: {status}");
@@ -11477,12 +10406,9 @@ use panel_kinds_seed::*;
         // track *and* slot. `sr` is a declared sampler mod destination, so its
         // knob binds the live dot to the rack slot's own published field.
         assert_eq!(
-            sr_knob.props.get("mod-offset").map(|value| {
-                bound_field(Some(value))
-                    .unwrap_or_else(|| panic!("rack sr knob should bind its live dot: {value:?}"))
-            }),
-            Some(super::rack_slot_mod_offset_field(0, 0, 8)),
-            "the dot must read the selected rack slot's field, not a track-wide one",
+            bound_instance(sr_knob.props.get("mod-offset")),
+            Some((seeded_rack_slot_param(&editor, 0, 8), "mod-offset".to_string())),
+            "the dot must read the selected rack slot's param, not a track-wide one",
         );
         let callback = sr_knob
             .props
@@ -11526,8 +10452,6 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_rack_slot_gain_uses_slot_param_plock_when_steps_selected() {
         let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::from([3])));
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
@@ -11541,10 +10465,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", rack_panel),
-                ("bus-effects", test_list(vec![])),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -11567,14 +10487,14 @@ use panel_kinds_seed::*;
             .expect("install selected-step rack gain test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_app_panels(&mut editor, &app, 0);
         editor.drain_host_commands();
 
         editor
             .runtime_mut()
             .eval_str(
                 r#"(eseq.effects.instrument-panel/rack-slot-set-gain
-                      (nth (get (nth SEQ.instrument-panel 0) :slots) 0)
+                      (nth (get (eseq.effects.panel-data/current-instrument-panel) :slots) 0)
                       0.33)"#,
             )
             .expect("set rack slot gain");
@@ -11648,7 +10568,6 @@ use panel_kinds_seed::*;
         }
 
         let mut app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
         let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
         let speed_idx = sampler_descriptor
             .params
@@ -11671,7 +10590,6 @@ use panel_kinds_seed::*;
             },
         )
         .expect("map rack macro to sampler speed");
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let speed_wrapper_key = format!("sampler-param-{speed_idx}-mod-wrapper");
         let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
@@ -11687,10 +10605,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", rack_panel),
-                ("bus-effects", test_list(vec![])),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -11713,7 +10627,7 @@ use panel_kinds_seed::*;
             .expect("install rack mods test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_app_panels(&mut editor, &app, 0);
         editor
             .runtime_mut()
             .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open true) (set! v.mod-slot 1)))")
@@ -11833,29 +10747,6 @@ use panel_kinds_seed::*;
             "rack modulation source and depth should be distinct params"
         );
         let depth_param = &sampler_descriptor.params[depth_idx];
-        let depth_value_field =
-            rack_slot_instrument_param_value_field(0, 0, depth_idx, &depth_param.name);
-        let depth_target_expression = format!(
-            r#"
-            (let ((p (nth
-                       (filter |candidate| (= (get candidate :idx) {speed_idx})
-                         (get
-                           (get (nth SEQ.instrument-panel 0) :selected-instrument)
-                           :synth))
-                       0)))
-              (nth
-                (filter |target| (= (get target :depth-idx) {depth_idx})
-                  (get p :mod-targets))
-                0))
-            "#
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str(&format!(
-                "(get {depth_target_expression} :depth-value-field)"
-            )),
-            Ok(Some(Value::String(depth_value_field.clone()))),
-            "rack modulation depth must observe the rack-slot reactive field"
-        );
 
         let updated_depth = 0.375_f32;
         let updated_depth_stored =
@@ -11866,22 +10757,15 @@ use panel_kinds_seed::*;
                     slot.instrument_slot.defaults[depth_idx] = updated_depth_stored;
                 })
         );
-        sync_rack_slot_instrument_param_value_field(
-            editor.runtime_mut(),
-            &app,
-            0,
-            0,
-            depth_idx,
-            None,
-        );
         // The host pushes the rack slot's depth param (eseq.kinds), which
         // the lane's depth binding reads.
-        set_seeded_field(&mut editor, &depth_value_field, Value::Number(updated_depth as f64));
+        let depth = seeded_rack_slot_param(&editor, 0, depth_idx);
+        set_param_value(&mut editor, depth, Value::Number(updated_depth as f64));
         assert_eq!(
             editor.runtime_mut().eval_str(&format!(
                 "(let ((p (nth
                            (filter |candidate| (= (get candidate :idx) {speed_idx})
-                             (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :synth))
+                             (get (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument) :synth))
                            0)))
                    (+ 0 (eseq.effects.param-controls/mod-target-depth
                           (first (filter (lambda (mt) (= mt.depth.index {depth_idx}))
@@ -11897,7 +10781,7 @@ use panel_kinds_seed::*;
                 r#"(eseq.effects.param-controls/fx-set-instrument-option
                     (get
                       (nth
-                        (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :sources)
+                        (get (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument) :sources)
                         0)
                       :source-param)
                     "lfo")"#,
@@ -11938,7 +10822,7 @@ use panel_kinds_seed::*;
               (let ((p (nth
                          (filter |candidate| (= (get candidate :idx) {speed_idx})
                            (get
-                             (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                             (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument)
                              :synth))
                          0)))
                 (not
@@ -11961,7 +10845,7 @@ use panel_kinds_seed::*;
                 (let ((p (nth
                            (filter |candidate| (= (get candidate :idx) {speed_idx})
                              (get
-                               (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                               (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument)
                                :synth))
                            0)))
                   (eseq.effects.param-controls/param-set-control-value false p 0.5))
@@ -12048,7 +10932,6 @@ use panel_kinds_seed::*;
             |rack_macro| rack_macro.value = 0.5,
         ));
         let selected = Arc::new(Mutex::new(HashSet::new()));
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
@@ -12061,10 +10944,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", rack_panel),
-                ("bus-effects", test_list(vec![])),
                 (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
             ],
             true,
@@ -12094,11 +10973,9 @@ use panel_kinds_seed::*;
                 "#,
             )
             .expect("install rack fx test helpers");
-        sync_rack_macro_value_fields(editor.runtime_mut(), &app, 0, None);
-        sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, 0, None);
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_app_panels(&mut editor, &app, 0);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("rack fx lisp status after refresh: {status}");
@@ -12568,7 +11445,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (eseq.effects.panel-data/current-instrument-panel))")
             .expect("collapse rack slot list");
         editor.refresh_runtime_side_effects();
         let compact_list_layout = editor
@@ -12609,7 +11486,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (eseq.effects.panel-data/current-instrument-panel))")
             .expect("open rack macro bank");
         editor.refresh_runtime_side_effects();
         let macro_layout = editor.widget_layout().expect("rack macro bank layout");
@@ -12694,20 +11571,26 @@ use panel_kinds_seed::*;
         ));
         editor.runtime_mut().set_reactive(
             "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(&app, 0, &selected),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
             "track-plocks",
             build_track_plocks_value(&app, &app.state, 0, &selected),
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
             Value::List(vec![plock_key_row("rack-macro", None, None, Some(0))]));
-        sync_rack_macro_value_fields(editor.runtime_mut(), &app, 0, Some(15));
-        // The rack's macros as the host kinds push them from these lists.
-        seed_panel_kinds(&mut editor);
+        // The rack's macros as the host kinds push them from these lists;
+        // macro 1 shows its lock at the selected step 15.
+        seed_app_panels(&mut editor, &app, 0);
+        let locked_macro = editor
+            .runtime_mut()
+            .eval_str(
+                "(let ((s eseq.kinds/selection)) \
+                   (let ((d (eseq.effects.devices/instrument-of s.track))) (nth d.macros 0)))",
+            )
+            .expect("read rack macro 1");
+        let Some(Value::Instance(locked_macro)) = locked_macro else {
+            panic!("the rack should publish macro 1: {locked_macro:?}");
+        };
+        set_field(editor.runtime_mut(), locked_macro, "value", Value::Number(0.73));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let updated_macro_layout = editor.widget_layout().expect("updated rack macro layout");
@@ -12750,13 +11633,13 @@ use panel_kinds_seed::*;
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (eseq.effects.panel-data/current-instrument-panel))")
             .expect("close rack macro bank");
         editor.refresh_runtime_side_effects();
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (eseq.effects.panel-data/current-instrument-panel))")
             .expect("collapse selected rack chain");
         editor.refresh_runtime_side_effects();
         let toolbar_only_layout = editor
@@ -12792,7 +11675,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (eseq.effects.panel-data/current-instrument-panel))")
             .expect("restore rack slot list independently");
         editor.refresh_runtime_side_effects();
         let list_only_layout = editor
@@ -12807,7 +11690,7 @@ use panel_kinds_seed::*;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (nth SEQ.instrument-panel 0))")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (eseq.effects.panel-data/current-instrument-panel))")
             .expect("restore selected rack chain");
         editor.refresh_runtime_side_effects();
 
@@ -12816,7 +11699,7 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"(eseq.effects.instrument-panel/rack-slot-select
-                    (nth (get (nth SEQ.instrument-panel 0) :slots) 0))"#,
+                    (nth (get (eseq.effects.panel-data/current-instrument-panel) :slots) 0))"#,
             )
             .expect("select rack slot");
         let commands = editor.drain_host_commands();
@@ -12843,7 +11726,7 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"(eseq.effects.instrument-panel/rack-slot-select-delete-target
-                    (nth (get (nth SEQ.instrument-panel 0) :slots) 0))"#,
+                    (nth (get (eseq.effects.panel-data/current-instrument-panel) :slots) 0))"#,
             )
             .expect("select rack slot delete target");
         let commands = editor.drain_host_commands();
@@ -12861,7 +11744,18 @@ use panel_kinds_seed::*;
         );
         // The slot device's delete-target (eseq.kinds), which replaced the
         // legacy field.
-        set_seeded_field(&mut editor, &rack_slot_delete_target_field(0, 0), Value::Bool(true));
+        let slot_device = editor
+            .runtime_mut()
+            .eval_str(
+                "(let ((s eseq.kinds/selection)) \
+                   (let ((d (eseq.effects.devices/instrument-of s.track))) (nth d.devices 0)))",
+            )
+            .expect("read rack slot 0's device");
+        let Some(Value::Instance(slot_device)) = slot_device else {
+            panic!("the rack should publish slot 0: {slot_device:?}");
+        };
+        set_field(editor.runtime_mut(), slot_device, "delete-target", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let delete_target_layout = editor
             .widget_layout()
@@ -13110,7 +12004,7 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .eval_str(
                 r#"(eseq.effects.param-controls/fx-set-instrument-value
-                    (nth (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :synth) 1)
+                    (nth (get (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument) :synth) 1)
                     12.0)"#,
             )
             .expect("edit selected rack sampler attack");
@@ -13335,17 +12229,7 @@ use panel_kinds_seed::*;
                     slot.custom_effect_names[0] = Some(format!("builtin:{}", descriptor.name));
                 },)
         );
-        let rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(0)
-            .cloned()
-            .flatten()
-            .expect("rack fixture");
-        let effect = build_rack_slot_effect_value(&rack, 0, 0, 0, descriptor, &snapshot, None);
+        let effect = rack_slot_effect_panel(&app);
         let Value::Map(effect) = &*effect.borrow() else {
             panic!("rack slot effect value should be a map");
         };
@@ -13393,140 +12277,6 @@ use panel_kinds_seed::*;
             param_id: None,
         };
         crate::host_kinds::tests::one_slot_chain(target, enabled)
-    }
-
-    #[test]
-    fn instrument_panel_marks_params_bound_by_an_enabled_process_port() {
-        // eseq-p1kg: a param an enabled process OUT port writes to carries
-        // `process-mapped` plus the effective-value fields; other params and
-        // disabled slots carry nothing, so the overlay never draws stale.
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let other = desc
-            .params
-            .iter()
-            .find(|param| param.name != "cutoff")
-            .map(|param| param.name.clone())
-            .expect("a second filter param");
-        let app = test_app_with_instrument_descriptor(desc.clone());
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-
-        assert!(app.state.set_track_process_chain(0, process_chain_bound_to("cutoff", true)));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        assert!(value_param_has_key(&panel, "cutoff", "process-mapped"));
-        assert_eq!(
-            value_param_string(&panel, "cutoff", "process-value-field"),
-            Some(super::instrument_proc_value_field(0, cutoff_idx))
-        );
-        assert_eq!(
-            value_param_string(&panel, "cutoff", "process-clamped-field"),
-            Some(super::instrument_proc_clamped_field(0, cutoff_idx))
-        );
-        assert!(
-            !value_param_has_key(&panel, &other, "process-mapped"),
-            "{other} is not a process target"
-        );
-
-        assert!(app.state.set_track_process_chain(0, process_chain_bound_to("cutoff", false)));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        assert!(
-            !value_param_has_key(&panel, "cutoff", "process-mapped"),
-            "a disabled slot's binding does not count as mapped"
-        );
-    }
-
-    #[test]
-    fn process_effective_param_fields_publish_display_units_once_per_change() {
-        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let cutoff_idx = desc
-            .params
-            .iter()
-            .position(|param| param.name == "cutoff")
-            .expect("filter descriptor should include cutoff");
-        let pdesc = desc.params[cutoff_idx].clone();
-        let app = test_app_with_instrument_descriptor(desc);
-        let stored = pdesc.min + (pdesc.max - pdesc.min) * 0.5;
-        app.state.publish_process_effective_params(
-            0,
-            &[sequencer::process::ProcessEffectiveParam {
-                param_idx: cutoff_idx,
-                base: pdesc.min,
-                value: stored,
-                clamped: true,
-            }],
-        );
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], false);
-        let mut previous = std::collections::HashMap::new();
-        super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &super::instrument_proc_value_field(0, cutoff_idx)),
-            Some(&Value::Number(pdesc.stored_to_user(stored) as f64)),
-            "the field carries the display-unit value the knob compares against"
-        );
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &super::instrument_proc_clamped_field(0, cutoff_idx)),
-            Some(&Value::Number(1.0))
-        );
-        assert_eq!(previous.len(), 1);
-        // Same feed again: nothing new to publish.
-        let before = previous.clone();
-        super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
-        assert_eq!(previous, before);
-    }
-
-    #[test]
-    fn rack_slot_effect_params_bind_their_own_node_modulation_fields() {
-        // Rack effects share the effect telemetry namespace, never the
-        // selected slot instrument's rack-mod-* fields.
-        let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
-        let app = test_app_with_rack_panel();
-        let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 43);
-        assert!(
-            app.state
-                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
-                    slot.effect_descriptors[0] = descriptor.clone();
-                    slot.effect_slots[0] = snapshot.clone();
-                    slot.custom_effect_names[0] = Some(format!("builtin:{}", descriptor.name));
-                },)
-        );
-        let rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(0)
-            .cloned()
-            .flatten()
-            .expect("rack fixture");
-        let effect = build_rack_slot_effect_value(&rack, 0, 0, 0, &descriptor, &snapshot, None);
-        let effect = effect.borrow().clone();
-        assert!(
-            value_param_has_key(&effect, "cutoff", "mod-targets"),
-            "fixture: a rack slot Filter's cutoff is a declared modulation destination"
-        );
-        let cutoff = descriptor.params.iter().position(|param| param.name == "cutoff").unwrap();
-        for (key, expected) in [
-            ("mod-offset-field", super::effect_mod_offset_field(43, cutoff)),
-            ("mod-value-field", super::effect_mod_value_field(43, cutoff)),
-            ("mod-scale-field", super::effect_mod_scale_field(43, cutoff)),
-        ] {
-            assert_eq!(value_param_string(&effect, "cutoff", key), Some(expected));
-        }
-
-        // The slot instrument keeps its independent slot-keyed fields.
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
-        assert_eq!(
-            value_param_string(&panel, "sr", "mod-offset-field"),
-            Some(super::rack_slot_mod_offset_field(0, 0, 8)),
-            "the rack slot instrument's declared destinations still bind their fields"
-        );
     }
 
     #[test]
@@ -15067,6 +13817,110 @@ use panel_kinds_seed::*;
             .unwrap_or(Value::Nil)
     }
 
+    /// A full UI editor over `app`'s track `track`, seeded as the host kinds
+    /// publish it (eseq-0l17.82: the panels lay out from the kinds).
+    fn panel_data_editor(app: &app::App, track: usize) -> eseqlisp::Editor {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        seed_app_panels(&mut editor, app, track);
+        editor
+    }
+
+    /// `code`'s panel dicts (eseq.effects.panel-data), each param dict
+    /// also listing its kinds param's lanes as `mod-targets` when it has
+    /// any (the panels read them from the param).
+    fn panel_dicts(editor: &mut eseqlisp::Editor, code: &str) -> Value {
+        fn lanes(rt: &Runtime, value: &Value) -> Value {
+            match value {
+                Value::List(items) => test_list(items.iter().map(|item| lanes(rt, &item.borrow())).collect()),
+                Value::Map(map) => {
+                    let mut map: HashMap<String, Rc<RefCell<Value>>> = map
+                        .iter()
+                        .map(|(key, value)| (key.clone(), Rc::new(RefCell::new(lanes(rt, &value.borrow())))))
+                        .collect();
+                    let prm = map.get("prm").map(|prm| prm.borrow().clone());
+                    if let Some(Value::Instance(id)) = prm {
+                        if let Ok(Value::List(targets)) = rt.instance_field(id, "mod-targets") {
+                            if !targets.is_empty() {
+                                let targets = Value::List(targets);
+                                map.insert("mod-targets".into(), Rc::new(RefCell::new(targets)));
+                            }
+                        }
+                    }
+                    Value::Map(map)
+                }
+                other => other.clone(),
+            }
+        }
+        let value = editor
+            .runtime_mut()
+            .eval_str(code)
+            .unwrap_or_else(|error| panic!("{code}: {error:?}"))
+            .unwrap_or(Value::Nil);
+        lanes(editor.runtime(), &value)
+    }
+
+    /// Track 0's chain effect panels with `descs` in its chain (over
+    /// `state`'s slots).
+    fn effect_panels(state: &Arc<SequencerState>, descs: &[sequencer::effects::EffectDescriptor]) -> Value {
+        let mut app = test_app_for_track_visual_state(Arc::clone(state));
+        app.graph.effect_descriptors = vec![descs.to_vec()];
+        let mut editor = panel_data_editor(&app, 0);
+        panel_dicts(&mut editor, "(eseq.effects.panel-data/current-effect-panels)")
+    }
+
+    /// The rack's selected sampler panel lists the builtin sampler's
+    /// host-only slice controls (`slice`, `sens`, `slice base`), each
+    /// bound to its param.
+    #[test]
+    fn rack_sampler_panel_exposes_host_only_slice_controls() {
+        let app = test_app_with_rack_panel();
+        let mut editor = panel_data_editor(&app, 0);
+        let synth = panel_dicts(
+            &mut editor,
+            "(get (get (eseq.effects.panel-data/current-instrument-panel) :selected-instrument) \
+               :synth)",
+        );
+        let Value::List(params) = synth else {
+            panic!("the rack's selected sampler should list its params: {synth:?}");
+        };
+        for expected in ["slice", "sens", "slice base"] {
+            let param = params
+                .iter()
+                .map(|param| param.borrow().clone())
+                .find(|param| {
+                    matches!(param, Value::Map(map) if map.get("name").map(|name| name.borrow().clone())
+                        == Some(Value::String(expected.to_string())))
+                })
+                .unwrap_or_else(|| panic!("the rack sampler should list `{expected}`: {params:?}"));
+            let Value::Map(map) = param else { unreachable!() };
+            assert!(
+                matches!(map.get("prm").map(|prm| prm.borrow().clone()), Some(Value::Instance(_))),
+                "`{expected}` binds its param"
+            );
+        }
+    }
+
+    /// Each bus's effect panels (a list per bus).
+    fn bus_effect_panels(app: &app::App) -> Value {
+        let mut editor = panel_data_editor(app, 0);
+        panel_dicts(
+            &mut editor,
+            "(map (lambda (b) (map eseq.effects.panel-data/fx-panel-of \
+               (eseq.effects.panel-data/bus-effects b))) (eseq.kinds/buses))",
+        )
+    }
+
+    /// The panel of the first effect of drum rack slot 0 on track 0.
+    fn rack_slot_effect_panel(app: &app::App) -> Rc<RefCell<Value>> {
+        let mut editor = panel_data_editor(app, 0);
+        let panel = panel_dicts(
+            &mut editor,
+            "(eseq.effects.panel-data/fx-panel-of (first (eseq.effects.panel-data/rack-slot-effect-devices \
+               (eseq.effects.devices/rack-slot-device 0 0))))",
+        );
+        Rc::new(RefCell::new(panel))
+    }
+
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
         let src = read_ui_source("main.lisp").expect("read grid lisp");
         full_grid_editor_with_main_source(&src)
@@ -15246,20 +14100,6 @@ use panel_kinds_seed::*;
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "bus-effects",
-                    test_list(vec![
-                        test_list(vec![]),
-                        test_list(vec![]),
-                        test_list(vec![]),
-                    ]),
-                ),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
                 ("current-pattern", Value::Number(0.0)),
                 ("recording", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
@@ -15359,6 +14199,14 @@ use panel_kinds_seed::*;
         seed_kind_tracks(
             &mut editor,
             &[KindTrack::new("bd02", [0.96, 0.28, 0.52]).cells(&[(1, true, true), (2, false, false)])],
+        );
+        // The track's instrument (the legacy fixture's instrument panel).
+        seed_panel_kinds(
+            &mut editor,
+            &PanelSeed {
+                instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+                ..PanelSeed::default()
+            },
         );
         editor.refresh_runtime_side_effects();
         crate::application_menu::sync_context(&menu_state, &mut editor);
@@ -19654,7 +18502,8 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "tp-fts", Value::String(crate::fts_scale_label(&params)));
-        seed_panel_kinds(&mut editor);
+        let panel_seed = PanelSeed::default();
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let track_id = editor
             .buffers
@@ -19768,8 +18617,9 @@ use panel_kinds_seed::*;
                 ]),
             ]),
         );
+        let panel_seed = PanelSeed::default();
         // The track's settings and their locks, as the host kinds push them.
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         // The selected step plays the current track's variant A: the
         // p-lock accent is its color (eseq.kinds variant.current).
         let rt = editor.runtime_mut();
@@ -29858,17 +28708,15 @@ use panel_kinds_seed::*;
             "track".to_string(),
             Rc::new(RefCell::new(Value::Number(0.0))),
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(instrument)]),
-        );
+        let mut panel_seed = PanelSeed::default();
+        panel_seed.instrument_panel = test_list(vec![Value::Map(instrument)]);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
             test_string_list(&["custom"]),
         );
         set_kind_instrument_types(&mut editor, &["custom"]);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -30029,17 +28877,15 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_fx_sampler_panel_routes_sample_and_instrument_drops() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
-        );
+        let mut panel_seed = PanelSeed::default();
+        panel_seed.instrument_panel = test_list(vec![Value::Map(test_sampler_instrument_map(0))]);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
             test_string_list(&["sampler"]),
         );
         set_kind_instrument_types(&mut editor, &["sampler"]);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -30407,7 +29253,7 @@ use panel_kinds_seed::*;
             editor
                 .runtime_mut()
                 .eval_str(
-                    "(eseq.effects.param-controls/process-param-bindable? false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                    "(eseq.effects.param-controls/process-param-bindable? false (nth (get (eseq.effects.panel-data/current-instrument-panel) :synth) 1))"
                 )
                 .expect("read process map bindable state before fx layout"),
             Some(Value::Bool(true))
@@ -33304,6 +32150,37 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_lisp_renders_track_and_bus_panels() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![
+                        Value::Map(test_fx_map("Filter", 0, test_filter_params())),
+                        Value::Map(test_fx_map(
+                            "track-fx",
+                            2,
+                            vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+                        )),
+                    ]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![
+                        test_list(vec![]),
+                        test_list(vec![Value::Map(test_bus_fx_map(
+                            "bus-fx",
+                            1,
+                            0,
+                            vec![
+                                Value::Map(test_param_map("rate", 0, 0.32, 0.05, 1.2)),
+                                Value::Map(test_param_map("depth", 1, 8.5, 1.0, 20.0)),
+                                Value::Map(test_param_map("base", 2, 12.5, 6.0, 28.0)),
+                                Value::Map(test_param_map("spread", 3, 6.0, 0.0, 14.0)),
+                                Value::Map(test_param_map("mix", 4, 0.68, 0.0, 1.0)),
+                                Value::Map(test_param_map("tone", 5, 10500.0, 2000.0, 18000.0)),
+                                Value::Map(test_param_map("width", 6, 1.0, 0.0, 1.0)),
+                                Value::Map(test_param_map("shimmer", 7, 0.28, 0.0, 1.0)),
+                            ],
+                        ))]),
+                        test_list(vec![]),
+                    ]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -33325,48 +32202,10 @@ use panel_kinds_seed::*;
                         Value::String("Bus B".to_string()),
                     ]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![
-                        Value::Map(test_fx_map("Filter", 0, test_filter_params())),
-                        Value::Map(test_fx_map(
-                            "track-fx",
-                            2,
-                            vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
-                        )),
-                    ]),
-                ),
-                ("midi-effects", test_list(vec![])),
                 ("tp-mute-group", Value::String("Off".to_string())),
                 (
                     "mute-group-options",
                     test_string_list(&["Off", "1", "2", "3", "4", "5", "6", "7", "8"]),
-                ),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                (
-                    "bus-effects",
-                    test_list(vec![
-                        test_list(vec![]),
-                        test_list(vec![Value::Map(test_bus_fx_map(
-                            "bus-fx",
-                            1,
-                            0,
-                            vec![
-                                Value::Map(test_param_map("rate", 0, 0.32, 0.05, 1.2)),
-                                Value::Map(test_param_map("depth", 1, 8.5, 1.0, 20.0)),
-                                Value::Map(test_param_map("base", 2, 12.5, 6.0, 28.0)),
-                                Value::Map(test_param_map("spread", 3, 6.0, 0.0, 14.0)),
-                                Value::Map(test_param_map("mix", 4, 0.68, 0.0, 1.0)),
-                                Value::Map(test_param_map("tone", 5, 10500.0, 2000.0, 18000.0)),
-                                Value::Map(test_param_map("width", 6, 1.0, 0.0, 1.0)),
-                                Value::Map(test_param_map("shimmer", 7, 0.28, 0.0, 1.0)),
-                            ],
-                        ))]),
-                        test_list(vec![]),
-                    ]),
                 ),
             ],
             true,
@@ -33388,7 +32227,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(0.0));
@@ -33712,7 +32551,7 @@ use panel_kinds_seed::*;
         );
         let filter_ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe filter ui")
             .expect("filter ui probe value");
         assert!(
@@ -33786,6 +32625,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_filter_layout_contains_response_curve_editor() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Filter",
+                        0,
+                        test_filter_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -33800,20 +32649,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Filter",
-                        0,
-                        test_filter_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -33834,10 +32669,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let filter_ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe filter ui")
             .expect("filter ui probe value");
         assert!(
@@ -33898,6 +32733,12 @@ use panel_kinds_seed::*;
             );
         }
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map("Filter", 0, params))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -33912,16 +32753,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map("Filter", 0, params))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
                 (cutoff_field, Value::Number(1000.0)),
                 (resonance_field, Value::Number(1.0)),
             ],
@@ -33944,7 +32775,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let fx_id = editor
             .buffers
@@ -34004,6 +32835,12 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_eq8_layout_contains_eq8_editor() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map("EQ8", 0, test_eq8_params()))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -34018,16 +32855,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map("EQ8", 0, test_eq8_params()))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -34048,10 +32875,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let eq8_ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe eq8 ui")
             .expect("eq8 ui probe value");
         assert!(
@@ -34118,6 +32945,16 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Filter",
+                        0,
+                        test_filter_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -34133,21 +32970,7 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Filter",
-                        0,
-                        test_filter_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
-                ),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -34168,7 +32991,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("fx lisp status after refresh: {status}");
@@ -34246,20 +33069,8 @@ use panel_kinds_seed::*;
             Rc::new(RefCell::new(Value::Number(0.2))),
         );
         instrument.insert(
-            "start-time-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                sampler_selection_time_field(0, "start"),
-            ))),
-        );
-        instrument.insert(
             "end-time".to_string(),
             Rc::new(RefCell::new(Value::Number(0.8))),
-        );
-        instrument.insert(
-            "end-time-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                sampler_selection_time_field(0, "end"),
-            ))),
         );
         instrument.insert(
             "slices".to_string(),
@@ -34318,6 +33129,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(instrument)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -34328,19 +33145,7 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(instrument)])),
                 ("sampler-playhead", Value::Number(0.0)),
-                (
-                    sampler_selection_time_field(0, "start").as_str(),
-                    Value::Number(0.2),
-                ),
-                (
-                    sampler_selection_time_field(0, "end").as_str(),
-                    Value::Number(0.8),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -34361,7 +33166,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let fx_id = editor
             .buffers
@@ -34800,10 +33605,18 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_sampler_instrument_map(2))]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(3.0)),
+                // The panel is track 2's (the seed places it on the current track).
+                ("current-track", Value::Number(2.0)),
                 (
                     "track-instrument-types",
                     test_string_list(&["sampler", "sampler", "sampler"]),
@@ -34813,14 +33626,7 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_sampler_instrument_map(2))]),
-                ),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -34841,7 +33647,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("sampler fx lisp status after refresh: {status}");
@@ -34970,6 +33776,12 @@ use panel_kinds_seed::*;
             "color-b".to_string(),
             Rc::new(RefCell::new(Value::Number(0.9))),
         );
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -34979,14 +33791,7 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
-                ),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![Value::Map(sr_plock)])),
                 (
                     "track-plock-variants",
@@ -35016,7 +33821,7 @@ use panel_kinds_seed::*;
             .expect("install selected-step sampler fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("sampler fx lisp status after refresh: {status}");
@@ -35127,6 +33932,12 @@ use panel_kinds_seed::*;
                 }
             }
         }
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(sampler_inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -35136,14 +33947,7 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(sampler_inst)]),
-                ),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
             ],
@@ -35196,7 +34000,7 @@ use panel_kinds_seed::*;
                 });
         }
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(
@@ -35283,6 +34087,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_dimension_layout_contains_mode_buttons_and_knobs() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Dimension",
+                        0,
+                        test_dimension_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -35297,20 +34111,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Dimension",
-                        0,
-                        test_dimension_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -35331,10 +34131,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe dimension ui")
             .expect("dimension ui probe value");
         assert!(
@@ -35385,6 +34185,12 @@ use panel_kinds_seed::*;
             Value::Map(test_param_map("detector-db", 9, 0.0, -36.0, 36.0)),
             Value::Map(test_param_map("enabled", 10, 1.0, 0.0, 1.0)),
         ];
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map("ES Compressor", 0, params))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -35401,16 +34207,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map("ES Compressor", 0, params))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -35431,10 +34227,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe es compressor ui")
             .expect("es compressor ui probe value");
         for text in ["amount", "tone", "mix", "attack", "release", "input", "drive", "detect", "output"] {
@@ -35505,6 +34301,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_phaser_flanger_layout_contains_mode_buttons_and_knobs() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Phaser-Flanger",
+                        0,
+                        test_phaser_flanger_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -35534,20 +34340,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Phaser-Flanger",
-                        0,
-                        test_phaser_flanger_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -35568,10 +34360,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe phaser-flanger ui")
             .expect("phaser-flanger ui probe value");
         assert!(
@@ -35719,6 +34511,12 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_roar_layout_contains_stage_tabs_and_shaper_display() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map("Roar", 0, test_roar_params()))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
             ("bpm", Value::Number(120.0)),
@@ -35732,16 +34530,6 @@ use panel_kinds_seed::*;
                 "bus-names",
                 test_list(vec![Value::String("Mix".to_string())]),
             ),
-            (
-                "effects",
-                test_list(vec![Value::Map(test_fx_map("Roar", 0, test_roar_params()))]),
-            ),
-            ("midi-effects", test_list(vec![])),
-            (
-                "instrument-panel",
-                test_list(vec![Value::Map(test_instrument_map())]),
-            ),
-            ("bus-effects", test_list(vec![test_list(vec![])])),
         ];
         // Live value-fields for the fixture's globals and stage-1 params.
         let reactive_values: Vec<(usize, f64)> = vec![
@@ -35792,10 +34580,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe roar ui")
             .expect("roar ui probe value");
         assert!(
@@ -35883,6 +34671,12 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_ott_layout_contains_band_fields_and_live_display() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map("OTT", 0, test_ott_params()))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
             ("bpm", Value::Number(120.0)),
@@ -35896,16 +34690,6 @@ use panel_kinds_seed::*;
                 "bus-names",
                 test_list(vec![Value::String("Mix".to_string())]),
             ),
-            (
-                "effects",
-                test_list(vec![Value::Map(test_fx_map("OTT", 0, test_ott_params()))]),
-            ),
-            ("midi-effects", test_list(vec![])),
-            (
-                "instrument-panel",
-                test_list(vec![Value::Map(test_instrument_map())]),
-            ),
-            ("bus-effects", test_list(vec![test_list(vec![])])),
         ];
         let reactive_values: Vec<(String, Value)> = [
             (0, -60.0),
@@ -35944,10 +34728,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe ott ui")
             .expect("ott ui probe value");
         for label in [
@@ -36076,6 +34860,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_compressor_layout_contains_sidechain_display_and_controls() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Compressor",
+                        0,
+                        test_compressor_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36090,20 +34884,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Compressor",
-                        0,
-                        test_compressor_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
                 ("test-comp-param-0", Value::Number(-18.0)),
             ],
             true,
@@ -36125,10 +34905,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe compressor ui")
             .expect("compressor ui probe value");
         for label in [
@@ -36236,6 +35016,16 @@ use panel_kinds_seed::*;
             mono_atlas.cell_w as f32,
             mono_atlas.cell_h as f32,
         );
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Space Echo",
+                        0,
+                        test_space_echo_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36250,20 +35040,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Space Echo",
-                        0,
-                        test_space_echo_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -36284,10 +35060,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe space echo ui")
             .expect("space echo ui probe value");
         assert!(
@@ -36542,6 +35318,12 @@ use panel_kinds_seed::*;
             "table-name".to_string(),
             Rc::new(RefCell::new(Value::String("vowel-drift".to_string()))),
         );
+        let mut panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(fx)]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36559,10 +35341,6 @@ use panel_kinds_seed::*;
                 ),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
-                ("effects", test_list(vec![Value::Map(fx)])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -36580,7 +35358,7 @@ use panel_kinds_seed::*;
         ).expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("Filter Table fx lisp status after refresh: {status}");
@@ -36744,17 +35522,9 @@ use panel_kinds_seed::*;
             Some("causal"),
         );
 
-        // Host-owned preset metadata is structural rather than binding-backed.
-        // The post-event invalidation path must therefore run a reactive cycle
-        // after replacing SEQ.effects, even while transport is stopped.
-        let outcome = editor.runtime_mut().set_reactive(
-            "SEQ",
-            "effects",
-            test_list(vec![Value::Map(updated_fx)]),
-        );
-        assert!(outcome.effects_dirty);
+        panel_seed.effects = test_list(vec![Value::Map(updated_fx)]);
         // The device's table fields, as the host kinds push them.
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let updated_layout = editor.widget_layout().expect("updated Filter Table layout");
@@ -36863,9 +35633,25 @@ use panel_kinds_seed::*;
 
     #[test]
     fn metal_seq_filter_table_rack_slot_controls_bind_modulation_and_target_the_slot_effect() {
-        let app = test_app_with_rack_panel();
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let panel = build_instrument_panel_value(&app, 0, &selected);
+        // A drum rack whose selected slot holds the Filter Table below.
+        let slot = map_value([
+            ("idx", Value::Number(0.0)),
+            ("track", Value::Number(0.0)),
+            ("type", Value::String("sampler".into())),
+            ("name", Value::String("Layer Alpha".into())),
+            ("display-name", Value::String("Layer Alpha".into())),
+            ("enabled", Value::Bool(true)),
+            ("effects", test_list(vec![])),
+        ]);
+        let panel = test_list(vec![map_value([
+            ("type", Value::String("rack".into())),
+            ("track", Value::Number(0.0)),
+            ("track-id", Value::String("0".into())),
+            ("name", Value::String("Rack".into())),
+            ("display-name", Value::String("Rack".into())),
+            ("selected-slot", Value::Number(0.0)),
+            ("slots", test_list(vec![slot])),
+        ])]);
         let mut fx = test_fx_map(
             "Filter Table",
             0,
@@ -36874,11 +35660,11 @@ use panel_kinds_seed::*;
                 {
                     let mut param = test_param_map("cutoff", 1, 1000.0, 40.0, 18000.0);
                     for (key, field) in [
-                        ("mod-value-field", effect_mod_value_field(43, 1)),
-                        ("mod-offset-field", effect_mod_offset_field(43, 1)),
-                        ("mod-scale-field", effect_mod_scale_field(43, 1)),
+                        ("mod-value-field", "test-cutoff-mod-value"),
+                        ("mod-offset-field", "test-cutoff-mod-offset"),
+                        ("mod-scale-field", "test-cutoff-mod-scale"),
                     ] {
-                        param.insert(key.into(), value_cell(Value::String(field)));
+                        param.insert(key.into(), value_cell(Value::String(field.into())));
                     }
                     Value::Map(param)
                 },
@@ -36932,6 +35718,12 @@ use panel_kinds_seed::*;
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: panel,
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36940,14 +35732,10 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", panel),
-                ("bus-effects", test_list(vec![])),
                 (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
-                (effect_mod_value_field(43, 1).as_str(), Value::Number(1000.0)),
-                (effect_mod_offset_field(43, 1).as_str(), Value::Number(0.0)),
-                (effect_mod_scale_field(43, 1).as_str(), Value::Number(1.0)),
+                ("test-cutoff-mod-value", Value::Number(1000.0)),
+                ("test-cutoff-mod-offset", Value::Number(0.0)),
+                ("test-cutoff-mod-scale", Value::Number(1.0)),
             ],
             true,
         );
@@ -36965,7 +35753,7 @@ use panel_kinds_seed::*;
         ).expect("install rack Filter Table test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter()
             .find(|buffer| buffer.name == "*fx*")
@@ -36998,8 +35786,8 @@ use panel_kinds_seed::*;
         assert!(matches!(curve.props.get("response-cutoff"), Some(Value::ReactiveRef { .. })));
         assert!(matches!(cutoff.props.get("mod-offset"), Some(Value::ReactiveRef { .. })));
         for value in [2400.0, 750.0, 1000.0] {
-            set_seeded_field(&mut editor, &effect_mod_value_field(43, 1), Value::Number(value));
-            set_seeded_field(&mut editor, &effect_mod_offset_field(43, 1), Value::Number(value - 1000.0));
+            set_seeded_field(&mut editor, "test-cutoff-mod-value", Value::Number(value));
+            set_seeded_field(&mut editor, "test-cutoff-mod-offset", Value::Number(value - 1000.0));
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&curve.props, "response-cutoff", -1.0), value as f32);
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "mod-offset", -1.0), (value - 1000.0) as f32);
             assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "value", -1.0), 1000.0);
@@ -37107,6 +35895,12 @@ use panel_kinds_seed::*;
             Rc::new(RefCell::new(Value::String("Spectral".to_string()))),
         );
         fx.insert("editor".to_string(), Rc::new(RefCell::new(editor_map())));
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(fx)]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37118,10 +35912,6 @@ use panel_kinds_seed::*;
                 ),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
-                ("effects", test_list(vec![Value::Map(fx)])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -37139,7 +35929,7 @@ use panel_kinds_seed::*;
         ).expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("Filter Table editor lisp status after refresh: {status}");
@@ -37245,17 +36035,9 @@ use panel_kinds_seed::*;
             vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-        let effects = build_effects_value(
-            &state, 0, &[vec![desc.clone()]], &Arc::new(Mutex::new(HashSet::new())),
-        );
-        let mut editor = full_grid_editor_for_scroll_tests();
         let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
         projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
-        for idx in 0..desc.params.len() {
-            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
-        }
-        editor.runtime_mut().set_reactive("SEQ", "effects", effects);
-        seed_panel_kinds(&mut editor);
+        let mut editor = panel_data_editor(&projection_app, 0);
         editor.runtime_mut().eval_str(r#"
             (set-layout (list :buf "*fx*" :hide-status true))
             (let ((v eseq.effects.state/effect-mods)) (do (set! v.chain "audio") (set! v.track 0) (set! v.slot 0) (set! v.rack-slot -1) (set! v.bus -1) (set! v.open true)))
@@ -37307,6 +36089,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_filterbank_layout_contains_dual_filters_and_harmonics() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Filterbank",
+                        0,
+                        test_filterbank_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37321,20 +36113,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Filterbank",
-                        0,
-                        test_filterbank_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -37355,10 +36133,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe filterbank ui")
             .expect("filterbank ui probe value");
         assert!(
@@ -37399,6 +36177,12 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_multiverb_layout_contains_modes_presets_and_live_knobs() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_multiverb_fx_map())]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37414,16 +36198,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_multiverb_fx_map())]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -37444,10 +36218,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe Multiverb ui")
             .expect("Multiverb ui probe value");
         for text in [
@@ -37535,7 +36309,7 @@ use panel_kinds_seed::*;
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.multiverb/builtin-fx-multiverb-apply-preset (nth SEQ.effects 0) \"Xtal Wash\")")
+            .eval_str("(eseq.effects.builtin.multiverb/builtin-fx-multiverb-apply-preset (first (eseq.effects.panel-data/current-effect-panels)) \"Xtal Wash\")")
             .expect("apply Xtal Wash factory setting");
         let mut writes = Vec::new();
         let mut source_writes = Vec::new();
@@ -37613,6 +36387,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_str8_delay_layout_contains_curve_and_offsets() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Str8 Delay",
+                        0,
+                        test_str8_delay_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37627,20 +36411,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Str8 Delay",
-                        0,
-                        test_str8_delay_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -37661,10 +36431,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let delay_ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe str8 delay ui")
             .expect("str8 delay ui probe value");
         assert!(
@@ -37746,6 +36516,16 @@ use panel_kinds_seed::*;
     fn reverb_panel_editor(mode: f64) -> eseqlisp::Editor {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Reverb",
+                        0,
+                        test_reverb_params(mode),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37761,20 +36541,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Reverb",
-                        0,
-                        test_reverb_params(mode),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -37795,7 +36561,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
     }
 
@@ -37804,7 +36570,7 @@ use panel_kinds_seed::*;
         let mut editor = reverb_panel_editor(0.0);
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe Reverb ui")
             .expect("Reverb ui probe value");
         for text in ["galaxy", "dry/wet"] {
@@ -37885,7 +36651,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .eval_str(
-                r#"(let ((fx (nth SEQ.effects 0)))
+                r#"(let ((fx (first (eseq.effects.panel-data/current-effect-panels))))
                      (eseq.effects.builtin.reverb/reverb-input-curve-action fx
                        (nth (get fx :params) 13) (nth (get fx :params) 14)
                        (dict :type :change-band :id 1 :freq 3000 :gain 0 :q 0.71)))"#,
@@ -37961,6 +36727,16 @@ use panel_kinds_seed::*;
     fn metal_seq_fx_builtin_without_custom_ui_falls_back_to_param_grid() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "Delay",
+                        0,
+                        test_legacy_delay_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -37975,20 +36751,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "Delay",
-                        0,
-                        test_legacy_delay_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -38009,10 +36771,10 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         let reverb_ui_probe = editor
             .runtime_mut()
-            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("probe delay ui");
         assert!(
             matches!(reverb_ui_probe, Some(Value::Bool(false))),
@@ -38073,76 +36835,6 @@ use panel_kinds_seed::*;
             "flat fallback labels should remain visible, mix={:?} size={:?}",
             mix.rect,
             size.rect
-        );
-    }
-
-    #[test]
-    fn param_ui_metadata_exposes_display_name_without_changing_group_or_envelope_identity() {
-        let metadata = sequencer::effects::ParamUiMetadata {
-            group: Some("amp".to_string()),
-            env: Some("amp.envelope".to_string()),
-            role: Some("attack".to_string()),
-            tags: Vec::new(),
-            asset_options: None,
-            display_name: Some("attack".to_string()),
-        };
-        let mut map = HashMap::new();
-
-        insert_param_ui_metadata(&mut map, Some(&metadata));
-
-        for (key, expected) in [
-            ("group", "amp"),
-            ("env", "amp.envelope"),
-            ("role", "attack"),
-            ("display-name", "attack"),
-        ] {
-            assert_eq!(
-                map.get(key).map(|value| value.borrow().clone()),
-                Some(Value::String(expected.to_string())),
-                "{key} should retain its own manifest identity"
-            );
-        }
-    }
-
-    #[test]
-    fn param_ui_metadata_exposes_asset_option_reference() {
-        let metadata = sequencer::effects::ParamUiMetadata {
-            group: None,
-            env: None,
-            role: None,
-            tags: Vec::new(),
-            asset_options: Some(sequencer::effects::ParamAssetOptions {
-                tensor: "bank".to_string(),
-                file: "waves/bank.json".to_string(),
-                key: "sets".to_string(),
-                asset_base: Some(std::path::PathBuf::from("/trusted/instrument")),
-            }),
-            display_name: None,
-        };
-        let mut map = HashMap::new();
-
-        insert_param_ui_metadata(&mut map, Some(&metadata));
-
-        let Value::Map(options) = &*map
-            .get("options")
-            .expect("asset options should be surfaced")
-            .borrow()
-        else {
-            panic!("asset options should be a map");
-        };
-        for (key, expected) in [("tensor", "bank"), ("file", "waves/bank.json")] {
-            assert_eq!(
-                options.get(key).map(|value| value.borrow().clone()),
-                Some(Value::String(expected.to_string()))
-            );
-        }
-        assert_eq!(
-            options.get("key").map(|value| value.borrow().clone()),
-            Some(Value::Keyword("sets".to_string()))
-        );
-        assert_eq!(
-            options.get("asset-base").map(|value| value.borrow().clone()),
-            Some(Value::String("/trusted/instrument".to_string()))
         );
     }
 
@@ -39180,6 +37872,16 @@ use panel_kinds_seed::*;
         )));
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "MODUM_DELAY",
+                        0,
+                        test_modum_delay_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39194,20 +37896,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "MODUM_DELAY",
-                        0,
-                        test_modum_delay_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -39231,7 +37919,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -39273,6 +37961,25 @@ use panel_kinds_seed::*;
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "sidechain",
+                        0,
+                        vec![
+                            Value::Map(test_param_map("threshold", 0, -20.0, -80.0, -2.0)),
+                            Value::Map(test_param_map("ratio", 1, 10.0, 1.0, 20.0)),
+                            Value::Map(test_enum_param_map(
+                                "sidechain signal",
+                                2,
+                                1.0,
+                                vec!["off", "kick", "snare"],
+                            )),
+                        ],
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39287,29 +37994,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "sidechain",
-                        0,
-                        vec![
-                            Value::Map(test_param_map("threshold", 0, -20.0, -80.0, -2.0)),
-                            Value::Map(test_param_map("ratio", 1, 10.0, 1.0, 20.0)),
-                            Value::Map(test_enum_param_map(
-                                "sidechain signal",
-                                2,
-                                1.0,
-                                vec!["off", "kick", "snare"],
-                            )),
-                        ],
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -39333,7 +38017,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -39419,6 +38103,16 @@ use panel_kinds_seed::*;
         )));
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "dimension-d-chorus",
+                        0,
+                        test_dimension_d_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39433,20 +38127,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "dimension-d-chorus",
-                        0,
-                        test_dimension_d_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -39470,7 +38150,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -39542,6 +38222,19 @@ use panel_kinds_seed::*;
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![
+                        Value::Map(test_fx_map(
+                            "dimension-d-chorus",
+                            0,
+                            test_dimension_d_params(),
+                        )),
+                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
+                    ]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39559,23 +38252,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![
-                        Value::Map(test_fx_map(
-                            "dimension-d-chorus",
-                            0,
-                            test_dimension_d_params(),
-                        )),
-                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
-                    ]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -39599,7 +38275,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -39692,6 +38368,19 @@ use panel_kinds_seed::*;
         )));
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![
+                        Value::Map(test_fx_map(
+                            "dimension-d-chorus",
+                            0,
+                            test_dimension_d_params(),
+                        )),
+                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
+                    ]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39709,23 +38398,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![
-                        Value::Map(test_fx_map(
-                            "dimension-d-chorus",
-                            0,
-                            test_dimension_d_params(),
-                        )),
-                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
-                    ]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -39752,7 +38424,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -39872,6 +38544,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39880,9 +38558,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
                 (
                     tensor_field,
                     test_list(vec![
@@ -39892,7 +38567,6 @@ use panel_kinds_seed::*;
                         Value::Number(0.4),
                     ]),
                 ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -39916,7 +38590,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load initial custom instrument UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -40013,6 +38687,16 @@ use panel_kinds_seed::*;
         ];
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "shimmerpitch",
+                        0,
+                        shimmerpitch_params,
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -40027,17 +38711,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "shimmerpitch",
-                        0,
-                        shimmerpitch_params,
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -40064,7 +38737,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -40173,6 +38846,16 @@ use panel_kinds_seed::*;
         )));
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![Value::Map(test_fx_map(
+                        "dimension-d-chorus",
+                        0,
+                        test_dimension_d_params(),
+                    ))]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![test_list(vec![])]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -40187,20 +38870,6 @@ use panel_kinds_seed::*;
                     "bus-names",
                     test_list(vec![Value::String("Mix".to_string())]),
                 ),
-                (
-                    "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "dimension-d-chorus",
-                        0,
-                        test_dimension_d_params(),
-                    ))]),
-                ),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![test_list(vec![])])),
             ],
             true,
         );
@@ -40227,7 +38896,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_audio_ui_source)
             .expect("load initial custom audio FX UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -40242,9 +38911,9 @@ use panel_kinds_seed::*;
             .eval_str(
                 r#"
                 (do
-                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                   (def test-instrument-section-click (eseq.effects.custom-ui-sections/ui-section-select-callback 2))
-                  (custom-audio-fx-ui (nth SEQ.effects 0))
+                  (custom-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))
                   (def test-fx-section-click (eseq.effects.custom-ui-sections/ui-section-select-callback 1))
                   (test-instrument-section-click false)
                   (test-fx-section-click false))
@@ -40254,12 +38923,12 @@ use panel_kinds_seed::*;
 
         let instrument_tree = editor
             .runtime_mut()
-            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
+            .eval_str("(custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))")
             .expect("render selected custom instrument UI")
             .expect("instrument UI value");
         let fx_tree = editor
             .runtime_mut()
-            .eval_str("(custom-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(custom-audio-fx-ui (first (eseq.effects.panel-data/current-effect-panels)))")
             .expect("render selected custom FX UI")
             .expect("FX UI value");
 
@@ -40325,6 +38994,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -40333,13 +39008,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -40363,7 +39031,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("custom instrument fx lisp status after refresh: {status}");
@@ -40380,6 +39048,9 @@ use panel_kinds_seed::*;
         assert_finite_layout_tree(&layout);
         let mut adsr_pickers = Vec::new();
         collect_number_pickers(&layout, &mut adsr_pickers);
+        // The base-note readout is the panel's base-note row, not the ADSR's.
+        assert_eq!(check_base_note_controls(&mut editor, &adsr_pickers, "custom UI"), 1);
+        adsr_pickers.retain(|picker| !binds_base_note(picker.props.get("value")));
         assert_eq!(adsr_pickers.len(), 4, "detail ADSR should expose four numeric readouts");
         for picker in adsr_pickers {
             assert_eq!(
@@ -40733,6 +39404,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -40741,14 +39418,10 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
                 ("test-lfo-sync", Value::Number(1.0)),
                 ("test-mod-source-12", Value::Number(0.0)),
                 ("test-mod-depth-13", Value::Number(0.0)),
                 ("fx-instrument-mod-offset-0", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -40772,7 +39445,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument UI");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open false) (set! v.mod-slot 1)))")
@@ -41347,6 +40020,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -41356,12 +40035,8 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("fx-instrument-mod-offset-11", Value::Number(0.0)),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -41382,7 +40057,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str("(let ((v eseq.effects.state/instrument-view)) (do (set! v.tab 0) (set! v.mods-open true) (set! v.mod-slot 2)))")
@@ -41605,6 +40280,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -41613,10 +40294,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(inst)])),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -41640,7 +40317,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load agent stub custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("agent stub fx lisp status after refresh: {status}");
@@ -41731,6 +40408,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(drift_inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -41739,10 +40422,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(drift_inst)])),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -41769,7 +40448,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load drift custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("drift fx lisp status after refresh: {status}");
@@ -41818,7 +40497,7 @@ use panel_kinds_seed::*;
         for section in [0, 1] {
             editor.runtime_mut().eval_str(&format!(r#"
                 (do
-                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                   ((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false))
             "#)).unwrap();
             editor.refresh_runtime_side_effects();
@@ -41901,7 +40580,7 @@ use panel_kinds_seed::*;
             // Voice controls live on the display's VOICES screen (section 2).
             editor.runtime_mut().eval_str(r#"
                 (do
-                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                   ((eseq.effects.custom-ui-sections/ui-section-select-callback 2) false))
             "#).unwrap();
             editor.refresh_runtime_side_effects();
@@ -41991,12 +40670,16 @@ use panel_kinds_seed::*;
         )));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 24);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive("SEQ", vec![
             ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
         ], true);
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -42010,7 +40693,7 @@ use panel_kinds_seed::*;
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&custom_ui).expect("load Revsynt UI");
         editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("Revsynt fx lisp status after refresh: {status}");
@@ -42115,12 +40798,16 @@ use panel_kinds_seed::*;
         )));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 24);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive("SEQ", vec![
             ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
         ], true);
         for (field, value) in &values {
             editor.runtime_mut().set_reactive("SEQ", field, value.clone());
@@ -42137,7 +40824,7 @@ use panel_kinds_seed::*;
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&custom_ui).expect("load Heat UI");
         editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
         editor.set_active_buffer(fx_id);
@@ -42327,7 +41014,7 @@ use panel_kinds_seed::*;
         ] {
             editor.runtime_mut().eval_str(&format!(r#"
                 (do
-                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                   (def heat-test-click (eseq.effects.custom-ui-sections/ui-section-select-callback {section}))
                   (heat-test-click false))
             "#)).unwrap();
@@ -42525,6 +41212,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(digiwave_inst)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -42533,10 +41226,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(digiwave_inst)])),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -42562,7 +41251,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load digiwave custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("digiwave fx lisp status after refresh: {status}");
@@ -42705,12 +41394,16 @@ use panel_kinds_seed::*;
         }).collect()))));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(instrument)]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive("SEQ", vec![
             ("num-tracks", Value::Number(1.0)),
             ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
             ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(instrument)])), ("bus-effects", test_list(vec![])),
         ], true);
         for (_, name, value, _, _) in &params {
             editor.runtime_mut().set_reactive("SEQ", &format!("clap-test-{name}"), Value::Number(*value));
@@ -42731,7 +41424,7 @@ use panel_kinds_seed::*;
         )));
         editor.runtime_mut().eval_str(&custom).unwrap();
         editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
         editor.set_active_buffer(fx);
@@ -42926,6 +41619,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![effect]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -42934,13 +41633,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![effect])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -42961,7 +41653,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(
@@ -43182,6 +41874,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![effect]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -43190,13 +41888,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![effect])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -43217,7 +41908,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(
@@ -43346,6 +42037,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![effect]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -43354,13 +42051,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![effect])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -43381,7 +42071,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(
@@ -43682,6 +42372,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![effect]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -43690,15 +42386,8 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![effect])),
                 ("dj-enabled-depth", Value::Number(1.0)),
                 ("dj-loop-depth", Value::Number(0.0)),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -43719,7 +42408,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor
             .runtime_mut()
             .eval_str(
@@ -44052,6 +42741,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![effect]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -44060,13 +42755,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![effect])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -44087,7 +42775,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("custom effect mods toggle status after refresh: {status}");
@@ -44123,8 +42811,7 @@ use panel_kinds_seed::*;
             1, vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+        let effects = effect_panels(&state, &[desc.clone()]);
         let Value::List(slots) = &effects else { panic!("effect list"); };
         let slot = slots[0].borrow();
         let Value::Map(slot) = &*slot else { panic!("effect map"); };
@@ -44140,14 +42827,9 @@ use panel_kinds_seed::*;
                 .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true)));
             assert_eq!(modulatable, expected, "{name}");
         }
-        let mut editor = full_grid_editor_for_scroll_tests();
         let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
         projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
-        for idx in 0..desc.params.len() {
-            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
-        }
-        editor.runtime_mut().set_reactive("SEQ", "effects", effects.clone());
-        seed_panel_kinds(&mut editor);
+        let mut editor = panel_data_editor(&projection_app, 0);
         editor.runtime_mut().eval_str(
             r#"(set-layout (list :buf "*fx*" :hide-status true))"#,
         ).expect("isolate effect panel");
@@ -44228,10 +42910,9 @@ use panel_kinds_seed::*;
             let idx = desc.params.iter().position(|p| p.name == format!("mod{slot}_source")).unwrap();
             assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param-option", idx, "label", Value::String("lfo".to_string()));
             state.pattern.effect_chains[0][0].defaults.set(idx, 1.0);
-            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
-            let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
-            editor.runtime_mut().set_reactive("SEQ", "effects", effects);
-            seed_panel_kinds(&mut editor);
+            // The source's settings show (`param.visible`), as the host
+            // kinds push them.
+            seed_app_panels(&mut editor, &projection_app, 0);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().unwrap();
@@ -44258,11 +42939,10 @@ use panel_kinds_seed::*;
             slot.effect_descriptors[0] = desc.clone();
             slot.effect_slots[0] = snapshot.clone();
         }));
-        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0].clone().unwrap();
-        let rack_value = build_rack_slot_effect_value(&rack, 0, 0, 0, &desc, &snapshot, None);
+        let rack_value = rack_slot_effect_panel(&app);
         app.buses[0].effect_descriptors = vec![desc.clone()];
         app.buses[0].effect_slots = vec![snapshot];
-        let bus_value = build_bus_effects_value_for_selection(&app, None);
+        let bus_value = bus_effect_panels(&app);
         let Value::List(buses) = bus_value else { panic!("bus list"); };
         let bus = buses[0].borrow();
         let Value::List(slots) = &*bus else { panic!("bus effects"); };
@@ -44318,9 +42998,8 @@ use panel_kinds_seed::*;
             vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
 
-        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+        let effects = effect_panels(&state, &[desc]);
         let Value::List(slots) = effects else {
             panic!("effects value should be a list");
         };
@@ -44436,9 +43115,8 @@ use panel_kinds_seed::*;
             vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
 
-        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+        let effects = effect_panels(&state, &[desc]);
 
         let Value::List(slots) = effects else {
             panic!("effects value should be a list");
@@ -44490,9 +43168,8 @@ use panel_kinds_seed::*;
             vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 43);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
 
-        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+        let effects = effect_panels(&state, &[desc.clone()]);
         let Value::List(slots) = effects else {
             panic!("effects value should be a list");
         };
@@ -44589,7 +43266,7 @@ use panel_kinds_seed::*;
         bus.effect_slots = vec![sequencer::effects::EffectSlotSnapshot::new_default(
             &desc, 44,
         )];
-        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let bus_effects = bus_effect_panels(&app);
         let Value::List(buses) = bus_effects else {
             panic!("bus effects value should be a list");
         };
@@ -44632,9 +43309,8 @@ use panel_kinds_seed::*;
         }
 
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        let selected = Arc::new(Mutex::new(HashSet::new()));
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
-        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+        let effects = effect_panels(&state, &[desc]);
 
         let Value::List(slots) = effects else {
             panic!("effects value should be a list");
@@ -44697,7 +43373,7 @@ use panel_kinds_seed::*;
             &desc, 104,
         )];
 
-        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let bus_effects = bus_effect_panels(&app);
         let Value::List(buses) = bus_effects else {
             panic!("bus effects should be a list");
         };
@@ -44709,12 +43385,6 @@ use panel_kinds_seed::*;
             .first()
             .expect("bus Filter Table slot should be present")
             .borrow();
-
-        assert_eq!(
-            map_get(&filter_table, "table-engine").map(|value| value.clone()),
-            Some(Value::String("Spectral".to_string())),
-            "bus-backed Filter Table panels need engine state for the dropdown",
-        );
         assert_eq!(
             map_get(&filter_table, "bus-fx").map(|value| value.clone()),
             Some(Value::Bool(true)),
@@ -44722,41 +43392,22 @@ use panel_kinds_seed::*;
         drop(filter_table);
         drop(mix_bus);
 
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter Table".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
-                ("bus-effects", Value::List(buses)),
-            ],
-            true,
+        // The dropdown reads the bus effect device's `table-engine`.
+        let mut editor = panel_data_editor(&app, 0);
+        let engine = editor
+            .runtime_mut()
+            .eval_str("(let ((b (first (eseq.kinds/buses)))) (let ((d (first b.devices))) d.table-engine))")
+            .expect("read the bus Filter Table's engine");
+        assert_eq!(
+            engine,
+            Some(Value::String("Spectral".to_string())),
+            "bus-backed Filter Table panels need engine state for the dropdown",
         );
-        editor.runtime_mut().eval_str(
-            r#"
-            (def eseq.seq-core-state/selected-bus-name () "Mix")
-            (def seq-has-selection? () false)
-            (def eseq.browser/clear-editor-name! () nil)
-            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-            (def custom-instrument-synth-ui (inst) false)
-            (def custom-midi-fx-ui (fx) false)
-            (def custom-audio-fx-ui (fx) false)
-            (defstate eseq.seq-core-state/selected-bus 0)
-            "#,
-        ).expect("install bus Filter Table test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 0)")
+            .expect("select the mix bus");
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let fx_id = editor.buffers.iter()
             .find(|buffer| buffer.name == "*fx*")
@@ -44776,7 +43427,13 @@ use panel_kinds_seed::*;
         editor.runtime_mut()
             .invoke(on_change, vec![Value::String("Min Phase".to_string())])
             .expect("select bus Filter Table engine");
-        let commands = editor.drain_host_commands();
+        // The full editor's mixer asks for its own refresh.
+        let commands: Vec<_> = editor
+            .drain_host_commands()
+            .into_iter()
+            .filter(|command| !matches!(command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "refresh-mixer-ui"))
+            .collect();
         let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
             panic!("expected one bus Filter Table command, got {commands:?}");
         };
@@ -44818,7 +43475,7 @@ use panel_kinds_seed::*;
             &desc, 99,
         )];
 
-        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let bus_effects = bus_effect_panels(&app);
         let Value::List(buses) = bus_effects else {
             panic!("bus effects should be a list");
         };
@@ -44880,6 +43537,12 @@ use panel_kinds_seed::*;
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_modulator_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -44888,13 +43551,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_modulator_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -44915,7 +43571,7 @@ use panel_kinds_seed::*;
             .expect("install fx test helpers");
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("modulator panel fx lisp status after refresh: {status}");
@@ -44951,14 +43607,21 @@ use panel_kinds_seed::*;
         assert_finite_nonzero_rect(actions, "modulator action menu");
         assert_layout_inside(actions, header, "modulator action menu");
         // The envelope binds the instrument device's modulator-phase /
-        // -level (eseq.kinds), which replaced these fields.
+        // -level (eseq.kinds).
+        let instrument = editor
+            .runtime_mut()
+            .eval_str("(let ((s eseq.kinds/selection)) (eseq.effects.devices/instrument-of s.track))")
+            .expect("read the instrument device");
+        let Some(Value::Instance(instrument)) = instrument else {
+            panic!("the seeded track should have an instrument device: {instrument:?}");
+        };
         assert_eq!(
-            bound_field(curve.props.get("phase")).as_deref(),
-            Some("modulator-phase-0")
+            bound_instance(curve.props.get("phase")),
+            Some((instrument, "modulator-phase".to_string()))
         );
         assert_eq!(
-            bound_field(curve.props.get("level")).as_deref(),
-            Some("modulator-level-0")
+            bound_instance(curve.props.get("level")),
+            Some((instrument, "modulator-level".to_string()))
         );
         assert!(
             find_layout_node_by_widget_type(&layout, "fx-enabled-dot").is_some(),
@@ -45012,6 +43675,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -45020,13 +43689,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -45050,7 +43712,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("lego text readout fx lisp status after refresh: {status}");
@@ -45133,6 +43795,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(140, 20);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -45141,13 +43809,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -45171,7 +43832,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("ui-rack fx lisp status after refresh: {status}");
@@ -45280,6 +43941,12 @@ use panel_kinds_seed::*;
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(140, 20);
+        let panel_seed = PanelSeed {
+            instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+            effects: test_list(vec![]),
+            midi_effects: test_list(vec![]),
+            bus_effects: test_list(vec![]),
+        };
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -45288,13 +43955,6 @@ use panel_kinds_seed::*;
                 ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
             ],
             true,
         );
@@ -45318,7 +43978,7 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom instrument ui");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("ui-rack fx lisp status after refresh: {status}");
@@ -47779,7 +46439,7 @@ use panel_kinds_seed::*;
             "custom UI sources should load without diagnostics"
         );
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let app = test_app_for_track_visual_state(Arc::clone(&state));
         for (fx_name, expected_widget) in [
             ("arp", "knob-number"),
             ("beat-repeat", "knob-number"),
@@ -47789,14 +46449,12 @@ use panel_kinds_seed::*;
             ("spatial-harmonic-delay", "number-picker"),
         ] {
             state.pattern.track_params[0].set_midi_fx_chain(vec![fx_name.to_string()]);
-            let fx = match build_midi_effects_value(&state, 0, &selected_steps) {
-                Value::List(items) => items
-                    .first()
-                    .unwrap_or_else(|| panic!("{fx_name} should be present"))
-                    .borrow()
-                    .clone(),
-                other => panic!("expected MIDI FX list for {fx_name}, got {other:?}"),
-            };
+            seed_app_panels(&mut editor, &app, 0);
+            let fx = panel_dicts(
+                &mut editor,
+                "(eseq.effects.panel-data/fx-panel-of \
+                   (first (eseq.effects.panel-data/track-midi-effects (eseq.kinds/track 0))))",
+            );
             editor.runtime_mut().set_global_value("midi-fx-ui-test-fx", fx);
             let rendered = editor
                 .runtime_mut()
@@ -47890,17 +46548,29 @@ use panel_kinds_seed::*;
             .eval_str(&custom_ui_source)
             .expect("load custom MIDI FX UIs");
 
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        state.pattern.track_params[0].set_midi_fx_chain(vec!["spatial-harmonic-delay".to_string()]);
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let spatial_fx = match build_midi_effects_value(&state, 0, &selected_steps) {
-            Value::List(items) => items
-                .first()
-                .expect("spatial harmonic delay should be present")
-                .borrow()
-                .clone(),
-            other => panic!("expected MIDI FX list, got {other:?}"),
-        };
+        // A MIDI effect panel's dict as the stubs above read it: its name,
+        // slot and params (name, index, range, value).
+        let library = sequencer::lisp_host::load_midi_fx_descriptors();
+        let desc = (library.iter())
+            .find(|desc| desc.name.eq_ignore_ascii_case("spatial-harmonic-delay"))
+            .expect("spatial harmonic delay should be present");
+        let params = (desc.params.iter().enumerate())
+            .map(|(idx, param)| {
+                map_value([
+                    ("name", Value::String(param.name.clone())),
+                    ("idx", Value::Number(idx as f64)),
+                    ("min", Value::Number(f64::from(param.min))),
+                    ("max", Value::Number(f64::from(param.max))),
+                    ("value", Value::Number(f64::from(param.default))),
+                ])
+            })
+            .collect();
+        let spatial_fx = map_value([
+            ("name", Value::String(desc.name.clone())),
+            ("slot-idx", Value::Number(0.0)),
+            ("midi-fx", Value::Bool(true)),
+            ("params", test_list(params)),
+        ]);
         match &spatial_fx {
             Value::Map(map) => {
                 let params = map
@@ -47992,18 +46662,13 @@ use panel_kinds_seed::*;
             1, vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().eval_str(&build_custom_audio_fx_ui_source_with_overlay(Some((
             "spectral-tamer".to_string(), ui_path.display().to_string(), ui,
         )))).expect("load custom UI");
         let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
         projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
-        for idx in 0..desc.params.len() {
-            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
-        }
-        editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+        seed_app_panels(&mut editor, &projection_app, 0);
         editor.runtime_mut().eval_str(r#"(set-layout (list :buf "*fx*" :hide-status true))"#).unwrap();
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();

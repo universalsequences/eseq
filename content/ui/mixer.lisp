@@ -19,10 +19,7 @@
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
 
-;; Names other code calls by spelling: four positional shims
-;; (`track-color-r`/`-g`/`-b`, `track-collapsed-label`; COMPAT(eseq-0l17)
-;; below) take a track position for effects/track-panels.lisp, which paints
-;; the track-panel header with them, and `seq-ctrl-g` is the global Ctrl+G /
+;; Names other code calls by spelling: `seq-ctrl-g` is the global Ctrl+G /
 ;; Cmd+G dispatcher src/ui/input.rs evals by name.
 
 (import eseq.track-collapse)
@@ -44,9 +41,6 @@
         display-buses
         group-bus?
         main-bus
-        track-color-r
-        track-color-g
-        track-color-b
         select-track
         select-track-delete-target
         drop-sample-on-track
@@ -54,7 +48,6 @@
         drop-on-track
         drop-effect-on-bus
         launch-track-pattern
-        track-collapsed-label
         select-prev-channel
         select-next-channel
         delete-selected-track
@@ -259,13 +252,6 @@
 (def track-rgba (t muted alpha)
   (rgba (track-color-part t 0 muted) (track-color-part t 1 muted) (track-color-part t 2 muted)
         alpha))
-
-;; COMPAT(eseq-0l17): positional shims. Track i's color components, dimmed
-;; when muted (the track panel header paints itself with them;
-;; effects/track-panels.lisp); a stock blue when there is no track i.
-(def track-color-r (i muted) (track-color-part (track i) 0 muted))
-(def track-color-g (i muted) (track-color-part (track i) 1 muted))
-(def track-color-b (i muted) (track-color-part (track i) 2 muted))
 
 (def arm-color (rgba 0.95 0.20 0.18 1.0))
 
@@ -1225,10 +1211,9 @@
       (track-badge t (substring t.name 0 (name-chars 12)) (str "track-label-content-" t.index)
         :width (* 9.8 (clip-cell-scale)) :font-size 10 :h-align :left :v-align :center))))
 
-;; COMPAT(eseq-0l17): positional shim (effects/track-panels.lisp).
-(def track-collapsed-label (i)
-  (let ((t (track i)))
-    (str (+ i 1) " " (substring (if t t.name "") 0 3))))
+;; A collapsed strip's label: the track's number and the start of its name.
+(def collapsed-label (t)
+  (str (+ t.index 1) " " (substring t.name 0 3)))
 
 (def track-collapsed-strip (t)
   (track-frame t 4.7 (collapsed-strip-height) 2 10 (track-strip-props t)
@@ -1242,7 +1227,7 @@
       (track-label-box t (str "track-collapsed-label-" t.index) 3.65
         (if (= strip-rename.track t)
           (track-rename-input t "track-collapsed-rename-input-" 3.65 9)
-          (track-badge t (track-collapsed-label t.index)
+          (track-badge t (collapsed-label t)
             (str "track-collapsed-label-content-" t.index)))))))
 
 ;; ── Buses ──

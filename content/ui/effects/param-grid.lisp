@@ -76,7 +76,8 @@
                        (pc/fx-toggle-effect-value fx p)
                        (pc/fx-toggle-instrument-value p)))
               (if (get p :options)
-              (dropdown :value (pc/fx-param-text-value-for fx p)
+              (dropdown :value (pc/param-option-label fx p)
+                :value-index (pc/param-option-index fx p)
                 :options (get p :options)
                 :on-change (lambda (v) (pc/param-set-option fx p v))
                 :plock-active (if (pc/param-plock-active? fx p) 1 0)
@@ -297,7 +298,8 @@
                :height (compact-control-height) :gap 0.12 :align :center
         (label (compact-label p) :font-size 8.7 :width (compact-control-width)
                :color :dim :bg :transparent)
-        (dropdown :value (pc/fx-param-text-value-for fx p)
+        (dropdown :value (pc/param-option-label fx p)
+          :value-index (pc/param-option-index fx p)
           :options (get p :options)
           :on-change (lambda (v) (pc/param-set-option fx p v))
           :plock-active (if (pc/param-plock-active? fx p) 1 0)
@@ -384,7 +386,7 @@
                   (host-command
                     (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
                     (dict :slot-idx (get fx :slot-idx)
-                          :target-node-id (get fx :target-node-id)
+                          :target-node-id (dv/fx-node-id fx)
                           :updates (pc/effect-param-updates fx
                             (list (list attack-p (get env :attack)) (list decay-p (get env :decay))
                                   (list sustain-p (get env :sustain)) (list release-p (get env :release))))

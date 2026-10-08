@@ -222,7 +222,6 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
         "track-instrument-run-modes",
@@ -374,7 +373,6 @@ pub(crate) fn sync_track_mixer_state(
         "track-device-chains",
         build_track_device_chains_value(app, state),
     );
-    sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
         "track-instrument-run-modes",
@@ -404,7 +402,6 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
 
 pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
     sync_bus_mixer_control_state(rt, app);
-    rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
     rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(app));
 }
 

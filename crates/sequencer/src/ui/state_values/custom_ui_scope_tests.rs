@@ -21,6 +21,19 @@ fn custom_controls_keep_owners_across_step_selection() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.runtime_mut().register_reactive("SEQV", vec![], true);
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+        effects: test_list(vec![
+                    Value::Map(test_fx_map(
+                        "dimension-d-chorus",
+                        0,
+                        test_dimension_d_params(),
+                    )),
+                    Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
+                ]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![test_list(vec![])]),
+    };
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -40,23 +53,6 @@ fn custom_controls_keep_owners_across_step_selection() {
                 "bus-names",
                 test_list(vec![Value::String("Mix".to_string())]),
             ),
-            (
-                "effects",
-                test_list(vec![
-                    Value::Map(test_fx_map(
-                        "dimension-d-chorus",
-                        0,
-                        test_dimension_d_params(),
-                    )),
-                    Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
-                ]),
-            ),
-            ("midi-effects", test_list(vec![])),
-            (
-                "instrument-panel",
-                test_list(vec![Value::Map(test_instrument_map())]),
-            ),
-            ("bus-effects", test_list(vec![test_list(vec![])])),
         ],
         true,
     );
@@ -83,7 +79,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         .eval_str(&custom_audio_ui_source)
         .expect("load initial custom audio FX UI");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-    seed_panel_kinds(&mut editor);
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor
         .runtime_mut()
         .eval_str(&custom_instrument_ui_source)
@@ -214,7 +210,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "track-plocks", test_list(rows));
-        seed_panel_kinds(&mut editor);
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("selected control layout");

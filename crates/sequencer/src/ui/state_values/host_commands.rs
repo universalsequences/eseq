@@ -13,7 +13,6 @@ pub(crate) fn poll_pending_compile_status(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     fx_epoch: &Arc<AtomicUsize>,
     ui_epoch: &Arc<AtomicUsize>,
 ) {
@@ -22,38 +21,10 @@ pub(crate) fn poll_pending_compile_status(
         let rt = editor.runtime_mut();
         rt.set_reactive(
             "SEQ",
-            "effects",
-            if app.tracks.is_empty() {
-                Value::List(vec![])
-            } else {
-                build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps)
-            },
-        );
-        rt.set_reactive(
-            "SEQ",
-            "midi-effects",
-            if app.tracks.is_empty() {
-                Value::List(vec![])
-            } else {
-                build_midi_effects_value(&state, ct, &selected_steps)
-            },
-        );
-        rt.set_reactive(
-            "SEQ",
             "track-device-chains",
             build_track_device_chains_value(&app, &state),
         );
         rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(&app));
-        rt.set_reactive(
-            "SEQ",
-            "instrument-panel",
-            if app.tracks.is_empty() {
-                Value::List(vec![])
-            } else {
-                build_instrument_panel_value(&app, ct, &selected_steps)
-            },
-        );
-        sync_fx_param_binding_fields(rt, app, state, ct, selected_steps);
         rt.set_reactive(
             "SEQ",
             "step-has-plocks",

@@ -90,7 +90,6 @@ impl Harness {
             step_clipboard: Arc::new(Mutex::new(None)),
             ui_epoch: Arc::new(AtomicUsize::new(0)),
             fx_epoch: Arc::new(AtomicUsize::new(0)),
-            fx_value_epoch: Arc::new(AtomicUsize::new(0)),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
             active_delete_target: Arc::new(Mutex::new(None)),
             active_delete_target_version: Arc::new(AtomicUsize::new(0)),

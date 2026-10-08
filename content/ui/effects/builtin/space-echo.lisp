@@ -201,7 +201,7 @@
       (label "MODE SELECTOR" :font-size 8.0 :width 8.2 :color :dim :bg :transparent)
       (box :height 0.25)
       (mode-grid fx mode-p)
-      (label (get mode-p :text-value)
+      (label (eseq.effects.param-controls/fx-param-text-value-for fx mode-p)
         :font-size 8.5 :width 8.2 :color :delay-mode-readout-fg :bg :transparent))))
 
 ;; ── Echo section ──

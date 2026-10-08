@@ -54,7 +54,8 @@
 (def option-row (fx label-text p width)
   (h-stack :gap 0.22 :align :center
     (label label-text :font-size 8.5 :width 4.7 :color :dim :bg :transparent)
-    (dropdown :value (get p :text-value)
+    (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
       :options (get p :options)
       :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

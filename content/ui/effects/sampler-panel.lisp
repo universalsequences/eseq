@@ -224,7 +224,8 @@
   (subtree :key key
     (v-stack :align :center :gap 0.5
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
-      (dropdown :value (pc/fx-param-text-value-for false p)
+      (dropdown :value (pc/param-option-label false p)
+        :value-index (pc/param-option-index false p)
         :options (get p :options)
 
         :bg-color :sampler-dropdown-bg

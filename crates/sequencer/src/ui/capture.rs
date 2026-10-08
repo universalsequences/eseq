@@ -1351,7 +1351,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         track_collapsed: Arc::clone(&track_collapsed),
         ui_epoch: Arc::clone(&ui_epoch),
         fx_epoch,
-        fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations,
         step_print: Arc::new(Mutex::new(StepPrintState::default())),
         auto_follow_override_until,
@@ -1415,11 +1414,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             "SEQ",
             "selected-steps",
             build_selection_value(&selected_steps),
-        );
-        runtime.set_reactive(
-            "SEQ",
-            "bus-effects",
-            build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
         );
         sync_song_state(runtime, &app, &mut SongFrameState::default());
         runtime.run_reactive_cycle();

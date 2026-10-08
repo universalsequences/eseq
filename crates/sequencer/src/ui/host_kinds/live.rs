@@ -255,7 +255,6 @@ pub(crate) struct KindsHandles {
     pub(crate) track_collapsed: Arc<Mutex<Vec<bool>>>,
     pub(crate) ui_epoch: Arc<AtomicUsize>,
     pub(crate) fx_epoch: Arc<AtomicUsize>,
-    pub(crate) fx_value_epoch: Arc<AtomicUsize>,
     /// Its per-track p-lock revisions say a p-lock may have moved (the step
     /// p-lock render, `has-locks`: [`KindsHandles::plock_key`]).
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
@@ -290,7 +289,6 @@ impl KindsHandles {
             track_collapsed: shared.track_collapsed.clone(),
             ui_epoch: shared.ui_epoch.clone(),
             fx_epoch: shared.fx_epoch.clone(),
-            fx_value_epoch: shared.fx_value_epoch.clone(),
             ui_invalidations: shared.ui_invalidations.clone(),
             step_print: shared.step_print.clone(),
             auto_follow_override_until: shared.auto_follow_override_until.clone(),
@@ -318,7 +316,6 @@ impl KindsHandles {
             track_collapsed: Default::default(),
             ui_epoch: Default::default(),
             fx_epoch: Default::default(),
-            fx_value_epoch: Default::default(),
             ui_invalidations: Arc::new(UiInvalidationQueue::new()),
             step_print: Default::default(),
             auto_follow_override_until: Default::default(),
@@ -775,6 +772,7 @@ pub(super) fn live_value<S: KindStore>(
             match key {
                 f::DEVICE_PLAYHEAD => number(device.sampler.as_ref().map_or(0.0, |s| s.seconds())),
                 f::DEVICE_DELETE_TARGET => Value::Bool(device_delete_target(sources, &device)),
+                f::DEVICE_NODE_ID => device_node_id(sources, &device),
                 f::DEVICE_MOD_PHASES => {
                     panel::numbers(&device_mod_phases(sources, shared, &device))
                 }

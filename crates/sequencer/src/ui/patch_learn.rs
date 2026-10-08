@@ -123,7 +123,6 @@ pub(crate) fn poll_learn_job(
     app: &mut app::App,
     sessions: &mut EditSessionState,
     editor: &mut Editor,
-    current_track: usize,
 ) {
     if sessions.instrument_edit_session.is_none() {
         if let Some(pending) = sessions.pending_learn_job.take() {
@@ -131,9 +130,7 @@ pub(crate) fn poll_learn_job(
         }
         if sessions.learn_param_preview.is_some() && clear_learn_param_preview(
             app,
-            editor.runtime_mut(),
             &mut sessions.learn_param_preview,
-            current_track,
         ) {
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -181,10 +178,8 @@ pub(crate) fn poll_learn_job(
                 if let Some(values) = preview_values {
                     if let Err(error) = set_learn_param_preview(
                         app,
-                        rt,
                         &mut sessions.learn_param_preview,
                         preview_track,
-                        current_track,
                         &values,
                     ) {
                         pending.saw_host_error = true;
@@ -236,9 +231,7 @@ pub(crate) fn poll_learn_job(
     if clear_preview {
         clear_learn_param_preview(
             app,
-            editor.runtime_mut(),
             &mut sessions.learn_param_preview,
-            current_track,
         );
     }
     if dirty {
@@ -250,9 +243,7 @@ pub(crate) fn poll_learn_job(
 
 pub(crate) fn clear_learn_param_preview(
     app: &app::App,
-    rt: &mut Runtime,
     preview: &mut Option<LearnParamPreview>,
-    current_track: usize,
 ) -> bool {
     let Some(preview) = preview.take() else {
         return false;
@@ -260,26 +251,6 @@ pub(crate) fn clear_learn_param_preview(
     for param_idx in preview.param_indices {
         if let Some(value) = app.effective_instrument_param_value(preview.track, param_idx) {
             app.send_instrument_param(preview.track, param_idx, value);
-            if let Some(param) = app
-                .graph
-                .instrument_descriptors
-                .get(preview.track)
-                .and_then(|descriptor| descriptor.params.get(param_idx))
-            {
-                let value = Value::Number(f64::from(param.stored_to_user(value)));
-                rt.set_reactive(
-                    "SEQ",
-                    &instrument_param_value_field(preview.track, param_idx, &param.name),
-                    value.clone(),
-                );
-                if preview.track == current_track {
-                    rt.set_reactive(
-                        "SEQ",
-                        &fx_instrument_param_value_field(param_idx, &param.name),
-                        value,
-                    );
-                }
-            }
         }
     }
     true
@@ -287,14 +258,12 @@ pub(crate) fn clear_learn_param_preview(
 
 fn set_learn_param_preview(
     app: &app::App,
-    rt: &mut Runtime,
     preview: &mut Option<LearnParamPreview>,
     track: usize,
-    current_track: usize,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Result<(), String> {
     if preview.as_ref().is_some_and(|active| active.track != track) {
-        clear_learn_param_preview(app, rt, preview, current_track);
+        clear_learn_param_preview(app, preview);
     }
     let descriptor = app
         .graph
@@ -323,24 +292,8 @@ fn set_learn_param_preview(
         let stored = param.clamp(param.user_input_to_stored(*natural_value as f32));
         resolved.push((param_idx, stored, param.name.clone()));
     }
-    for (param_idx, stored, name) in &resolved {
-        let param_idx = *param_idx;
-        let stored = *stored;
+    for &(param_idx, stored, _) in &resolved {
         app.send_instrument_param(track, param_idx, stored);
-        let display_value = descriptor.params[param_idx].stored_to_user(stored);
-        let value = Value::Number(f64::from(display_value));
-        rt.set_reactive(
-            "SEQ",
-            &instrument_param_value_field(track, param_idx, name),
-            value.clone(),
-        );
-        if track == current_track {
-            rt.set_reactive(
-                "SEQ",
-                &fx_instrument_param_value_field(param_idx, name),
-                value,
-            );
-        }
     }
     let active = preview.get_or_insert_with(|| LearnParamPreview {
         track,
@@ -617,7 +570,7 @@ mod tests {
         take_learn_updates_through_epoch,
     };
     use crate::{
-        app, fx_instrument_param_value_field, instrument_param_value_field, Runtime, Value,
+        app, Runtime,
     };
     use sequencer::learn_job::{LearnEvent, LearnJobUpdate};
     use std::collections::BTreeMap;
@@ -653,21 +606,6 @@ mod tests {
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![descriptor];
         app
-    }
-
-    fn reactive_number(runtime: &Runtime, field: &str) -> f64 {
-        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
-            panic!("SEQ should be a map");
-        };
-        let value = seq
-            .get(field)
-            .unwrap_or_else(|| panic!("missing reactive field {field}"))
-            .borrow()
-            .clone();
-        let Value::Number(number) = value else {
-            panic!("reactive field {field} should be numeric");
-        };
-        number
     }
 
     #[test]
@@ -781,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn learn_preview_updates_knob_field_and_clear_restores_document_value() {
+    fn learn_preview_holds_its_values_and_leaves_the_document_value() {
         let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
         let cutoff_idx = descriptor
             .params
@@ -794,44 +732,31 @@ mod tests {
         app.state.pattern.instrument_slots[0]
             .defaults
             .set(cutoff_idx, seed_stored);
-        let field = instrument_param_value_field(0, cutoff_idx, &cutoff.name);
-        let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff.name);
-        let mut runtime = Runtime::new();
         let mut preview = None;
 
         set_learn_param_preview(
             &app,
-            &mut runtime,
             &mut preview,
-            0,
             0,
             &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
         )
         .unwrap();
-        assert!((reactive_number(&runtime, &field) - 1125.0).abs() < 0.01);
-        assert!((reactive_number(&runtime, &fx_field) - 1125.0).abs() < 0.01);
+        let active = preview.as_ref().expect("a preview");
+        assert_eq!(active.param_indices, vec![cutoff_idx]);
+        let held = active.stored_values[&cutoff_idx];
+        assert!((cutoff.stored_to_user(held) - 1125.0).abs() < 0.01);
         assert!((cutoff.stored_to_user(app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx))
             - 520.0)
             .abs()
             < 0.01, "preview must not mutate the saved instrument default");
 
-        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview, 0));
-        assert!((reactive_number(&runtime, &field) - 520.0).abs() < 0.01);
-        assert!((reactive_number(&runtime, &fx_field) - 520.0).abs() < 0.01);
-
-        runtime.set_reactive("SEQ", &fx_field, Value::Number(777.0));
-        set_learn_param_preview(
-            &app,
-            &mut runtime,
-            &mut preview,
-            0,
-            1,
-            &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
-        )
-        .unwrap();
-        assert_eq!(reactive_number(&runtime, &fx_field), 777.0);
-        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview, 1));
-        assert_eq!(reactive_number(&runtime, &fx_field), 777.0);
+        assert!(clear_learn_param_preview(&app, &mut preview));
+        assert!(preview.is_none());
+        assert!(!clear_learn_param_preview(&app, &mut preview), "nothing left to clear");
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx),
+            seed_stored
+        );
     }
 
     #[test]
@@ -847,13 +772,10 @@ mod tests {
         app.state.pattern.instrument_slots[0]
             .defaults
             .set(cutoff_idx, cutoff.user_input_to_stored(520.0));
-        let mut runtime = Runtime::new();
         let mut preview = None;
         set_learn_param_preview(
             &app,
-            &mut runtime,
             &mut preview,
-            0,
             0,
             &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
         )

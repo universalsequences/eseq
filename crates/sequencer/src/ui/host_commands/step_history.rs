@@ -1545,26 +1545,12 @@ pub(super) fn handle(
             if !changed {
                 return;
             }
-            // Refresh the clicked strip without changing the selected track's
-            // parameter projection. Mixer controls may belong to any track.
-            if target == "rack-macro" || target == "rack-slot-param" {
-                let display_step = if track == selected_track {
-                    displayed_plock_step(&state, track, selected_plock_step(&selected_steps))
-                } else {
-                    None
-                };
-                if target == "rack-macro" {
-                    sync_rack_macro_value_fields(editor.runtime_mut(), &app, track, display_step);
-                } else {
-                    sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, track, display_step);
-                }
-            }
             let track = selected_track;
             // Same refresh arms the per-step clear uses, plus the automation
             // presence field so the knob's dot goes out with the locks.
             {
                 let rt = editor.runtime_mut();
-                sync_instrument_plock_presence_display_fields(rt, &state, &app, track);
+                sync_instrument_plock_presence_fields(rt, &state, &app.graph.effect_descriptors, track);
                 rt.run_reactive_cycle();
             }
             editor.refresh_runtime_side_effects();
@@ -1886,7 +1872,6 @@ mod tests {
                 step_clipboard: Arc::new(Mutex::new(None)),
                 ui_epoch: ui_epoch.clone(),
                 fx_epoch: Arc::new(AtomicUsize::new(0)),
-                fx_value_epoch: Arc::new(AtomicUsize::new(0)),
                 ui_invalidations: ui_invalidations.clone(),
                 active_delete_target: active_delete_target.clone(),
                 active_delete_target_version: active_delete_target_version.clone(),

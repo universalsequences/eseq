@@ -407,21 +407,15 @@ pub(crate) fn run_event_loop(
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
-        prev_process_effective_params_version: shared.state.process_effective_params_version(),
-        prev_process_effective_params: Default::default(),
         prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
-        prev_fx_epoch: 0,
-        prev_fx_value_epoch: 0,
         prev_sound_binding_epoch: 0,
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
         track_param_sync_revision: None,
-        fx_param_sync_revision: None,
         prev_instrument_active_notes: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
-        prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
         // Force one complete track/rack publication on the first frame; an
@@ -964,17 +958,6 @@ pub(crate) fn run_event_loop(
                                     "track-names",
                                     build_track_names(&track_names),
                                 );
-                                if !app.tracks.is_empty() {
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "instrument-panel",
-                                        build_instrument_panel_value(
-                                            &app,
-                                            replay_track,
-                                            &shared.selected_steps,
-                                        ),
-                                    );
-                                }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 if topology_changed {
@@ -1059,17 +1042,6 @@ pub(crate) fn run_event_loop(
                             had_selection
                         };
                         if cleared_neural_selection {
-                            let selection = shared.selected_neural_neurons.lock().unwrap().clone();
-                            let track = shared.current_track.load(Ordering::Relaxed);
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                editor.runtime_mut(),
-                                &app,
-                                &shared.state,
-                                track,
-                                &shared.selected_steps,
-                                Some(&selection),
-                            );
-                            frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             return Ok(HostLoopControl::WaitUntil(Instant::now()));
@@ -1616,9 +1588,6 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
                             rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
                             sync_track_mixer_empty_state(rt);
-                            rt.set_reactive("SEQ", "effects", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
@@ -1637,39 +1606,9 @@ pub(crate) fn run_event_loop(
                             sync_track_mixer_state(rt, &app, &shared.state);
                             sync_track_peak_fields(rt, &meters.cached_track_peak_levels);
                             sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                            rt.set_reactive(
-                                "SEQ",
-                                "effects",
-                                build_effects_value(
-                                    &shared.state,
-                                    ct,
-                                    &app.graph.effect_descriptors,
-                                    &shared.selected_steps,
-                                ),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "midi-effects",
-                                build_midi_effects_value(&shared.state, ct, &shared.selected_steps),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "instrument-panel",
-                                build_instrument_panel_value(&app, ct, &shared.selected_steps),
-                            );
                             *shared.accumulator_names.lock().unwrap() =
                                 build_accumulator_names(&app);
-                            let selected_neural_snapshot =
-                                shared.selected_neural_neurons.lock().unwrap().clone();
                             sync_track_params(rt, &shared.state, ct, &shared.selected_steps);
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                rt,
-                                &app,
-                                &shared.state,
-                                ct,
-                                &shared.selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -1806,7 +1745,6 @@ pub(crate) fn run_event_loop(
                                 track,
                                 preset,
                                 &shared.current_track,
-                                &shared.selected_steps,
                                 &shared.ui_epoch,
                             );
                         }
@@ -1840,7 +1778,6 @@ pub(crate) fn run_event_loop(
                                 track,
                                 preset,
                                 &shared.current_track,
-                                &shared.selected_steps,
                                 &shared.ui_epoch,
                             );
                         }
@@ -1919,15 +1856,6 @@ pub(crate) fn run_event_loop(
                         sessions.editor_mode = None;
                         let rt = editor.runtime_mut();
                         present_editor_closed(rt);
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(
-                                &app,
-                                shared.current_track.load(Ordering::Relaxed),
-                                &shared.selected_steps,
-                            ),
-                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2029,31 +1957,9 @@ pub(crate) fn run_event_loop(
                             sessions.editor_mode = None;
                             let rt = editor.runtime_mut();
                             present_editor_closed(rt);
-                            match session.target {
-                                EffectEditTarget::Track { track, .. } => {
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "effects",
-                                        build_effects_value(
-                                            &shared.state,
-                                            track,
-                                            &app.graph.effect_descriptors,
-                                            &shared.selected_steps,
-                                        ),
-                                    );
-                                }
-                                EffectEditTarget::Bus { .. } => {
-                                    *shared.bus_state.lock().unwrap() = app.buses.clone();
-                                    sync_bus_mixer_state(rt, &app);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "bus-effects",
-                                        build_bus_effects_value_for_selection(
-                                            &app,
-                                            Some(&shared.selected_steps),
-                                        ),
-                                    );
-                                }
+                            if let EffectEditTarget::Bus { .. } = session.target {
+                                *shared.bus_state.lock().unwrap() = app.buses.clone();
+                                sync_bus_mixer_state(rt, &app);
                             }
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
@@ -2126,15 +2032,6 @@ pub(crate) fn run_event_loop(
                                         replan_after_preview = session.learn_target_path.is_some();
                                         let rt = editor.runtime_mut();
                                         present_editor(rt, |e| e.error.clear());
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "instrument-panel",
-                                            build_instrument_panel_value(
-                                                &app,
-                                                shared.current_track.load(Ordering::Relaxed),
-                                                &shared.selected_steps,
-                                            ),
-                                        );
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2229,32 +2126,10 @@ pub(crate) fn run_event_loop(
                                             session.visible_revision_valid = true;
                                             let rt = editor.runtime_mut();
                                             present_editor(rt, |e| e.error.clear());
-                                            match session.target {
-                                                EffectEditTarget::Track { track, .. } => {
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "effects",
-                                                        build_effects_value(
-                                                            &shared.state,
-                                                            track,
-                                                            &app.graph.effect_descriptors,
-                                                            &shared.selected_steps,
-                                                        ),
-                                                    );
-                                                }
-                                                EffectEditTarget::Bus { .. } => {
-                                                    *shared.bus_state.lock().unwrap() =
-                                                        app.buses.clone();
-                                                    sync_bus_mixer_state(rt, &app);
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "bus-effects",
-                                                        build_bus_effects_value_for_selection(
-                                                            &app,
-                                                            Some(&shared.selected_steps),
-                                                        ),
-                                                    );
-                                                }
+                                            if let EffectEditTarget::Bus { .. } = session.target {
+                                                *shared.bus_state.lock().unwrap() =
+                                                    app.buses.clone();
+                                                sync_bus_mixer_state(rt, &app);
                                             }
                                             rt.run_reactive_cycle();
                                             editor.refresh_runtime_side_effects();
@@ -2292,7 +2167,6 @@ pub(crate) fn run_event_loop(
             &mut app,
             &mut sessions,
             &mut editor,
-            shared.current_track.load(Ordering::Relaxed),
         );
         // Jev ghost-cable suggestions (eseq-c049): the patcher render pass
         // queues one request per newly selected node. Hold each until the

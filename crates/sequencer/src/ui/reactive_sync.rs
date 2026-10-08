@@ -89,29 +89,8 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
     sync_bus_mixer_state(rt, app);
     sync_track_peak_fields(rt, cached_track_peak_levels);
     sync_bus_peak_fields(rt, cached_bus_peak_levels);
-    rt.set_reactive(
-        "SEQ",
-        "effects",
-        build_effects_value(
-            state,
-            selected_track,
-            &app.graph.effect_descriptors,
-            selected_steps,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "midi-effects",
-        build_midi_effects_value(state, selected_track, selected_steps),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected_track, selected_steps),
-    );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, state, selected_track, selected_steps);
-    sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
@@ -142,39 +121,15 @@ pub(super) fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     }
 }
 
-pub(super) fn refresh_instrument_panel_reactive(
-    editor: &mut Editor,
-    app: &app::App,
-    track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    ui_epoch: &AtomicUsize,
-) {
-    let selected_step = selected_plock_step(selected_steps);
-    let display_step = displayed_plock_step(&app.state, track, selected_step);
-    let rt = editor.runtime_mut();
-    let mut dirty = sync_all_rack_slot_selection_binding_fields(rt, app);
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(app, track, selected_steps),
-        )
-        .effects_dirty;
-    dirty |= sync_rack_macro_value_fields(rt, app, track, display_step);
-    dirty |= sync_all_rack_macro_name_fields(rt, app);
-    dirty |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
-    if dirty {
-        editor.refresh_runtime_side_effects();
-        editor.mark_needs_redraw();
-    }
+/// After a device panel edit the panels read through the host kinds: bump
+/// `ui_epoch`, so the kinds' model sync carries it this tick.
+pub(super) fn refresh_instrument_panel_reactive(ui_epoch: &AtomicUsize) {
     ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(super) fn apply_rack_macro_rename_host_command(
-    editor: &mut Editor,
     app: &mut app::App,
     map: &HashMap<String, Rc<RefCell<Value>>>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
 ) {
     let (Some(track), Some(id), Some(name)) = (
@@ -186,7 +141,7 @@ pub(super) fn apply_rack_macro_rename_host_command(
     ) else { return; };
     let Some(id) = sequencer::sequencer::RackMacroId::from_index(id) else { return; };
     let name = sequencer::sequencer::RackMacroField::Name(name);
-    apply_rack_macro_edit_reactive(editor, app, track, id, name, selected_steps, ui_epoch);
+    apply_rack_macro_edit_reactive(app, track, id, name, ui_epoch);
 }
 
 /// The rack panel's rack macro edit (`set-rack-macro-value`,
@@ -195,17 +150,13 @@ pub(super) fn apply_rack_macro_rename_host_command(
 /// (`App::apply_rack_macro_edit`: a drag joins one entry), then its
 /// refresh; returns whether the model changed.
 pub(super) fn apply_rack_macro_edit_reactive(
-    editor: &mut Editor,
     app: &mut app::App,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     field: sequencer::sequencer::RackMacroField,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
 ) -> bool {
-    let fields = (selected_steps, ui_epoch);
-    let changed =
-        rack_macro_edit_reactive(editor, app, (track, id), field, fields, |app, field| {
+    let changed = rack_macro_edit_reactive(app, field, ui_epoch, |app, field| {
             let outcome = app.apply_rack_macro_edit(track, id, field);
             outcome
                 .map(|outcome| outcome.changed())
@@ -214,123 +165,66 @@ pub(super) fn apply_rack_macro_edit_reactive(
     changed.unwrap_or(false)
 }
 
-/// A rack macro edit: `field` of rack macro `id` of `track`, recorded by
+/// A rack macro edit, recorded by
 /// `record` (which returns whether the model changed: the rack panel's
 /// plain `App::apply_rack_macro_edit`, or a script's `ScriptEdit`), then
 /// its refresh (`rack_macro_edit_applied`) when it did. Shared by the rack
 /// panel's commands and the host kinds' setters.
 pub(super) fn rack_macro_edit_reactive(
-    editor: &mut Editor,
     app: &mut app::App,
-    (track, id): (usize, sequencer::sequencer::RackMacroId),
     field: sequencer::sequencer::RackMacroField,
-    (selected_steps, ui_epoch): (&Arc<Mutex<HashSet<usize>>>, &AtomicUsize),
+    ui_epoch: &AtomicUsize,
     record: impl FnOnce(&mut app::App, sequencer::sequencer::RackMacroField) -> Result<bool, String>,
 ) -> Result<bool, String> {
     let changed = record(app, field.clone())?;
     if changed {
-        rack_macro_edit_applied(editor, app, track, id, &field, selected_steps, ui_epoch);
+        rack_macro_edit_applied(&field, ui_epoch);
     }
     Ok(changed)
 }
 
-/// Publish what an edit of `field` of rack macro `id` of `track` changed:
-/// a name its text field alone (a label edit cannot change rack topology,
-/// locks or DSP; an epoch bump resyncs the entire project), a value the
-/// macro's and its targets' value fields, a mapping the instrument panel.
+/// Refresh what an edit of a rack macro's `field` changed: a mapping's
+/// range or curve bumps `ui_epoch` (the mapping rows are model fields); a
+/// name or value nothing (the panels bind the rack macro, which the host
+/// kinds push).
 fn rack_macro_edit_applied(
-    editor: &mut Editor,
-    app: &app::App,
-    track: usize,
-    id: sequencer::sequencer::RackMacroId,
     field: &sequencer::sequencer::RackMacroField,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
 ) {
     use sequencer::sequencer::RackMacroField;
     match field {
-        RackMacroField::Name(_) => {
-            let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
-            flush_reactive_display_edit(editor, dirty);
-        }
-        RackMacroField::Value(_) => {
-            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps);
-        }
+        // The rack panel binds the rack macro's name and value (the host
+        // kinds push them).
+        RackMacroField::Name(_) | RackMacroField::Value(_) => {}
         RackMacroField::Range { .. } | RackMacroField::Curve { .. } => {
-            refresh_instrument_panel_reactive(editor, app, track, selected_steps, ui_epoch);
+            refresh_instrument_panel_reactive(ui_epoch);
         }
     }
 }
 
-pub(super) fn refresh_rack_macro_value_reactive(
-    editor: &mut Editor,
-    app: &app::App,
-    track: usize,
-    id: sequencer::sequencer::RackMacroId,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) {
-    let display_step = displayed_plock_step(&app.state, track, selected_plock_step(selected_steps));
-    let rt = editor.runtime_mut();
-    let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
-    dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
-    // The macro knob and every mapped target readout are bound to the value
-    // fields written above; a per-event `ui_epoch` bump here resynced the
-    // whole UI per mouse move (eseq-lf72).
-    flush_reactive_display_edit(editor, dirty);
-}
-
 /// After a rack macro p-lock edit (the rack panel's `set-rack-macro-plock`,
-/// the host kinds' `lock-rack-macro!` / `unlock-rack-macro!`): the macro's
-/// and its targets' value fields. Same policy as
-/// `refresh_rack_direct_param_reactive`: the macro knob and its mapped
-/// targets repaint through bound value fields, so only a write that moves
-/// the shown step's p-lock rows (`RowSetChanged`: a first lock there, or a
-/// clear) runs the epoch-driven resync (the host kinds rebuild the step
-/// panel's rows, `selection.plock-rows`, from the lock's invalidation). A macro is
-/// always continuous, so the *fx* tree never needs a structural
-/// (`fx_epoch`) rebuild for it.
+/// the host kinds' `lock-rack-macro!` / `unlock-rack-macro!`). Same policy
+/// as `refresh_rack_direct_param_reactive`: the macro knob and its mapped
+/// targets bind their instances (the host kinds push their values), so only
+/// a write that moves the shown step's p-lock rows (`RowSetChanged`: a
+/// first lock there, or a clear) runs the epoch-driven resync (the host
+/// kinds rebuild the step panel's rows, `selection.plock-rows`, from the
+/// lock's invalidation). A macro is always continuous, so it never bumps
+/// `fx_epoch`.
 pub(super) fn refresh_rack_macro_plock_reactive(
-    editor: &mut Editor,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    id: sequencer::sequencer::RackMacroId,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
     plock_rows: RackPlockRowsSync,
 ) {
-    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
-    let rt = editor.runtime_mut();
-    let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
-    dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
-    flush_reactive_display_edit(editor, dirty);
     if plock_rows == RackPlockRowsSync::RowSetChanged {
         ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum RackDirectDisplayTarget {
-    SlotParam {
-        slot_idx: usize,
-        param: RackSlotParam,
-    },
-    InstrumentParam {
-        slot_idx: usize,
-        param_idx: usize,
-    },
-    EffectParam {
-        rack_slot: usize,
-        effect_slot: usize,
-        param_idx: usize,
-    },
-}
-
 /// What a rack direct-param edit owes the *step* p-lock surfaces.
 ///
 /// Mirrors the `set-instrument-plock` policy (instrument_params.rs): a
-/// continuous knob drag is fully covered by the bound per-param value field,
-/// so only the FIRST write of a lock in a gesture — the one event that can
+/// knob drag repaints through the param it binds (the host kinds push its
+/// value), so only the FIRST write of a lock in a gesture — the one event that can
 /// change the *step* row set and light the step-grid presence tick — pays for
 /// the presence sync and one `ui_epoch` resync.
 /// Bumping the epochs on every drag event rebuilt the whole *fx* rack panel
@@ -339,7 +233,7 @@ pub(super) enum RackDirectDisplayTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RackPlockRowsSync {
     /// Base value edit, or a later drag event of a lock that already existed:
-    /// the bound value field alone repaints the knob and the LOCK readout.
+    /// the bound param alone repaints the knob and the LOCK readout.
     Unchanged,
     /// This write can add a *step* row / presence tick: republish once.
     RowSetChanged,
@@ -357,81 +251,22 @@ impl RackPlockRowsSync {
     }
 }
 
+/// After a rack direct-param edit (a slot strip control, a slot
+/// instrument or effect param): the rack panel binds the param (the host
+/// kinds push its value), so only a lock's first write (`RowSetChanged`)
+/// republishes the p-lock presence lists and resyncs once.
 pub(super) fn refresh_rack_direct_param_reactive(
     editor: &mut Editor,
     app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
-    target: RackDirectDisplayTarget,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_rows: RackPlockRowsSync,
     ui_epoch: &AtomicUsize,
 ) {
-    refresh_rack_direct_params_reactive(
-        editor,
-        app,
-        state,
-        track,
-        &[target],
-        selected_steps,
-        plock_rows,
-        ui_epoch,
-    );
-}
-
-/// Publish every value of a multi-parameter gesture before flushing readers.
-/// EQ curves must not rerender with only frequency or gain updated.
-pub(super) fn refresh_rack_direct_params_reactive(
-    editor: &mut Editor,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    targets: &[RackDirectDisplayTarget],
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    plock_rows: RackPlockRowsSync,
-    ui_epoch: &AtomicUsize,
-) {
-    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
-    let rt = editor.runtime_mut();
-    let mut dirty = false;
-    for target in targets {
-        dirty |= match *target {
-            RackDirectDisplayTarget::SlotParam { slot_idx, param } => {
-                sync_rack_slot_control_value_field(rt, app, track, slot_idx, param, display_step)
-            }
-            RackDirectDisplayTarget::InstrumentParam {
-                slot_idx,
-                param_idx,
-            } => sync_rack_slot_instrument_param_value_field(
-                rt,
-                app,
-                track,
-                slot_idx,
-                param_idx,
-                display_step,
-            ),
-            RackDirectDisplayTarget::EffectParam {
-                rack_slot,
-                effect_slot,
-                param_idx,
-            } => sync_rack_slot_effect_param_value_field(
-                rt,
-                app,
-                track,
-                rack_slot,
-                effect_slot,
-                param_idx,
-                display_step,
-            ),
-        };
-    }
     if plock_rows == RackPlockRowsSync::RowSetChanged {
         // Step-grid tick, expanded-lane tick, variant tint: the surfaces the
         // per-event `ui_epoch` bump used to refresh for free.
-        dirty |= sync_instrument_plock_presence_display_fields(rt, state, app, track);
-    }
-    flush_reactive_display_edit(editor, dirty);
-    if plock_rows == RackPlockRowsSync::RowSetChanged {
+        sync_instrument_plock_presence_display(editor, app, state, track);
         // Once per gesture (the first lock write), never per drag event.
         ui_epoch.fetch_add(1, Ordering::Relaxed);
     }
@@ -440,7 +275,6 @@ pub(super) fn refresh_rack_direct_params_reactive(
 pub(super) fn apply_rack_macro_host_command(
     name: &str,
     map: &HashMap<String, Rc<RefCell<Value>>>,
-    editor: &mut Editor,
     app: &mut app::App,
     state: &Arc<SequencerState>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -457,12 +291,10 @@ pub(super) fn apply_rack_macro_host_command(
         "set-rack-macro-value" => {
             let value = sequencer::sequencer::RackMacroField::Value(value.clamp(0.0, 1.0));
             return apply_rack_macro_edit_reactive(
-                editor,
                 app,
                 track,
                 id,
                 value,
-                selected_steps,
                 ui_epoch,
             );
         }
@@ -499,12 +331,6 @@ pub(super) fn apply_rack_macro_host_command(
                 return false;
             }
             refresh_rack_macro_plock_reactive(
-                editor,
-                app,
-                state,
-                track,
-                id,
-                selected_steps,
                 ui_epoch,
                 RackPlockRowsSync::for_plock_write(plock_row_exists),
             );
@@ -514,26 +340,18 @@ pub(super) fn apply_rack_macro_host_command(
     true
 }
 
-pub(super) fn sync_rack_slot_instrument_authoring_display(
+/// After an instrument p-lock edit (a track's or a drum rack slot's): the
+/// legacy p-lock presence lists a lock write can change (the step grids read
+/// `step.plocked` / `lock-kind`, which the host kinds push; the panels bind
+/// the param's `value`).
+pub(super) fn sync_instrument_plock_presence_display(
     editor: &mut Editor,
     app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
-    let rt = editor.runtime_mut();
-    let mut dirty = rt
-        .set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(app, track, selected_steps),
-        )
-        .effects_dirty;
-    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
-    dirty |= sync_rack_macro_value_fields(rt, app, track, display_step);
-    dirty |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
-    dirty |= sync_instrument_plock_presence_fields(
-        rt,
+    let dirty = sync_instrument_plock_presence_fields(
+        editor.runtime_mut(),
         state,
         &app.graph.effect_descriptors,
         track,
@@ -1003,184 +821,6 @@ pub(super) fn write_selected_neural_effect_plock(
     })
 }
 
-pub(super) struct InstrumentParamDisplaySync<'a> {
-    pub(super) app: &'a app::App,
-    pub(super) state: &'a Arc<SequencerState>,
-    pub(super) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
-    pub(super) selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    pub(super) track: usize,
-    /// The track the *fx* panel is showing. `track` may name another one, and
-    /// the current-track-relative `fx-instrument-param-*` fields must only be
-    /// published when the two match (as in `apply_ui_invalidations`).
-    pub(super) current_track_idx: usize,
-    pub(super) param_idx: usize,
-    pub(super) display_step: Option<usize>,
-    pub(super) sync_plock_presence: bool,
-    pub(super) sync_sampler_times: bool,
-}
-
-/// Republish the legacy p-lock *presence* lists an instrument p-lock write can
-/// change (the step grids read `step.plocked` / `lock-kind`, which the host
-/// kinds push).
-pub(super) fn sync_instrument_plock_presence_display_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    track: usize,
-) -> bool {
-    sync_instrument_plock_presence_fields(rt, state, &app.graph.effect_descriptors, track)
-}
-
-pub(super) fn sync_instrument_param_authoring_display(
-    editor: &mut Editor,
-    sync: InstrumentParamDisplaySync<'_>,
-) {
-    let mut ui_dirty = false;
-    if sync.sync_plock_presence {
-        ui_dirty |= sync_instrument_plock_presence_display_fields(
-            editor.runtime_mut(),
-            sync.state,
-            sync.app,
-            sync.track,
-        );
-    }
-    ui_dirty |= if sync.track == sync.current_track_idx {
-        sync_fx_instrument_param_value_field_with_neural_selection(
-            editor.runtime_mut(),
-            sync.app,
-            sync.track,
-            sync.param_idx,
-            sync.display_step,
-            Some(sync.selection),
-        )
-    } else {
-        sync_instrument_param_value_field_with_neural_selection(
-            editor.runtime_mut(),
-            sync.app,
-            sync.track,
-            sync.param_idx,
-            sync.display_step,
-            Some(sync.selection),
-        )
-    };
-    if sync.sync_sampler_times && (sync.param_idx == 2 || sync.param_idx == 3) {
-        ui_dirty |= sync_sampler_selection_time_fields(
-            editor.runtime_mut(),
-            sync.app,
-            sync.track,
-            sync.display_step,
-        );
-    }
-    flush_reactive_display_edit(editor, ui_dirty);
-}
-
-pub(super) struct EffectParamDisplaySync<'a> {
-    pub(super) state: &'a Arc<SequencerState>,
-    pub(super) effect_descriptors: &'a [Vec<sequencer::effects::EffectDescriptor>],
-    pub(super) app: &'a app::App,
-    pub(super) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
-    pub(super) selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    pub(super) track: usize,
-    pub(super) slot_idx: usize,
-    pub(super) param_idx: usize,
-    pub(super) display_step: Option<usize>,
-}
-
-pub(super) fn sync_effect_param_authoring_display(
-    editor: &mut Editor,
-    sync: EffectParamDisplaySync<'_>,
-) {
-    let mut ui_dirty = false;
-    ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
-        editor.runtime_mut(),
-        sync.app,
-        sync.track,
-        sync.slot_idx,
-        sync.param_idx,
-        sync.display_step,
-        Some(sync.selection),
-    );
-    flush_reactive_display_edit(editor, ui_dirty);
-}
-
-pub(super) fn sync_instrument_param_batch_display(
-    editor: &mut Editor,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    track: usize,
-    current_track_idx: usize,
-    param_indices: &[usize],
-    display_step: Option<usize>,
-    plocks_changed: bool,
-) {
-    let mut ui_dirty = false;
-    if plocks_changed {
-        ui_dirty |= sync_instrument_plock_presence_fields(
-            editor.runtime_mut(),
-            state,
-            &app.graph.effect_descriptors,
-            track,
-        );
-    }
-    // A batch can name any track; only the current one owns the visible *fx*
-    // panel's current-track-relative fields (cf. `apply_ui_invalidations`).
-    let publish_fx_relative = track == current_track_idx;
-    for &param_idx in param_indices {
-        ui_dirty |= if publish_fx_relative {
-            sync_fx_instrument_param_value_field_with_neural_selection(
-                editor.runtime_mut(),
-                app,
-                track,
-                param_idx,
-                display_step,
-                Some(selection),
-            )
-        } else {
-            sync_instrument_param_value_field_with_neural_selection(
-                editor.runtime_mut(),
-                app,
-                track,
-                param_idx,
-                display_step,
-                Some(selection),
-            )
-        };
-    }
-    if param_indices
-        .iter()
-        .any(|param_idx| *param_idx == 2 || *param_idx == 3)
-    {
-        ui_dirty |=
-            sync_sampler_selection_time_fields(editor.runtime_mut(), app, track, display_step);
-    }
-    flush_reactive_display_edit(editor, ui_dirty);
-}
-
-pub(super) fn sync_effect_param_batch_display(
-    editor: &mut Editor,
-    app: &app::App,
-    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    track: usize,
-    slot_idx: usize,
-    param_indices: &[usize],
-    display_step: Option<usize>,
-) {
-    let mut ui_dirty = false;
-    for &param_idx in param_indices {
-        ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
-            editor.runtime_mut(),
-            app,
-            track,
-            slot_idx,
-            param_idx,
-            display_step,
-            Some(selection),
-        );
-    }
-    flush_reactive_display_edit(editor, ui_dirty);
-}
-
 pub(super) fn flush_reactive_display_edit(editor: &mut Editor, dirty: bool) {
     if dirty {
         editor.runtime_mut().run_reactive_cycle();
@@ -1491,8 +1131,6 @@ pub(super) fn apply_ui_invalidations(
                                 track,
                                 selected_steps,
                             );
-                            needs_reactive_cycle |=
-                                sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                         }
                         needs_reactive_cycle |= rt
                             .set_reactive(
@@ -1630,34 +1268,13 @@ pub(super) fn apply_ui_invalidations(
                 }
             }
             UiInvalidation::Instrument { track, change } => {
-                let display_step =
-                    displayed_plock_step(state, track, selected_plock_step(selected_steps));
                 match change {
-                    InstrumentInvalidation::Param { param } => {
-                        needs_reactive_cycle |= if track == current_track_idx {
-                            sync_fx_instrument_param_value_field(
-                                rt,
-                                app,
-                                track,
-                                param,
-                                display_step,
-                            )
-                        } else {
-                            sync_instrument_param_value_field(rt, app, track, param, display_step)
-                        };
-                    }
-                    InstrumentInvalidation::Plock { param } => {
-                        needs_reactive_cycle |= if track == current_track_idx {
-                            sync_fx_instrument_param_value_field(
-                                rt,
-                                app,
-                                track,
-                                param,
-                                display_step,
-                            )
-                        } else {
-                            sync_instrument_param_value_field(rt, app, track, param, display_step)
-                        };
+                    // The panels bind the instrument's params (the host kinds
+                    // push their values); a lock moves the presence lists.
+                    InstrumentInvalidation::Param { .. }
+                    | InstrumentInvalidation::BaseNote
+                    | InstrumentInvalidation::SamplerSelectionTime => {}
+                    InstrumentInvalidation::Plock { .. } => {
                         if track == current_track_idx {
                             needs_reactive_cycle |= sync_instrument_plock_presence_fields(
                                 rt,
@@ -1667,24 +1284,8 @@ pub(super) fn apply_ui_invalidations(
                             );
                         }
                     }
-                    InstrumentInvalidation::BaseNote => {
-                        needs_reactive_cycle |= if track == current_track_idx {
-                            sync_fx_instrument_base_note_value_field(rt, app, track)
-                        } else {
-                            sync_instrument_base_note_value_field(rt, app, track)
-                        };
-                    }
-                    InstrumentInvalidation::SamplerSelectionTime => {
-                        needs_reactive_cycle |=
-                            sync_sampler_selection_time_fields(rt, app, track, display_step);
-                    }
                     InstrumentInvalidation::PanelTopology | InstrumentInvalidation::Analysis => {
                         if fx_visible && track == current_track_idx {
-                            rt.set_reactive(
-                                "SEQ",
-                                "instrument-panel",
-                                build_instrument_panel_value(app, track, selected_steps),
-                            );
                             needs_reactive_cycle = true;
                         }
                     }
@@ -1693,18 +1294,7 @@ pub(super) fn apply_ui_invalidations(
                 }
             }
             UiInvalidation::TrackFx { track, change } => match change {
-                TrackFxInvalidation::Param { slot, param }
-                | TrackFxInvalidation::Plock { slot, param } => {
-                    let display_step =
-                        displayed_plock_step(state, track, selected_plock_step(selected_steps));
-                    needs_reactive_cycle |= sync_track_effect_param_value_field(
-                        rt,
-                        app,
-                        track,
-                        slot,
-                        param,
-                        display_step,
-                    );
+                TrackFxInvalidation::Param { .. } | TrackFxInvalidation::Plock { .. } => {
                     if track == current_track_idx {
                         needs_reactive_cycle |= rt
                             .set_reactive(
@@ -1717,46 +1307,22 @@ pub(super) fn apply_ui_invalidations(
                 }
                 TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
                     if fx_visible && track == current_track_idx {
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                selected_steps,
-                            ),
-                        );
                         needs_reactive_cycle = true;
                     }
                 }
             },
             UiInvalidation::MidiFx { track, change } => match change {
-                MidiFxInvalidation::Param { slot, param } => {
-                    let display_step =
-                        displayed_plock_step(state, track, selected_plock_step(selected_steps));
-                    needs_reactive_cycle |=
-                        sync_midi_fx_param_value_field(rt, state, track, slot, param, display_step);
-                    if track == current_track_idx {
-                        // A MIDI-FX p-lock write arrives on this same arm, so
-                        // the automation dot has to be re-derived here too.
-                    }
-                }
+                // The panels bind the MIDI effect's params (the host kinds).
+                MidiFxInvalidation::Param { .. } => {}
                 MidiFxInvalidation::Topology => {
                     if fx_visible && track == current_track_idx {
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(state, track, selected_steps),
-                        );
                         needs_reactive_cycle = true;
                     }
                 }
             },
-            UiInvalidation::BusFx { bus, change } => match change {
-                BusFxInvalidation::Param { slot, param } => {
-                    sync_bus_effect_param_value_field(rt, app, bus, slot, param);
-                }
+            UiInvalidation::BusFx { change, .. } => match change {
+                // The panels bind the bus effect's params (the host kinds).
+                BusFxInvalidation::Param { .. } => {}
                 BusFxInvalidation::Topology => {
                     if mixer_visible || fx_visible {
                         sync_bus_mixer_state(rt, app);
@@ -1765,11 +1331,6 @@ pub(super) fn apply_ui_invalidations(
                 }
                 BusFxInvalidation::PanelTree => {
                     if fx_visible {
-                        rt.set_reactive(
-                            "SEQ",
-                            "bus-effects",
-                            build_bus_effects_value_for_selection(app, Some(selected_steps)),
-                        );
                         needs_reactive_cycle = true;
                     }
                 }
@@ -1863,7 +1424,6 @@ pub(super) fn load_or_convert_sampler_track(
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
     track_names: &mut Vec<String>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
     track: usize,
     path: Option<&Path>,
@@ -1919,11 +1479,6 @@ pub(super) fn load_or_convert_sampler_track(
         app.ui.cursor_track = selected_track;
         let rt = editor.runtime_mut();
         set_current_track_reactive(rt, selected_track);
-        rt.set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(app, selected_track, selected_steps),
-        );
         sync_track_mixer_state(rt, app, state);
         sync_sidebar_browser(rt, app, selected_track);
         rt.run_reactive_cycle();
@@ -2023,19 +1578,6 @@ pub(super) fn load_or_convert_sampler_track(
     let rt = editor.runtime_mut();
     set_current_track_reactive(rt, selected_track);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected_track, selected_steps),
-    );
-    if selected_track == track {
-        sync_sampler_selection_time_fields(
-            rt,
-            app,
-            selected_track,
-            selected_steps.lock().unwrap().iter().copied().min(),
-        );
-    }
     sync_track_mixer_state(rt, app, state);
     sync_sidebar_browser(rt, app, selected_track);
     rt.run_reactive_cycle();

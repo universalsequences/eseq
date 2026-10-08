@@ -1176,24 +1176,6 @@ impl VariantChip {
         }
     }
 
-    /// The legacy chip map (`kind`, `label`, `display`, `count`,
-    /// `color-r/g/b`; a caller adds `current`).
-    pub(crate) fn legacy_map(self) -> HashMap<String, Rc<RefCell<Value>>> {
-        let cell = |value| Rc::new(RefCell::new(value));
-        let [r, g, b] = self.color.map(|channel| Value::Number(f64::from(channel)));
-        HashMap::from([
-            (
-                "kind".to_string(),
-                cell(Value::String("variant".to_string())),
-            ),
-            ("label".to_string(), cell(Value::String(self.label))),
-            ("display".to_string(), cell(Value::String(self.name))),
-            ("count".to_string(), cell(Value::Number(self.count as f64))),
-            ("color-r".to_string(), cell(r)),
-            ("color-g".to_string(), cell(g)),
-            ("color-b".to_string(), cell(b)),
-        ])
-    }
 }
 
 /// The variant chip the step panel's p-lock table lights

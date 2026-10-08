@@ -43,6 +43,14 @@ impl DeviceSlot {
         usize::try_from(slot).map_or(Self::Instrument, Self::Effect)
     }
 
+    /// An audio effect: of a track's chain, a drum rack slot or a bus.
+    pub(crate) fn is_effect(self) -> bool {
+        matches!(
+            self,
+            Self::Effect(_) | Self::RackEffect { .. } | Self::BusEffect(_)
+        )
+    }
+
     /// `device.role`.
     pub(crate) fn role(self) -> &'static str {
         match self {

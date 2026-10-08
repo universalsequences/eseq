@@ -478,10 +478,9 @@ impl VisibleCache {
         &mut self,
         sources: &KindsHandles,
         device: &DeviceSource,
-        pdesc: &ParamDescriptor,
         index: usize,
     ) -> bool {
-        match PanelSection::of(pdesc) {
+        match PanelSection::of_device(device.device, &device.desc.desc, index) {
             PanelSection::Hidden => false,
             PanelSection::Source => {
                 let at = std::ptr::from_ref(device) as usize;
@@ -513,7 +512,7 @@ pub(super) fn param_panel_fields(
     let user = |stored: f32| f64::from(DeviceSlot::to_user(pdesc, stored));
     let shown = shown.map(user).unwrap_or_default();
     if mask & bits.visible != 0 {
-        let on = visible.visible(sources, device, pdesc, index);
+        let on = visible.visible(sources, device, index);
         emit(f::PARAM_VISIBLE, Value::Bool(on));
     }
     if mask & bits.mod_values() != 0 {

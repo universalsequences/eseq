@@ -1213,21 +1213,13 @@ pub(super) fn rack_slot_effect_param_needs_panel_rebuild(
         .is_none_or(|param| param_change_needs_fx_rebuild(&param))
 }
 
+/// Whether a change of `param`'s value redefines model data the host kinds
+/// derive (and so bumps `fx_epoch`). A param's own value, text and which
+/// modulation source settings show (`param.visible`) are live fields, so an
+/// option or toggle edit needs no rebuild; the sampler's `sens` and `slice`
+/// mode re-derive the slice markers the waveform draws.
 pub(super) fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
-    matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
-        || param_redefines_derived_panel_data(param)
-}
-
-/// Continuous params normally reach the UI through their bound display field,
-/// with no panel rebuild — a knob readout is all that changes.
-///
-/// The sampler's `sens` is not like that: it re-derives which slice markers are
-/// active, which is panel data the waveform draws, not a knob readout. Without
-/// this the audio followed the knob immediately while the flags kept their old
-/// colours until some Boolean/Enum edit (e.g. the warp button) happened to
-/// force a rebuild.
-fn param_redefines_derived_panel_data(param: &sequencer::effects::ParamDescriptor) -> bool {
-    param.name == "sens"
+    matches!(param.name.as_str(), "sens" | "slice")
 }
 
 pub(super) struct AgentDraftApplyResult {

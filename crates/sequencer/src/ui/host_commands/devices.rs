@@ -128,20 +128,10 @@ pub(super) fn handle(
     }
 }
 
-/// The rack panel field a rack slot device's param repaints.
-fn rack_target(device: DeviceSlot, param_idx: usize) -> Option<RackDirectDisplayTarget> {
-    match device {
-        DeviceSlot::RackSlot(slot_idx) => Some(RackDirectDisplayTarget::InstrumentParam {
-            slot_idx,
-            param_idx,
-        }),
-        DeviceSlot::RackEffect { rack_slot, slot } => Some(RackDirectDisplayTarget::EffectParam {
-            rack_slot,
-            effect_slot: slot,
-            param_idx,
-        }),
-        _ => None,
-    }
+/// Whether `device` is a drum rack slot (its instrument) or a rack slot's
+/// effect: its edits refresh as the rack panel's (`rack_param_applied`).
+fn is_rack_device(device: DeviceSlot) -> bool {
+    matches!(device, DeviceSlot::RackSlot(_) | DeviceSlot::RackEffect { .. })
 }
 
 /// `set-device-param` and the p-lock edits (see the module docs).
@@ -201,10 +191,10 @@ fn param_edit(
     };
     // The step the rack panel shows, and whether it held a lock before
     // (a rack lock's row refresh, as the rack knobs do).
-    let shown = rack_target(device, param_idx).and_then(|_| {
+    let shown = is_rack_device(device).then(|| {
         let selected = selected_plock_step(&ctx.shared.selected_steps);
         displayed_plock_step(&state, owner, selected)
-    });
+    }).flatten();
     let (steps, shown_locked) = device
         .with_values(&state, &app.buses, owner, |values| {
             let held = |step| values.lock(step, param_idx);
@@ -238,9 +228,9 @@ fn param_edit(
             steps,
             change: StepInvalidation::PlockPresence,
         });
-        if let Some(target) = rack_target(device, param_idx) {
+        if is_rack_device(device) {
             let rebuild = param_change_needs_fx_rebuild(&pdesc);
-            rack_param_applied(editor, app, ctx, track, target, rebuild, Some(rows));
+            rack_param_applied(editor, app, ctx, track, rebuild, Some(rows));
         }
     }
     // A drag's locks of the same steps join one entry (eseq-0l17.58).
@@ -362,9 +352,7 @@ fn base_edit(
             Ok(()) => {
                 bus_effect_param_applied(
                     app,
-                    editor,
                     ctx.shared,
-                    (owner, slot, param_idx),
                     Some(pdesc),
                 );
                 true
@@ -377,14 +365,14 @@ fn base_edit(
     }
     let edit = (owner, device, param_idx);
     let apply = |app: &mut app::App, command| script.apply(app, command);
-    let rack = rack_target(device, param_idx);
+    let rack = is_rack_device(device);
     // A rack slot's refresh (the panel rebuild included) is
     // `rack_param_applied`'s alone.
-    let rebuild = rack.is_none().then_some(pdesc);
+    let rebuild = (!rack).then_some(pdesc);
     let changed = apply_device_param_base(app, ctx.shared, edit, rebuild, value, apply);
-    if let Some(target) = rack.filter(|_| changed) {
+    if rack && changed {
         let rebuild = param_change_needs_fx_rebuild(pdesc);
-        rack_param_applied(editor, app, ctx, owner, target, rebuild, None);
+        rack_param_applied(editor, app, ctx, owner, rebuild, None);
     }
     changed
 }
@@ -480,7 +468,7 @@ fn strip_edit(
     let script = ScriptEdit::begin(app, ctx, control.drags());
     let changed = script.apply(app, control.command(owner, slot_idx, wanted));
     if changed {
-        rack_slot_strip_applied(editor, app, ctx, owner, slot_idx, control);
+        rack_slot_strip_applied(editor, app, ctx, owner, control);
     }
     script.end(app, ctx, changed);
     Ok(())
@@ -555,7 +543,7 @@ fn strip_lock_edit(
         locks,
         command,
         |editor, app, ctx, rows| {
-            rack_slot_plock_applied(editor, app, ctx, track, slot_idx, param, rows)
+            rack_slot_plock_applied(editor, app, ctx, track, param, rows)
         },
     );
     Ok(())

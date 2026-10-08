@@ -3,7 +3,7 @@
 
 (import eseq.kinds :refer (selection transport project mute-group-options lock-param!
                            unlock-param! lock-rack-macro! unlock-rack-macro! stamp-variant!))
-(import eseq.view-kit :refer (index-of color-rgba))
+(import eseq.view-kit :refer (index-of color-rgba track-color-part))
 (import eseq.effects.state :as st)
 (import eseq.effects.devices :as dv)
 (import eseq.effects.param-controls :as pc)
@@ -443,13 +443,15 @@
         :width width
         :height 1.15))))
 
-;; The track-colour helpers resolve through eseq.mixer's compat aliases, NOT
-;; an import: importing eseq.mixer would evaluate mixer.lisp, whose top-level
-;; (effect-buffer "*mixer*") / define-mode registrations must not ride along
-;; into every VM that loads the effects family.
-(def track-rgba (i dim)
-  (rgba (eseq.mixer/track-color-r i dim) (eseq.mixer/track-color-g i dim)
-        (eseq.mixer/track-color-b i dim) 1.0))
+;; Track t's colour, dimmed while `dim` (as the mixer paints its strips).
+(def track-rgba (t dim)
+  (rgba (track-color-part t 0 dim) (track-color-part t 1 dim) (track-color-part t 2 dim)
+        1.0))
+
+;; Track t's short label: its number and the start of its name (the
+;; mixer's collapsed strip spells it so too).
+(def track-short-label (t)
+  (str (+ t.index 1) " " (substring t.name 0 3)))
 
 ;; The current track's chip (eseq.panel-header's chip shape). A binding
 ;; cannot be negated, so the box binds t.audible as :muted with the silenced
@@ -464,9 +466,9 @@
         :corner-radius 8
         :v-align :center
         :muted #'t.audible
-        :background-color (track-rgba t.index true)
-        :muted-background-color (track-rgba t.index false)
-        (label (eseq.mixer/track-collapsed-label t.index)
+        :background-color (track-rgba t true)
+        :muted-background-color (track-rgba t false)
+        (label (track-short-label t)
           :width 4.55
           :font-size 10
           :v-align :center

@@ -24,31 +24,30 @@
 
 ;; Rack slot clicks select the slot as the factory rack panel does.
 (import eseq.effects.instrument-panel)
+(import eseq.effects.panel-data :as pd)
 
 (export device-panel device-panel-body panel-height panel-buffer rack-slot-select)
 
-;; The buffer name the host publishes device panels for: it builds
-;; instrument / effect panel data (what `device-panel` returns) only while a
-;; buffer named "*fx*" is visible, so a view showing panels names its tile
-;; "*fx*". (`effect-buffer` takes a literal name: write "*fx*" there and use
-;; `panel-buffer` in layouts.)
+;; The factory's device panel buffer: a view showing the factory panels
+;; names its tile "*fx*". (`effect-buffer` takes a literal name: write
+;; "*fx*" there and use `panel-buffer` in layouts.)
 (def panel-buffer "*fx*")
 
 ;; Height of a panel body, the factory's fixed device-panel height less its
 ;; header and padding: what `device-panel-body` lays out at.
 (def panel-height eseq.effects.state/fx-panel-body-content-height)
 
-;; The panel data of `d`, an eseq.kinds device (`(nth t.devices i)`): the
-;; instrument panel for the instrument (slot -1; its `:type` is "rack" for a
-;; rack, with `:slots`, `:selected-slot` and `:selected-instrument`), else the
-;; effect in that slot (`:params` holds its parameters). Nil while d's track
-;; is not the selected one: the host publishes panels for the selected track
-;; only, and only while `panel-buffer` is visible.
+;; The panel data of `d`, an eseq.kinds device (`(nth t.devices i)`,
+;; `(nth t.midi-devices i)`), built from the kinds (eseq.effects.panel-data):
+;; the instrument panel for the instrument (slot -1; its `:type` is "rack"
+;; for a rack, with `:slots`, `:selected-slot` and `:selected-instrument`),
+;; else the effect's (`:params` holds its parameters). Nil while d's track
+;; is not the selected one: the panels' controls edit the selected track.
 (def device-panel (d)
   (if (and d d.track d.track.selected)
     (if (< d.slot 0)
-      (if (> (len SEQ.instrument-panel) 0) (first SEQ.instrument-panel) nil)
-      (find-by-key SEQ.effects :slot-idx d.slot))
+      (pd/instrument-panel-of d.track d)
+      (pd/fx-panel-of d))
     nil))
 
 ;; The factory body of d's panel (no header), `panel-height` tall: the synth

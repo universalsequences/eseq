@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67 and .76 ported, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -3325,6 +3325,99 @@ its instance and field.
    - **Captures.** Scratch fixtures (a group and a rack, nothing, the main
      bus, the group and the rack selected; mixer and grid) match before
      and after.
+   Built (stage 8, eseq-0l17.82): the device panels' layout from kinds.
+   - **Adapter.** `ui/effects/panel-data.lisp` (`eseq.effects.panel-data`)
+     builds the dicts the renderers take (synth, sampler, rack and its slot
+     rows, track / bus / MIDI / rack slot effects) from the instrument
+     device, track.devices, track.midi-devices, (buses) b.devices and the
+     rack's slot devices. Each param dict carries `:prm`; controls bind
+     `#'prm.value`, and a dict reads only structure by value (names,
+     ranges, options, section, `visible`), never a param's value or text.
+     The *fx* buffer builds each effect's dict inside that effect's subtree
+     (`buffers`: each MIDI, chain and bus effect; `rack-selected-fx-panel`:
+     the selected rack slot's effects, the only ones shown), so a
+     structural change re-renders that panel alone. The instrument's is
+     built inline: a custom instrument UI sets its render scope
+     (`synth-ui-current-inst`, the selected section) as the tree evaluates,
+     which a re-render of its subtree alone loses (fm-formant's voice page
+     went missing); its dict reads no value or text, only which source
+     settings show.
+     `eseq.effects/device-panel` uses `instrument-panel-of` /
+     `fx-panel-of`; the capture fixtures read `current-instrument-panel` /
+     `current-effect-panels`. A node id comes from `devices/fx-node-id`
+     (device.node-id). A bus effect's source type offers no `env`
+     (`bus-source-param`, as the legacy builder dropped it); every
+     instrument panel lists its base-note row first, as before; a drum
+     rack slot holding any instrument (a param-less custom one too) shows
+     its panel, an empty slot the drop panel.
+   - **Option labels.** A dropdown binds its option to the param's value
+     (`:value-index`, `pc/param-option-index`) when the value indexes its
+     options (an enum's own, or the synced Delay's divisions,
+     `:index-options`); otherwise (the keys tab, a dict that leaves options
+     out) it shows `pc/fx-param-text-value-for` by value. So an option
+     edit, or a p-lock under the playhead, repaints the dropdown and
+     re-renders no panel (the generic grid, the sampler's and the built-in
+     effects' plain dropdowns; a built-in that draws from an option, the
+     Filter's curve or a choice button row, still reads it by value).
+   - **New fields.** param.host-modulatable (model), device.instrument-name
+     (model), device.strip-macros (model, pushed by the rack macro sync:
+     the slot strip controls a rack macro maps, which replace
+     `rack-slot-param-macro-owned?`), device.node-id (live, read only by
+     the rack's selected chain and at event time). `PanelSection::of_device`
+     places an effect's params (sidechain main, routing and host-only
+     hidden, voice modulation sources `source`, no mod split) for
+     param.section and visible.
+   - **Epochs.** A param edit bumps `fx_epoch` only when its value
+     redefines model data (`param_change_needs_fx_rebuild`: the sampler's
+     `sens` and `slice`); option and toggle edits, their p-locks and a
+     tensor cell bump none (`text`, `visible` and a tensor's values are
+     live fields).
+   - **Deleted:** the `SEQ.instrument-panel`, `SEQ.effects`,
+     `SEQ.midi-effects` and `SEQ.bus-effects` publishers, registrations and
+     builders (`build_*_value*`, the rack panel and rack slot builders,
+     `filter_table_editor_value`, `EffectTableFields::insert_into`; the
+     struct stays, the host's `device_table_fields` reads it), the dicts'
+     `*-field` strings, every param value-field publisher
+     (`sync_*_value_field*`, `sync_fx_param_binding_fields*`, rack macro
+     name / value and slot strip syncs, the process effective syncs, the
+     learn preview field writes) and their field-name helpers, the rack
+     slot selection fields (`sync_all_rack_slot_selection_binding_fields`,
+     unread), the reactive tick's shared and fx panel syncs, their epochs
+     and timers, `fx_value_epoch` (the scene launch value patch) and
+     `prev_selected_neural_neurons`, `VariantChip::legacy_map` (unused: the
+     keys-tab chips build from d.variants), `rack_slot_type_name`; the
+     mixer shims `track-color-r/g/b` and `track-collapsed-label`
+     (track-panels reads view-kit's `track-color-part`) and their four
+     alias rows. `refresh_instrument_panel_reactive` is the `ui_epoch` bump.
+   - **Kept:** `SEQ.step-has-plocks` and
+     `sync_instrument_plock_presence_fields` (eseq-0l17.78 deletes them),
+     the step inspector's `fx-step-value-*` fields, `fx_epoch` (the kinds'
+     structure gate), and the host-less test seeds' handle maps (test-local
+     names). Follow-ups: the Delay's sync labels, the rack strip ranges and
+     the bus `env` rule are duplicated in Lisp (`panel-data`).
+   - **Tests.** `host_kinds::tests::panels_view`:
+     `panel_layout_reads_the_kinds` (legacy-forms scan of buffers,
+     panel-data and index, non-vacuous),
+     `editing_a_param_repaints_without_rebuilding_the_panels` (a knob's
+     value; fails if a dict reads `prm.value` by value),
+     `a_p_locked_instrument_option_steps_under_the_playhead_without_rebuilding`
+     and its drum rack slot effect twin (the *fx* revision holds while the
+     playhead steps between two locked options),
+     `a_synced_delay_time_edit_rebuilds_no_panel`,
+     `adding_or_removing_an_effect_rebuilds_the_panels`; `devices`:
+     `panel_device_fields_follow_the_host` (strip-macros on mapping and
+     unmapping, node-id, host-modulatable),
+     `a_rack_slot_eq8_drag_reads_one_coherent_band_through_the_kinds`;
+     `params`: `an_option_or_toggle_edit_bumps_no_epoch_and_its_text_and_visible_follow`;
+     `panel`: the sampler's placement and lanes pinned literally. The
+     host-less suites seed the kinds from the App (`seed_app_panels`,
+     through the host's `seed_device_params`, `strip_macros` and
+     `EffectTableFields`) or a `PanelSeed`; pure parity tests of the
+     deleted publishers are gone.
+   - **Captures.** 340 jobs: all byte-identical but phaser-flanger-panel
+     (wall-clock animation) and the two EQ8 spectra (x-f14a/x-f14b-eq8),
+     which differ between two runs of one build too; four rack-sampler
+     fixtures fail before and after alike (a missing IR).
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -3555,6 +3648,37 @@ the other port beads follow it):
    - a capture whose hook sends no host command never published the legacy
      group fields: a legacy view of them rendered empty where the kinds
      show the state.
+   Learned by the device panels (.82):
+   - renderers over a legacy dict shape port whole when one module
+     (`eseq.effects.panel-data`) builds the same dicts from the kinds and
+     each param dict carries its instance (`:prm`): the renderers bind
+     `#'prm.value` and read only structure by value (names, ranges,
+     options, section, visible);
+   - a dict built by value inside the subtree that draws it re-renders
+     only that subtree when its device's structure changes; built above
+     it (the *fx* root), every tick a read field moves re-renders the
+     whole tile. A custom UI that sets render-scope globals as it
+     evaluates (the custom instrument UIs) cannot move into a subtree of
+     its own: keep its by-value reads structural instead;
+   - a binding read as a value is its value: testing `#'prm.value` for
+     truth (`(if (index-of p) ...)`) reads the param and subscribes the
+     subtree; test a predicate, return the binding;
+   - a dropdown's label follows a value without a re-render through
+     `:value-index` bound to it (the widget rounds and clamps); a label
+     read by value (`param.text`) re-renders the dropdown's subtree on
+     every change, a p-lock under the playhead included;
+   - the panel's placement rules are the host's (`PanelSection::of_device`:
+     an effect's sidechain params are main, routing and host-only params
+     hidden, voice modulation sources `source`): publish them as
+     `param.section` / `visible`, never re-derive them in Lisp;
+   - a host-less test that renders panels seeds the kinds from the App
+     (`seed_app_panels`: descriptors, racks, macros, buses) through the
+     host's own functions where it can (`seed_device_params`,
+     `strip_macros`, `EffectTableFields`); what the seed computes itself
+     (live values at the displayed step, media) is tested on a Harness,
+     against the real sync;
+   - `ESEQ_RERENDER_LOG=1` names the field a subtree re-rendered on: the
+     quickest way to find a stray by-value read.
 4. **Legacy publishers.** For each family the area read, grep every
    reader and mention: `content/` Lisp, all of `crates/` Rust (tests and
    capture fixtures included), `tools/` and `docs/` (the compat alias
@@ -6296,11 +6420,11 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10); ported (.66), kept: seq-core-state COMPAT (.14) | .11 .66 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10); ported (.11), removed | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14); ported (.14 A: param-controls and the custom-UI runtime bind param.value through eseq.effects.devices/param-of; % effect params read display units, the effect dicts too), kept: instrument-panel macros, track-panels lock rows, sampler-panel; ported (.18: the mapping table reads macro-mapping / rack-macro), kept: macro-state's COMPAT macro-name (the rack panel's live `:name-field`, until .61); ported (.61: rack macros → rack-macro.value / base / locked / has-locks / name, rack slot strip → device.*-display / delete-target, sampler selection → device.start-time / end-time, modulator → device.modulator-phase / -level, the source editors' slot phases → param.mod-phase (new)); legacy removed: the `modulator-phase-N` / `-level-N` fields and the slot phase fields' publishers (`instrument-mod-slot-phase-*`, `fx-mod-slot-phase-*`, rack slot ones); kept (eseq-0l17.22): the dicts' `*-field` strings (the host-less test seeds key on them), the param value publishers (the p-lock table rows' `:value-field`), the rack macro name fields (main's alez.tracker until eseq-0l17.65 merges); ported (.74: the p-lock table binds `param.value` / `rack-macro.value`; the print latch shows on `param.value` while it prints), legacy removed: the print latch display writer (`sync_print_latch_display`); kept (eseq-0l17.22, after eseq-0l17.19): the param value publishers (`sync_fx_param_binding_fields*`, the rack value field syncs; unread by content now, read by the host-less test seeds and Rust tests) | .14 .16 .18 .19 .20 .21 .61 .74 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37), a rack slot's strip value fields (`rack_slot_value_field`: `track-N-rack-slot-K-gain`, `-pan`, `-mute`, `-solo`; the slot dict's `:gain-field`, …) → device.gain-display / pan-display / muted-display / soloed-display, their lock state → `-locked` (built .42); the base note and voices value fields (`-base-note`, `-max-polyphony`; the slot dict's `:base-note-field`, `:max-polyphony-field`) → device.base-note-display / -locked, device.voices-display (built .54); the sampler selection times (`track-N-sampler-selection-start-time`, `track-N-rack-slot-K-sampler-selection-*-time`; the dicts' `:start-time-field` / `:end-time-field`) → device.start-time / end-time, `modulator-phase-N` / `modulator-level-N` (the dicts' `:phase-field` / `:level-field`) → device.modulator-phase / modulator-level (built .43) | built (.28, .36, .37, .42, .43, .54); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14); ported (.14 A: param-controls and the custom-UI runtime bind param.value through eseq.effects.devices/param-of; % effect params read display units, the effect dicts too), kept: instrument-panel macros, track-panels lock rows, sampler-panel; ported (.18: the mapping table reads macro-mapping / rack-macro), kept: macro-state's COMPAT macro-name (the rack panel's live `:name-field`, until .61); ported (.61: rack macros → rack-macro.value / base / locked / has-locks / name, rack slot strip → device.*-display / delete-target, sampler selection → device.start-time / end-time, modulator → device.modulator-phase / -level, the source editors' slot phases → param.mod-phase (new)); legacy removed: the `modulator-phase-N` / `-level-N` fields and the slot phase fields' publishers (`instrument-mod-slot-phase-*`, `fx-mod-slot-phase-*`, rack slot ones); kept (eseq-0l17.22): the dicts' `*-field` strings (the host-less test seeds key on them), the param value publishers (the p-lock table rows' `:value-field`), the rack macro name fields (main's alez.tracker until eseq-0l17.65 merges); ported (.74: the p-lock table binds `param.value` / `rack-macro.value`; the print latch shows on `param.value` while it prints), legacy removed: the print latch display writer (`sync_print_latch_display`); kept (eseq-0l17.22, after eseq-0l17.19): the param value publishers (`sync_fx_param_binding_fields*`, the rack value field syncs; unread by content now, read by the host-less test seeds and Rust tests); ported (.82: every panel control binds its param instance, `:prm` in the panel dict `eseq.effects.panel-data` builds), legacy removed: the dicts' `*-field` strings and every param value publisher (`sync_*_value_field*`, `sync_fx_param_binding_fields*`, the rack macro name / value and rack slot strip syncs, the field-name helpers in `sv/shared.rs` and `sv/meters_and_modulation.rs`, the learn preview field writes); the host-less test seeds' handle maps keep test-local names | .14 .16 .18 .19 .20 .21 .61 .74 .82 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28); ported (.66), removed | .11 .66 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels); ported (.14 A: param-controls, custom-ui-runtime; mod/process display → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, unconditionally bound: an unmodulated param reads 0 and draws no dot), kept: track-panels (tp-bus-M-send) | .13 .14 |
-| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) → table-editor (its `:band` → band-kind / band-freq / band-gain / band-q; which device: table-editor.device), the `filter-table-editor-*` commands → the `table-editor-…!` actions and `(set! te.selected-frame n)` (built .56) | built (.28, .37, .43, .56); kept as structure (.14 A reads every value from the device; index, buffers, effect-panels read the dicts: B/C); ported (.18: application menus find the armed effect among selection.track.devices and each bus's devices, device.builtin new); ported (.61: Filter Table → device.table-* and the table-editor singleton, Convolution Reverb → device.ir-name, EQ8's spectrum → device.meter), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22) | .14 .18 .61 .74 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now); ported (.14 A: param-controls, panel-bodies read key locks, variants and rack macros from the device), kept as structure: index, buffers, instrument-panel, sampler-panel, effect-panels (B/C); ported (.18: the mapping table reads the armed rack-macro of selection.track's instrument device); ported (.61: sampler media → device.sample-*, slices, start/end-time, rack macros → rack-macro, the rack slot macro dot reads the dict's own :macros), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22) | .14 .17 .18 .61 .74 |
+| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); `:table-name` / `:table-options` / `:table-mode` / `:table-engine` / `:table-data-key` / `:ir-name` → device.table-* / ir-name, `:meter` → device.meter, `:modulators` → device.modulators (modulator), param `:group` / `:env` / `:role` / `:display-name` / `:options` (an unresolved reference) → param.group / env / role / display-name / asset-options (built .43); `:editor` (the Filter Table response editor) → table-editor (its `:band` → band-kind / band-freq / band-gain / band-q; which device: table-editor.device), the `filter-table-editor-*` commands → the `table-editor-…!` actions and `(set! te.selected-frame n)` (built .56) | built (.28, .37, .43, .56); kept as structure (.14 A reads every value from the device; index, buffers, effect-panels read the dicts: B/C); ported (.18: application menus find the armed effect among selection.track.devices and each bus's devices, device.builtin new); ported (.61: Filter Table → device.table-* and the table-editor singleton, Convolution Reverb → device.ir-name, EQ8's spectrum → device.meter), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22); ported (.82: `eseq.effects.panel-data` builds each effect panel from track.devices / the rack slot's devices; buffers, device-panel and the capture fixtures read it; `fx-node-id` reads device.node-id), legacy removed (`build_effects_value`, `filter_table_editor_value`, the registration and the reactive tick's fx panel sync) | .14 .18 .61 .74 .82 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); a rack slot's strip (the slot dict's `:gain`, `:pan`, `:mute`, `:solo`, `:enabled`, choke group) → device.gain / pan / muted / soloed / enabled / choke, its `set-rack-slot-*` / `set-rack-slot-param-plock` commands → their `set!`s and `lock-strip!` / `unlock-strip!` (built .42); the slot dict's `:base-note` / `:max-polyphony` → device.base-note / voices, `set-rack-slot-base-note` / `-max-polyphony` and their p-locks → `set!` and `lock-strip!` (built .54); sampler media (`:buffer`, `:duration`, `:start-time`, `:end-time`, `:slices`, `:slice-active`, `:onsets`, `:analysis-*`, `:downbeat-time`) → device.sample-buffer / sample-duration / start-time / end-time / slices / slice-active / onsets / analysis-* / downbeat-time, `:sound-binding` / `:display-name` → device.sound-binding / display-name, `:meter` → device.meter, `:modulators` → device.modulators, `:phase-field` / `:level-field` → device.modulator-phase / modulator-level (built .43)) | built (.28, .36, .37, .42, .43, .54); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now); ported (.14 A: param-controls, panel-bodies read key locks, variants and rack macros from the device), kept as structure: index, buffers, instrument-panel, sampler-panel, effect-panels (B/C); ported (.18: the mapping table reads the armed rack-macro of selection.track's instrument device); ported (.61: sampler media → device.sample-*, slices, start/end-time, rack macros → rack-macro, the rack slot macro dot reads the dict's own :macros), kept as structure (eseq-0l17.22): buffers, eseq.effects/device-panel, tests and capture fixtures; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22); ported (.82: `eseq.effects.panel-data` builds the synth, sampler and rack panels from the instrument device, its params (param.section / visible / text / host-modulatable) and the rack's slot devices (device.strip-macros, device.instrument-name)), legacy removed (`build_instrument_panel_value*`, `build_sampler_panel_value`, `build_rack_panel_value` and the rack slot builders, the rack slot selection fields, `sync_shared_panel_state`, the registration); each device's dict is built in its own subtree, a dropdown binds its option (`:value-index`) | .14 .17 .18 .61 .74 .82 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) (built .37); a scene macro's `:target-scene` / `:morph-params` / `:steal-patterns` / `:quantize` / `:track-mask` → macro.target-scene / morph-params / steal-patterns / quantize / tracks, settable (`macro-scene-config` → their `set!`s), `:diff-count` → macro.diff-count (built .43) | built (.37, .43); ported (.14 A: param-controls reads (macros) / mm.target), kept: macros; ported (.18), legacy removed (publisher, registration, the parity test) | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28); ported (.61: the waveform binds #'d.playhead; the tick keeps the sampler voices watched while it is observed, HostKinds::wants_sampler_playhead), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
@@ -6308,11 +6432,11 @@ builds the field name.
 | `SEQ.seq-track-step-variant-b-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-variant-g-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
 | `SEQ.seq-track-step-variant-r-*` | 1 | sequencer | - | model | step.variant-color | built (.28); ported (.11 grid), kept: unread, .22 | .11 |
-| `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | built (.28) | .11 |
+| `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | built (.28); kept (.82): still written on a track fx param / p-lock invalidation; no content reader (eseq-0l17.78 deletes it) | .11 .82 |
 | `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks, send.has-locks | built (.28); ported (.14 A: param.has-locks), kept: track-panels (track-level rows, rack macro and slot control targets: tp/target-plock-any?); ported (.61: rack macros → rack-macro.has-locks, rack slot strip → device.strip-locks (new)), legacy removed (publisher, registration, the *plock-any-sync* projection) | .14 .61 |
 | `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | built (.28); ported (.14 A: param.printing); legacy removed (publisher, registration, row test) | .14 |
 | `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list → track.variants / variant (built .37); the variant a step plays → step.variant (built .43) | built (.28, .37, .43); ported (.14 A: the p-lock accent is the current track variant's color, the plock-color singleton), kept: track-panels; kept (.61): the p-lock table's chips (no kind holds the def chip or a preview); ported (.74: the chips are `selection.track.variants` and a def chip, lit by `selection.plock-variant` (new: the selected step's variant, else the previewed one, else def)), legacy removed (publishers, registration, `build_track_plock_variants_value`) | .14 .61 .74 |
-| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28); ported (.14 A: param.locked / param.base), kept: track-panels; ported (.61: track-level rows → track.setting-locks (new); rack macro row names → rack-macro.name; the *plock-sync* projection deleted), kept: the p-lock table (track-panels), filter-core; ported (.74: the p-lock table reads `selection.plock-rows` (new kind `plock-row`: target, domain, source, name, value, text, default, min, max, options, step, param, rack-macro, address); a device param's or rack macro's row binds that instance's value and edits through `lock-param!` / `lock-rack-macro!`), legacy removed (publishers, registration, the rows' `:value-field` / `:name-field`, `sync_track_plocks_for_neural_selection`, `sync_track_plock_variant_preview`); kept (eseq-0l17.22): the host-less test seeds publish the legacy rows, which `seed_panel_kinds` turns into `plock-row`s | .14 .61 .74 |
+| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28); ported (.14 A: param.locked / param.base), kept: track-panels; ported (.61: track-level rows → track.setting-locks (new); rack macro row names → rack-macro.name; the *plock-sync* projection deleted), kept: the p-lock table (track-panels), filter-core; ported (.74: the p-lock table reads `selection.plock-rows` (new kind `plock-row`: target, domain, source, name, value, text, default, min, max, options, step, param, rack-macro, address); a device param's or rack macro's row binds that instance's value and edits through `lock-param!` / `lock-rack-macro!`), legacy removed (publishers, registration, the rows' `:value-field` / `:name-field`, `sync_track_plocks_for_neural_selection`, `sync_track_plock_variant_preview`); kept (eseq-0l17.22): the host-less test seeds publish the legacy rows, which `seed_panel_kinds` turns into `plock-row`s; ported (.82: the host-less test seeds build the panels' kinds from the App (`seed_app_panels`) or a `PanelSeed`) | .14 .61 .74 .82 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | selection.track.lanes → lane | built (.29); ported (.66), kept: tracker | .11 .66 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | process-library.classes → process-class | built (.29); ported (.66, .67: alez.neural, the node picker reads process-class.node-label / node-hidden), kept: unread, .22 | .11 .20 .67 |
 | `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | process.error (live): a track slot's, and a graph node slot's (n.processes, under the slot's id); `lane-patch-run-error` → p.error, `lane-patch-expr-error` → p.compile-error, else the expr buffer's commit error (view state), else p.error | built (.29, .45); ported (.66), removed | .11 .66 |
@@ -6485,7 +6609,7 @@ builds the field name.
 | `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35); ported (.61), legacy removed (publisher, registration) | .14 .61 |
 | `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | built (.35) | .11 |
-| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36); ported (.14 A: panel-widgets counts (buses)), kept: buffers, application-menus; ported (.18: application menus read (buses) b.devices), kept: buffers; kept as structure (.61; eseq-0l17.22): buffers; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22) | .14 .18 .61 .74 |
+| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36); ported (.14 A: panel-widgets counts (buses)), kept: buffers, application-menus; ported (.18: application menus read (buses) b.devices), kept: buffers; kept as structure (.61; eseq-0l17.22): buffers; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22); ported (.82: buffers builds each bus effect panel from (buses) b.devices inside its subtree), legacy removed (`build_bus_effects_value*`, publisher, registration) | .14 .18 .61 .74 .82 |
 | `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35); ported (.13), removed | .13 |
 | `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35); ported (.13), removed | .13 |
 | `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35); ported (.61: buffers read engine.compiling); legacy removed (.74: publishers, registration, test seeds) | .14 .61 .74 |
@@ -6495,7 +6619,7 @@ builds the field name.
 | `SEQ.fx-step-parameter-step` | 1 | seq-core-state | sv/topology_and_visualization.rs | model | selection.edit-step | built (.35); ported (.66), kept: track-panels (.14) | .11 .66 |
 | `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35); ported (.61), kept: seq-core-state | .11 .14 .61 |
 | `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35); ported (.61: the pickers bind the edit step's fields, which show the print latch; `step_print`'s latch writers removed), kept: seq-core-state | .14 .61 |
-| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36); kept as structure (.61; eseq-0l17.22): buffers; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22) | .14 .61 .74 |
+| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36); kept as structure (.61; eseq-0l17.22): buffers; kept (.74): `buffers` is ported by eseq-0l17.19 (the drum rack lane); the panels' layout from kinds follows it (eseq-0l17.22); ported (.82: buffers builds the MIDI effect panels from track.midi-devices), legacy removed (`build_midi_effects_value`, publisher, registration) | .14 .61 .74 .82 |
 | `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35); ported (.13), removed | .13 |
 | `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35); ported (.13), removed | .13 |
 | `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35); ported (.13), removed | .13 |

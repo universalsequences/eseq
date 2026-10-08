@@ -138,14 +138,15 @@ fn param_type(pdesc: &ParamDescriptor) -> &'static str {
     }
 }
 
-/// The descriptor (model) fields of a param, in display units, with its
-/// panel placement ([`PanelSection`]) and UI metadata (as the legacy
-/// `insert_param_ui_metadata`: an unresolved options reference only where
-/// no option labels resolved).
-fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 16] {
+/// The descriptor (model) fields of param `index` of `source`, in display
+/// units, with its panel placement ([`PanelSection::of_device`]) and UI
+/// metadata (an unresolved options reference only where no option labels
+/// resolved).
+fn param_model_fields(source: &DeviceSource, index: usize) -> [(FieldKey, Value); 17] {
+    let pdesc = &source.params()[index];
     let user = |stored| number(DeviceSlot::to_user(pdesc, stored));
     let options = param_enum_labels(pdesc).into_iter().map(Value::String);
-    let section = PanelSection::of(pdesc);
+    let section = PanelSection::of_device(source.device, &source.desc.desc, index);
     let metadata = pdesc.ui_metadata.as_ref();
     let meta = |read: fn(&sequencer::effects::ParamUiMetadata) -> &Option<String>| {
         Value::String(metadata.and_then(|m| read(m).clone()).unwrap_or_default())
@@ -174,6 +175,10 @@ fn param_model_fields(pdesc: &ParamDescriptor) -> [(FieldKey, Value); 16] {
         (f::PARAM_ROLE, meta(|m| &m.role)),
         (f::PARAM_DISPLAY_NAME, meta(|m| &m.display_name)),
         (f::PARAM_ASSET_OPTIONS, asset_options),
+        (
+            f::PARAM_HOST_MODULATABLE,
+            Value::Bool(pdesc.is_host_modulatable()),
+        ),
     ]
 }
 
@@ -194,7 +199,7 @@ pub(super) fn register_params<S: KindStore>(
         fresh = true;
         store.push(id, f::PARAM_INDEX, number(index as f64));
         store.push(id, f::PARAM_DEVICE, Value::Instance(device));
-        for (key, value) in param_model_fields(&source.params()[index]) {
+        for (key, value) in param_model_fields(&source, index) {
             store.push(id, key, value);
         }
     });
@@ -205,6 +210,36 @@ pub(super) fn register_params<S: KindStore>(
         register_mod_targets(store, &source.desc, &params);
     }
     Some(params)
+}
+
+/// Test support for the host-less panel harnesses: register `device`'s
+/// params from `desc` (descriptor and panel fields, lanes) as
+/// [`register_params`] does for a device of family `slot`, with no host
+/// sync behind them.
+#[cfg(test)]
+pub(crate) fn seed_device_params(
+    rt: &mut Runtime,
+    device: InstanceId,
+    slot: DeviceSlot,
+    desc: &EffectDescriptor,
+) -> Vec<InstanceId> {
+    let source = DeviceSource {
+        owner: 0,
+        device: slot,
+        desc: Rc::new(DeviceDescriptor::of(Some(desc), false)),
+        sampler: None,
+    };
+    let params = indexed_children(rt, device, PARAM, desc.params.len(), |store, id, index| {
+        store.push(id, f::PARAM_INDEX, number(index as f64));
+        store.push(id, f::PARAM_DEVICE, Value::Instance(device));
+        for (key, value) in param_model_fields(&source, index) {
+            store.push(id, key, value);
+        }
+    });
+    register_mod_targets(rt, &source.desc, &params);
+    rt.set_instance_field(device, f::DEVICE_PARAMS.1, instance_list(params.iter().copied()))
+        .expect("device.params");
+    params
 }
 
 /// A cold read of `d.params` (the reader hook): registers the params the
@@ -341,8 +376,8 @@ struct ParamReading {
 }
 
 /// A selected neural neuron's output override of a track chain param (the
-/// step editing overlay the legacy value fields show); `None` while no
-/// neuron is selected.
+/// step editing overlay `param.value` shows); `None` while no neuron is
+/// selected.
 fn neural_override(
     sources: &KindsHandles,
     device: DeviceSlot,
@@ -985,6 +1020,9 @@ impl HostKinds {
             let held = device_delete_target(sources, source);
             pusher.push_computed(id, f::DEVICE_DELETE_TARGET, Value::Bool(held));
         }
+        if mask & bits.node_id != 0 {
+            pusher.push_computed(id, f::DEVICE_NODE_ID, device_node_id(sources, source));
+        }
         if mask & bits.mod_phases != 0 {
             let phases = device_mod_phases(sources, shared, source);
             pusher.push_numbers(id, f::DEVICE_MOD_PHASES, &phases);
@@ -1017,6 +1055,7 @@ impl HostKinds {
 struct DeviceBits {
     playhead: ObservedMask,
     delete_target: ObservedMask,
+    node_id: ObservedMask,
     mod_phases: ObservedMask,
     key_locked_notes: ObservedMask,
     variants: ObservedMask,
@@ -1038,6 +1077,7 @@ impl DeviceBits {
             DeviceBits {
                 playhead: DEVICE_LIVE.bit(f::DEVICE_PLAYHEAD),
                 delete_target: DEVICE_LIVE.bit(f::DEVICE_DELETE_TARGET),
+                node_id: DEVICE_LIVE.bit(f::DEVICE_NODE_ID),
                 mod_phases: DEVICE_LIVE.bit(f::DEVICE_MOD_PHASES),
                 key_locked_notes,
                 variants,

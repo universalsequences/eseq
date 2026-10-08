@@ -46,11 +46,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
         sync_track_mixer_state(rt, app, state);
         sync_bus_mixer_state(rt, app);
-        rt.set_reactive("SEQ", "effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-device-chains", Value::List(vec![]));
         rt.set_reactive("SEQ", "bus-device-chains", Value::List(vec![]));
-        rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
-        rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-plock-kinds", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-variant-r", Value::List(vec![]));
@@ -114,30 +111,10 @@ pub(crate) fn sync_track_topology_state(
     sync_track_peak_fields(rt, track_peak_levels);
     rt.set_reactive(
         "SEQ",
-        "effects",
-        build_effects_value(
-            state,
-            current_track_idx,
-            &app.graph.effect_descriptors,
-            selected_steps,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "midi-effects",
-        build_midi_effects_value(state, current_track_idx, selected_steps),
-    );
-    rt.set_reactive(
-        "SEQ",
         "track-device-chains",
         build_track_device_chains_value(app, state),
     );
     rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, current_track_idx, selected_steps),
-    );
     rt.set_reactive(
         "SEQ",
         "fx-step-display-step",
@@ -145,7 +122,6 @@ pub(crate) fn sync_track_topology_state(
             .map(|step| Value::Number(step as f64))
             .unwrap_or(Value::Number(-1.0)),
     );
-    sync_fx_param_binding_fields(rt, app, state, current_track_idx, selected_steps);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, state, current_track_idx, selected_steps);
     rt.set_reactive(
