@@ -1,16 +1,6 @@
 use super::*;
 
-pub(super) fn rack_slot_type_name(slot: &sequencer::sequencer::RackSlotSnapshot) -> &'static str {
-    match slot.instrument_type {
-        sequencer::sequencer::InstrumentType::Empty => "empty",
-        sequencer::sequencer::InstrumentType::Sampler => "sampler",
-        sequencer::sequencer::InstrumentType::Custom => "custom",
-        sequencer::sequencer::InstrumentType::Modulator => "modulator",
-        sequencer::sequencer::InstrumentType::Rack => "rack",
-    }
-}
-
-pub(super) fn rack_slot_raw_name(
+pub(crate) fn rack_slot_raw_name(
     app: &app::App,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
@@ -34,7 +24,7 @@ pub(super) fn rack_slot_raw_name(
     }
 }
 
-pub(super) fn drum_rack_pad_label(pad_note: i32) -> String {
+pub(crate) fn drum_rack_pad_label(pad_note: i32) -> String {
     let name = match pad_note.rem_euclid(12) {
         0 => "C",
         1 => "C#",
@@ -52,32 +42,6 @@ pub(super) fn drum_rack_pad_label(pad_note: i32) -> String {
     format!("{name}{}", 4 + pad_note.div_euclid(12))
 }
 
-/// Publishes the rack's global slot selection for the rack panel without
-/// rebuilding the sequencer tree.
-pub(crate) fn sync_all_rack_slot_selection_binding_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-) -> bool {
-    let racks = app.state.pattern.rack_tracks.lock().unwrap();
-    let mut dirty = false;
-    for (track, rack) in racks.iter().enumerate() {
-        let Some(rack) = rack.as_ref() else {
-            continue;
-        };
-        let selected_slot = app.selected_rack_slot_index_for_rack(track, rack);
-        for slot_idx in 0..rack.slots.len() {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &rack_slot_selected_field(track, slot_idx),
-                    Value::Bool(Some(slot_idx) == selected_slot),
-                )
-                .effects_dirty;
-        }
-    }
-    dirty
-}
-
 // ── Pad trigger lights (eseq-4b5.16) ────────────────────────────────────
 // A pad lights while it sounds, whatever fired it: a pad-grid click, an
 // armed rack's live keys, or the member track's own sequenced steps. All
@@ -90,13 +54,6 @@ pub(crate) fn sync_all_rack_slot_selection_binding_fields(
 /// hi-hat's gate can be shorter than a UI frame and would otherwise flash for
 /// zero frames, while a held pad key keeps refreshing this and stays lit.
 pub(crate) const RACK_PAD_TRIGGER_HOLD: Duration = Duration::from_millis(140);
-
-/// Binding field a pad cell reads: `1.0` while the pad's member track is lit.
-/// Per track, not per (rack, pad note), so moving a pad to another note moves
-/// its light with it for free.
-pub(crate) fn rack_pad_trigger_field(track: usize) -> String {
-    format!("rack-pad-trigger-{track}")
-}
 
 /// Pad lights for every track, `false` everywhere outside a drum rack.
 ///
@@ -137,36 +94,4 @@ pub(crate) fn read_rack_pad_trigger_flags(
         }
     }
     flags
-}
-
-/// Publish only the pads whose light changed. A rack that is not playing holds
-/// every flag at `false`, so an idle panel publishes nothing at all.
-pub(crate) fn sync_rack_pad_trigger_field_delta(
-    rt: &mut Runtime,
-    previous: &[bool],
-    flags: &[bool],
-) -> bool {
-    let mut effects_dirty = false;
-    for (track, &lit) in flags.iter().enumerate() {
-        if previous.get(track).copied().unwrap_or(false) == lit {
-            continue;
-        }
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &rack_pad_trigger_field(track),
-                Value::Number(if lit { 1.0 } else { 0.0 }),
-            )
-            .effects_dirty;
-    }
-    // A track that disappeared takes its light with it.
-    for track in flags.len()..previous.len() {
-        if !previous[track] {
-            continue;
-        }
-        effects_dirty |= rt
-            .set_reactive("SEQ", &rack_pad_trigger_field(track), Value::Number(0.0))
-            .effects_dirty;
-    }
-    effects_dirty
 }

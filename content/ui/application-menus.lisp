@@ -2,16 +2,18 @@
 (module eseq.application-menus)
 (import eseq.menus :as menus)
 (import eseq.seq-core-state)
+(import eseq.kinds :refer (tracks buses selection browser project))
 (export application-menu-items install-default-menus)
 
 (def commands-enabled? () (not (get (native-menu-context) :blocked)))
 (def edit-commands-enabled? ()
   (let ((context (native-menu-context)))
     (or (not (get context :blocked)) (get context :text-input))))
+(def has-tracks? () (not (empty? (tracks))))
 (def pattern-commands-enabled? ()
   (let ((context (native-menu-context)))
     (and (not (get context :blocked)) (get context :ui-view)
-         (not (get context :text-input)) (> SEQ.num-tracks 0))))
+         (not (get context :text-input)) (has-tracks?))))
 
 (def track-pattern-enabled? ()
   (and (pattern-commands-enabled?) (< eseq.seq-core-state/selected-bus 0)))
@@ -20,6 +22,15 @@
   (if (= shortcut "")
     (dict :id id :label label :on-select action)
     (dict :id id :label label :shortcut (dict :key shortcut :modifiers (list :primary)) :on-select action)))
+
+;; The recent projects; reading the project's name re-lists them when
+;; another project opens or saves.
+(def recent-project-items ()
+  project.name
+  (map (lambda (name)
+    (application-menu-entry (str "file-recent-" name) name ""
+      (lambda () (host-command "menu-open-recent" (dict :name name)))))
+    (seq-recent-projects)))
 
 (def application-menu-items (name)
   (if (= name "File")
@@ -30,13 +41,7 @@
       (application-menu-entry "file-menu-save" "Save" "s" (lambda () (eseq.transport/file-menu-save)))
       (merge (application-menu-entry "file-menu-save-as" "Save As…" "s" (lambda () (eseq.transport/file-menu-save-as))) :shortcut (dict :key "s" :modifiers (list :primary :shift)))
       (application-menu-entry "file-menu-open-project" "Open Project…" "o" (lambda () (eseq.transport/file-menu-open-project)))
-      (dict :id "file-recent" :label "Open Recent" :items-when
-        (lambda ()
-          (let ((project SEQ.current-project-name))
-            (map (lambda (name)
-              (application-menu-entry (str "file-recent-" name) name ""
-                (lambda () (host-command "menu-open-recent" (dict :name name)))))
-              (seq-recent-projects)))))
+      (dict :id "file-recent" :label "Open Recent" :items-when recent-project-items)
       nil
       (merge (application-menu-entry "file-menu-export" "Export Audio…" "e" (lambda () (eseq.export-song/export-song))) :shortcut (dict :key "e" :modifiers (list :primary :shift)))
       (application-menu-entry "file-menu-import" "Import Samples…" "" (lambda () (host-command "menu-import-samples" (dict))))
@@ -104,28 +109,31 @@
         (list)))))
 
 
+;; The current track's audio effects and every bus's.
+(def audio-effects ()
+  (let ((t selection.track)
+        (track-effects (if t (filter (lambda (d) (= d.role "effect")) t.devices) (list))))
+    (reduce (lambda (all b) (append all b.devices)) track-effects (buses))))
+
+;; The effect armed for deletion (its header selected) when the effect
+;; editor opens it (no built-in), or nil.
 (def selected-editable-effect ()
-  ;; Read the version so selecting a different header updates the native item.
-  (let ((version SEQ.delete-target-version)
-        (effects (append SEQ.effects
-          (reduce (lambda (all chain) (append all chain)) (list) SEQ.bus-effects)))
-        (matches (filter (lambda (fx)
-          (and (not (get fx :builtin))
-            (seq-delete-target? :fx-effect
-              (if (get fx :bus-fx)
-                (dict :chain "bus" :bus (get fx :bus-idx) :slot (get fx :slot-idx))
-                (dict :chain "audio" :slot (get fx :slot-idx)))))) effects)))
-    (if (> (len matches) 0) (nth matches 0) nil)))
+  (first (filter (lambda (d) (and d.delete-target (not d.builtin))) (audio-effects))))
 
 (def edit-selected-effect ()
-  (let ((fx (selected-editable-effect)))
-    (if fx
-      (do
-        (eseq.effects.panel-frame/fx-clear-selected-effect)
-        (host-command "enter-edit-effect"
-          (if (get fx :bus-fx)
-            (dict :name (get fx :name) :slot (get fx :slot-idx) :bus (get fx :bus-idx))
-            (dict :name (get fx :name) :slot (get fx :slot-idx))))) nil)))
+  (let ((d (selected-editable-effect)))
+    (when d
+      (eseq.effects.panel-frame/fx-clear-selected-effect)
+      (host-command "enter-edit-effect"
+        (if d.bus
+          (dict :name d.name :slot d.slot :bus d.bus.index)
+          (dict :name d.name :slot d.slot))))))
+
+;; Whether the current track plays a custom (editable) instrument. Menu
+;; predicates answer true or false (a menu's :enabled is a boolean).
+(def custom-instrument? ()
+  (let ((t selection.track))
+    (and (not (= t nil)) (= t.instrument-type "custom"))))
 
 (def restore-default-layout ()
   (set! eseq.seq-core-state/samples-sidebar-visible true)
@@ -169,39 +177,40 @@
         :on-select (lambda () (edit-selected-effect)))
       (dict :id "edit-menu-instrument" :label "Edit Instrument…"
         :enabled-when (lambda ()
-          (and (commands-enabled?) (< eseq.seq-core-state/selected-bus 0) (> SEQ.num-tracks 0)
-               (= (nth SEQ.track-instrument-types SEQ.current-track) "custom")
-               (not (= SEQ.sidebar-instrument-name ""))))
+          (and (commands-enabled?) (< eseq.seq-core-state/selected-bus 0)
+               (custom-instrument?)
+               (not (= browser.instrument ""))))
         :on-select (lambda ()
           (host-command "enter-edit-instrument"
-            (dict :name SEQ.sidebar-instrument-name))))
+            (dict :name browser.instrument))))
       nil
       ;; Pick up instrument/effect files written outside the app, e.g. by a
       ;; coding agent (eseq-63j4.4). New folders and ui.lisp edits are picked
       ;; up by the file watcher; DSP running on a track needs these.
       (dict :id "edit-menu-reload-instrument" :label "Reload Instrument From Disk"
         :enabled-when (lambda ()
-          (and (commands-enabled?) (< eseq.seq-core-state/selected-bus 0) (> SEQ.num-tracks 0)
-               (= (nth SEQ.track-instrument-types SEQ.current-track) "custom")))
+          (and (commands-enabled?) (< eseq.seq-core-state/selected-bus 0)
+               (custom-instrument?)))
         :on-select (lambda ()
-          (host-command "reload-instrument-from-disk" (dict :track SEQ.current-track))))
+          (let ((t selection.track))
+            (when t
+              (host-command "reload-instrument-from-disk" (dict :track t.index))))))
       (dict :id "edit-menu-reload-effect" :label "Reload Selected Effect From Disk"
         :enabled-when (lambda ()
           (and (commands-enabled?)
-               (let ((fx (selected-editable-effect)))
-                 (and (not (= fx nil)) (not (get fx :bus-fx))))))
+               (let ((d (selected-editable-effect)))
+                 (and (not (= d nil)) (= d.bus nil)))))
         :on-select (lambda ()
-          (let ((fx (selected-editable-effect)))
-            (if fx
-              (host-command "reload-effect-from-disk" (dict :slot (get fx :slot-idx)))
-              nil))))
+          (let ((d (selected-editable-effect)))
+            (when d
+              (host-command "reload-effect-from-disk" (dict :slot d.slot))))))
       (dict :id "edit-menu-rescan-library" :label "Rescan Instruments & Effects"
         :enabled-when commands-enabled?
         :on-select (lambda () (host-command "reload-content-library" (dict))))))))
   (menus/register-menu (dict :id "Create" :label "Create" :enabled-when commands-enabled?
     :items (map (lambda (item)
       (if (and item (= (get item :id) "create-menu-effect"))
-        (merge item :enabled-when (lambda () (> SEQ.num-tracks 0))) item))
+        (merge item :enabled-when has-tracks?) item))
       (application-menu-items "Create"))))
   (menus/register-menu (dict :id "Pattern" :label "Pattern" :enabled-when pattern-commands-enabled?
     :items (map (lambda (item)

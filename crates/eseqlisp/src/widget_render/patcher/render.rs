@@ -17,11 +17,11 @@ use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
-use super::display::{node_display_label, node_display_label_arg_spans, node_font_size, preview};
+use super::display::{build_node_header_label, node_font_size, preview};
 use super::geometry::{
-    connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
+    connection_cable_edit_points, connection_endpoints_at, node_resize_handle_centers,
     patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
-    patch_output_counts, patcher_back_button_rect, patcher_zoom, port_center, rect_from_points,
+    patch_output_counts, patcher_back_button_rect, patcher_zoom, port_center_at, rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
@@ -35,13 +35,17 @@ use super::metrics::{
     AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP,
     CABLE_FEEDBACK_RADIUS_PX, CABLE_FORWARD_RADIUS_PX, CABLE_HANDLE_RADIUS_PX,
     NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
-    NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
+    NODE_HEIGHT, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, InputPortRef, InputPresentation, NodeKind,
     OutputPortRef, Patch, PatchConnection, PatchNode, SourceOwner,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
+};
+use super::probe::{
+    PROBE_NO_VALUE, ProbeAttrs, ProbeValueDisplay, format_probe_value, probe_attrs_by_node,
+    probe_frame_in_instance, probe_value_display, scope_columns, scope_display_range,
 };
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
@@ -218,6 +222,7 @@ pub(super) fn build_primitives_for_patcher(
                 &interaction_state,
                 &view_key,
                 &autocomplete_macros,
+                Some(path.to_string_lossy().as_ref()),
             );
             let mut ghost_prims = Vec::new();
             let mut ghost_chip_prims = Vec::new();
@@ -1276,6 +1281,7 @@ pub(super) fn draw_patch(
         &interaction_state,
         "root",
         &patch.macros,
+        None,
     );
 }
 
@@ -1288,8 +1294,12 @@ fn draw_patch_with_view_key(
     interaction_state: &PatcherInteractionState,
     view_key: &str,
     autocomplete_macros: &[super::model::MacroPatch],
+    probe_path: Option<&str>,
 ) {
-    let node_rects = patch_node_rects(patch, rect, pan_state);
+    // Each probe node's `@id`/`@view`, parsed once for this paint.
+    let probe_attrs = probe_attrs_by_node(patch);
+    let node_rects =
+        super::geometry::patch_node_rects_with_probes(patch, rect, pan_state, &probe_attrs);
     let origin = super::geometry::patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let input_indices = patch_input_indices(patch);
@@ -1314,12 +1324,13 @@ fn draw_patch_with_view_key(
         if dragged_cable == Some(connection_id.as_str()) {
             continue;
         }
-        let Some((start, end)) = connection_endpoints(
+        let Some((start, end)) = connection_endpoints_at(
             connection,
             &node_rects,
             &input_indices,
             &input_slot_counts,
             &output_counts,
+            zoom,
         ) else {
             continue;
         };
@@ -1414,6 +1425,26 @@ fn draw_patch_with_view_key(
     );
     push_z_layered(prims, PATCHER_OVERLAY_Z + 10, alignment_prims);
 
+    // Live probe values. Reading a frame registers a paint dependency on it,
+    // so a newly published frame repaints this widget without a layout pass.
+    // The instance is resolved once per paint (it registers its own paint
+    // dependency, so a rebinding repaints too).
+    let probe_instance = probe_path.and_then(crate::live_audio::patch_probe_instance);
+    let probe_frames = probe_attrs
+        .iter()
+        .filter(|(_, attrs)| attrs.shows_value())
+        .map(|(node_id, attrs)| {
+            let frame = probe_instance
+                .as_deref()
+                .zip(attrs.id.as_deref())
+                .and_then(|(instance, id)| probe_frame_in_instance(instance, id));
+            (*node_id, frame)
+        })
+        .collect::<HashMap<_, _>>();
+    let probe_values = probe_frames
+        .iter()
+        .map(|(node_id, frame)| (*node_id, probe_value_display(frame.as_deref())))
+        .collect::<HashMap<_, _>>();
     let mut active_edit_panel = None;
     for node in ordered_patch_nodes(patch, interaction_state, view_key) {
         let Some(rect) = node_rects.get(&node.id).copied() else {
@@ -1457,6 +1488,9 @@ fn draw_patch_with_view_key(
                 &node.id,
                 PatcherZSlot::NodeChrome,
             ),
+            probe_attrs.get(node.id.as_str()),
+            probe_values.get(node.id.as_str()),
+            probe_frames.get(node.id.as_str()).cloned().flatten(),
         );
     }
     if let Some((node_rect, edit)) = active_edit_panel {
@@ -1480,6 +1514,7 @@ fn draw_patch_with_view_key(
         &input_slot_counts,
         &output_counts,
         interaction_state,
+        &probe_values,
         viewport,
         zoom,
     );
@@ -1490,6 +1525,8 @@ enum TooltipAnchor {
     InputPort(usize),
     OutputPort(usize),
     LabelArg(usize),
+    /// Above the node's top edge: a probe's block min/max.
+    NodeTop,
 }
 
 /// The argument index whose label token the pointer is on, for `node_id`.
@@ -1514,9 +1551,11 @@ fn label_arg_tooltip_anchor(
     zoom: f32,
 ) -> Option<(f32, f32)> {
     let node = patch.nodes.iter().find(|node| node.id == node_id)?;
-    let label = node_display_label(node);
+    let header = build_node_header_label(node, ProbeAttrs::of(node).as_ref());
+    let label = header.text;
     let font_size = node_font_size(node);
-    let (_, span) = node_display_label_arg_spans(node)
+    let (_, span) = header
+        .arg_spans
         .into_iter()
         .find(|(idx, _)| *idx == arg_index)?;
     let start = measured_cursor_offset(&label, font_size, span.start)?;
@@ -1532,6 +1571,7 @@ fn push_hovered_port_tooltip(
     input_slot_counts: &HashMap<String, usize>,
     output_counts: &HashMap<String, usize>,
     interaction_state: &PatcherInteractionState,
+    probe_values: &HashMap<&str, ProbeValueDisplay>,
     viewport: WidgetViewport,
     zoom: f32,
 ) {
@@ -1576,6 +1616,13 @@ fn push_hovered_port_tooltip(
                         )
                     })
                 })
+        })
+        .or_else(|| {
+            // A probe's box shows the block's last value; hovering it anywhere
+            // off a port shows that block's range.
+            let node_id = interaction_state.hovered_node.as_deref()?;
+            let range = probe_values.get(node_id)?.range_text()?;
+            Some((node_id, TooltipAnchor::NodeTop, range))
         });
     let Some((node_id, anchor, text)) = tooltip else {
         return;
@@ -1585,17 +1632,19 @@ fn push_hovered_port_tooltip(
     };
     let is_input = !matches!(anchor, TooltipAnchor::OutputPort(_));
     let center = match anchor {
-        TooltipAnchor::InputPort(port_index) => port_center(
+        TooltipAnchor::InputPort(port_index) => port_center_at(
             node_rect,
             port_index,
             input_slot_counts.get(node_id).copied().unwrap_or(1),
             true,
+            zoom,
         ),
-        TooltipAnchor::OutputPort(port_index) => port_center(
+        TooltipAnchor::OutputPort(port_index) => port_center_at(
             node_rect,
             port_index,
             output_counts.get(node_id).copied().unwrap_or(1),
             false,
+            zoom,
         ),
         TooltipAnchor::LabelArg(arg_index) => {
             let Some(center) = label_arg_tooltip_anchor(patch, node_id, arg_index, node_rect, zoom)
@@ -1604,11 +1653,18 @@ fn push_hovered_port_tooltip(
             };
             center
         }
+        TooltipAnchor::NodeTop => (node_rect.col + node_rect.width * 0.5, node_rect.row),
     };
     let font_size = 10.5;
     let text = preview(&text, 48);
-    let Some(measured_text_width) = measured_text_width(&text, font_size) else {
-        return;
+    // A probe range changes every frame, so the measure pass never cached its
+    // advances: size it from the estimate instead of hiding it.
+    let measured_text_width = match measured_text_width(&text, font_size) {
+        Some(width) => width,
+        None if matches!(anchor, TooltipAnchor::NodeTop) => {
+            super::display::estimated_label_width_cells(&text, font_size)
+        }
+        None => return,
     };
     let text_width_cells = (measured_text_width * zoom)
         .max(4.0 * zoom)
@@ -2218,12 +2274,13 @@ fn draw_jev_ghosts(
         .filter(|connection| connection.presentation == InputPresentation::Cable)
         .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
         .filter_map(|connection| {
-            connection_endpoints(
+            connection_endpoints_at(
                 connection,
                 &node_rects,
                 &input_indices,
                 &input_slot_counts,
                 &output_counts,
+                zoom,
             )
         })
         .collect();
@@ -2241,12 +2298,13 @@ fn draw_jev_ghosts(
             source: None,
             authored_reference: None,
         };
-        let Some((start, end)) = connection_endpoints(
+        let Some((start, end)) = connection_endpoints_at(
             &connection,
             &node_rects,
             &input_indices,
             &input_slot_counts,
             &output_counts,
+            zoom,
         ) else {
             continue;
         };
@@ -2472,7 +2530,21 @@ fn push_node(
     origin: (f32, f32),
     zoom: f32,
     node_chrome_z: i32,
+    probe: Option<&ProbeAttrs>,
+    probe_value: Option<&ProbeValueDisplay>,
+    probe_frame: Option<std::sync::Arc<crate::live_audio::ProbeFrame>>,
 ) {
+    let is_scope = probe.is_some_and(ProbeAttrs::is_scope);
+    // A scope's header (label, value, text edit) sits in a standard-height
+    // row at its top; the rest of the box is the plot.
+    let header_rect = if is_scope {
+        Rect {
+            height: (NODE_HEIGHT * zoom).min(rect.height),
+            ..rect
+        }
+    } else {
+        rect
+    };
     let (bg, mut border, text) = match node.kind {
         NodeKind::In | NodeKind::Out => (
             theme::PATCHER_IO_NODE_BG(),
@@ -2535,7 +2607,7 @@ fn push_node(
     for &index in input_indices {
         push_port(
             &mut port_prims,
-            port_center(rect, index, input_slot_count, true),
+            port_center_at(rect, index, input_slot_count, true, zoom),
             true,
             bg,
             highlighted_inputs.contains(&index),
@@ -2546,7 +2618,7 @@ fn push_node(
     for index in 0..output_count {
         push_port(
             &mut port_prims,
-            port_center(rect, index, output_count, false),
+            port_center_at(rect, index, output_count, false, zoom),
             false,
             bg,
             highlighted_outputs.contains(&index),
@@ -2557,7 +2629,7 @@ fn push_node(
     push_z_layered(prims, node_base_z + PatcherZSlot::Ports as i32, port_prims);
     let font_size = node_font_size(node);
     let mut selection_prims = Vec::new();
-    push_node_edit_selection(&mut selection_prims, rect, edit, font_size, zoom);
+    push_node_edit_selection(&mut selection_prims, header_rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditSelection as i32,
@@ -2567,13 +2639,29 @@ fn push_node(
     push_node_label(
         &mut text_prims,
         node,
-        rect,
+        probe,
+        header_rect,
         text,
         edit,
         autocomplete_ghost,
         hovered_arg,
         zoom,
     );
+    if edit.is_none()
+        && let Some(probe_value) = probe_value
+    {
+        push_probe_value(&mut text_prims, node, header_rect, probe_value, zoom);
+    }
+    if is_scope {
+        push_probe_scope(
+            &mut text_prims,
+            rect,
+            header_rect,
+            probe_frame.as_deref(),
+            viewport,
+            zoom,
+        );
+    }
     if let Some(diagnostic) = &node.diagnostic {
         text_prims.push(GpuPrimitive::ProportionalText(
             GpuProportionalTextPrimitive {
@@ -2592,7 +2680,7 @@ fn push_node(
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
     let mut cursor_prims = Vec::new();
-    push_node_edit_cursor(&mut cursor_prims, rect, edit, font_size, zoom);
+    push_node_edit_cursor(&mut cursor_prims, header_rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditCursor as i32,
@@ -2802,6 +2890,7 @@ fn push_node_edit_cursor(
 fn push_node_label(
     prims: &mut Vec<GpuPrimitive>,
     node: &PatchNode,
+    probe: Option<&ProbeAttrs>,
     rect: Rect,
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
@@ -2856,7 +2945,8 @@ fn push_node_label(
         }
         return;
     }
-    let label = node_display_label(node);
+    let header = build_node_header_label(node, probe);
+    let label = header.text;
     let (head, tail, tail_start) = split_label_head_tail(&label);
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
     prims.push(GpuPrimitive::ProportionalText(
@@ -2881,7 +2971,8 @@ fn push_node_label(
     // everything around it keeps the ordinary tail color.
     let hovered_span = hovered_arg
         .and_then(|arg_index| {
-            node_display_label_arg_spans(node)
+            header
+                .arg_spans
                 .into_iter()
                 .find(|(idx, _)| *idx == arg_index)
         })
@@ -2926,6 +3017,193 @@ fn push_node_label(
             },
         ));
     }
+}
+
+/// A probe's live value, right-aligned in the room `node_width_label` reserved
+/// for it, so changing digits never move the header or resize the box. Dimmed
+/// while there is no frame (`—`) or the frame is held (stale).
+fn push_probe_value(
+    prims: &mut Vec<GpuPrimitive>,
+    node: &PatchNode,
+    rect: Rect,
+    value: &ProbeValueDisplay,
+    zoom: f32,
+) {
+    let text_row = rect.row + (rect.height - zoom) * 0.5;
+    let text_col = rect.col + NODE_TEXT_COL_OFFSET * zoom;
+    prims.push(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
+            row: text_row,
+            col: text_col,
+            align_width: (rect.width - 1.84 * zoom).max(0.0),
+            h_align: 1.0,
+            text: value.text.clone(),
+            font_size: node_font_size(node),
+            scale: zoom,
+            fg: if value.dimmed {
+                theme::PATCHER_TEXT_MUTED()
+            } else {
+                theme::PATCHER_NODE_TEXT()
+            },
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
+        },
+    ));
+}
+
+/// Small text for the scope's axis labels.
+const SCOPE_LABEL_FONT_SIZE: f32 = 9.5;
+/// Space between the range labels and the trace, in cells at zoom 1.
+const SCOPE_GUTTER_GAP: f32 = 0.45;
+/// Plot inset from the node edges, in cells at zoom 1.
+const SCOPE_PLOT_INSET_X: f32 = 0.7;
+const SCOPE_PLOT_INSET_BOTTOM: f32 = 0.55;
+/// Trace outline and zero line widths, in design pixels.
+const SCOPE_TRACE_HALF_WIDTH_PX: f32 = 0.75;
+const SCOPE_GRID_HALF_WIDTH_PX: f32 = 0.5;
+/// Opacity of the filled min/max band under the outline.
+const SCOPE_BAND_ALPHA: f32 = 0.32;
+/// A held (stale) frame draws at this fraction of its normal opacity.
+const SCOPE_STALE_ALPHA: f32 = 0.45;
+
+/// The plot area of a scope node drawn at `rect` with its header row at
+/// `header_rect`.
+pub(super) fn scope_plot_rect(rect: Rect, header_rect: Rect, zoom: f32) -> Rect {
+    let top = header_rect.row + header_rect.height;
+    Rect {
+        col: rect.col + SCOPE_PLOT_INSET_X * zoom,
+        row: top,
+        width: (rect.width - 2.0 * SCOPE_PLOT_INSET_X * zoom).max(0.0),
+        height: (rect.row + rect.height - SCOPE_PLOT_INSET_BOTTOM * zoom - top).max(0.0),
+    }
+}
+
+/// The scope plot: the ring's per-column min/max envelope as a translucent
+/// band with its top and bottom edges stroked, a faint zero line when 0 is
+/// in range, the range's max/min labelled small in a left gutter at the
+/// plot's top and bottom, and `—` centred when there is nothing to draw. Everything
+/// dims when the frame is held (stale).
+fn push_probe_scope(
+    prims: &mut Vec<GpuPrimitive>,
+    rect: Rect,
+    header_rect: Rect,
+    frame: Option<&crate::live_audio::ProbeFrame>,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let plot = scope_plot_rect(rect, header_rect, zoom);
+    if plot.width <= 0.0 || plot.height <= 0.0 {
+        return;
+    }
+    let transparent = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
+    let muted = theme::PATCHER_TEXT_MUTED();
+    let label = |text: String, row: f32, gutter: f32| {
+        GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+            row,
+            col: plot.col,
+            align_width: gutter,
+            h_align: 1.0,
+            text,
+            font_size: SCOPE_LABEL_FONT_SIZE,
+            scale: zoom,
+            fg: muted,
+            bg: transparent,
+            mono: false,
+        })
+    };
+    let pairs = frame.and_then(|frame| frame.scope.as_deref());
+    let range = frame.and_then(scope_display_range);
+    let (Some(frame), Some(pairs), Some(range)) = (frame, pairs, range) else {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
+                row: plot.row + (plot.height - zoom) * 0.5,
+                col: plot.col,
+                align_width: plot.width,
+                h_align: 0.5,
+                text: PROBE_NO_VALUE.to_string(),
+                font_size: super::metrics::NODE_FONT_SIZE,
+                scale: zoom,
+                fg: muted,
+                bg: transparent,
+                mono: false,
+            },
+        ));
+        return;
+    };
+    // The range labels sit in a left gutter, right-aligned against the
+    // trace, so they never draw over it.
+    let max_label = format_probe_value(range.1);
+    let min_label = format_probe_value(range.0);
+    let label_width = |text: &str| {
+        measured_text_width(text, SCOPE_LABEL_FONT_SIZE).unwrap_or_else(|| {
+            super::display::estimated_label_width_cells(text, SCOPE_LABEL_FONT_SIZE)
+        })
+    };
+    let gutter = ((label_width(&max_label).max(label_width(&min_label)) + SCOPE_GUTTER_GAP)
+        * zoom)
+        .min(plot.width * 0.4);
+    let labels = [
+        label(max_label, plot.row, gutter - SCOPE_GUTTER_GAP * zoom),
+        label(
+            min_label,
+            plot.row + plot.height - 0.8 * zoom,
+            gutter - SCOPE_GUTTER_GAP * zoom,
+        ),
+    ];
+    let plot = Rect {
+        col: plot.col + gutter,
+        width: plot.width - gutter,
+        ..plot
+    };
+    let alpha = if frame.stale { SCOPE_STALE_ALPHA } else { 1.0 };
+    let trace = theme::PATCHER_PORT_OUTPUT();
+    let trace = with_alpha_scale(trace, alpha);
+    let band = crate::backend::Color::rgba(trace.r, trace.g, trace.b, SCOPE_BAND_ALPHA * alpha);
+    let grid = crate::backend::Color::rgba(muted.r, muted.g, muted.b, 0.35 * alpha);
+    let mut mesh = super::super::stroke::ShadedMesh::new();
+    if range.0 < 0.0 && range.1 > 0.0 {
+        let zero_row = plot.row + plot.height * range.1 / (range.1 - range.0);
+        mesh.push_polyline(
+            &[[plot.col, zero_row], [plot.col + plot.width, zero_row]],
+            grid,
+            viewport,
+            SCOPE_GRID_HALF_WIDTH_PX,
+        );
+    }
+    // About one column per two design pixels of plot; more only adds vertices.
+    let max_columns = super::super::scope::points_for_plot_width(plot.width, viewport, 0.5, 16, 512);
+    let columns = scope_columns(pairs, plot, range, max_columns);
+    for run in scope_column_runs(&columns) {
+        let tops = run.iter().map(|c| [c.x, c.top]).collect::<Vec<_>>();
+        let bottoms = run.iter().map(|c| [c.x, c.bottom]).collect::<Vec<_>>();
+        mesh.push_band(&tops, &bottoms, band);
+        mesh.push_polyline(&tops, trace, viewport, SCOPE_TRACE_HALF_WIDTH_PX);
+        mesh.push_polyline(&bottoms, trace, viewport, SCOPE_TRACE_HALF_WIDTH_PX);
+    }
+    mesh.push_into(prims);
+    prims.extend(labels);
+}
+
+/// Split plotted columns at gaps (a run of non-finite pairs leaves a hole in
+/// the column x spacing) so the band and outline don't bridge them.
+fn scope_column_runs(columns: &[super::probe::ScopeColumn]) -> Vec<&[super::probe::ScopeColumn]> {
+    if columns.len() < 2 {
+        return if columns.is_empty() { Vec::new() } else { vec![columns] };
+    }
+    let step = columns
+        .windows(2)
+        .map(|pair| pair[1].x - pair[0].x)
+        .fold(f32::INFINITY, f32::min);
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for index in 1..columns.len() {
+        if columns[index].x - columns[index - 1].x > step * 1.5 {
+            runs.push(&columns[start..index]);
+            start = index;
+        }
+    }
+    runs.push(&columns[start..]);
+    runs
 }
 
 fn split_label_head_tail(label: &str) -> (&str, &str, usize) {

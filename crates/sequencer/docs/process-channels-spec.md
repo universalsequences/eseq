@@ -1,5 +1,7 @@
 # Processes and Channels Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 First-class musical processes for eseqlisp: Max/MSP-style objects (inlets, outlets, state, clock) expressed as lisp instead of patching, with Strudel/Tidal-flavored affordances layered on top as library.
 
 ## Goal
@@ -294,7 +296,7 @@ A shipped declaration's ID defaults to (buffer name, ordinal within that buffer'
 
 ### Scheduler-safe native set
 
-Shipped bodies may call: pure lisp, the mutation surface (`graph-*`, `transpose!`, plocks), and process natives (`emit`, `send`, `play-pat`, handle messages). They may not call UI natives (`reactive-set`, widgets) or buffer/host natives. Call sites are checked against the whitelist at publish time in the UI runtime so violations surface as immediate buffer diagnostics; the scheduler VM keeps a backstop check.
+Shipped bodies may call: pure lisp, the mutation surface (`graph-*`, `transpose!`, plocks), and process natives (`emit`, `send`, `play-pat`, handle messages). They may not call UI natives (host namespace writes, widgets; `reactive-set` itself was removed in eseq-0l17.80) or buffer/host natives. Call sites are checked against the whitelist at publish time in the UI runtime so violations surface as immediate buffer diagnostics; the scheduler VM keeps a backstop check.
 
 ### The reverse direction (scheduler → UI)
 

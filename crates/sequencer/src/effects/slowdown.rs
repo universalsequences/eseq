@@ -235,6 +235,8 @@ pub fn descriptor() -> EffectDescriptor {
             scaling,
             node_param_idx: index as u32,
             node_param_span: 1,
+            // The Slowdown mix, its one % param, is a stored ratio.
+            percent_ratio: unit == Some("%"),
             host_control: None,
             ui_metadata: (index != SYNC).then(super::modulatable_ui_metadata),
         });
@@ -257,6 +259,7 @@ pub fn descriptor() -> EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: (DEPTH_BASE + target_idx * MOD_SLOTS + slot) as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             });
@@ -325,6 +328,7 @@ pub fn descriptor() -> EffectDescriptor {
             min,
             max,
             default: EXTRA_DEFAULTS[(slot - PARAM_MODE) as usize],
+            percent_ratio: false,
             kind,
             scaling,
             node_param_idx: slot as u32,

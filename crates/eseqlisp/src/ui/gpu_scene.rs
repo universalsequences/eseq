@@ -839,7 +839,10 @@ pub(crate) fn collect_mod_patch_port(
                 dest: dest.unwrap_or(track_or_dest),
                 input: layout_node_usize_prop(node, "input").unwrap_or(0),
                 active: layout_node_bool_prop(node, "active"),
-                pending: layout_node_bool_prop(node, "pending"),
+                pending: crate::widget_render::patch_port_pending(
+                    &node.props,
+                    track.unwrap_or(track_or_dest),
+                ),
                 center_px,
                 level,
                 radius_px,

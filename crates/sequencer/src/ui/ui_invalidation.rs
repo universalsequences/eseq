@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use sequencer::sequencer::StepParam;
@@ -37,10 +38,6 @@ pub(crate) enum UiInvalidation {
         track: usize,
         /// Step indexes whose membership in the selection changed.
         changed_steps: Vec<usize>,
-    },
-    ExpandedStepViewport {
-        track: usize,
-        track_id: usize,
     },
     TrackMixer {
         track: usize,
@@ -92,7 +89,6 @@ pub(crate) enum UiInvalidation {
         change: PianoRollInvalidation,
     },
     Transport(TransportInvalidation),
-    Recording(RecordingInvalidation),
     DeleteTarget,
     AutoFollow,
     Sidebar {
@@ -205,8 +201,6 @@ pub(crate) enum BusMixerInvalidation {
     Volume,
     Mute,
     Solo,
-    Steps,
-    Timing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -290,12 +284,6 @@ pub(crate) enum TransportInvalidation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum RecordingInvalidation {
-    RecordingEnabled,
-    ArmedTracks,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum SidebarInvalidation {
     TrackBrowser,
     Presets,
@@ -311,9 +299,150 @@ pub(crate) enum BrowserInvalidation {
     EffectTrees,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct UiInvalidationQueue {
     pending: Mutex<BTreeSet<UiInvalidation>>,
+    /// P-lock revisions for readers that do not drain the queue (the host
+    /// kinds' step p-lock render and `has-locks`): moved by an invalidation
+    /// that may move a track's p-locks ([`UiInvalidation::plock_scope`]).
+    plocks: TrackGenerations,
+    /// Process chain revisions, likewise (the host kinds' process lanes):
+    /// moved by an invalidation that may move a track's process chain or
+    /// lane values ([`UiInvalidation::process_scope`]).
+    processes: TrackGenerations,
+}
+
+/// Per-track revisions: `all` moves on an invalidation that may move every
+/// track's, `tracks[t]` on one that may move track `t`'s.
+#[derive(Debug)]
+struct TrackGenerations {
+    all: AtomicU64,
+    tracks: [AtomicU64; sequencer::sequencer::MAX_TRACKS],
+}
+
+impl Default for TrackGenerations {
+    fn default() -> Self {
+        Self {
+            all: AtomicU64::new(0),
+            tracks: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl TrackGenerations {
+    /// Track `track`'s revision.
+    fn of(&self, track: usize) -> u64 {
+        let all = self.all.load(Ordering::Relaxed);
+        let own = self
+            .tracks
+            .get(track)
+            .map_or(0, |generation| generation.load(Ordering::Relaxed));
+        all.wrapping_add(own)
+    }
+
+    /// Move the revisions `scope` names (a track past the array moves all).
+    fn bump(&self, scope: Option<PlockScope>) {
+        let generation = match scope {
+            Some(PlockScope::AllTracks) => &self.all,
+            Some(PlockScope::Track(track)) => self.tracks.get(track).unwrap_or(&self.all),
+            None => return,
+        };
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Which tracks' p-locks an invalidation may have moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlockScope {
+    AllTracks,
+    Track(usize),
+}
+
+impl UiInvalidation {
+    /// The tracks whose p-locks (any family: device params, sends, step
+    /// params, process lanes) or pattern shape this invalidation may have
+    /// moved; `None` for one that cannot move a p-lock (mixer, selection,
+    /// meters, a device's base value, …).
+    pub(crate) fn plock_scope(&self) -> Option<PlockScope> {
+        use PlockScope::{AllTracks, Track};
+        Some(match self {
+            Self::Full(_) | Self::ProjectState | Self::Pattern(PatternInvalidation::AllTracks) => {
+                AllTracks
+            }
+            Self::TrackTopology(TrackTopologyInvalidation::InstrumentType { track }) => {
+                Track(*track)
+            }
+            Self::TrackTopology(TrackTopologyInvalidation::TracksAddedRemovedOrReordered) => {
+                AllTracks
+            }
+            Self::Pattern(
+                PatternInvalidation::WholeTrack { track }
+                | PatternInvalidation::TrackLength { track },
+            ) => Track(*track),
+            Self::Step { track, change, .. }
+            | Self::StepInvalidationBatch { track, change, .. }
+                if *change != StepInvalidation::Selected =>
+            {
+                Track(*track)
+            }
+            Self::StepBatch { track, .. }
+            | Self::TrackBusSend { track, .. }
+            | Self::ProcessLaneValues { track }
+            | Self::ProcessChain { track }
+            | Self::MidiFx { track, .. }
+            | Self::TrackFx {
+                track,
+                change:
+                    TrackFxInvalidation::Plock { .. }
+                    | TrackFxInvalidation::Topology
+                    | TrackFxInvalidation::PanelTree,
+            }
+            | Self::Instrument {
+                track,
+                change: InstrumentInvalidation::Plock { .. } | InstrumentInvalidation::PanelTopology,
+            }
+            | Self::TrackParam {
+                track,
+                change:
+                    TrackParamInvalidation::Plocks
+                    | TrackParamInvalidation::BusSends
+                    | TrackParamInvalidation::NumSteps,
+            }
+            | Self::Sidebar {
+                track,
+                change: SidebarInvalidation::Plocks,
+            } => Track(*track),
+            _ => return None,
+        })
+    }
+
+    /// The tracks whose process chain (slots, lanes, inlets, bindings) this
+    /// invalidation may have moved; `None` for one that cannot.
+    pub(crate) fn process_scope(&self) -> Option<PlockScope> {
+        use PlockScope::{AllTracks, Track};
+        Some(match self {
+            Self::Full(_)
+            | Self::ProjectState
+            | Self::Pattern(PatternInvalidation::AllTracks)
+            | Self::TrackTopology(TrackTopologyInvalidation::TracksAddedRemovedOrReordered) => {
+                AllTracks
+            }
+            Self::Pattern(PatternInvalidation::WholeTrack { track })
+            | Self::ProcessLaneValues { track }
+            | Self::ProcessChain { track } => Track(*track),
+            _ => return None,
+        })
+    }
+}
+
+impl Default for UiInvalidationQueue {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::default(),
+            plocks: TrackGenerations::default(),
+            processes: TrackGenerations::default(),
+        }
+    }
 }
 
 impl UiInvalidationQueue {
@@ -321,7 +450,22 @@ impl UiInvalidationQueue {
         Self::default()
     }
 
+    /// Track `track`'s p-lock revision: moves whenever an invalidation that
+    /// may move its p-locks is pushed ([`UiInvalidation::plock_scope`]).
+    pub(crate) fn plock_generation(&self, track: usize) -> u64 {
+        self.plocks.of(track)
+    }
+
+    /// Track `track`'s process chain revision: moves whenever an
+    /// invalidation that may move its process chain is pushed
+    /// ([`UiInvalidation::process_scope`]).
+    pub(crate) fn process_generation(&self, track: usize) -> u64 {
+        self.processes.of(track)
+    }
+
     pub(crate) fn push(&self, invalidation: UiInvalidation) {
+        self.plocks.bump(invalidation.plock_scope());
+        self.processes.bump(invalidation.process_scope());
         let mut pending = self.pending.lock().unwrap();
         if matches!(invalidation, UiInvalidation::Full(_)) {
             pending.clear();
@@ -465,7 +609,6 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepInvalidationBatch { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })
-        | (UiInvalidation::TrackTopology(_), UiInvalidation::ExpandedStepViewport { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Instrument { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackFx { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::MidiFx { .. }) => true,
@@ -473,8 +616,7 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
             UiInvalidation::Pattern(PatternInvalidation::AllTracks),
             UiInvalidation::Step { .. }
             | UiInvalidation::StepInvalidationBatch { .. }
-            | UiInvalidation::StepSelection { .. }
-            | UiInvalidation::ExpandedStepViewport { .. },
+            | UiInvalidation::StepSelection { .. },
         ) => true,
         (
             UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track }),
@@ -485,9 +627,6 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
                 track: old_track, ..
             }
             | UiInvalidation::StepSelection {
-                track: old_track, ..
-            }
-            | UiInvalidation::ExpandedStepViewport {
                 track: old_track, ..
             },
         ) => track == old_track,

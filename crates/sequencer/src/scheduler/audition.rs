@@ -7,6 +7,9 @@ use std::sync::Mutex;
 pub struct AuditionLoop {
     pub snapshot: SequencerSnapshot,
     pub steps: usize,
+    /// The span it loops, in seconds of its source (a MIDI capture's crop):
+    /// the range [`AuditionMailbox::playhead`] moves over.
+    pub span: (f64, f64),
 }
 
 pub struct AuditionMailbox {
@@ -15,6 +18,7 @@ pub struct AuditionMailbox {
     pending: Mutex<Option<(u64, AuditionLoop)>>,
     pub(crate) queue: ScheduledEventQueue<4096>,
     position: AtomicU64,
+    span: [AtomicU64; 2],
     error: Mutex<Option<String>>,
 }
 
@@ -22,7 +26,8 @@ impl Default for AuditionMailbox {
     fn default() -> Self {
         Self { sequence: AtomicU64::new(1), active: AtomicU64::new(0),
             pending: Mutex::new(None), queue: ScheduledEventQueue::new(),
-            position: AtomicU64::new(0), error: Mutex::new(None) }
+            position: AtomicU64::new(0), span: [AtomicU64::new(0), AtomicU64::new(0)],
+            error: Mutex::new(None) }
     }
 }
 
@@ -33,6 +38,8 @@ impl AuditionMailbox {
         let generation = self.sequence.fetch_add(1, Ordering::Relaxed);
         self.active.store(generation, Ordering::Release);
         self.position.store(0, Ordering::Release);
+        self.span[0].store(score.span.0.to_bits(), Ordering::Release);
+        self.span[1].store(score.span.1.to_bits(), Ordering::Release);
         *pending = Some((generation, score));
     }
 
@@ -49,6 +56,17 @@ impl AuditionMailbox {
     pub fn take_error(&self) -> Option<String> { self.error.lock().unwrap().take() }
     pub(super) fn report_error(&self, error: String) { *self.error.lock().unwrap() = Some(error); }
     pub fn position(&self) -> f64 { f64::from_bits(self.position.load(Ordering::Acquire)) }
+    /// Where the playing loop is within its span, in seconds; -1 while none
+    /// plays.
+    pub fn playhead(&self) -> f64 {
+        if self.generation() == 0 {
+            return -1.0;
+        }
+        let [start, end] = &self.span;
+        let (start, end) = (f64::from_bits(start.load(Ordering::Acquire)),
+            f64::from_bits(end.load(Ordering::Acquire)));
+        start + self.position() * (end - start)
+    }
 
     fn cancel(&self, generation: u64) {
         let _ = self.active.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
@@ -171,7 +189,7 @@ mod tests {
         let mut runtime = lisp_host::ScratchControlRuntime::new(state.clone(), vec![vec![], vec![]],
             vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()], 0, 0);
         runtime.eval(r#"(def-midi-fx "preview-route" (do (fx-suppress) (fx-emit 0 :track 1)))"#).unwrap();
-        state.note_audition.start(AuditionLoop { snapshot: score, steps: 16 });
+        state.note_audition.start(AuditionLoop { snapshot: score, steps: 16, span: (0.0, 2.0) });
         let mut player = AuditionPlayer::default();
         player.advance(&state, &current, 0, 2048, 48_000, 256, Some(&mut runtime)).unwrap();
         let event = state.note_audition.queue.pop().expect("routed note");
@@ -190,7 +208,7 @@ mod tests {
         let current = SequencerSnapshot::capture(&state);
         let mut score = current.clone();
         score.transport.bpm = 137;
-        state.note_audition.start(AuditionLoop { snapshot: score, steps: 16 });
+        state.note_audition.start(AuditionLoop { snapshot: score, steps: 16, span: (0.0, 2.0) });
         let generation = state.note_audition.generation();
         let mut player = AuditionPlayer::default();
         let rate = 48_000;
@@ -217,5 +235,19 @@ mod tests {
         assert!(!state.note_audition.is_current(generation));
         assert!(state.note_audition.is_current(0), "ordinary notes keep their lifetime");
         assert!(state.note_audition.queue.pop().is_none());
+    }
+
+    #[test]
+    fn the_playhead_moves_over_the_span_while_a_loop_plays() {
+        let state = SequencerState::new(1, vec![]);
+        let mailbox = &state.note_audition;
+        assert_eq!(mailbox.playhead(), -1.0, "idle");
+        let score = SequencerSnapshot::capture(&state);
+        mailbox.start(AuditionLoop { snapshot: score, steps: 16, span: (2.0, 6.0) });
+        assert_eq!(mailbox.playhead(), 2.0);
+        mailbox.position.store(0.25f64.to_bits(), Ordering::Release);
+        assert_eq!(mailbox.playhead(), 3.0);
+        mailbox.stop();
+        assert_eq!(mailbox.playhead(), -1.0);
     }
 }

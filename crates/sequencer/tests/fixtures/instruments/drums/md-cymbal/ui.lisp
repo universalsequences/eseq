@@ -3,7 +3,7 @@
 ;; full-height knobs. CORE + machine panel column, FILTER/COLOR/OUT column.
 
 (def md-cymbal-engine-options () '("TRX-CY" "EFM-CY" "PI-RC" "PI-CC"))
-(def md-cymbal-engine-index () (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "engine"))) (let ((e (if p (round (if (get p :value-field) (reactive-get "SEQ" (get p :value-field)) (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)))) 1))) (if (= e 2) 2 (if (= e 3) 3 (if (= e 4) 4 1))))))
+(def md-cymbal-engine-index () (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "engine"))) (let ((e (if p (round (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 1))) (if (= e 2) 2 (if (= e 3) 3 (if (= e 4) 4 1))))))
 
 (def md-cymbal-core-block ()
   (eseq.effects.custom-ui-lego/ui-control-panel-dense-s 0

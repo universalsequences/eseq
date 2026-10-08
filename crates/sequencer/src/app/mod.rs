@@ -68,7 +68,9 @@ pub mod song_transport;
 mod synth;
 
 pub use browser::BrowserNode;
+pub use effect_params::effect_param_macro_key;
 pub use params::SoloAudibility;
+pub use synth::{instrument_param_macro_key, rack_macro_shown_value};
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand, TuningEdit};
 pub use edit::try_apply_command;
@@ -438,6 +440,7 @@ mod engine_registry_tests {
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 1,
@@ -1065,13 +1068,13 @@ pub struct App {
     pub(crate) song_capture_take: Option<song_capture::SongCaptureTake>,
     /// True when the most recent arrangement capture failed to commit
     /// (overflow, normalization, validation). Cleared when the next capture
-    /// starts. Bound to `SEQ.song-capture-failed`.
+    /// starts. Read as `song.capture-failed` (the host kinds).
     pub song_capture_failed: bool,
-    /// The actionable error for the most recent failed capture, bound to
-    /// `SEQ.song-capture-error`.
+    /// The actionable error for the most recent failed capture, read as
+    /// `song.capture-error`.
     pub song_capture_error: Option<String>,
-    /// The most recent song editing-primitive rejection, bound to
-    /// `SEQ.song-edit-error` so the arrangement view can surface it (the
+    /// The most recent song editing-primitive rejection, pushed as
+    /// `song.edit-error` so the arrangement view can surface it (the
     /// step tile hides the global status line). Cleared by the next
     /// successful song edit.
     pub song_edit_error: Option<String>,
@@ -1081,12 +1084,14 @@ pub struct App {
     pub(crate) take_recording: Option<take_recording::TakeRecordingSession>,
     /// Change counter for PROVISIONAL capture content
     /// (docs/realtime-arrangement-feedback-spec.md 3.3): bumped by the
-    /// writers of pending take notes and captured launches, and by nothing
-    /// else. `SEQ.song-pending` rebuilds its dots only when this moves, so a
-    /// recording never invalidates the committed-lane caches per note. It is
-    /// deliberately neither `committed_song_revision` (nothing is committed
-    /// yet) nor `pool_content_revision` (slice 3's counter, for COMMITTED
-    /// pool edits).
+    /// writers of pending take notes and captured launches, and when a
+    /// capture take begins or ends (begin / discard / finish), and by
+    /// nothing else. `song.pending-*` rebuilds its dots only when this (or
+    /// the pool / scenes content the launches name, `pending_content_key`)
+    /// moves, so a recording never invalidates the committed-lane caches
+    /// per note. It is deliberately neither `committed_song_revision`
+    /// (nothing is committed yet) nor `pool_content_revision` (slice 3's
+    /// counter, for COMMITTED pool edits).
     pub pending_revision: u64,
     /// Set after project load: the loaded per-track record-arm flags in
     /// `graph.record_armed` must be pushed INTO the UI-shared arm vector
@@ -1105,7 +1110,7 @@ pub struct App {
     pub song_region_selection: Option<song_region::SongRegionSelection>,
     /// The open sound-palette overlay (takes spec §17.6): the track it was
     /// opened on and the referent its Apply/Fork gestures target. `None` =
-    /// closed (the `SEQ.sound-palette` surface publishes Nil).
+    /// closed (`sound-palette.open` false).
     pub sound_palette_open: Option<(usize, sound_palette::PaletteTarget)>,
     /// Mirror of the arrangement edit cursor (region spec 5.3). The Lisp view
     /// owns the click gesture, but the Cmd-V seam lives in Rust and needs a
@@ -1139,19 +1144,30 @@ pub struct App {
     /// during a coalescing drag records its pool pattern here and the
     /// gesture end re-preflights once, instead of per drag frame.
     pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
-    /// An in-flight process lane slider drag: the scene structure captured
-    /// before its first write, committed as one history entry when the
-    /// gesture finishes (see `edit::apply_process_lane_drag_steps`).
-    pub(crate) process_lane_drag: Option<edit::ProcessLaneDrag>,
-    /// An in-flight rack groove amount drag (Timing / Velocity / Random):
-    /// the bus/group structure captured before its first write, committed
-    /// as one history entry when the gesture finishes (see
-    /// `edit::apply_rack_groove_amount_drag`).
-    pub(crate) rack_groove_drag: Option<edit::RackGrooveDrag>,
+    /// An in-flight drag whose writes go straight to state, committed as one
+    /// history entry when its gesture finishes: a process lane slider drag
+    /// (the scene structure captured before its first write, see
+    /// `edit::apply_process_lane_drag_steps`), a rack groove amount drag
+    /// (Timing / Velocity / Random: the bus/group structure, see
+    /// `edit::apply_rack_groove_amount_drag`) or a script note drag
+    /// (kind-bindings spec §14, stage 7e: the focus steps, every frame
+    /// rebuilt from them, see `edit::note_drag_frame`).
+    pub(crate) pending_drag: Option<edit::PendingDrag>,
+    /// Bumped by every undo and redo that replays an entry (the host kinds
+    /// forget the note ids of a source a replay changed).
+    pub history_replays: u64,
+    /// Bumped by every focus step edit that commits, rolls back or writes a
+    /// drag frame (`edit::FocusStepGesture`, the script note and focus step
+    /// drags): a pinned source's pool writes move no other counter, so the
+    /// host kinds re-read the piano roll's notes and steps when it moves.
+    pub focus_step_edits: u64,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
     pub sound_binding_epoch: usize,
+    /// Where the Filter Table editor saves its assets; `None` is the user
+    /// library (tests point it at scratch space).
+    pub filter_table_save_dir: Option<std::path::PathBuf>,
 }
 
 struct RecordingHistoryTransaction {
@@ -1159,9 +1175,55 @@ struct RecordingHistoryTransaction {
     changed: bool,
 }
 
+/// Where a device sat, with no identity bound yet, when the registry
+/// allocated one for it (its family and position then): what lets a reader
+/// that keyed the unbound device by position carry it over to the new
+/// identity (the host kinds' device instances), rather than guess by
+/// position afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevicePlaceholder {
+    AudioEffect {
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    },
+    BusEffect {
+        bus: crate::sequencer::BusId,
+        slot: usize,
+    },
+    MidiEffect {
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    },
+    RackSlot {
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    },
+    /// `rack_slot` is the rack slot's position on `track` at the allocation.
+    RackEffect {
+        track: crate::sequencer::TrackId,
+        rack_slot: usize,
+        slot: usize,
+    },
+}
+
+/// The stable identities of a project's devices: track chain effects, bus
+/// effects, drum rack slots and their effects, MIDI effects. All come from
+/// one allocator (`next_id`, advanced past every id bound), and an identity
+/// is bound in at most one family: every `bind_*` refuses an id another
+/// family holds, and a project load reallocates a persisted id two records
+/// share (`Project::normalize_device_instances`). So a device's id is
+/// unique across families, which the host kinds rely on (a track's devices
+/// of every family share one key space).
 #[derive(Clone, Default)]
 pub struct DeviceIdentityRegistry {
+    /// Moved by every change to the bindings below (an allocation, a bind,
+    /// a clear), so a reader can tell when an id may have been bound.
+    generation: u64,
     next_id: u64,
+    /// Identity -> where its device sat unbound when it was allocated
+    /// ([`DevicePlaceholder`]); only identities allocated for an existing
+    /// unbound device have one.
+    placeholders: HashMap<u64, DevicePlaceholder>,
     audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,
     audio_effect_locations:
         HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::TrackId, usize)>,
@@ -1182,10 +1244,79 @@ pub struct DeviceIdentityRegistry {
 }
 
 impl DeviceIdentityRegistry {
+    /// Moves whenever a binding may have changed (the host kinds' device
+    /// sync re-reads device ids only then).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Where `id`'s device sat unbound when it was allocated, if it was
+    /// allocated for an existing unbound device ([`DevicePlaceholder`]).
+    pub fn placeholder(&self, id: u64) -> Option<DevicePlaceholder> {
+        self.placeholders.get(&id).copied()
+    }
+
+    /// Allocate an identity for the unbound device at `placeholder`.
+    fn allocate_for(&mut self, placeholder: DevicePlaceholder) -> u64 {
+        let id = self.allocate();
+        self.placeholders.insert(id, placeholder);
+        id
+    }
+
+    /// The family other than `own` that holds `id`, if any (an identity is
+    /// bound in at most one family).
+    fn bound_elsewhere(&self, id: u64, own: DeviceFamily) -> Option<&'static str> {
+        let effect = crate::sequencer::EffectInstanceId(id);
+        [
+            (
+                DeviceFamily::AudioEffect,
+                self.audio_effect_locations.contains_key(&effect),
+            ),
+            (
+                DeviceFamily::BusEffect,
+                self.bus_audio_effect_locations.contains_key(&effect),
+            ),
+            (
+                DeviceFamily::RackEffect,
+                self.rack_audio_effect_locations.contains_key(&effect),
+            ),
+            (
+                DeviceFamily::MidiEffect,
+                self.midi_effect_locations
+                    .contains_key(&crate::sequencer::MidiFxInstanceId(id)),
+            ),
+            (
+                DeviceFamily::RackSlot,
+                self.rack_slot_locations
+                    .contains_key(&crate::sequencer::RackSlotId(id)),
+            ),
+        ]
+        .into_iter()
+        .find(|(family, bound)| *bound && *family != own)
+        .map(|(family, _)| family.label())
+    }
+
+    /// Refuse binding `ids` to `own` when another family holds one.
+    fn check_unbound_elsewhere(
+        &self,
+        ids: impl IntoIterator<Item = u64>,
+        own: DeviceFamily,
+    ) -> Result<(), String> {
+        for id in ids {
+            if let Some(family) = self.bound_elsewhere(id, own) {
+                return Err(format!(
+                    "device instance {id} is already bound to a {family}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn observe(&mut self, id: u64) {
         self.next_id = self.next_id.max(id);
     }
     fn allocate(&mut self) -> u64 {
+        self.generation += 1;
         self.next_id = self.next_id.checked_add(1).expect("device instance id exhausted");
         self.next_id
     }
@@ -1202,17 +1333,29 @@ impl DeviceIdentityRegistry {
         if let Some(id) = self.audio_effects.get(&(track, slot)).copied() {
             return id;
         }
-        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        let id = crate::sequencer::EffectInstanceId(
+            self.allocate_for(DevicePlaceholder::AudioEffect { track, slot }),
+        );
         self.audio_effects.insert((track, slot), id);
         self.audio_effect_locations.insert(id, (track, slot));
         id
     }
 
-    pub(crate) fn audio_effect_location(
+    pub fn audio_effect_location(
         &self,
         id: crate::sequencer::EffectInstanceId,
     ) -> Option<(crate::sequencer::TrackId, usize)> {
         self.audio_effect_locations.get(&id).copied()
+    }
+
+    /// The stable identity bound to `track`'s effect chain slot `slot`, if
+    /// one is (a read-only [`Self::audio_effect`]: never allocates).
+    pub fn audio_effect_id(
+        &self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> Option<crate::sequencer::EffectInstanceId> {
+        self.audio_effects.get(&(track, slot)).copied()
     }
 
     pub(crate) fn audio_effect_chain(
@@ -1232,6 +1375,7 @@ impl DeviceIdentityRegistry {
         first_slot: usize,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        self.generation += 1;
         for id in instances {
             self.observe(id.0);
         }
@@ -1249,15 +1393,8 @@ impl DeviceIdentityRegistry {
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("audio-effect chain contains a duplicate stable identity".to_string());
         }
+        self.check_unbound_elsewhere(instances.iter().map(|id| id.0), DeviceFamily::AudioEffect)?;
         for id in instances {
-            if self.bus_audio_effect_locations.contains_key(id)
-                || self.rack_audio_effect_locations.contains_key(id)
-            {
-                return Err(format!(
-                    "effect instance {} is already bound to a bus device",
-                    id.0
-                ));
-            }
             if let Some((owner, slot)) = self.audio_effect_locations.get(id).copied() {
                 if owner != track || slot < first_slot || slot >= end_slot {
                     return Err(format!(
@@ -1289,17 +1426,29 @@ impl DeviceIdentityRegistry {
         if let Some(id) = self.bus_audio_effects.get(&(bus, slot)).copied() {
             return id;
         }
-        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        let id = crate::sequencer::EffectInstanceId(
+            self.allocate_for(DevicePlaceholder::BusEffect { bus, slot }),
+        );
         self.bus_audio_effects.insert((bus, slot), id);
         self.bus_audio_effect_locations.insert(id, (bus, slot));
         id
     }
 
-    pub(crate) fn bus_audio_effect_location(
+    pub fn bus_audio_effect_location(
         &self,
         id: crate::sequencer::EffectInstanceId,
     ) -> Option<(crate::sequencer::BusId, usize)> {
         self.bus_audio_effect_locations.get(&id).copied()
+    }
+
+    /// The identity bound to `bus`'s effect slot `slot`, if one is (never
+    /// allocates).
+    pub fn bus_audio_effect_id(
+        &self,
+        bus: crate::sequencer::BusId,
+        slot: usize,
+    ) -> Option<crate::sequencer::EffectInstanceId> {
+        self.bus_audio_effects.get(&(bus, slot)).copied()
     }
 
     pub(crate) fn bind_bus_audio_effect_chain(
@@ -1307,21 +1456,15 @@ impl DeviceIdentityRegistry {
         bus: crate::sequencer::BusId,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        self.generation += 1;
         for id in instances {
             self.observe(id.0);
         }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("bus effect chain contains a duplicate stable identity".to_string());
         }
+        self.check_unbound_elsewhere(instances.iter().map(|id| id.0), DeviceFamily::BusEffect)?;
         for id in instances {
-            if self.audio_effect_locations.contains_key(id)
-                || self.rack_audio_effect_locations.contains_key(id)
-            {
-                return Err(format!(
-                    "effect instance {} is already bound to a track device",
-                    id.0
-                ));
-            }
             if let Some((owner, _)) = self.bus_audio_effect_locations.get(id).copied() {
                 if owner != bus {
                     return Err(format!(
@@ -1358,17 +1501,35 @@ impl DeviceIdentityRegistry {
         if let Some(id) = self.rack_audio_effects.get(&(rack_slot, slot)).copied() {
             return id;
         }
-        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        let id = match self.rack_slot_locations.get(&rack_slot).copied() {
+            Some((track, position)) => self.allocate_for(DevicePlaceholder::RackEffect {
+                track,
+                rack_slot: position,
+                slot,
+            }),
+            None => self.allocate(),
+        };
+        let id = crate::sequencer::EffectInstanceId(id);
         self.rack_audio_effects.insert((rack_slot, slot), id);
         self.rack_audio_effect_locations.insert(id, (rack_slot, slot));
         id
     }
 
-    pub(crate) fn rack_audio_effect_location(
+    pub fn rack_audio_effect_location(
         &self,
         id: crate::sequencer::EffectInstanceId,
     ) -> Option<(crate::sequencer::RackSlotId, usize)> {
         self.rack_audio_effect_locations.get(&id).copied()
+    }
+
+    /// The identity bound to effect slot `slot` of rack slot `rack_slot`,
+    /// if one is (never allocates).
+    pub fn rack_audio_effect_id(
+        &self,
+        rack_slot: crate::sequencer::RackSlotId,
+        slot: usize,
+    ) -> Option<crate::sequencer::EffectInstanceId> {
+        self.rack_audio_effects.get(&(rack_slot, slot)).copied()
     }
 
     pub(crate) fn bind_rack_audio_effect_chain(
@@ -1376,21 +1537,15 @@ impl DeviceIdentityRegistry {
         rack_slot: crate::sequencer::RackSlotId,
         instances: &[crate::sequencer::EffectInstanceId],
     ) -> Result<(), String> {
+        self.generation += 1;
         for id in instances {
             self.observe(id.0);
         }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("rack-slot effect chain contains a duplicate stable identity".to_string());
         }
+        self.check_unbound_elsewhere(instances.iter().map(|id| id.0), DeviceFamily::RackEffect)?;
         for id in instances {
-            if self.audio_effect_locations.contains_key(id)
-                || self.bus_audio_effect_locations.contains_key(id)
-            {
-                return Err(format!(
-                    "effect instance {} is already bound to another device domain",
-                    id.0
-                ));
-            }
             if let Some((owner, _)) = self.rack_audio_effect_locations.get(id).copied() {
                 if owner != rack_slot {
                     return Err(format!(
@@ -1425,17 +1580,29 @@ impl DeviceIdentityRegistry {
         if let Some(id) = self.midi_effects.get(&(track, slot)).copied() {
             return id;
         }
-        let id = crate::sequencer::MidiFxInstanceId(self.allocate());
+        let id = crate::sequencer::MidiFxInstanceId(
+            self.allocate_for(DevicePlaceholder::MidiEffect { track, slot }),
+        );
         self.midi_effects.insert((track, slot), id);
         self.midi_effect_locations.insert(id, (track, slot));
         id
     }
 
-    pub(crate) fn midi_effect_location(
+    pub fn midi_effect_location(
         &self,
         id: crate::sequencer::MidiFxInstanceId,
     ) -> Option<(crate::sequencer::TrackId, usize)> {
         self.midi_effect_locations.get(&id).copied()
+    }
+
+    /// The identity bound to `track`'s MIDI-FX slot `slot`, if one is
+    /// (never allocates).
+    pub fn midi_effect_id(
+        &self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> Option<crate::sequencer::MidiFxInstanceId> {
+        self.midi_effects.get(&(track, slot)).copied()
     }
 
     pub(crate) fn midi_effect_chain(
@@ -1453,12 +1620,14 @@ impl DeviceIdentityRegistry {
         track: crate::sequencer::TrackId,
         instances: &[crate::sequencer::MidiFxInstanceId],
     ) -> Result<(), String> {
+        self.generation += 1;
         for id in instances {
             self.observe(id.0);
         }
         if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
             return Err("MIDI-FX chain contains a duplicate stable identity".to_string());
         }
+        self.check_unbound_elsewhere(instances.iter().map(|id| id.0), DeviceFamily::MidiEffect)?;
         let retained = self
             .midi_effects
             .iter()
@@ -1543,17 +1712,29 @@ impl DeviceIdentityRegistry {
         if let Some(id) = self.rack_slots.get(&(track, slot)).copied() {
             return id;
         }
-        let id = crate::sequencer::RackSlotId(self.allocate());
+        let id = crate::sequencer::RackSlotId(
+            self.allocate_for(DevicePlaceholder::RackSlot { track, slot }),
+        );
         self.rack_slots.insert((track, slot), id);
         self.rack_slot_locations.insert(id, (track, slot));
         id
     }
 
-    pub(crate) fn rack_slot_location(
+    pub fn rack_slot_location(
         &self,
         id: crate::sequencer::RackSlotId,
     ) -> Option<(crate::sequencer::TrackId, usize)> {
         self.rack_slot_locations.get(&id).copied()
+    }
+
+    /// The identity bound to `track`'s rack slot `slot`, if one is (never
+    /// allocates).
+    pub fn rack_slot_id(
+        &self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> Option<crate::sequencer::RackSlotId> {
+        self.rack_slots.get(&(track, slot)).copied()
     }
 
     pub(crate) fn bind_rack_slot(
@@ -1562,7 +1743,9 @@ impl DeviceIdentityRegistry {
         slot: usize,
         id: crate::sequencer::RackSlotId,
     ) -> Result<(), String> {
+        self.generation += 1;
         self.observe(id.0);
+        self.check_unbound_elsewhere([id.0], DeviceFamily::RackSlot)?;
         if let Some((owner, owner_slot)) = self.rack_slot_locations.get(&id).copied() {
             if owner != track || owner_slot != slot {
                 return Err(format!("rack-slot instance {} is already bound", id.0));
@@ -1576,6 +1759,7 @@ impl DeviceIdentityRegistry {
     }
 
     pub(crate) fn clear_rack_track(&mut self, track: crate::sequencer::TrackId) {
+        self.generation += 1;
         let removed = self.rack_slots.iter()
             .filter(|((owner, _), _)| *owner == track)
             .map(|(location, id)| (*location, *id))
@@ -1583,18 +1767,51 @@ impl DeviceIdentityRegistry {
         for (location, rack_slot) in removed {
             self.rack_slots.remove(&location);
             self.rack_slot_locations.remove(&rack_slot);
-            let effects = self.rack_audio_effects.iter()
-                .filter(|((owner, _), _)| *owner == rack_slot)
-                .map(|(effect_location, id)| (*effect_location, *id))
-                .collect::<Vec<_>>();
-            for (effect_location, effect_id) in effects {
-                self.rack_audio_effects.remove(&effect_location);
-                self.rack_audio_effect_locations.remove(&effect_id);
+            self.forget_rack_slot_effects(rack_slot);
+        }
+    }
+
+    /// Forget the identities of rack slot `slot`'s audio effects.
+    fn forget_rack_slot_effects(&mut self, slot: crate::sequencer::RackSlotId) {
+        let effects = self
+            .rack_audio_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner == slot)
+            .map(|(effect_location, id)| (*effect_location, *id))
+            .collect::<Vec<_>>();
+        for (effect_location, effect_id) in effects {
+            self.rack_audio_effects.remove(&effect_location);
+            self.rack_audio_effect_locations.remove(&effect_id);
+        }
+    }
+
+    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
+    /// identities; the slots after it keep theirs, each one position down,
+    /// so no identity passes to another slot.
+    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        self.generation += 1;
+        let shifted = self
+            .rack_slots
+            .iter()
+            .filter(|((owner, at), _)| *owner == track && *at >= slot)
+            .map(|((_, at), id)| (*at, *id))
+            .collect::<Vec<_>>();
+        for (at, id) in &shifted {
+            self.rack_slots.remove(&(track, *at));
+            self.rack_slot_locations.remove(id);
+        }
+        for (at, id) in shifted {
+            if at == slot {
+                self.forget_rack_slot_effects(id);
+                continue;
             }
+            self.rack_slots.insert((track, at - 1), id);
+            self.rack_slot_locations.insert(id, (track, at - 1));
         }
     }
 
     pub(crate) fn clear_track(&mut self, track: crate::sequencer::TrackId) {
+        self.generation += 1;
         let audio_effects = self.audio_effects.iter()
             .filter(|((owner, _), _)| *owner == track)
             .map(|(location, id)| (*location, *id))
@@ -1615,6 +1832,8 @@ impl DeviceIdentityRegistry {
     }
 
     pub(crate) fn clear(&mut self) {
+        self.generation += 1;
+        self.placeholders.clear();
         self.audio_effects.clear();
         self.audio_effect_locations.clear();
         self.bus_audio_effects.clear();
@@ -1625,6 +1844,28 @@ impl DeviceIdentityRegistry {
         self.midi_effect_locations.clear();
         self.rack_slots.clear();
         self.rack_slot_locations.clear();
+    }
+}
+
+/// A [`DeviceIdentityRegistry`] family, for its cross-family check.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceFamily {
+    AudioEffect,
+    BusEffect,
+    RackEffect,
+    MidiEffect,
+    RackSlot,
+}
+
+impl DeviceFamily {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AudioEffect => "track effect",
+            Self::BusEffect => "bus effect",
+            Self::RackEffect => "rack-slot effect",
+            Self::MidiEffect => "MIDI effect",
+            Self::RackSlot => "rack slot",
+        }
     }
 }
 
@@ -1646,6 +1887,36 @@ mod device_identity_registry_tests {
         let allocated = registry.bus_audio_effect(BusId::DEFAULT_A, 0);
 
         assert_eq!(allocated, EffectInstanceId(101));
+    }
+
+    /// An identity allocated for an unbound device records where the device
+    /// sat (its family and position); one minted for a new device does not.
+    #[test]
+    fn allocations_for_unbound_devices_record_their_placeholder() {
+        use super::DevicePlaceholder;
+        let mut registry = DeviceIdentityRegistry::default();
+        let track = TrackId(1);
+        let ids = registry.midi_effect_chain(track, 2);
+        assert_eq!(
+            registry.placeholder(ids[1].0),
+            Some(DevicePlaceholder::MidiEffect { track, slot: 1 })
+        );
+        let inserted = registry.insert_midi_effect_identity(track, 0, 2).unwrap();
+        assert_eq!(registry.placeholder(inserted.0), None, "a new device");
+        let rack_slot = registry.rack_slot(track, 3);
+        let effect = registry.rack_audio_effect(rack_slot, 1);
+        assert_eq!(
+            registry.placeholder(effect.0),
+            Some(DevicePlaceholder::RackEffect {
+                track,
+                rack_slot: 3,
+                slot: 1
+            })
+        );
+        let generation = registry.generation();
+        registry.clear();
+        assert!(registry.generation() > generation);
+        assert_eq!(registry.placeholder(ids[1].0), None);
     }
 }
 
@@ -2684,9 +2955,11 @@ impl App {
             song_held_sources: Vec::new(),
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
-            process_lane_drag: None,
-            rack_groove_drag: None,
+            pending_drag: None,
+            history_replays: 0,
+            focus_step_edits: 0,
             sound_binding_epoch: 0,
+            filter_table_save_dir: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),
@@ -3724,10 +3997,7 @@ impl App {
         edits: Option<&'a crate::analysis::SamplerSliceEdits>,
     ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
         let path = self.sampler_path_for_track(track);
-        crate::analysis::edits_for_sample(
-            edits,
-            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
-        )
+        crate::analysis::edits_for_sample_path(edits, path.as_deref())
     }
 
     pub fn sampler_slice_edits_for_sample<'a>(
@@ -3737,10 +4007,7 @@ impl App {
         sample_name: &str,
     ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
         let path = self.sample_path_for_buffer(buffer_id, sample_name);
-        crate::analysis::edits_for_sample(
-            edits,
-            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
-        )
+        crate::analysis::edits_for_sample_path(edits, path.as_deref())
     }
 
     pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {
@@ -3754,7 +4021,16 @@ impl App {
     }
 
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
-        if self.graph.track_buffer_ids.get(track)
+        self.sampler_path_ref_for_track(track).cloned()
+    }
+
+    /// [`Self::sampler_path_for_track`], borrowed (a per-tick comparison
+    /// allocates nothing).
+    pub fn sampler_path_ref_for_track(&self, track: usize) -> Option<&PathBuf> {
+        if self
+            .graph
+            .track_buffer_ids
+            .get(track)
             .is_some_and(|buffer| self.blank_sample_buffers.contains(buffer))
         {
             return None;
@@ -3762,19 +4038,16 @@ impl App {
         self.sampler_paths
             .get(track)
             .and_then(|path| path.as_ref())
-            .cloned()
             .or_else(|| {
                 self.graph
                     .track_buffer_ids
                     .get(track)
                     .and_then(|buffer_id| self.sample_buffer_path_registry.get(buffer_id))
-                    .cloned()
             })
             .or_else(|| {
                 self.tracks
                     .get(track)
                     .and_then(|name| self.sample_path_registry.get(name))
-                    .cloned()
             })
     }
 

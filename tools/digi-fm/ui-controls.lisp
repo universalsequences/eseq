@@ -66,7 +66,7 @@
 (def df-switch (section name title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-binding p) 0.5)))
       (button title :width 4.3 :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (df-ink) :dim)
         :background-color (if on (df-accent) :instrument-control-bg)

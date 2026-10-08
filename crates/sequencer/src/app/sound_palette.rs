@@ -13,6 +13,12 @@ use crate::sequencer::{
 use super::sound_binding::BoundSource;
 use super::App;
 
+/// A Patch's palette name: its own, else `Patch N`.
+fn patch_name(meta: Option<&crate::sequencer::SoundEntityMeta>, patch: PatchId) -> String {
+    meta.map(|meta| meta.name.clone())
+        .unwrap_or_else(|| format!("Patch {}", patch.0 + 1))
+}
+
 /// The per-track sound color set (§17.11), indexed by
 /// `SoundEntityMeta::color`. Same visual family as the p-lock
 /// `VARIANT_PALETTE` (the palette mirrors that UI's language), extended to
@@ -413,6 +419,28 @@ impl App {
         Ok(format!("Cleaned up {removed} unused entit(ies)"))
     }
 
+    /// The bound sound's identity, as the panel header's badge shows it
+    /// (takes spec 16.6): the current palette entry's name (the palette's
+    /// own `is_current` row), else the binding's label (`Take 2 · bars
+    /// 0–2` / `Pattern 2 (scene)`); `None` when unbound. Reads one entry,
+    /// not the palette's diff over every Patch. Deliberately not
+    /// [`Self::sound_binding_badge`], whose reverse referent index ("— used
+    /// by Scene 1, Take 2, …") grows without bound. Shared by the
+    /// instrument panels and the host kinds' `device.sound-binding`.
+    pub fn sound_binding_label(&self, track: usize) -> Option<String> {
+        let target = self.palette_target_or_binding(track, None);
+        let current = self.resolve_palette_target(track, target).ok();
+        let named = current.and_then(|resolved| {
+            let patch = resolved.current.patch;
+            self.state.with_project_scenes(|scenes| {
+                let pool = scenes.track_pools.get(track)?;
+                (pool.sounds.patches.contains_key(&patch))
+                    .then(|| patch_name(pool.sounds.patch_meta.get(&patch), patch))
+            })
+        });
+        named.or_else(|| self.track_binding_label(track))
+    }
+
     /// The palette overlay's rows for `track` (§17.6): every Patch in the
     /// track's pool, ordered by id, with display metadata and the reverse
     /// referent index. `target` marks which entry `is_current`.
@@ -511,9 +539,7 @@ impl App {
                     PaletteEntry {
                         patch,
                         mix: paired_mix.get(&patch).copied(),
-                        name: meta
-                            .map(|meta| meta.name.clone())
-                            .unwrap_or_else(|| format!("Patch {}", patch.0 + 1)),
+                        name: patch_name(meta, patch),
                         color: meta.and_then(|meta| meta.color),
                         referents: if names.is_empty() {
                             // The track sound is never "unused": the carrier
@@ -598,31 +624,29 @@ impl App {
     /// every dot on the lane at once).
     pub fn song_clip_sounds(&self) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         // Two sequential lock scopes, never nested (arrangement and scenes
-        // have no established lock order): first the minimal clip tuples,
-        // then the sound resolution.
-        let lanes: Vec<Vec<(u64, Option<u64>, Option<u64>)>> =
-            self.state.with_committed_arrangement(|arrangement| {
-                arrangement
-                    .map(|arrangement| {
-                        arrangement
-                            .track_lanes
-                            .iter()
-                            .map(|clips| {
-                                clips
-                                    .iter()
-                                    .map(|clip| (clip.id.0, clip.take_id, clip.pattern_id))
-                                    .collect()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
+        // have no established lock order): first the lanes, then the sound
+        // resolution.
+        let lanes = self.state.with_committed_arrangement(|arrangement| {
+            arrangement.map(|arrangement| arrangement.track_lanes.clone())
+        });
+        match lanes {
+            Some(lanes) => self.song_clip_sounds_in(&lanes),
+            None => Vec::new(),
+        }
+    }
+
+    /// [`Self::song_clip_sounds`] for `lanes` already read from the
+    /// committed arrangement (one scenes lock, no arrangement lock).
+    pub fn song_clip_sounds_in(
+        &self,
+        lanes: &[Vec<crate::sequencer::ArrClip>],
+    ) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         if lanes.is_empty() {
             return Vec::new();
         }
         self.state.with_project_scenes(|scenes| {
             lanes
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(track, clips)| {
                     let pool = scenes.track_pools.get(track);
@@ -640,14 +664,14 @@ impl App {
                         }
                     };
                     clips
-                        .into_iter()
-                        .map(|(clip_id, take_id, pattern_id)| {
-                            let patch = clip_patch(take_id, pattern_id);
+                        .iter()
+                        .map(|clip| {
+                            let patch = clip_patch(clip.take_id, clip.pattern_id);
                             let color = patch.and_then(|patch| {
                                 pool.and_then(|pool| pool.sounds.patch_meta.get(&patch))
                                     .and_then(|meta| meta.color)
                             });
-                            (clip_id, patch.is_some(), color)
+                            (clip.id.0, patch.is_some(), color)
                         })
                         .collect()
                 })

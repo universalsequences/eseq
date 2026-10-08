@@ -2,18 +2,18 @@
 ;; graph-neural-variable-reset-demo.lisp that adds the two k×k group control
 ;; surfaces from docs/neural-groups-spec.md:
 ;;
-;;   G (:group-gain-<r>-<c>)     — propagation gain between groups (§4.3). Cell
-;;                                 [A][B] scales every deposit from a group-A node
-;;                                 into a group-B node. 1 = inert, 0 = unplugged.
-;;   H (:group-coupling-<r>-<c>) — activity→threshold coupling (§4.5). Positive
-;;                                 [A][B]: activity in A raises B's effective
-;;                                 threshold (cross-inhibition); negative excites;
-;;                                 the diagonal is a per-group density governor.
+;;   G (group gain)     — propagation gain between groups (§4.3). Cell
+;;                        [A][B] scales every deposit from a group-A node
+;;                        into a group-B node. 1 = inert, 0 = unplugged.
+;;   H (group coupling) — activity→threshold coupling (§4.5). Positive
+;;                        [A][B]: activity in A raises B's effective
+;;                        threshold (cross-inhibition); negative excites;
+;;                        the diagonal is a per-group density governor.
 ;;
 ;; Both render as editable 4×4 matrices to the right of the connection-weight
-;; matrix (rows = source group A–D, cols = target group). Each drag writes ONE
-;; config cell override via `graph-config`, like a weight-matrix cell writes one
-;; edge. Assign nodes to groups with the per-row `grp` dropdown.
+;; matrix (rows = source group A–D, cols = target group). Each drag sets ONE
+;; cell (`set-group-gain!` / `set-group-coupling!`), like a weight-matrix cell
+;; sets one edge. Assign nodes to groups with the per-row `grp` dropdown.
 ;;
 ;; The graph defaults to eight all-to-all nodes and can be grown to sixteen without
 ;; losing dormant node or edge overrides. Per-row seed controls choose whether a node
@@ -30,21 +30,25 @@
 ;; vel-decay / vel-reset / resolution / quantize plus the active NxN
 ;; connection-weight matrix.
 ;;
-;; SCALING: every per-node control binds DIRECTLY to the resolved graph value via
-;; `bind-graph` (number knobs) / `bind-graph` + an options list (enum dropdowns).
-;; There is no per-node shadow `defstate` and no per-node sync function — the rows are
-;; generated with a single `each` over (range NODE-COUNT), so a 16- or 64-node
-;; sequencer costs zero extra lines. Edits write back through `reactive-set` (to dirty
-;; just the one bound widget) plus the `graph-*` setter (to persist the override). The
-;; weight matrix uses `:on-cell-change`, so dragging one cell writes ONE edge override
-;; instead of re-applying the full active matrix.
+;; The panel reads and edits the graph through the kinds (kind-bindings spec §14.2k,
+;; §14.2s): every control edit is one undo entry, a drag's frames joining one. The
+;; batch controls (threshold, global transpose, dur x) set every node's param at once
+;; through the graph-* natives, one undo entry each; the threshold every node up to the
+;; graph's capacity, so a node that becomes active later already carries it.
 ;;
 ;; Project scratch entrypoint:
 ;;   (load "content/scripts/sequencers/graph-neural-group-matrix-demo.lisp")
 ;;
-;; Loading this file only publishes the graph/UI and syncs controls from the current
-;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
+;; Loading this file only publishes the graph/UI. It does not write graph overrides.
+;; For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
+
+(import eseq.kinds :refer (graph-of graph-param-named graph-quantize-options
+                           graph-max-poly-selection-options set-group-gain! set-group-coupling!))
+(import eseq.view-kit :refer (rgb-part index-of nothing))
+(import eseq.graph-kit :refer (route-tracks route-options node-route-label set-route-label!
+                               weight-rows set-weight! column rack-name res-options
+                               set-param-on-nodes!))
 
 ;; `def-sequencer` returns the instance handle; every graph-* native below takes
 ;; it, so this script also works when a drum rack owns it (routes then address
@@ -111,319 +115,46 @@
 (def script-buffer-name "*group-matrix*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def ggm-owner-rack (graph-owner ggm-name))
-(def ggm-route-tracks ()
-  ;; Read live so a member that joins the rack later shows up; SEQ.groups
-  ;; is read only to re-render when the membership changes.
-  (let ((groups SEQ.groups)) (graph-route-tracks ggm-name)))
-(def script-tab-label
-  (if ggm-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id ggm-owner-rack)) "grp mtx"))
+(def script-tab-label (if ggm-owner-rack (rack-name ggm-owner-rack) "grp mtx"))
 (def script-sequencer-name "neural-group-matrix-demo")
 
-;; ── dropdown option lists (order is the index space bind-graph maps into) ──
-
-(def ggm-res-options (list "1" "2" "4" "8" "16" "32" "64"))
-(def ggm-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
-;; Route option n is track n (project-owned) or rack member n (rack-owned);
-;; "Off" is always last. Either way the option index IS the route value.
-(def ggm-route-options ()
-  (if (ggm-route-tracks)
-    (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (ggm-route-tracks))
-      (list "Off"))
-    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-          "Off")))
-;; Colors parallel to the route options: a rack-owned instance colors by the
-;; member's track, so the panel's track-colors are re-indexed through the members.
-(def ggm-route-track-colors (track-colors)
-  (if (ggm-route-tracks)
-    (map (lambda (track) (nth track-colors track)) (ggm-route-tracks))
-    track-colors))
-(def ggm-max-poly-selection-options
-  (list "deterministic" "propagation" "random" "markov" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
-;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
-;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
+;; Neural-group assignment (docs/neural-groups-spec.md §3.1): a node's group
+;; is the option's index (group A = 0).
 (def ggm-group-options (list "A" "B" "C" "D"))
-(def ggm-route-off-index () (- (len (ggm-route-options)) 1))
+(def ggm-group-count 4)
 (def ggm-route-off-color (list 0.20 0.21 0.23))
 
-(def ggm-index-of (xs item)
-  (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
-    (if (> (len hits) 0) (nth hits 0) 0)))
+;; The neuron whose weight-matrix column is pressed (-1: none); its row lights.
+(def-kind ggm-view
+  :key ()
+  :state ((selected-neuron -1)))
 
-;; Route dropdown label -> the internal route the engine stores (:off or a track index).
-(def ggm-route->internal (label)
-  (if (= label "Off") :off (ggm-index-of (ggm-route-options) label)))
-
-(def ggm-route-color-field (n channel)
-  (str "ggm-route-color-" n "-" channel))
-
-(def ggm-route-option-index (n)
-  (round (reactive-value (bind-graph ggm-name n :route (ggm-route-options)))))
-
-(def ggm-route-color-valid? (track-colors route-index)
-  (and (>= route-index 0) (< route-index (len track-colors)) (< route-index (ggm-route-off-index))))
-
-(def ggm-color-channel (color channel fallback)
-  (if (< channel (len color)) (nth color channel) fallback))
-
-(def ggm-route-color-channel (track-colors route-index channel)
-  (if (ggm-route-color-valid? track-colors route-index)
-    (ggm-color-channel (nth track-colors route-index) channel (nth ggm-route-off-color channel))
-    (nth ggm-route-off-color channel)))
-
-(def ggm-sync-route-color (n track-colors route-index)
-  (do
-    (reactive-set "GRAPH" (ggm-route-color-field n "active")
-      (if (ggm-route-color-valid? track-colors route-index) 1 0))
-    (reactive-set "GRAPH" (ggm-route-color-field n "r")
-      (ggm-route-color-channel track-colors route-index 0))
-    (reactive-set "GRAPH" (ggm-route-color-field n "g")
-      (ggm-route-color-channel track-colors route-index 1))
-    (reactive-set "GRAPH" (ggm-route-color-field n "b")
-      (ggm-route-color-channel track-colors route-index 2))))
-
-;; ── connection weights: one list-valued widget, so a single state cell is fine ──
-;; (Per-node knobs avoid defstate via bind-graph; the matrix is one widget for all active
-;;  cells, so it keeps a single ggm-weights cell that is rebuilt from the graph on render
-;;  and patched one cell at a time on edit.)
+;; ── init helpers (explicit-only; loading the file does NOT call these) ──
+;; They write through the graph-* natives, which answer at once: the graph is
+;; not a kind instance until the host's next sync.
 
 (def ggm-node-count ()
   (max ggm-min-node-count
     (min ggm-max-node-count
-      (round (reactive-value (bind-graph-config ggm-name :node-count))))))
-
-(def ggm-ring-weights ()
-  (let ((count (ggm-node-count)))
-    (map
-      (lambda (r)
-        (map
-          (lambda (c) (if (= c (mod (+ r 1) count)) 1 0))
-          (range 0 count)))
-      (range 0 count))))
-
-(defstate ggm-weights (list))
-(defstate ggm-group-gain (list))
-(defstate ggm-group-coupling (list))
-(defstate ggm-selected-neuron -1)
-(defstate ggm-threshold 0.55)
-(defstate ggm-global-transpose 0)
-(defstate ggm-dur-factor 1)
-(defstate ggm-piano-press-depth 0.6)
-(defstate ggm-delay-factor-index 2)
-(defstate ggm-timebase-factor-index 2)
-
-(def ggm-read-weights ()
-  (map
-    (lambda (r) (map (lambda (c) (graph-edge-value ggm-name r c :weight)) (range 0 (ggm-node-count))))
-    (range 0 (ggm-node-count))))
-
-(def ggm-set-cell (w r c v)
-  (set-nth w r (set-nth (nth w r) c v)))
-
-(def ggm-zero-row ()
-  (map (lambda (n) 0) (range 0 (ggm-node-count))))
-
-(def ggm-zero-matrix ()
-  (map (lambda (n) (ggm-zero-row)) (range 0 (ggm-node-count))))
-
-(def ggm-zero-column-matrix ()
-  (map (lambda (n) (list 0)) (range 0 (ggm-node-count))))
-
-;; ── neural-group matrices (docs/neural-groups-spec.md §3.2) ──
-;; Config cells are addressed as :group-gain-<row>-<col> / :group-coupling-<row>-<col>
-;; (row = source group, col = target group). Like ggm-weights, each matrix widget is
-;; one list-valued state cell rebuilt from the resolved config on render and patched
-;; one cell at a time on edit.
-
-(def ggm-group-count 4)
-
-(def ggm-zero-group-column-matrix ()
-  (map (lambda (n) (list 0)) (range 0 ggm-group-count)))
-
-(def ggm-group-cell-field (prefix r c)
-  (str prefix "-" r "-" c))
-
-(def ggm-read-group-matrix (prefix)
-  (map
-    (lambda (r)
-      (map
-        (lambda (c) (graph-config-value ggm-name (ggm-group-cell-field prefix r c)))
-        (range 0 ggm-group-count)))
-    (range 0 ggm-group-count)))
-
-(def ggm-edit-group-cell (prefix r c v)
-  (do
-    (reactive-set "GRAPH" (graph-config-key ggm-name (ggm-group-cell-field prefix r c)) v)
-    (graph-config ggm-name (ggm-group-cell-field prefix r c) v)))
-
-(def ggm-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :id) ggm-name)) visualizations)))
-    (if (> (len hits) 0) (nth hits 0) nil)))
-
-(def ggm-matrix-shape? (value rows cols)
-  (if value
-    (if (= (len value) rows)
-      (if (> rows 0)
-        (= (len (nth value 0)) cols)
-        true)
-      false)
-    false))
-
-(def ggm-viz-matrix (viz field fallback rows cols)
-  (if viz
-    (let ((value (get viz field)))
-      (if (ggm-matrix-shape? value rows cols) value fallback))
-    fallback))
-
-;; ── init helpers (explicit-only; loading the file does NOT call these) ──
-
-(def ggm-apply-weights (w)
-  (for-each
-    (lambda (r)
-      (for-each
-        (lambda (c)
-          (graph-edge ggm-name :from r :to c :weight (nth (nth w r) c)))
-        (range 0 (ggm-node-count))))
-    (range 0 (ggm-node-count))))
-
-(def ggm-seed-if-active (n track)
-  (if (< n (ggm-node-count))
-    (graph-node ggm-name n :seed-from track)
-    nil))
+      (round (graph-config-value ggm-name :node-count)))))
 
 (def ggm-init-ring-defaults ()
-  (do
-    (set! ggm-weights (ggm-ring-weights))
-    (ggm-apply-weights ggm-weights)
-    (ggm-seed-if-active 0 0)
-    (ggm-seed-if-active 1 1)
-    (ggm-seed-if-active 2 2)
-    (ggm-seed-if-active 3 4)
-    ))
+  (let ((count (ggm-node-count)))
+    (for-each
+      (lambda (r)
+        (for-each
+          (lambda (c)
+            (graph-edge ggm-name :from r :to c :weight (if (= c (mod (+ r 1) count)) 1 0)))
+          (range 0 count)))
+      (range 0 count))
+    (for-each
+      (lambda (seed)
+        (when (< (first seed) count)
+          (graph-node ggm-name (first seed) :seed-from (nth seed 1))))
+      (list (list 0 0) (list 1 1) (list 2 2) (list 3 4)))))
 
 (def script-init-fn ()
   (ggm-init-ring-defaults))
-
-;; ── edit helpers: dirty the bound widget (reactive-set) + persist the override ──
-;; `graph-key` gives the canonical GRAPH field name a `bind-graph` handle reads, so a
-;; reactive-set on the same key re-renders exactly that one widget.
-
-(def ggm-edit-num (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key ggm-name n field) v)
-    (graph-node ggm-name n field v)))
-
-(def ggm-edit-param (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key ggm-name n field) v)
-    (graph-param ggm-name n field v)))
-
-(def ggm-edit-global-param (field v)
-  (for-each
-    (lambda (n)
-      (do
-        (reactive-set "GRAPH" (graph-key ggm-name n field) v)
-        (graph-param ggm-name n field v)))
-    (range 0 (ggm-node-count))))
-
-(def ggm-edit-capacity-param (field v)
-  (for-each
-    (lambda (n)
-      (do
-        (reactive-set "GRAPH" (graph-key ggm-name n field) v)
-        (graph-param ggm-name n field v)))
-    (range 0 ggm-max-node-count)))
-
-(def ggm-edit-enum (n field options label internal)
-  (do
-    (reactive-set "GRAPH" (graph-key ggm-name n field) (ggm-index-of options label))
-    (graph-node ggm-name n field internal)))
-
-(def ggm-edit-route (n label track-colors)
-  (let ((route-index (ggm-index-of (ggm-route-options) label)))
-    (do
-      (ggm-edit-enum n :route (ggm-route-options) label (ggm-route->internal label))
-      (ggm-sync-route-color n track-colors route-index))))
-
-(def ggm-edit-seed-route (n enabled)
-  (do
-    (reactive-set "GRAPH" (graph-key ggm-name n :seed-route) (if enabled 1 0))
-    (graph-node ggm-name n :seed-from (if enabled :route :off))))
-
-(def ggm-edit-reset-seed (n enabled)
-  (do
-    (reactive-set "GRAPH" (graph-key ggm-name n :seed-on-reset) (if enabled 1 0))
-    (graph-node ggm-name n :seed-on-reset (if enabled 1 0))))
-
-(def ggm-factor-options (list "1/4" "1/2" "1" "2" "4"))
-
-(def ggm-factor-value (label)
-  (if (= label "1/4") 0.25
-    (if (= label "1/2") 0.5
-      (if (= label "2") 2
-        (if (= label "4") 4 1)))))
-
-(def ggm-factor-shift (label)
-  (if (= label "1/4") -2
-    (if (= label "1/2") -1
-      (if (= label "2") 1
-        (if (= label "4") 2 0)))))
-
-(def ggm-clamp-index (idx len)
-  (max 0 (min (- len 1) idx)))
-
-(def ggm-scale-res-label (label shift)
-  (nth ggm-res-options
-    (ggm-clamp-index (+ (ggm-index-of ggm-res-options label) shift) (len ggm-res-options))))
-
-(def ggm-scale-quant-label (label shift)
-  (let ((idx (ggm-index-of ggm-quant-options label)))
-    (if (= label "off")
-      "off"
-      (if (= label "Prh")
-        "Prh"
-        (if (< idx 8)
-          (nth ggm-quant-options (max 1 (min 7 (+ idx shift))))
-          (nth ggm-quant-options (+ 8 (ggm-clamp-index (+ (- idx 8) shift) 6))))))))
-
-(def ggm-apply-delay-factor (label)
-  (let ((factor (ggm-factor-value label)))
-    (do
-      (for-each
-        (lambda (n)
-          (let ((current (graph-node-value ggm-name n :delay)))
-            (ggm-edit-num n :delay
-              (if (<= current 0)
-                0
-                (max 1 (round (* current factor)))))))
-        (range 0 (ggm-node-count)))
-      (set! ggm-delay-factor-index (ggm-index-of ggm-factor-options "1")))))
-
-(def ggm-apply-timebase-factor (label)
-  (let ((shift (ggm-factor-shift label)))
-    (do
-      (for-each
-        (lambda (n)
-          (let ((res (ggm-scale-res-label (graph-node-value ggm-name n :resolution) shift))
-                (quant (ggm-scale-quant-label (graph-node-value ggm-name n :quantize) shift)))
-            (do
-              (ggm-edit-enum n :resolution ggm-res-options res res)
-              (ggm-edit-enum n :quantize ggm-quant-options quant quant))))
-        (range 0 (ggm-node-count)))
-      (set! ggm-timebase-factor-index (ggm-index-of ggm-factor-options "1")))))
-
-;; Sequencer-level config is per-pattern like the node/edge overrides; bind via
-;; `bind-graph-config`, key via `graph-config-key`.
-(def ggm-edit-config (field v)
-  (do
-    (reactive-set "GRAPH" (graph-config-key ggm-name field) v)
-    (graph-config ggm-name field v)))
-
-(def ggm-edit-config-enum (field options label)
-  (do
-    (reactive-set "GRAPH" (graph-config-key ggm-name field) (ggm-index-of options label))
-    (graph-config ggm-name field label)))
 
 ;; ── UI ──
 
@@ -443,7 +174,6 @@
 
 (def ggm-matrix-header-spacer-height ()
   (+ -0.5 (max 0 (- (+ ggm-row-panel-padding ggm-row-height ggm-row-gap) ggm-matrix-column-gap))))
-
 
 ;; ── group matrices ──
 ;; Both k×k group grids share one footprint; the row/column labels around them
@@ -487,21 +217,18 @@
     :width ggm-control-width :height ggm-row-height :font-size 9
     :on-change on-change))
 
-(def ggm-pick-sized (key value-index options width on-change)
+(def ggm-pick-sized (key value options width on-change)
   (dropdown
     :key key
-    :value-index value-index :options options
+    :value value :options options
     :badge-color :transparent
     :bg-color :mixer-strip-bg
     :border-color :mixer-strip-selected-bg
     :width width :height ggm-row-height :font-size 6
     :on-change on-change))
 
-(def ggm-pick (key value-index options on-change)
-  (ggm-pick-sized key value-index options ggm-control-width on-change))
-
-(def ggm-reset-value (n field)
-  (>= (reactive-value (bind-graph ggm-name n field)) 1))
+(def ggm-pick (key value options on-change)
+  (ggm-pick-sized key value options ggm-control-width on-change))
 
 (def ggm-toggle-sized (key width value on-change)
   (box
@@ -516,23 +243,29 @@
       :off-knob-color "#d8dde8"
       :on-change on-change)))
 
-(def ggm-toggle (key value on-change)
-  (ggm-toggle-sized key ggm-control-width value on-change))
+;; Node n's param `name`, bound.
+(def ggm-param (n name lo hi stp dec)
+  (let ((p (graph-param-named n name)))
+    (ggm-num (str "graph-group-matrix-" name "-" n.index) #'p.value lo hi stp dec
+      (lambda (v) (set! p.value v)))))
 
-(def ggm-seed-toggle (key value on-change)
-  (ggm-toggle-sized key ggm-seed-control-width value on-change))
+;; Node n's 0 / 1 param `name` as a toggle, bound.
+(def ggm-switch (n name)
+  (let ((p (graph-param-named n name)))
+    (ggm-toggle-sized (str "graph-group-matrix-" name "-" n.index) ggm-control-width #'p.value
+      (lambda (on) (set! p.value (if on 1 0))))))
 
-(def ggm-seed-route-value (n)
-  (>= (reactive-value (bind-graph ggm-name n :seed-route)) 1))
-
-(def ggm-reset-seed-value (n)
-  (>= (reactive-value (bind-graph ggm-name n :seed-on-reset)) 1))
+;; A param every node carries alike: shows node 0's, sets the first count
+;; nodes'.
+(def ggm-global-param (g count key name lo hi stp dec)
+  (let ((p (graph-param-named (first g.nodes) name)))
+    (ggm-num key #'p.value lo hi stp dec
+      (lambda (v) (set-param-on-nodes! g count name v)))))
 
 (defwidget ggm-route-color-strip
   :width 0.28 :height 1.0
   :paint-margin 0.08
   :state (active track-r track-g track-b)
-  :bindable (active track-r track-g track-b)
   :shader
   (sdf/fill (sdf/rounded-rect width height 0.08)
     (material
@@ -540,343 +273,292 @@
         (rgba track-r track-g track-b 1.0)
         (rgba track-r track-g track-b 0.62)))))
 
-(def ggm-route-bar (n track-colors)
-  (do
-    (ggm-sync-route-color n track-colors (ggm-route-option-index n))
+;; The node's route color: its track's, dimmed grey while off.
+(def ggm-route-bar (n)
+  (let ((t n.route)
+        (channel (lambda (i) (if t (rgb-part t.color i) (nth ggm-route-off-color i)))))
     (box
-      :key (str "graph-group-matrix-route-color-" n)
+      :key (str "graph-group-matrix-route-color-" n.index)
       :width ggm-route-bar-width
       :height ggm-row-height
       :background "ggm-route-color-strip"
-      :active (bind "GRAPH" (ggm-route-color-field n "active"))
-      :track-r (bind "GRAPH" (ggm-route-color-field n "r"))
-      :track-g (bind "GRAPH" (ggm-route-color-field n "g"))
-      :track-b (bind "GRAPH" (ggm-route-color-field n "b")))))
+      :active (if t 1 0)
+      :track-r (channel 0)
+      :track-g (channel 1)
+      :track-b (channel 2))))
 
-(def ggm-row (n track-colors)
-  (box
-    :key (str "graph-group-matrix-row-" n)
-    :height ggm-row-height
-    :padding 0
-    :selected (= ggm-selected-neuron n)
-    :background-color :transparent
-    :selected-background-color :mixer-strip-selected-bg
-    :corner-radius 4
+;; Node n's controls, in a subtree of their own: a weight-cell press,
+;; which lights a row, re-runs only the rows' highlight boxes (below), which
+;; reuse these.
+(def ggm-row-controls (n routes)
+  (subtree :key (str "graph-group-matrix-row-controls-" n.index)
     (h-stack :gap 0.4 :align :center
-      (ggm-route-bar n track-colors)
-      (label (str n) :width ggm-node-width :height ggm-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
-      (ggm-pick (str "graph-group-matrix-route-" n)
-        (bind-graph ggm-name n :route (ggm-route-options)) (ggm-route-options)
-        (lambda (v) (ggm-edit-route n v track-colors)))
-      (ggm-pick-sized (str "graph-group-matrix-group-" n)
-        (bind-graph ggm-name n :group) ggm-group-options ggm-group-width
-        (lambda (v) (ggm-edit-num n :group (ggm-index-of ggm-group-options v))))
-      (ggm-seed-toggle (str "graph-group-matrix-seed-route-" n)
-        (ggm-seed-route-value n)
-        (lambda (v) (ggm-edit-seed-route n v)))
-      (ggm-seed-toggle (str "graph-group-matrix-reset-seed-" n)
-        (ggm-reset-seed-value n)
-        (lambda (v) (ggm-edit-reset-seed n v)))
-      (ggm-num (str "graph-group-matrix-delay-" n)
-        (bind-graph ggm-name n :delay) 0 16 1 0
-        (lambda (v) (ggm-edit-num n :delay v)))
-      (ggm-num (str "graph-group-matrix-transpose-" n)
-        (bind-graph ggm-name n :transpose) -48 48 1 0
-        (lambda (v) (ggm-edit-param n :transpose v)))
-      (ggm-toggle (str "graph-group-matrix-transpose-reset-" n)
-        (ggm-reset-value n :transpose-reset)
-        (lambda (v) (ggm-edit-param n :transpose-reset (if v 1 0))))
-      (ggm-num (str "graph-group-matrix-vel-decay-" n)
-        (bind-graph ggm-name n :vel-decay) 0 2 0.01 2
-        (lambda (v) (ggm-edit-param n :vel-decay v)))
-      (ggm-toggle (str "graph-group-matrix-vel-reset-" n)
-        (ggm-reset-value n :vel-reset)
-        (lambda (v) (ggm-edit-param n :vel-reset (if v 1 0))))
-      (ggm-num (str "graph-group-matrix-dampening-" n)
-        (bind-graph ggm-name n :dampening) 0 1 0.01 2
-        (lambda (v) (ggm-edit-param n :dampening v)))
-      (ggm-num (str "graph-group-matrix-recovery-" n)
-        (bind-graph ggm-name n :recovery) 0 1 0.01 2
-        (lambda (v) (ggm-edit-param n :recovery v)))
-      (ggm-pick (str "graph-group-matrix-resolution-" n)
-        (bind-graph ggm-name n :resolution ggm-res-options) ggm-res-options
-        (lambda (v) (ggm-edit-enum n :resolution ggm-res-options v v)))
-      (ggm-pick (str "graph-group-matrix-quantize-" n)
-        (bind-graph ggm-name n :quantize ggm-quant-options) ggm-quant-options
-        (lambda (v) (ggm-edit-enum n :quantize ggm-quant-options v v))))))
+      (ggm-route-bar n)
+      (label (str n.index) :width ggm-node-width :height ggm-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
+      (ggm-pick (str "graph-group-matrix-route-" n.index)
+        (node-route-label n) routes
+        (lambda (label) (set-route-label! n label)))
+      (ggm-pick-sized (str "graph-group-matrix-group-" n.index)
+        (nth ggm-group-options n.group) ggm-group-options ggm-group-width
+        (lambda (v) (set! n.group (index-of ggm-group-options v))))
+      (ggm-toggle-sized (str "graph-group-matrix-seed-route-" n.index) ggm-seed-control-width
+        #'n.seed-route
+        (lambda (on) (set! n.seed-route on)))
+      (ggm-toggle-sized (str "graph-group-matrix-reset-seed-" n.index) ggm-seed-control-width
+        (> n.seed-on-reset 0)
+        (lambda (on) (set! n.seed-on-reset (if on 1 0))))
+      (ggm-num (str "graph-group-matrix-delay-" n.index) #'n.delay 0 16 1 0
+        (lambda (v) (set! n.delay v)))
+      (ggm-param n "transpose" -48 48 1 0)
+      (ggm-switch n "transpose-reset")
+      (ggm-param n "vel-decay" 0 2 0.01 2)
+      (ggm-switch n "vel-reset")
+      (ggm-param n "dampening" 0 1 0.01 2)
+      (ggm-param n "recovery" 0 1 0.01 2)
+      (ggm-pick (str "graph-group-matrix-resolution-" n.index) n.resolution res-options
+        (lambda (v) (set! n.resolution v)))
+      (ggm-pick (str "graph-group-matrix-quantize-" n.index) n.quantize graph-quantize-options
+        (lambda (v) (set! n.quantize v))))))
+
+;; Node n's row, lit while its weight column is pressed.
+(def ggm-row (n routes)
+  (subtree :key (str "graph-group-matrix-row-" n.index)
+    (box
+      :key (str "graph-group-matrix-row-" n.index)
+      :height ggm-row-height
+      :padding 0
+      :selected (= ggm-view.selected-neuron n.index)
+      :background-color :transparent
+      :selected-background-color :mixer-strip-selected-bg
+      :corner-radius 4
+      (ggm-row-controls n routes))))
+
+(def ggm-header-label (text width)
+  (label text :width width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent))
 
 (def ggm-header ()
   (h-stack :gap 0.4 :align :center
     (label "" :width ggm-route-bar-width :height 1.0 :font-size 1 :bg :transparent)
-    (label "node"   :width ggm-node-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "route"  :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "grp"    :width ggm-group-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "seed rt" :width ggm-seed-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "rst seed" :width ggm-seed-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "delay"  :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "transp" :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "trn rst" :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "vel x"  :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "vel rst" :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "dampen" :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "recover" :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "res"    :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "quant"  :width ggm-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
+    (ggm-header-label "node" ggm-node-width)
+    (ggm-header-label "route" ggm-control-width)
+    (ggm-header-label "grp" ggm-group-width)
+    (ggm-header-label "seed rt" ggm-seed-control-width)
+    (ggm-header-label "rst seed" ggm-seed-control-width)
+    (ggm-header-label "delay" ggm-control-width)
+    (ggm-header-label "transp" ggm-control-width)
+    (ggm-header-label "trn rst" ggm-control-width)
+    (ggm-header-label "vel x" ggm-control-width)
+    (ggm-header-label "vel rst" ggm-control-width)
+    (ggm-header-label "dampen" ggm-control-width)
+    (ggm-header-label "recover" ggm-control-width)
+    (ggm-header-label "res" ggm-control-width)
+    (ggm-header-label "quant" ggm-control-width)))
 
-(def ggm-panel (current-pattern graph-visualizations track-colors track-active-notes)
-  (do
-    ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
-    ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
-    ;; render below.
-    current-pattern
-    (set! ggm-weights (ggm-read-weights))
-    (set! ggm-group-gain (ggm-read-group-matrix "group-gain"))
-    (set! ggm-group-coupling (ggm-read-group-matrix "group-coupling"))
-    (set! ggm-threshold (graph-param-value ggm-name 0 :threshold))
-    (set! ggm-global-transpose (graph-param-value ggm-name 0 :global-transpose))
-    (set! ggm-dur-factor (graph-param-value ggm-name 0 :dur-factor))
-    (let ((active-count (ggm-node-count))
-        (viz (ggm-viz graph-visualizations)))
-      (box 
-        :padding 0.85
-        :gap 0.6
-        (v-stack :gap 0.5
-          ;; ── sequencer-level config (on top) ──
-          (box 
-            :width 102
-            :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
-            
-            (h-stack
-              (v-stack
-                (h-stack :gap 0.6 :align :center
-                  (label "variable graph" :width 8 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
-                  (label "nodes" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-node-count"
-                    (bind-graph-config ggm-name :node-count) 1 16 1 0
-                    (lambda (v) (ggm-edit-config :node-count v))))
-                (h-stack :gap 0.6 :align :center
-                  (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-reset-bars"
-                    (bind-graph-config ggm-name :reset-bars) 0 64 1 0
-                    (lambda (v) (ggm-edit-config :reset-bars v))))
-                (h-stack :gap 0.6 :align :center
-                  (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-max-poly"
-                    (bind-graph-config ggm-name :max-poly) 0 16 1 0
-                    (lambda (v) (ggm-edit-config :max-poly v))))
-                (h-stack :gap 0.6 :align :center
-                  (label "poly mode" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-pick-sized "graph-group-matrix-max-poly-selection"
-                    (bind-graph-config ggm-name :max-poly-selection ggm-max-poly-selection-options)
-                    ggm-max-poly-selection-options 9.5
-                    (lambda (v) (ggm-edit-config-enum :max-poly-selection ggm-max-poly-selection-options v))))
-                (h-stack :gap 0.6 :align :center
-                  (label "threshold" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-threshold"
-                    ggm-threshold 0 4 0.01 2
-                    (lambda (v)
-                      (do
-                        (set! ggm-threshold v)
-                        (ggm-edit-capacity-param :threshold v)))))
-                (h-stack :gap 0.6 :align :center
-                  (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-global-transpose"
-                    ggm-global-transpose -48 48 1 0
-                    (lambda (v)
-                      (do
-                        (set! ggm-global-transpose v)
-                        (ggm-edit-global-param :global-transpose v))))
-                  (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (ggm-num "graph-group-matrix-dur-factor"
-                    ggm-dur-factor 0 8 0.25 2
-                    (lambda (v)
-                      (do
-                        (set! ggm-dur-factor v)
-                        (ggm-edit-global-param :dur-factor v)))))
+(def ggm-config-label (text)
+  (label text :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent))
 
-                )
-              ;; Time-constant of the whole H coupling layer: the per-beat decay of the
-              ;; group activity traces. ~0.5 = beat-scale sidechain-style coupling;
-              ;; 0.85+ = bar-scale swells (the back-off cycle time for excite +
-              ;; self-limit diagonal patches).
-              (v-stack :gap 0.3
-                (knob-number
-                  :key "graph-group-matrix-trace-decay"
-                  :debug-name "graph-group-matrix-trace-decay"
-                  :label "trace decay"
-                  :value (bind-graph-config ggm-name :group-trace-decay)
-                  :min 0 :max 1 :decimals 2
-                  :width 7.0 :height 3.0 :knob-size 2.2
-                  :font-size 9.0 :label-font-size 9.0
-                  :label-color :dim
-                  :on-change (lambda (v) (ggm-edit-config :group-trace-decay v)))
-                ;; Global multiplier on the whole H matrix. H is touchy: a few
-                ;; tenths per cell already gates groups hard, so scale the layer
-                ;; here (0 = off, 1 = cells as drawn) instead of retouching cells.
-                (knob-number
-                  :key "graph-group-matrix-coupling-scale"
-                  :debug-name "graph-group-matrix-coupling-scale"
-                  :label "H scale"
-                  :value (bind-graph-config ggm-name :group-coupling-scale)
-                  :min 0 :max 2 :decimals 2
-                  :width 7.0 :height 3.0 :knob-size 2.2
-                  :font-size 9.0 :label-font-size 9.0
-                  :label-color :dim
-                  :on-change (lambda (v) (ggm-edit-config :group-coupling-scale v)))
-                ;; How far excitation (blue H cells) may lower a node's threshold,
-                ;; as a fraction of its authored value. 0 lets an excited group fire
-                ;; on zero energy (self-oscillates); 1 disables excitation entirely.
-                (knob-number
-                  :key "graph-group-matrix-excite-floor"
-                  :debug-name "graph-group-matrix-excite-floor"
-                  :label "exc floor"
-                  :value (bind-graph-config ggm-name :group-excite-floor)
-                  :min 0 :max 1 :decimals 2
-                  :width 7.0 :height 3.0 :knob-size 2.2
-                  :font-size 9.0 :label-font-size 9.0
-                  :label-color :dim
-                  :on-change (lambda (v) (ggm-edit-config :group-excite-floor v))))
+(def ggm-config-knob (key label-text value lo hi on-change)
+  (knob-number
+    :key key
+    :debug-name key
+    :label label-text
+    :value value
+    :min lo :max hi :decimals 2
+    :width 7.0 :height 3.0 :knob-size 2.2
+    :font-size 9.0 :label-font-size 9.0
+    :label-color :dim
+    :on-change on-change))
+
+;; A playback column (each node's trigger or energy), in a subtree of its
+;; own so playback re-runs only it.
+(def ggm-column-matrix (key count width hi values)
+  (v-stack :gap ggm-matrix-column-gap
+    (label "" :width 0.1 :height (ggm-matrix-header-spacer-height) :font-size 1 :bg :transparent)
+    (subtree :key key
+      (matrix
+        :key key
+        :rows count
+        :cols 1
+        :width width
+        :height (ggm-matrix-data-height count)
+        :min 0
+        :max hi
+        :value (column (values))))))
+
+(def ggm-graph-panel (g)
+  (let ((active-count (len g.nodes)))
+    (box
+      :padding 0.85
+      :gap 0.6
+      (v-stack :gap 0.5
+        ;; ── sequencer-level config (on top) ──
+        (box
+          :width 102
+          :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
+          (h-stack
+            (v-stack
+              (h-stack :gap 0.6 :align :center
+                (label "variable graph" :width 8 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+                (ggm-config-label "nodes")
+                (ggm-num "graph-group-matrix-node-count" #'g.node-count 1 16 1 0
+                  (lambda (v) (set! g.node-count v))))
+              (h-stack :gap 0.6 :align :center
+                (ggm-config-label "reset bars")
+                (ggm-num "graph-group-matrix-reset-bars" #'g.reset-bars 0 64 1 0
+                  (lambda (v) (set! g.reset-bars v))))
+              (h-stack :gap 0.6 :align :center
+                (ggm-config-label "max poly")
+                (ggm-num "graph-group-matrix-max-poly" #'g.max-poly 0 16 1 0
+                  (lambda (v) (set! g.max-poly v))))
+              (h-stack :gap 0.6 :align :center
+                (ggm-config-label "poly mode")
+                (ggm-pick-sized "graph-group-matrix-max-poly-selection"
+                  g.max-poly-selection graph-max-poly-selection-options 9.5
+                  (lambda (v) (set! g.max-poly-selection v))))
+              (h-stack :gap 0.6 :align :center
+                (ggm-config-label "threshold")
+                (ggm-global-param g g.max-nodes "graph-group-matrix-threshold" "threshold" 0 4 0.01 2))
+              (h-stack :gap 0.6 :align :center
+                (ggm-config-label "global trn")
+                (ggm-global-param g active-count "graph-group-matrix-global-transpose" "global-transpose" -48 48 1 0)
+                (ggm-config-label "dur x")
+                (ggm-global-param g active-count "graph-group-matrix-dur-factor" "dur-factor" 0 8 0.25 2)))
+            ;; Time-constant of the whole H coupling layer: the per-beat decay of the
+            ;; group activity traces. ~0.5 = beat-scale sidechain-style coupling;
+            ;; 0.85+ = bar-scale swells (the back-off cycle time for excite +
+            ;; self-limit diagonal patches).
+            (v-stack :gap 0.3
+              (ggm-config-knob "graph-group-matrix-trace-decay" "trace decay"
+                #'g.group-trace-decay 0 1
+                (lambda (v) (set! g.group-trace-decay v)))
+              ;; Global multiplier on the whole H matrix. H is touchy: a few
+              ;; tenths per cell already gates groups hard, so scale the layer
+              ;; here (0 = off, 1 = cells as drawn) instead of retouching cells.
+              (ggm-config-knob "graph-group-matrix-coupling-scale" "H scale"
+                #'g.group-coupling-scale 0 2
+                (lambda (v) (set! g.group-coupling-scale v)))
+              ;; How far excitation (blue H cells) may lower a node's threshold,
+              ;; as a fraction of its authored value. 0 lets an excited group fire
+              ;; on zero energy (self-oscillates); 1 disables excitation entirely.
+              (ggm-config-knob "graph-group-matrix-excite-floor" "exc floor"
+                #'g.group-excite-floor 0 1
+                (lambda (v) (set! g.group-excite-floor v))))
+            (subtree :key "graph-group-matrix-dampening-matrix"
               (matrix
                 :key "graph-group-matrix-dampening-matrix"
                 :rows active-count
                 :cols active-count
-                :width 16 
+                :width 16
                 :height 7
-                
                 :control :grid
                 :background-color :bg
                 :fill :primary
                 :min 0
                 :max 1
-                :value (ggm-viz-matrix viz :dampening-matrix (ggm-zero-matrix) active-count active-count)
-                )
-              
-              ;; ── group matrices (rows = FROM group, cols = TO group) ──
-          ;; ── G: group propagation gain (rows = from group A–D, cols = to group) ──
-          (ggm-group-grid "G gain"
-            (matrix
-              :key "graph-group-matrix-group-gain-matrix"
-              :rows ggm-group-count
-              :cols ggm-group-count
-              :width ggm-group-matrix-width
-              :height ggm-group-matrix-height
-              :min 0
-              :max 2
-              :default 1
-              :background :mixer-strip-bg
-              :color (rgba 0.16 0.66 0.44 1)
-              :empty-fill-color (rgba 0.04 0.04 0.05 1)
-              :stroke-color (rgba 0.36 0.62 0.57 1)
-              :stroke-width 1.5
-              :stroke-active-only true
-              :value ggm-group-gain
-              :on-cell-change (lambda (r c v)
-                (do
-                  (set! ggm-group-gain (ggm-set-cell ggm-group-gain r c v))
-                  (ggm-edit-group-cell "group-gain" r c v)))))
+                :value g.dampening))
 
-          ;; ── H: activity→threshold coupling (positive = suppress, negative = excite) ──
-          ;; Bipolar, so :control :pie — wedge sweep = |H| from zero, clockwise
-          ;; orange = suppression, counter-clockwise blue = excitation; an empty
-          ;; ring is an untouched (zero) coupling.
-          (ggm-group-grid "H couple"
-            (matrix
-              :key "graph-group-matrix-group-coupling-matrix"
-              :rows ggm-group-count
-              :cols ggm-group-count
-              :width ggm-group-matrix-width
-              :height ggm-group-matrix-height
-              :min -2
-              :max 2
-              :default 0
-              :control :pie
-              :background :mixer-strip-bg
-              :color (rgba 0.9 0.5 0.16 1)
-              :negative-color (rgba 0.3 0.55 0.95 1)
-              ;; Zero cells draw only this outline ring (at 0.6 alpha) — it must
-              ;; clearly beat the matrix background or the 4x4 grid reads as
-              ;; just-the-nonzero-cells.
-              :empty-fill-color (rgba 0.42 0.44 0.5 1)
-              :stroke-color (rgba 0.62 0.5 0.36 1)
-              :stroke-width 1.5
-              :stroke-active-only true
-              :value ggm-group-coupling
-              :on-cell-change (lambda (r c v)
-                (do
-                  (set! ggm-group-coupling (ggm-set-cell ggm-group-coupling r c v))
-                  (ggm-edit-group-cell "group-coupling" r c v)))))
+            ;; ── group matrices (rows = FROM group, cols = TO group) ──
+            ;; ── G: group propagation gain (rows = from group A–D, cols = to group) ──
+            (ggm-group-grid "G gain"
+              (subtree :key "graph-group-matrix-group-gain-matrix"
+                (matrix
+                  :key "graph-group-matrix-group-gain-matrix"
+                  :rows ggm-group-count
+                  :cols ggm-group-count
+                  :width ggm-group-matrix-width
+                  :height ggm-group-matrix-height
+                  :min 0
+                  :max 2
+                  :default 1
+                  :background :mixer-strip-bg
+                  :color (rgba 0.16 0.66 0.44 1)
+                  :empty-fill-color (rgba 0.04 0.04 0.05 1)
+                  :stroke-color (rgba 0.36 0.62 0.57 1)
+                  :stroke-width 1.5
+                  :stroke-active-only true
+                  :value (chunks g.group-gain ggm-group-count)
+                  :on-cell-change (lambda (r c v) (set-group-gain! g r c v)))))
 
-          ;; ── live group state (read-only, rows = groups A–D like the H matrix) ──
-          ;; act: each group's leaky activity trace. θΔ: the signed threshold offset
-          ;; H imposes on that group this boundary — orange wedge = suppressed,
-          ;; blue = excited, empty ring = untouched.
-          (v-stack :gap ggm-group-grid-gap
-            (label "act" :width 2 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-            (matrix
-              :key "graph-group-matrix-group-activity-matrix"
-              :rows ggm-group-count
-              :cols 1
-              :width 2
-              :height ggm-group-matrix-height
-              :min 0
-              :max 2
-              :color (rgba 0.16 0.66 0.44 1)
-              :value (ggm-viz-matrix viz :group-activity-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
+            ;; ── H: activity→threshold coupling (positive = suppress, negative = excite) ──
+            ;; Bipolar, so :control :pie — wedge sweep = |H| from zero, clockwise
+            ;; orange = suppression, counter-clockwise blue = excitation; an empty
+            ;; ring is an untouched (zero) coupling.
+            (ggm-group-grid "H couple"
+              (subtree :key "graph-group-matrix-group-coupling-matrix"
+                (matrix
+                  :key "graph-group-matrix-group-coupling-matrix"
+                  :rows ggm-group-count
+                  :cols ggm-group-count
+                  :width ggm-group-matrix-width
+                  :height ggm-group-matrix-height
+                  :min -2
+                  :max 2
+                  :default 0
+                  :control :pie
+                  :background :mixer-strip-bg
+                  :color (rgba 0.9 0.5 0.16 1)
+                  :negative-color (rgba 0.3 0.55 0.95 1)
+                  ;; Zero cells draw only this outline ring (at 0.6 alpha) — it must
+                  ;; clearly beat the matrix background or the 4x4 grid reads as
+                  ;; just-the-nonzero-cells.
+                  :empty-fill-color (rgba 0.42 0.44 0.5 1)
+                  :stroke-color (rgba 0.62 0.5 0.36 1)
+                  :stroke-width 1.5
+                  :stroke-active-only true
+                  :value (chunks g.group-coupling ggm-group-count)
+                  :on-cell-change (lambda (r c v) (set-group-coupling! g r c v)))))
 
-          (v-stack :gap ggm-group-grid-gap
-            (label "θΔ" :width 2.5 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-            (matrix
-              :key "graph-group-matrix-group-suppression-matrix"
-              :rows ggm-group-count
-              :cols 1
-              :width 2.5
-              :height ggm-group-matrix-height
-              :min -2
-              :max 2
-              :control :pie
-              :background :mixer-strip-bg
-              :color (rgba 0.9 0.5 0.16 1)
-              :negative-color (rgba 0.3 0.55 0.95 1)
-              :empty-fill-color (rgba 0.42 0.44 0.5 1)
-              :value (ggm-viz-matrix viz :group-suppression-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
-              ))
-          
-          (h-stack
-            (box 
-              :padding ggm-row-panel-padding
-              :border-color :mixer-strip-border
-              :background-color :mixer-strip-bg :corner-radius 16
-              (v-stack :gap 0.5
-                (v-stack :gap ggm-row-gap
-                  (ggm-header)
-                  (each (range 0 active-count) |n| (ggm-row n track-colors)))))
-            
-            (v-stack :gap ggm-matrix-column-gap 
-              (label "" :width 0.1 :height (ggm-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-trigger-matrix"
-                :rows active-count
-                :cols 1
-                :width 1
-                :height (ggm-matrix-data-height active-count)
-                :min 0
-                :max 1
-                :value (ggm-viz-matrix viz :trigger-matrix (ggm-zero-column-matrix) active-count 1)))            
-            
-            (v-stack :gap ggm-matrix-column-gap
-              (label "" :width 0.1 :height (ggm-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-energy-matrix"
-                :rows active-count
-                :cols 1
-                :width 2
-                :height (ggm-matrix-data-height active-count)
-                :min 0
-                :max 4
-                :value (ggm-viz-matrix viz :energy-matrix (ggm-zero-column-matrix) active-count 1)))            
-           
-            (v-stack :gap ggm-matrix-column-gap
-              (label "" :width 0.1 :height (ggm-matrix-header-spacer-height) :font-size 1 :bg :transparent)
+            ;; ── live group state (read-only, rows = groups A–D like the H matrix) ──
+            ;; act: each group's leaky activity trace. θΔ: the signed threshold offset
+            ;; H imposes on that group this boundary — orange wedge = suppressed,
+            ;; blue = excited, empty ring = untouched.
+            (v-stack :gap ggm-group-grid-gap
+              (label "act" :width 2 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+              (subtree :key "graph-group-matrix-group-activity-matrix"
+                (matrix
+                  :key "graph-group-matrix-group-activity-matrix"
+                  :rows ggm-group-count
+                  :cols 1
+                  :width 2
+                  :height ggm-group-matrix-height
+                  :min 0
+                  :max 2
+                  :color (rgba 0.16 0.66 0.44 1)
+                  :value (column g.group-activity))))
+
+            (v-stack :gap ggm-group-grid-gap
+              (label "θΔ" :width 2.5 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+              (subtree :key "graph-group-matrix-group-suppression-matrix"
+                (matrix
+                  :key "graph-group-matrix-group-suppression-matrix"
+                  :rows ggm-group-count
+                  :cols 1
+                  :width 2.5
+                  :height ggm-group-matrix-height
+                  :min -2
+                  :max 2
+                  :control :pie
+                  :background :mixer-strip-bg
+                  :color (rgba 0.9 0.5 0.16 1)
+                  :negative-color (rgba 0.3 0.55 0.95 1)
+                  :empty-fill-color (rgba 0.42 0.44 0.5 1)
+                  :value (column g.group-suppression))))))
+
+        (h-stack
+          (box
+            :padding ggm-row-panel-padding
+            :border-color :mixer-strip-border
+            :background-color :mixer-strip-bg :corner-radius 16
+            (v-stack :gap 0.5
+              (v-stack :gap ggm-row-gap
+                (ggm-header)
+                (let ((routes (route-options g)))
+                  (each g.nodes |n| (ggm-row n routes))))))
+          (ggm-column-matrix "graph-group-matrix-trigger-matrix" active-count 1 1 (lambda () g.triggers))
+          (ggm-column-matrix "graph-group-matrix-energy-matrix" active-count 2 4 (lambda () g.energy))
+          (v-stack :gap ggm-matrix-column-gap
+            (label "" :width 0.1 :height (ggm-matrix-header-spacer-height) :font-size 1 :bg :transparent)
+            (subtree :key "graph-group-matrix-weight-matrix"
               (matrix
                 :key "graph-group-matrix-weight-matrix"
                 :rows active-count
@@ -891,35 +573,33 @@
                 :stroke-width 1.5
                 :stroke-active-only true
                 :max 1
-                :value ggm-weights
-                :on-cell-press (lambda (r c)
-                  (set! ggm-selected-neuron c))
-                :on-cell-release (lambda (r c)
-                  (set! ggm-selected-neuron -1))
-                :on-cell-change (lambda (r c v)
-                  (do
-                    (set! ggm-weights (ggm-set-cell ggm-weights r c v))
-                    (graph-edge ggm-name :from r :to c :weight v)))))
-
-            )
-          (box
-            :debug-name "graph-group-matrix-piano-panel"
-            :padding 1
-            :background-color :mixer-strip-bg
-            :border-color :mixer-strip-border
-            :corner-radius 12
+                :value (weight-rows g)
+                :on-cell-press (lambda (r c) (set! ggm-view.selected-neuron c))
+                :on-cell-release (lambda (r c) (set! ggm-view.selected-neuron -1))
+                :on-cell-change (lambda (r c v) (set-weight! g r c v))))))
+        (box
+          :debug-name "graph-group-matrix-piano-panel"
+          :padding 1
+          :background-color :mixer-strip-bg
+          :border-color :mixer-strip-border
+          :corner-radius 12
+          (subtree :key "graph-group-matrix-piano"
             (piano-keyboard
               :key "graph-group-matrix-piano"
-              :notes-by-track track-active-notes
-              :track-colors track-colors
+              :notes-by-track (map (lambda (t) t.active-notes) (route-tracks g))
+              :track-colors (map (lambda (t) t.color) (route-tracks g))
               :tracks (range 0 active-count)
               :overlap-mode :loudest
-              :press-depth ggm-piano-press-depth
+              :press-depth 0.6
               :start-note 12
               :key-count 80
               :width 84
-              :height 3.5))
-          )))))
+              :height 3.5)))))))
 
-(effect-buffer "*group-matrix*" (ggm-panel SEQ.current-pattern SEQ.graph-visualizations (ggm-route-track-colors SEQ.track-colors) SEQ.track-active-notes))
+;; The panel, empty until the host publishes the graph (at its next sync).
+(def ggm-panel ()
+  (let ((g (graph-of ggm-name)))
+    (if g (ggm-graph-panel g) (nothing))))
+
+(effect-buffer "*group-matrix*" (ggm-panel))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

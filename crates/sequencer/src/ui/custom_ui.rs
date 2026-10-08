@@ -374,6 +374,20 @@ fn warn_custom_ui_source(path: &str, source: &str) {
     eseqlisp::module_alias_migration::warn_on_old_module_aliases(Path::new(path), source);
 }
 
+/// Whether a custom UI source uses a removed binding form or host namespace
+/// (eseq-0l17.80), logged and skipped by the caller: every custom UI is
+/// spliced into one unit, so its compile error would otherwise drop all of
+/// them, not just the stale one (a user-tier instrument still calling
+/// `reactive-get`).
+fn uses_removed_forms(kind: &str, ui_path: &str, exprs: &[eseqlisp::parser::Expression]) -> bool {
+    let removed = eseqlisp::compiler::removed_form_uses(exprs);
+    if removed.is_empty() {
+        return false;
+    }
+    eprintln!("{kind} skipped in {ui_path}: {}", removed.join("; "));
+    true
+}
+
 pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -494,6 +508,9 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
                 continue;
             }
         };
+        if uses_removed_forms("custom instrument UI", &ui_path, &exprs) {
+            continue;
+        }
         let helper_prefix = format!("custom_ui_{}__", safe_lisp_ident(&instrument_name));
         let helper_names = local_helper_names(&exprs);
         let mut body = None;
@@ -628,6 +645,9 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
                 continue;
             }
         };
+        if uses_removed_forms("custom MIDI FX UI", &ui_path, &exprs) {
+            continue;
+        }
         let helper_prefix = format!("custom_ui_midi_{}__", safe_lisp_ident(&fx_name));
         let helper_names = local_helper_names(&exprs);
         let mut body = None;
@@ -734,6 +754,9 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
                 continue;
             }
         };
+        if uses_removed_forms("custom audio effect UI", &ui_path, &exprs) {
+            continue;
+        }
         let helper_prefix = format!("custom_ui_audio_{}__", safe_lisp_ident(&fx_name));
         let helper_names = local_helper_names(&exprs);
         let mut body = None;
@@ -900,7 +923,7 @@ mod tests {
             (defmacro contour (v) `(* ,v 0.8))
             (defmacro shape (v) `(sdf/circle (contour ,v)))
             (defwidget plot :width 8 :height 3
-              :state (level) :bindable (level)
+              :state (level)
               :shader (sdf/layer (sdf/stroke (shape level) 0.04 :dim)))
         "#;
         let exprs = ASTParser::new(Parser::new(authored.to_string()).parse().unwrap()).parse().unwrap();
@@ -912,7 +935,7 @@ mod tests {
         runtime.register_reactive("HEAT", vec![("level", Value::Number(0.25))], true);
         let result = runtime.eval_str(&source).unwrap();
         assert!(!matches!(result, Some(Value::String(ref error)) if error.contains("error")), "{result:?}");
-        runtime.eval_str(r#"(effect (test_heat_plot :level (bind "HEAT" "level")))"#).unwrap();
+        runtime.eval_str(r#"(effect (test_heat_plot :level #'HEAT.level))"#).unwrap();
         let layout = runtime.current_layout.as_ref().expect("SDF plot");
         assert_eq!(layout.widget_type, "test_heat_plot");
         let Some(Value::ReactiveRef { slot, .. }) = layout.props.get("level") else {
@@ -1139,6 +1162,15 @@ mod tests {
         );
         assert!(!value_contains_string(tree, "old custom ui"));
     }
+}
+
+/// Whether the active buffer is an instrument / MIDI FX / audio effect panel
+/// source (`ui.lisp` beside a `dsp.lisp` under a library root) — the only
+/// buffers whose evaluation needs the custom UI dispatch rebuilt.
+pub(crate) fn active_buffer_is_custom_ui_source(editor: &Editor) -> bool {
+    active_custom_ui_buffer_overlay(editor).is_some()
+        || active_custom_midi_fx_ui_buffer_overlay(editor).is_some()
+        || active_custom_audio_fx_ui_buffer_overlay(editor).is_some()
 }
 
 fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {

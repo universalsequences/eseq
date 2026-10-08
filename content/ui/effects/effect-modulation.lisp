@@ -1,8 +1,9 @@
 ;; Audio effect modulation source selection and editor controls.
 (module eseq.effects.effect-modulation)
 
-(import eseq.effects.state :as st :refer (effect-selected-mod-slot))
+(import eseq.effects.state :as st :refer (effect-mods))
 (import eseq.effects.param-controls :as pc)
+(import eseq.effects.devices :as dv)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.instrument-modulation :as im)
 (import eseq.effects.panel-frame :as pf)
@@ -12,7 +13,7 @@
 
 
 (def set-selected-mod-slot (slot)
-  (set! eseq.effects.state/effect-selected-mod-slot slot))
+  (set! effect-mods.mod-slot slot))
 
 (def mod-selector-row (fx modulator)
   (let ((slot (get modulator :slot))
@@ -24,12 +25,12 @@
           :width 3.9 :height 1.1
           :padding 0
           :font-size 9
-          :background-color (if (= eseq.effects.state/effect-selected-mod-slot slot)
+          :background-color (if (= effect-mods.mod-slot slot)
             (rgba 0.95 0.48 0.18 0.82)
             :instrument-control-bg)
-          :color (if (= eseq.effects.state/effect-selected-mod-slot slot) :white :dim)
+          :color (if (= effect-mods.mod-slot slot) :white :dim)
           :on-click (lambda (info) (set-selected-mod-slot slot)))
-        (dropdown :value (if source-p (get source-p :text-value) "off")
+        (dropdown :value (if source-p (pc/fx-param-text-value-for fx source-p) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/param-set-option fx source-p v) false))
           :width 4.8 :height 1.1 :font-size 8.5)))))
@@ -46,7 +47,7 @@
           (mod-selector-row fx modulator))))))
 
 (def selected-mod-source-section (fx)
-  (nth (filter |section| (= (get section :slot) eseq.effects.state/effect-selected-mod-slot)
+  (nth (filter |section| (= (get section :slot) effect-mods.mod-slot)
          (get fx :sources))
        0))
 
@@ -60,7 +61,7 @@
   (if p (pc/param-set-control-value fx p v) false))
 
 (def source-button (fx p title width)
-  (let ((active (> (reactive-value (source-param-value fx p 0)) 0.5)))
+  (let ((active (> (source-param-value fx p 0) 0.5)))
     (v-stack :width width :height 1.72 :gap 0.10 :align :start
       (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
       (button (if active "ON" "OFF")
@@ -73,7 +74,7 @@
 (def source-dropdown (fx p title width)
   (v-stack :width width :height 1.72 :gap 0.10 :align :start
     (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
-    (dropdown :value (if p (get p :text-value) "")
+    (dropdown :value (if p (pc/fx-param-text-value-for fx p) "")
       :options (if p (get p :options) '())
       :on-change (lambda (v) (if p (pc/param-set-option fx p v) false))
       :width width :height 0.88 :font-size 8.5)))
@@ -111,7 +112,7 @@
     :shape (source-param-value fx shape 0)
     :pw (source-param-value fx pulse-width 0.5)
     :phase-offset (source-param-value fx phase 0)
-    :phase (if (get section :phase-field) (bind-seq (get section :phase-field)) -1)
+    :phase (im/section-phase fx section)
     :background-color :instrument-control-bg
     :grid-color :dim
     :curve-color (lego/ui-accent-orange)
@@ -145,7 +146,7 @@
           (h-stack :gap 0.25 :align :start
             (if pulse-width
               (source-compact-knob fx pulse-width
-                (if (= (reactive-value (source-param-value fx shape 0)) 0) "peak" "pw") 2)
+                (if (= (source-param-value fx shape 0) 0) "peak" "pw") 2)
               (box :width 4.4 :height 1.72))))
         (box :debug-name "effect-lfo-curve-wrapper"
              :width 12.2 :height 5.7 :padding 0.22
@@ -160,7 +161,8 @@
        :padding 0.35
     (let ((section (selected-mod-source-section fx)))
       (if section
-        (let ((source-type (im/source-type section)))
+        (let ((source-p (get section :source-param))
+              (source-type (if source-p (pc/fx-param-text-value-for fx source-p) "off")))
           (v-stack :width :fill :height :fill :gap 0.3 :align :start
             (label (get section :name) :font-size 9 :color :dim :bg :transparent)
             (if (= source-type "lfo")

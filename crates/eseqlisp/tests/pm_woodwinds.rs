@@ -153,7 +153,13 @@ fn factory_amp_outputs_survive_patch_save() {
     // stale graph would silently drop the `@amp` voice-retirement output.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     eseqlisp::defmacro_library::set_default_library_root(root.join("content/defmacros"));
-    for name in ["Synths/Digi Wave", "Synths/Poseidon", "Synths/Revsynt", "Physical Models/PM Piano"] {
+    let physical_models = [
+        "PM Piano", "PM Cello", "PM Clarinet", "PM Flute", "PM Saxophone", "PM Saron",
+        "PM Bonang", "PM Kempyang", "PM Kethuk", "PM Slenthem", "PM Slenthem Slendro",
+        "PM Crash", "PM Hi-Hat",
+    ].map(|name| format!("Physical Models/{name}"));
+    let synths = ["Synths/Digi Wave", "Synths/Poseidon", "Synths/Revsynt"].map(String::from);
+    for name in synths.iter().chain(&physical_models) {
         let path = root.join("content/instruments").join(name).join("dsp.lisp");
         let source = std::fs::read_to_string(&path).unwrap();
         assert!(source.contains("@amp true"), "{name} declares an @amp output");

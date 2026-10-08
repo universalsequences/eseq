@@ -163,7 +163,19 @@ pub(in crate::lisp_host) fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+thread_local! {
+    /// MIDI effect source files read on this thread ([`midi_fx_source_reads`]).
+    static MIDI_FX_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many MIDI effect source files this thread has read (a library scan
+/// reads one per effect), so tests can pin that a hot path reads none.
+pub fn midi_fx_source_reads() -> u64 {
+    MIDI_FX_SOURCE_READS.with(std::cell::Cell::get)
+}
+
 pub(in crate::lisp_host) fn read_midi_fx_lisp(path: &Path) -> io::Result<String> {
+    MIDI_FX_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
     let source = std::fs::read_to_string(path)?;
     eseqlisp::module_alias_migration::warn_on_old_module_aliases(path, &source);
     Ok(source)

@@ -5,15 +5,21 @@
 (import eseq.effects.builtin.filter-core :as fc)
 (export panel select-filter)
 
-(defstate filter-tabs '())
+;; Each panel's filter tab (0 wet, 1 output), as (scope-key tab) rows: a
+;; panel without a row shows 0.
+(def-kind chorus-view
+  :key ()
+  :state ((tabs (list-of :any) :default '())))
 (def scope-key (fx)
   (fc/builtin-fx-param-subtree-key fx (fc/builtin-fx-param (get fx :params) "enabled") "chorus"))
 (def tab-for (fx)
-  (let ((row (nth (filter |row| (= (nth row 0) (scope-key fx)) filter-tabs) 0)))
+  (let ((key (scope-key fx))
+        (row (first (filter |row| (= (nth row 0) key) chorus-view.tabs))))
     (if row (nth row 1) 0)))
 (def select-filter (fx tab)
-  (set! filter-tabs (cons (list (scope-key fx) tab)
-    (filter |row| (not (= (nth row 0) (scope-key fx))) filter-tabs))))
+  (let ((key (scope-key fx)))
+    (set! chorus-view.tabs
+      (cons (list key tab) (filter |row| (not (= (nth row 0) key)) chorus-view.tabs)))))
 
 (def knob (fx p)
   (let ((unit (pc/param-control-unit fx p))
@@ -26,21 +32,21 @@
             :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
             :decimals (if (= (get p :name) "stereo phase") 0 2)
             :unit unit
-            :value-scale (if (= unit "%") 100 1)
+            :value-scale (if (= unit "%") (pc/percent-scale fx p) 1)
             :taper (if (and (not (pc/param-mods-open? fx))
               (or frequency (= (get p :name) "rate") (= (get p :name) "base delay"))) "log" "linear")
             :base-value (pc/param-base-value-prop fx p)
             :base-min (pc/param-base-min-prop fx p) :base-max (pc/param-base-max-prop fx p)
-            :mod-offset (pc/param-mod-offset p) :mod-scale (pc/param-mod-scale p)
+            :mod-offset (pc/param-mod-offset-for fx p) :mod-scale (pc/param-mod-scale-for fx p)
             :mod-range-0-slot (pc/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (pc/param-knob-mod-depth-prop fx p 0)
             :mod-range-1-slot (pc/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (pc/param-knob-mod-depth-prop fx p 1)
             :mod-range-2-slot (pc/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (pc/param-knob-mod-depth-prop fx p 2)
             :mod-range-3-slot (pc/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (pc/param-knob-mod-depth-prop fx p 3)
             :selected-mod-slot (pc/param-selected-mod-slot-prop fx p)
-            :plock-active (if (pc/param-plock-active? fx p) 1 0)
+            :plock-active (pc/param-plock-active-prop fx p)
             :plock-default (pc/param-plock-default fx p)
             :plock-color-r (pc/param-plock-color-r) :plock-color-g (pc/param-plock-color-g) :plock-color-b (pc/param-plock-color-b)
-            :text-color (pc/param-plock-text-color fx p) :label-color :dim
+            :text-color :dim :label-color :dim
             :color :blue :font-size 9.5 :label-font-size 9
             :width 7.0 :height 3.15 :knob-size 2.0
             :on-change |v| (pc/param-set-control-value fx p v)))))))
@@ -69,11 +75,12 @@
           (pc/fx-set-effect-value fx (if (= (get event :id) 1) hp lp) (get event :freq)) nil))))
 
 (def tab-button (fx tab title)
-  (button title :debug-name (str "chorus-filter-tab-" tab)
-    :width 14.35 :height 0.9 :font-size 9 :padding 0 :corner-radius 2
-    :background-color (if (= (tab-for fx) tab) :blue :instrument-control-bg)
-    :color (if (= (tab-for fx) tab) :white :dim)
-    :on-click (lambda (x y r) (select-filter fx tab))))
+  (let ((on (= (tab-for fx) tab)))
+    (button title :debug-name (str "chorus-filter-tab-" tab)
+      :width 14.35 :height 0.9 :font-size 9 :padding 0 :corner-radius 2
+      :background-color (if on :blue :instrument-control-bg)
+      :color (if on :white :dim)
+      :on-click (lambda (x y r) (select-filter fx tab)))))
 
 (def panel (fx)
   (let ((params (get fx :params)) (output (= (tab-for fx) 1)))

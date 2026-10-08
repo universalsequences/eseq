@@ -83,7 +83,8 @@ square button in the track's cell column header (Ableton's clip-stop
 convention). Pressing it issues new host command `stop-track-clip`
 `{:track :quantize}`. `TrackPatternCellView` (scenes.rs:885) gains a
 `stopped` flag so the grid can render the stopped state (no cell `active`),
-and `SEQ.queued-track-clips` blink covers the pending case unchanged.
+and the queued cell's blink (`cell.queued`, kind-bindings spec §14.2d)
+covers the pending case unchanged.
 Clicking the currently-active cell may later become stop-toggle; not in v1.
 
 ## 2. Layer 2 — timed windows

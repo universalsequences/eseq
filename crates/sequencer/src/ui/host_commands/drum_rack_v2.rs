@@ -6,9 +6,6 @@ use crate::*;
 /// stable `GroupId` and a pad by its note — never by track index, which moves
 /// under track delete/reindex.
 pub(super) const COMMANDS: &[&str] = &[
-    "set-rack-pad-note",
-    "set-rack-pad-choke-group",
-    "set-rack-pad-role",
     "trigger-rack-pad",
     "save-rack-as-kit",
     "load-kit",
@@ -21,59 +18,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "launch-rack-clip",
     "save-rack-clip-as",
     "delete-rack-clip",
-    "rename-rack-clip",
 ];
-
-/// Applies one pad-map edit by rack group id and pad note — `set-rack-pad-note`
-/// (move; an occupied note swaps), `set-rack-pad-choke-group` (`value` 0
-/// clears; choke groups start at 1 because 0 is the packed "unassigned"
-/// runtime key) or `set-rack-pad-role` (a `PadRole` key, or `standard` to
-/// clear back to the role the standard layout infers from the note). `None`
-/// for any other command. Shared by the live handler and the capture harness.
-pub(crate) fn apply_rack_pad_map_command(
-    name: &str,
-    payload: &Value,
-    app: &mut app::App,
-) -> Option<Result<(), String>> {
-    let group_id = extract_usize_from_payload(payload, "group-id").map(|id| id as u64);
-    let pad_note = extract_i32_from_payload(payload, "pad-note");
-    Some(match name {
-        "set-rack-pad-note" => {
-            match (group_id, pad_note, extract_i32_from_payload(payload, "note")) {
-                (Some(group_id), Some(pad_note), Some(note)) => {
-                    app.set_rack_pad_note_recorded(group_id, pad_note, note)
-                }
-                _ => Err("set-rack-pad-note needs a group id, pad note and note".to_string()),
-            }
-        }
-        "set-rack-pad-choke-group" => {
-            match (group_id, pad_note, extract_i32_from_payload(payload, "value")) {
-                (Some(group_id), Some(pad_note), Some(value)) => {
-                    let choke = u8::try_from(value).ok().filter(|value| *value > 0);
-                    app.set_rack_pad_choke_group_recorded(group_id, pad_note, choke)
-                }
-                _ => Err(
-                    "set-rack-pad-choke-group needs a group id, pad note and value".to_string(),
-                ),
-            }
-        }
-        "set-rack-pad-role" => {
-            match (group_id, pad_note, extract_string_from_payload(payload, "role")) {
-                (Some(group_id), Some(pad_note), Some(role)) => {
-                    let role = match role.as_str() {
-                        "standard" => Ok(None),
-                        key => sequencer::project::PadRole::from_key(key)
-                            .map(Some)
-                            .ok_or_else(|| format!("Unknown pad role {key}")),
-                    };
-                    role.and_then(|role| app.set_rack_pad_role_recorded(group_id, pad_note, role))
-                }
-                _ => Err("set-rack-pad-role needs a group id, pad note and role".to_string()),
-            }
-        }
-        _ => return None,
-    })
-}
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
 /// performance view, not a latch: a click is a hit, exactly as a key press is.
@@ -90,31 +35,36 @@ pub(super) fn handle(
     let track_groups = ctx.shared.track_groups.clone();
     let keyboard_tx = ctx.shared.keyboard_tx.clone();
     match name {
-        // Pad map edits (note move/swap, choke group, drum role): the same
-        // App-level funnel the capture harness uses, then the pad map is
-        // republished.
-        "set-rack-pad-note" | "set-rack-pad-choke-group" | "set-rack-pad-role" => {
-            match apply_rack_pad_map_command(name, &payload, app) {
-                Some(Ok(())) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
-                Some(Err(error)) => editor.handle_host_event(HostEvent::Status(error)),
-                None => {}
-            }
-        }
         // Pad grid hit: the same live path a pad key takes — the pad's member
         // track at base pitch (transpose 0), so choke groups and the member's
         // own fx chain apply exactly as they do from the keyboard.
+        // The pad by its note, or (`trigger-pad!`) by its member track's
+        // stable id, resolved now: a gone rack or pad is then an error, as
+        // with the kinds' setters (the grid's note hit stays silent).
         "trigger-rack-pad" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let pad_note = extract_i32_from_payload(&payload, "pad-note");
-            let (Some(group_id), Some(pad_note)) = (group_id, pad_note) else {
-                return;
+            let group = group_id.and_then(|id| app.groups.iter().find(|group| group.id == id));
+            let track = match extract_usize_from_payload(&payload, "track-id") {
+                Some(tid) => {
+                    let pad = group.ok_or("the rack is gone").and_then(|group| {
+                        live_track_index(app, sequencer::sequencer::TrackId(tid as u64))
+                            .filter(|track| group.rack_pad_index_of_track(*track).is_some())
+                            .ok_or("the pad is gone")
+                    });
+                    match pad {
+                        Ok(track) => Some(track),
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Error(format!("{name}: {error}")));
+                            return;
+                        }
+                    }
+                }
+                None => group.and_then(|group| {
+                    extract_i32_from_payload(&payload, "pad-note")
+                        .and_then(|pad_note| group.rack_pad_track(pad_note))
+                }),
             };
-            let Some(track) = app
-                .groups
-                .iter()
-                .find(|group| group.id == group_id)
-                .and_then(|group| group.rack_pad_track(pad_note))
-            else {
+            let Some(track) = track else {
                 return;
             };
             release_matching_key_lock_auditions(
@@ -168,7 +118,7 @@ pub(super) fn handle(
             match app.save_rack_as_kit(group_id, &name, overwrite, &scenes) {
                 Ok((path, warnings)) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
+                    record_kit_presets();
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -313,7 +263,7 @@ pub(super) fn handle(
                     // it in the published owner map, but a `(load …)` scratch
                     // script has no module and would otherwise republish a
                     // second, project-owned instance under the same name,
-                    // making every `bind-graph` by name ambiguous and the
+                    // making every graph read by name ambiguous and the
                     // tab's node rows disappear.
                     if !source.is_empty() {
                         let rerun = sequencer::lisp_host::with_graph_owner_rack(Some(group_id), || {
@@ -380,13 +330,6 @@ pub(super) fn handle(
                 .collect(),
             );
             super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
-            // Only the scene's clip pointer changed. An immediate launch
-            // already publishes this via sync_pattern_state; a quantized one
-            // still needs its selected clip shown while waiting for the beat.
-            if sync_rack_clip_state(editor.runtime_mut(), &app.state) {
-                editor.runtime_mut().run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-            }
         }
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
@@ -419,21 +362,6 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
-        "rename-rack-clip" => {
-            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
-            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
-            let (Some(group_id), Some(clip_id)) = (group_id, clip_id) else {
-                editor.handle_host_event(HostEvent::Status(
-                    "rename-rack-clip needs a group id and a clip id".to_string(),
-                ));
-                return;
-            };
-            match app.rename_rack_clip_recorded(group_id, clip_id, &name) {
-                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
-                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
-            }
-        }
         // With a selected rack, activating a kit swaps that rack's complete
         // pad/sound assignment in one undo entry. With no addressed rack the
         // browser's create behavior remains: append a new rack.
@@ -449,10 +377,10 @@ pub(super) fn handle(
             if let Some(group_id) = selected_rack {
                 match app.load_kit_onto_rack(group_id, Path::new(&path)) {
                     Ok(name) => {
-                        // Publish the rebuilt rack to the UI runtime BEFORE
-                        // running its scripts: a rack-owned script reads
-                        // `SEQ.groups` (its tab wears the rack's name) and
-                        // must see the members it now has.
+                        // Share the rebuilt rack and publish the track
+                        // topology BEFORE running its scripts: a rack-owned
+                        // script reads its rack's group (its tab wears the
+                        // rack's name) and must see the members it now has.
                         sync_after_rack_structure_change(app, editor, ctx, None);
                         let mut failures = attach_rack_instance_packages(editor, app, group_id);
                         failures.extend(evaluate_rack_sequencers(editor, app, group_id));
@@ -478,8 +406,8 @@ pub(super) fn handle(
                         // that is not installed is reported and its entry stays
                         // recorded, so a later re-import brings it back.
                         //
-                        // The new rack is published to the UI runtime FIRST:
-                        // a rack-owned script reads `SEQ.groups` on evaluation
+                        // The new rack is shared with the UI runtime FIRST: a
+                        // rack-owned script reads its rack's group on evaluation
                         // (its tab is named after the rack), and a group the
                         // runtime has not heard of yet fails that eval, which
                         // rolls the script's panel and tab back while the
@@ -713,19 +641,14 @@ pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
 /// Republishes what a pad-map edit can change: the group value the grid reads
 /// its pad badges and choke selectors from, and the groups snapshot the live
 /// keyboard's pad routing reads.
-fn sync_rack_pad_map(
+pub(super) fn sync_rack_pad_map(
     app: &mut app::App,
     editor: &mut Editor,
     track_groups: &Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) {
     *track_groups.lock().unwrap() = app.groups.clone();
-    let rt = editor.runtime_mut();
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
-    // Clip bank edits (create/rename/delete/convert/launch) do not bump the
-    // pattern epoch, so the clip run's source is republished here explicitly.
-    sync_rack_clip_state(rt, &app.state);
-    rt.run_reactive_cycle();
+    editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
@@ -775,18 +698,8 @@ pub(super) fn sync_after_rack_structure_change(
         &state,
         ctx.track_names,
         current,
-        &ctx.shared.selected_steps,
-        &ctx.shared.piano_roll_selection,
         &ctx.shared.accumulator_names,
-        &ctx.shared.record_armed,
-        &ctx.meters.cached_track_peak_levels,
     );
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
-    sync_bus_mixer_state(rt, app);
-    sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-    sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-    sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-    sync_mod_port_level_fields(rt, &ctx.meters.cached_mod_port_levels);
     rt.clear_subtree_effects_for_named_target("*sequencer*");
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();

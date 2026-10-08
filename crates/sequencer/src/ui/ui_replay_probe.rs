@@ -32,7 +32,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     } else {
         shared.state.start_playback();
     }
-    editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(!solo_replay));
     let mut sessions = EditSessionState::default();
     let mut frame = FrameDiffState::default();
     let mut gesture = GestureState::default();
@@ -42,7 +41,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0; app.tracks.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: vec![0.0; app.buses.len()],
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -54,8 +52,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
 
@@ -69,7 +65,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             sync_reactive_tick(app, editor, &mut LoopCtx {
                 sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                 gesture: &mut gesture, track_names: &mut track_names, shared,
-            }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+            }, &mut stats);
             let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
             backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render solo warmup"));
         }
@@ -108,7 +104,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                     sync_reactive_tick(app, editor, &mut LoopCtx {
                         sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                         gesture: &mut gesture, track_names: &mut track_names, shared,
-                    }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+                    }, &mut stats);
                     let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
                     let build_started = Instant::now();
                     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
@@ -147,9 +143,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             assert!(editor.switch_active_tile_to_buffer_named(if phase == "scroll" { "*sequencer*" } else { "*fx*" }));
         }
         editor.mark_needs_redraw();
-        let hidden_fields = ["track-events", "track-event-current-beat", "track-active-notes", "track-process-scopes", "transport-playhead"];
-        let hidden_snapshot = (phase == "scratch").then(|| hidden_fields.map(|field|
-            editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone)));
         let compressor_keys = editor.visible_widget_layouts().iter().flat_map(|layout|
             eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(layout)
                 .into_iter().map(|request| request.data_key)).collect::<std::collections::HashSet<_>>();
@@ -209,7 +202,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             // than their wall-clock cadence. The previous probe left these
             // mostly idle, hiding work paid by actual scratch-only playback.
             meters.last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
-            meters.last_neural_visualization_poll_at = Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL;
             shared.state.transport.playhead.store(index, Ordering::Relaxed);
             shared.state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
                 track: 0, sample_time: index as u64 * 512, beat: index as f64 / 6.0,
@@ -221,9 +213,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             sync_reactive_tick(app, editor, &mut LoopCtx {
                 sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                 gesture: &mut gesture, track_names: &mut track_names, shared,
-            }, &TickInputs {
-                cols, rows,
-                playing_now: true,
             }, &mut stats);
             let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
             let redraw = editor.needs_redraw();
@@ -231,9 +220,6 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                 assert!(!redraw, "hidden playback displays must not request scratch frames");
                 assert!(meters.watched_display_modulators.is_empty());
                 assert!(frame.watched_sampler_voice_ids.is_empty());
-                let current = hidden_fields.map(|field|
-                    editor.runtime().reactive_field_value("SEQ", field).map(Value::deep_clone));
-                assert_eq!(hidden_snapshot.as_ref(), Some(&current), "hidden display fields must not be rebuilt");
             }
             let mut build_ms = 0.0;
             let mut render = None;
@@ -252,38 +238,28 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         }
         target.save_png(&out.with_file_name(format!("{}-{phase}.png", out.file_stem().unwrap().to_string_lossy()))).unwrap();
     }
-    // Restore the real panel layout and verify its first sync samples meters
-    // even though their ordinary wall-clock interval has not elapsed.
+    // Restore the real panel layout and verify the meters sample before
+    // their ordinary wall-clock interval elapses: the first tick's sync
+    // observes the reopened views' meter fields, the second polls on that
+    // rising edge (`poll_observed_meters`, eseq-0l17.79).
     editor.runtime_mut().eval_str("(eseq.seq-layout/apply-fx-layout)").unwrap();
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(cols as u16, rows as u16);
     editor.sync_reactive_bindings_for_visible_layouts();
-    let scope_version_before_reopen = frame.prev_process_scope_values_version;
-    let cells_version_before_reopen = frame.prev_process_scope_cells_version;
     meters.cached_peak_l_level = -1.0;
     meters.cached_track_peak_levels.clear();
     meters.last_meter_poll_at = Instant::now();
-    sync_reactive_tick(app, editor, &mut LoopCtx {
-        sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
-        gesture: &mut gesture, track_names: &mut track_names, shared,
-    }, &TickInputs {
-        cols, rows,
-        playing_now: true,
-    }, &mut stats);
-    assert!(meters.cached_peak_l_level >= 0.0, "reopened master meter samples immediately");
+    for _ in 0..2 {
+        sync_reactive_tick(app, editor, &mut LoopCtx {
+            sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
+            gesture: &mut gesture, track_names: &mut track_names, shared,
+        }, &mut stats);
+    }
+    assert!(
+        meters.cached_peak_l_level >= 0.0,
+        "reopened master meter samples on the tick after the sync that observes it"
+    );
     assert_eq!(meters.cached_track_peak_levels.len(), app.tracks.len());
-    if editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes") {
-        assert_eq!(frame.prev_process_scope_values_version, shared.state.process_scope_values_version());
-    } else {
-        // Open track groups do not imply expanded lane editors. A restored
-        // layout without scope consumers must continue leaving histories alone.
-        assert_eq!(frame.prev_process_scope_values_version, scope_version_before_reopen);
-    }
-    if editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells") {
-        assert_eq!(frame.prev_process_scope_cells_version, shared.state.process_scope_values_version());
-    } else {
-        assert_eq!(frame.prev_process_scope_cells_version, cells_version_before_reopen);
-    }
     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
     backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render reopened panels"));
     target.save_png(&out.with_file_name(format!("{}-reopened.png", out.file_stem().unwrap().to_string_lossy()))).unwrap();

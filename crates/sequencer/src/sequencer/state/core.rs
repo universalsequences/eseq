@@ -704,10 +704,17 @@ pub struct SequencerState {
     pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
+    /// The next native neural network id to mint (`mint_neural_network_id`):
+    /// only ever grows, so a deleted network's id is never reused in the
+    /// session (held handles and history entries name networks by id).
+    pub(super) next_neural_network_id: AtomicU64,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     /// `gen-mark` values per (generator id, key): (audio sample, value),
     /// oldest first, capped (see `push_generator_mark`).
     pub(super) generator_marks: Mutex<HashMap<(u64, String), std::collections::VecDeque<(u64, f64)>>>,
+    /// Moved (under the `generator_marks` lock) whenever its key set changes:
+    /// a first mark under a new (generator id, key), or a clear.
+    pub(super) generator_mark_keys_revision: AtomicU64,
     pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
     /// Control-thread hold ownership and ordered roll commands, drained at
     /// the top of every scheduler worker iteration.
@@ -723,6 +730,10 @@ pub struct SequencerState {
     /// recording). Realtime-safe SPSC ring — the callback never locks.
     pub(super) live_trigger_stamps: crate::sequencer::LiveTriggerStampRing,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
+    /// Moved (under the `track_output_events` lock) by every append and
+    /// clear that changed the history, so a reader skips an unchanged one
+    /// with one atomic load.
+    pub(super) track_output_events_revision: AtomicU64,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) active_note_velocity_bits: Vec<[AtomicU32; 128]>,

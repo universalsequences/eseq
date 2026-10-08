@@ -5,8 +5,8 @@
 (def drum-c () (eseq.effects.custom-ui-lego/ui-accent-cyan))
 (def drum-section () eseq.vanilla/custom-ui-selected-section)
 (def drum-p (name) (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-(def drum-bind (name) (eseq.effects.custom-ui-runtime/custom-ui-param-binding (drum-p name)))
-(def drum-value (name) (reactive-value (drum-bind name)))
+(def drum-bind (name) (eseq.effects.custom-ui-controls/ui-param-bound-value name 0))
+(def drum-value (name) (eseq.effects.custom-ui-controls/ui-param-value name 0))
 (def drum-knob (section name title width decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.45 2.15
     (drum-c) decimals taper :widget-knob-track 8.5 8 :center))
@@ -35,7 +35,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 
 ;; Closed-form integrated exponential pitch sweep, at the identified
@@ -71,7 +71,6 @@
 (defwidget eseq-identified-drum-source
   :width 35.2 :height 4.65
   :state (tune note ratio sweep decay attack sustain amp asym mode tfreq trate reference odd curvature)
-  :bindable (tune note ratio sweep decay attack sustain amp asym mode tfreq trate reference odd curvature)
   :shader
   (eseq.effects.identified-drum/drum-source-paint
     (sdf/layer
@@ -84,7 +83,6 @@
 (defwidget eseq-identified-drum-transient
   :width 35.2 :height 4.65
   :state (tune note ratio sweep decay attack sustain amp asym mode tfreq trate reference odd curvature)
-  :bindable (tune note ratio sweep decay attack sustain amp asym mode tfreq trate reference odd curvature)
   :shader (eseq.effects.identified-drum/drum-source-paint (rgba 0 0 0 0)))
 
 (def drum-source (config mode)
@@ -120,7 +118,6 @@
 (defwidget eseq-identified-drum-bank-sweep
   :width 35.2 :height 2.95
   :state (floor depth duration tune note track)
-  :bindable (floor depth duration tune note track)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.94) 1.88) 0 1))
         (key-offset (* (clamp track 0 1) (/ (* (+ tune note) 0.057762265) 5.586)))
@@ -147,7 +144,6 @@
 (defwidget eseq-identified-bank-shape
   :width 8.65 :height 1.0
   :state (mode value)
-  :bindable (value)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.9) 1.8) 0 1))
         (h (* 0.5 (round (* value 2))))
@@ -191,8 +187,8 @@
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope))
         (gesture (dict :start nil)))
     (let ((read (lambda (name)
-            (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-              (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name))))))
+            (eseq.effects.custom-ui-runtime/custom-ui-param-value
+              (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))))
       (v-stack :width 35.2 :height 4.65 :gap 0.15
         (eseq-identified-drum-bank-sweep :debug-name "kick-bank-sweep" :width 35.2 :height 2.95
           :tune (drum-bind "tune") :track (drum-bind "bank_track")

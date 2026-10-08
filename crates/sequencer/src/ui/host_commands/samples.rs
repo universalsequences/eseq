@@ -17,10 +17,8 @@ pub(super) fn handle(
     mut editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let state = ctx.shared.state.clone();
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
     match name {
         "audition-sample" => {
             let path_str = extract_path_from_payload(&payload);
@@ -45,10 +43,8 @@ pub(super) fn handle(
                 match load_or_convert_sampler_track(
                     &mut app,
                     &mut editor,
-                    &state,
                     &current_track,
                     &mut *ctx.track_names,
-                    &selected_steps,
                     lg_raw,
                     track,
                     Some(path),
@@ -102,10 +98,8 @@ pub(super) fn handle(
                         std::sync::Arc::new(stereo),
                         decoded.sample_rate,
                     );
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    // `browser.preview-playing` / `preview-position` read
+                    // the player itself (live host kind fields).
                     editor.mark_needs_redraw();
                     let name = path
                         .file_name()
@@ -122,11 +116,6 @@ pub(super) fn handle(
         }
         "stop-sample-preview" => {
             sequencer::audio::preview::stop();
-            let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(false));
-            rt.set_reactive("SEQ", "browser-preview-playhead", Value::Number(0.0));
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
         }
         "reanalyze-sample" => {
@@ -167,11 +156,6 @@ pub(super) fn handle(
                     );
                     app.publish_sampler_analysis_runtime(track);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "instrument-panel",
-                        build_instrument_panel_value(&app, track, &selected_steps),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(
@@ -207,10 +191,8 @@ pub(super) fn handle(
                     match load_or_convert_sampler_track(
                         &mut app,
                         &mut editor,
-                        &state,
                         &current_track,
                         &mut *ctx.track_names,
-                        &selected_steps,
                         lg_raw,
                         track,
                         Some(path),

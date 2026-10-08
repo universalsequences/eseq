@@ -13,19 +13,15 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/audition'))
-from audition import Instrument, write_wav
+from audition import Instrument, expand_defmacro_imports, write_wav
 
 FACTORY = ROOT / 'content/instruments/Physical Models'
 BASELINE = Path(__file__).parent / 'baseline'
 
 
 def prepared_source(source, output):
-    # PM Flute has one imported macro. Resolve that exact dependency from the
-    # same factory package used by the host; refuse any unhandled import.
-    source = source.replace('(use-defmacro pitch-transpose)',
-                            (ROOT / 'content/defmacros/pitch-transpose/macro.lisp').read_text())
-    if '(use-defmacro ' in source:
-        raise ValueError('New macro import: update woodwind source preparation')
+    # Resolve imported macros from the same factory package the host uses.
+    source = expand_defmacro_imports(source)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(source)
     return output

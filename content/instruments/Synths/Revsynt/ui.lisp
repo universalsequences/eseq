@@ -2,7 +2,7 @@
 ;; The eight allpass stage lengths (149..911 samples per unit of delay/10),
 ;; drawn against the full Size range so headroom for modulation is visible.
 (defwidget rv-allpass-view
-  :width 35.2 :height 3.2 :state (size) :bindable (size)
+  :width 35.2 :height 3.2 :state (size)
   :shader
   (let ((lift (* 0.775 (sqrt (clamp (/ size 4) 0.001 1)))))
     (sdf/layer

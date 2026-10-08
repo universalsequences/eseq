@@ -7,14 +7,6 @@ use sequencer::audio::worker_prefs::{self, WorkerPrefs};
 
 pub(super) const COMMANDS: &[&str] = &["audio-set-workers"];
 
-pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
-    runtime.register_reactive("AUDIO", vec![
-        ("workers-choice", Value::String(String::new())),
-        ("workers-options", Value::List(vec![])),
-        ("workers-note", Value::String(String::new())),
-    ], true); // Presentation only; capture fixtures may seed a preview.
-}
-
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -25,11 +17,27 @@ pub(super) fn handle(
     if name != "audio-set-workers" {
         return;
     }
-    let choice = match payload {
-        Value::Map(ref map) => map_string(map, "choice").unwrap_or_default(),
-        _ => String::new(),
+    let (choice, strict) = match payload {
+        Value::Map(ref map) => (
+            map_string(map, "choice").unwrap_or_default(),
+            map.get("strict")
+                .is_some_and(|strict| matches!(*strict.borrow(), Value::Bool(true))),
+        ),
+        _ => (String::new(), false),
     };
     let auto = worker_prefs::auto_worker_count();
+    // `settings.audio-workers-choice`'s setter (spec §14.2c value rule): one
+    // of the options, case-insensitively (like `SetValue::choice`); anything
+    // else is an error that changes nothing.
+    if strict {
+        let options = choice_options(auto, worker_prefs::logical_cores());
+        if !is_option(&options, &choice) {
+            editor.handle_host_event(HostEvent::Status(format!(
+                "audio-workers-choice takes one of {options:?}, not {choice:?}"
+            )));
+            return;
+        }
+    }
     let error = match parse_choice(&choice, auto) {
         Some(prefs) => worker_prefs::save(prefs).err(),
         None => Some(format!("Unrecognized worker choice {choice:?}")),
@@ -41,10 +49,7 @@ pub(super) fn handle(
 pub(crate) fn publish(editor: &mut Editor, error: Option<String>) {
     let prefs = worker_prefs::load();
     let auto = worker_prefs::auto_worker_count();
-    let options = choice_options(auto, worker_prefs::logical_cores())
-        .into_iter()
-        .map(|option| Rc::new(RefCell::new(Value::String(option))))
-        .collect();
+    let options = choice_options(auto, worker_prefs::logical_cores());
     let note = error.unwrap_or_else(|| {
         workers_note(
             worker_prefs::resolve(prefs, auto),
@@ -52,10 +57,11 @@ pub(crate) fn publish(editor: &mut Editor, error: Option<String>) {
             worker_prefs::env_override(),
         )
     });
-    let runtime = editor.runtime_mut();
-    runtime.set_reactive("AUDIO", "workers-choice", Value::String(choice_label(prefs, auto)));
-    runtime.set_reactive("AUDIO", "workers-options", Value::List(options));
-    runtime.set_reactive("AUDIO", "workers-note", Value::String(note));
+    present_settings(editor.runtime_mut(), |s| {
+        s.workers_choice = choice_label(prefs, auto);
+        s.workers_options = options;
+        s.workers_note = note;
+    });
     editor.mark_needs_redraw();
 }
 
@@ -76,9 +82,16 @@ fn choice_options(auto: u32, logical: u32) -> Vec<String> {
         .collect()
 }
 
+/// `choice` is one of `options`, case-insensitively.
+fn is_option(options: &[String], choice: &str) -> bool {
+    options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case(choice))
+}
+
 fn parse_choice(choice: &str, auto: u32) -> Option<WorkerPrefs> {
     let choice = choice.trim();
-    if choice == auto_label(auto) || choice.eq_ignore_ascii_case("auto") {
+    if choice.eq_ignore_ascii_case(&auto_label(auto)) || choice.eq_ignore_ascii_case("auto") {
         return Some(WorkerPrefs { workers: None });
     }
     let workers = choice.parse::<u32>().ok()?;
@@ -122,6 +135,22 @@ mod tests {
         assert_eq!(parse_choice("auto", auto), Some(WorkerPrefs { workers: None }));
         assert_eq!(parse_choice("lots", auto), None);
         assert_eq!(parse_choice("9999", auto), None);
+    }
+
+    #[test]
+    fn strict_choices_are_the_options_in_any_case() {
+        let options = choice_options(6, 10);
+        for choice in ["Auto (6)", "auto (6)", "AUTO (6)", "1", "10"] {
+            assert!(is_option(&options, choice), "{choice}");
+            assert!(parse_choice(choice, 6).is_some(), "{choice}");
+        }
+        assert_eq!(
+            parse_choice("auto (6)", 6),
+            Some(WorkerPrefs { workers: None })
+        );
+        for choice in ["0", "11", "auto", "lots", ""] {
+            assert!(!is_option(&options, choice), "{choice}");
+        }
     }
 
     #[test]

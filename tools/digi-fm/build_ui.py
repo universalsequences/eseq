@@ -12,7 +12,7 @@ def build_ui():
     emit=lines.append
     emit('''(defwidget df-routing
   :width 7.8 :height 1.65
-  :state (mode selected) :bindable (selected)
+  :state (mode selected)
   :shader
   (let ((ink (if (> selected .5) :control-on-bg :control-on-fg)))
     (sdf/layer
@@ -35,7 +35,7 @@ def build_ui():
     emit(')))')
     emit('''(defwidget df-spectrum
   :width 32 :height 4.7
-  :state (harm) :bindable (harm)
+  :state (harm)
   :shader
   (let ((position (abs harm)))
     (sdf/layer''')

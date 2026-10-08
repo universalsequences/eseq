@@ -184,7 +184,7 @@ pub(crate) fn move_instance_status(
     })
 }
 
-/// One row of `SEQ.instances`: `{:id :kind :label :owner-rack :owner-label
+/// One row of `project.instances`: `{:id :kind :label :owner-rack :owner-label
 /// :registered?}` per project instance, in list order. `:owner-rack` is nil
 /// for a project-owned instance; `:owner-label` is "project" or the rack's
 /// name; `:registered?` is false for a placeholder whose kind has not
@@ -220,11 +220,6 @@ fn instance_rows(app: &app::App) -> Vec<InstanceRow> {
         .collect()
 }
 
-/// `SEQ.instances` as a Lisp list of dicts.
-pub(crate) fn build_instances_value(app: &app::App) -> Value {
-    instances_value(&instance_rows(app))
-}
-
 fn instances_value(rows: &[InstanceRow]) -> Value {
     Value::List(
         rows.iter()
@@ -245,13 +240,13 @@ fn instances_value(rows: &[InstanceRow]) -> Value {
     )
 }
 
-/// The `SEQ.instances` value when it differs from the one `last`
-/// fingerprints (updating `last`), else `None`. Runs every reactive tick,
-/// so the fingerprint borrows instead of building rows: each instance's
+/// The `project.instances` value when it differs from the one `last`
+/// fingerprints (updating `last`; `None` always differs), else `None`. Runs every host kinds
+/// sync it is observed, so the fingerprint borrows instead of building rows: each instance's
 /// fields, its owner rack's name, and ONE registry version read (which moves
 /// whenever any kind's registration does) stand in for `:registered?`.
 /// Rows are only built on a change.
-pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut u64) -> Option<Value> {
+pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut Option<u64>) -> Option<Value> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sequencer::lisp_host::kind_registry_version().hash(&mut hasher);
@@ -264,10 +259,10 @@ pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut u64) -> Opti
     }
     app.instances.list.len().hash(&mut hasher);
     let fingerprint = hasher.finish();
-    if fingerprint == *last {
+    if *last == Some(fingerprint) {
         return None;
     }
-    *last = fingerprint;
+    *last = Some(fingerprint);
     Some(instances_value(&instance_rows(app)))
 }
 
@@ -295,9 +290,21 @@ pub(crate) fn sync_instances_to_editor(app: &app::App, editor: &mut Editor) {
 
 /// Run the kind's `:on-create` for the fresh instance `id` in the UI VM
 /// (spec §11), then let the views re-render the defaults it wrote. A
-/// failing hook leaves the instance in place and reports it.
+/// failing hook leaves the instance in place and reports it. The defaults
+/// it writes through the legacy `graph-*` natives belong to the creation:
+/// their history commands (eseq-0l17.53) are dropped, so they record no
+/// entry of their own.
 pub(crate) fn run_on_create(editor: &mut Editor, id: u64) {
-    match sequencer::lisp_host::run_instance_on_create(editor.runtime_mut(), id) {
+    let queued = editor.drain_host_commands();
+    let result = sequencer::lisp_host::run_instance_on_create(editor.runtime_mut(), id);
+    let hook = editor.drain_host_commands().into_iter().filter(|command| {
+        !matches!(command, HostCommand::Custom { name, .. }
+            if name == sequencer::lisp_host::GRAPH_OVERRIDE_HISTORY_COMMAND)
+    });
+    for command in queued.into_iter().chain(hook) {
+        editor.runtime_mut().enqueue_host_command(command);
+    }
+    match result {
         Ok(false) => {}
         Ok(true) => {
             editor.runtime_mut().run_reactive_cycle();

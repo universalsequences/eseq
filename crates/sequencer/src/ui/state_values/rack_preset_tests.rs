@@ -36,17 +36,26 @@ fn rack_slot_presets_follow_explicit_selection_and_route_to_the_slot() {
         Ok(build_preset_tree_from_list(args.first(), "", &instrument, args.get(3)))
     });
     editor.set_layout_viewport(55, 38);
+    seed_browser_tracks(&mut editor, &vec!["rack"; app.tracks.len()], track);
+    sync_sidebar_browser(&app, track);
+    let slot_devices = push_presented_sidebar(&mut editor);
+    // The rack slot the delete target selects, as the host pushes
+    // `device.delete-target`.
+    let target_slot = |editor: &mut Editor, slot: Option<usize>| {
+        for (index, &device) in slot_devices.iter().enumerate() {
+            set_field(editor.runtime_mut(), device, "delete-target", Value::Bool(slot == Some(index)));
+        }
+        editor.runtime_mut().run_reactive_cycle();
+    };
+    let rack_presets = "(let ((b eseq.kinds/browser)) b.presets)";
+    set_browser_view_field(&mut editor, "browser-view", "tab", r#""presets""#);
     let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "num-tracks", Value::Number(app.tracks.len() as f64));
-    sync_sidebar_browser(rt, &app, track);
-    rt.eval_str("(set! eseq.vanilla/sbrowser-tab \"presets\")").unwrap();
     // An ordinary edit cursor alone must keep the rack-level preset bank.
     assert_eq!(rt.eval_str("(eseq.browser/selected-rack-preset-context)").unwrap(), Some(Value::Nil));
     assert_eq!(rt.eval_str("(eseq.browser/browser-preset-items)").unwrap(),
-        rt.reactive_field_value("SEQ", "sidebar-presets").cloned());
+        rt.eval_str(rack_presets).unwrap());
     rt.eval_str(&format!("(seq-set-delete-target :rack-slot (dict :track {track} :slot 0))")).unwrap();
-    rt.set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
-    rt.run_reactive_cycle();
+    target_slot(&mut editor, Some(0));
     editor.refresh_runtime_side_effects();
     let layout = editor.widget_layout().expect("preset sidebar layout");
     let tree = find_layout_node_by_stable_key_suffix(&layout, "/presets-tab-tree")
@@ -124,21 +133,25 @@ fn rack_slot_presets_follow_explicit_selection_and_route_to_the_slot() {
     assert!(!rack_slot_runs_instrument(&app, track, 9, name));
     assert!(!track_runs_instrument(&app, track, name));
 
+    sync_sidebar_browser(&app, track);
+    push_presented_sidebar(&mut editor);
     let rt = editor.runtime_mut();
-    sync_sidebar_browser(rt, &app, track);
     assert_eq!(rt.eval_str("(eseq.browser/browser-loaded-preset)").unwrap(), Some(Value::String(preset.name.clone())));
     rt.eval_str(&format!("(seq-set-delete-target :rack-slot (dict :track {track} :slot 1))")).unwrap();
-    rt.set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
-    rt.run_reactive_cycle();
-    assert_eq!(rt.eval_str("(get (eseq.browser/selected-rack-preset-context) :slot)").unwrap(), Some(Value::Number(1.0)));
+    target_slot(&mut editor, Some(1));
+    let rt = editor.runtime_mut();
+    assert_eq!(
+        rt.eval_str("(let ((s (eseq.browser/selected-rack-preset-context))) s.index)").unwrap(),
+        Some(Value::Number(1.0))
+    );
     assert_eq!(rt.eval_str("(eseq.browser/browser-loaded-preset)").unwrap(),
         Some(Value::String(sibling_before.sound_state.loaded_preset.clone().unwrap_or_default())));
     rt.eval_str("(seq-clear-delete-target)").unwrap();
-    rt.set_reactive("SEQ", "delete-target-version", Value::Number(3.0));
-    rt.run_reactive_cycle();
+    target_slot(&mut editor, None);
+    let rt = editor.runtime_mut();
     assert_eq!(rt.eval_str("(eseq.browser/selected-rack-preset-context)").unwrap(), Some(Value::Nil));
     assert_eq!(rt.eval_str("(eseq.browser/browser-preset-items)").unwrap(),
-        rt.reactive_field_value("SEQ", "sidebar-presets").cloned());
+        rt.eval_str(rack_presets).unwrap());
 }
 
 #[test]
@@ -164,12 +177,10 @@ fn dropped_preset_of_the_running_instrument_loads_in_place() {
 
     // The browser stamps the track's instrument on its preset rows.
     let mut editor = browser_editor_on_instrument_tab();
+    seed_browser_tracks(&mut editor, &vec!["custom"; app.tracks.len()], track);
+    sync_sidebar_browser(&app, track);
+    push_presented_sidebar(&mut editor);
     let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "num-tracks", Value::Number(app.tracks.len() as f64));
-    rt.set_reactive("SEQ", "track-instrument-types", list_value(
-        (0..app.tracks.len()).map(|_| Value::String("custom".to_string()))));
-    sync_sidebar_browser(rt, &app, track);
-    rt.run_reactive_cycle();
     assert_eq!(rt.eval_str("(eseq.browser/browser-preset-instrument)").unwrap(),
         Some(Value::String(name.to_string())));
 

@@ -51,7 +51,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (subtree :key (str "tri-osc-toggle-" name "-" (if on 1 0))
           (v-stack :width 3.4 :height 1.18 :gap 0.16 :align :start
             (label title :font-size 9.0 :width 3.4 :height 0.56 :color :dim :bg :transparent)
@@ -302,7 +302,7 @@
 (def tri-hp-enabled? ()
   (let ((mode-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter_mode")))
     (if mode-p
-      (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p)) 0.5)
+      (> (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p) 0.5)
       true)))
 
 ;; The hp number picker, or an inert dimmed stand-in while LP24 hides it.
@@ -315,7 +315,7 @@
         ;; background, muted solid colours (label alpha is not honoured), and
         ;; no widget underneath, so it neither edits nor drags.
         (let ((hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq")))
-          (let ((hp-val (if hp-p (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value hp-p)) 0)))
+          (let ((hp-val (if hp-p (eseq.effects.custom-ui-runtime/custom-ui-param-value hp-p) 0)))
             (v-stack :width 6.0 :height 1.0 :gap 0.06 :align :start
               (label "hp" :font-size 9.0 :width 6.0 :height 0.68 :color (rgba 0.36 0.37 0.41 1) :bg :transparent)
               (label (str " " (round hp-val) " Hz") :font-size 9.5 :width 6.0 :height 0.75

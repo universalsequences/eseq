@@ -36,7 +36,18 @@ impl SequencerState {
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<BusPatternSnapshot> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, scene_idx + 1, default_snapshot);
+        // Only a fill writes: a read that fills nothing leaves the scenes'
+        // revision alone (the host kinds' model gate reads it).
+        let fills = !default_snapshot.is_empty()
+            && (scenes.scenes.iter().take(scene_idx + 1))
+                .any(|scene| scene.bus_patterns.is_empty());
+        if fills {
+            Self::ensure_scene_bus_patterns_len_locked(
+                &mut scenes,
+                scene_idx + 1,
+                default_snapshot,
+            );
+        }
         scenes
             .scenes
             .get(scene_idx)
@@ -545,8 +556,16 @@ impl SequencerState {
         Ok(())
     }
 
+    /// The current scene's mod connections (cloning nothing else of the
+    /// scene).
     pub fn current_mod_connections(&self) -> Vec<ModConnection> {
-        self.current_scene_metadata().0
+        let current_pattern = self.current_pattern_index();
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_mod_connections(current_pattern)
+            .unwrap_or_default()
     }
 
     pub fn edit_current_mod_connections<F, R>(&self, edit: F) -> Result<R, String>

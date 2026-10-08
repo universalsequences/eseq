@@ -12,7 +12,7 @@
 
 (def dsn-engine-index ()
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "engine")))
-    (let ((e (if p (round (if (get p :value-field) (reactive-get "SEQ" (get p :value-field)) (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)))) 1)))
+    (let ((e (if p (round (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 1)))
       (if (= e 2) 2 (if (= e 3) 3 1)))))
 
 (def dsn-num-w () 4.6)

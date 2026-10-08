@@ -10,7 +10,8 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: eseq paths
+const USAGE: &str = "usage: eseq -noui [FILE]
+       eseq paths
        eseq authoring seed [DIR]
        eseq authoring skill
        eseq instrument check DIR_OR_NAME [--no-render]
@@ -31,6 +32,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     sequencer::app_paths::init()
         .map_err(|error| format!("failed to resolve application paths: {error}"))?;
     match args.as_slice() {
+        [flag, file @ ..] if (flag == "-noui" || flag == "--noui") && file.len() <= 1 => {
+            run_noui(file.first())
+        }
         [paths] if paths == "paths" => print_paths(),
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {
             let paths = sequencer::app_paths::app_paths();
@@ -180,6 +184,32 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Replace this process with the sibling `metal_seq noui` (eseq-750i): the
+/// app under a bare Lisp root with FILE open and the shell's directory as the
+/// working directory. Exec rather than spawn so the terminal keeps the app's
+/// output and Ctrl-C.
+fn run_noui(file: Option<&String>) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    // Resolve symlinks first: macOS reports the invoked path, so an `eseq`
+    // symlinked onto PATH would otherwise look for metal_seq beside the link.
+    let metal_seq = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("metal_seq")))
+        .filter(|path| path.exists())
+        .ok_or("metal_seq not found next to eseq")?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("failed to read the current directory: {error}"))?;
+    let error = std::process::Command::new(&metal_seq)
+        .arg("noui")
+        .args(file)
+        .arg("--cwd")
+        .arg(&cwd)
+        .exec();
+    Err(format!("cannot run {}: {error}", metal_seq.display()))
 }
 
 fn print_paths() -> Result<(), String> {
@@ -607,7 +637,8 @@ fn declared_module(source: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Every `(def-kind NAME` in the source, in order.
+/// Every `(def-kind NAME` in the source, in order, except singletons
+/// (`:key`): they have no instances or tab to check.
 fn def_kind_names(source: &str) -> Vec<String> {
     let code = code_only(source);
     let mut names = Vec::new();
@@ -622,11 +653,35 @@ fn def_kind_names(source: &str) -> Vec<String> {
             .chars()
             .take_while(|ch| !ch.is_whitespace() && *ch != ')' && *ch != '(')
             .collect();
-        if !name.is_empty() && !names.contains(&name) {
+        if !name.is_empty() && !names.contains(&name) && !form_has_key_slot(rest) {
             names.push(name);
         }
     }
     names
+}
+
+/// Whether the form whose body starts at `rest` (just after its head) has a
+/// top-level `:key` slot.
+fn form_has_key_slot(rest: &str) -> bool {
+    let mut depth = 0usize;
+    for (at, ch) in rest.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth == 0 => return false,
+            ')' | ']' => depth -= 1,
+            ':' if depth == 0 => {
+                let slot: String = rest[at + 1..]
+                    .chars()
+                    .take_while(|ch| !ch.is_whitespace() && *ch != '(' && *ch != ')')
+                    .collect();
+                if slot == "key" {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Load the module in the app's own runtime, create instance 1 of the kind
@@ -735,7 +790,8 @@ mod tests {
     fn sequencer_check_reads_the_module_header_and_kind_names() {
         let source = ";; (def-kind commented-out)\n(module my.pulse)\n(import my.pulse-core)\n\
                       (def x \"(def-kind in-a-string\")\n(def-kind pulse\n  :view p)\n\
-                      (def-kind other :view q) ; (def-kind trailing)\n(def-kinds nope)\n";
+                      (def-kind other :view q) ; (def-kind trailing)\n(def-kinds nope)\n\
+                      (def-kind menu :key () :state ((open false)))\n";
         assert_eq!(declared_module(source).as_deref(), Some("my.pulse"));
         assert_eq!(def_kind_names(source), vec!["pulse".to_string(), "other".to_string()]);
         assert_eq!(declared_module("(def x 1)\n(module late)"), None);

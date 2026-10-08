@@ -1,5 +1,6 @@
 //! History for graph node process-chain edits (eseq-waa9.23). The
-//! `graph-node-process-*` natives apply their edit to the node's chain at
+//! `graph-node-process-*` natives the expr edit buffer calls (add, inlet,
+//! expr-set, rebind, edit-as-expr) apply their edit to the node's chain at
 //! once and enqueue the chain before/after it; this records that as one undo
 //! entry (a picker drag as one coalesced gesture). Replay goes through
 //! `EditPatch::GraphNodeProcessChain`.

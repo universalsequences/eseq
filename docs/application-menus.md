@@ -84,7 +84,7 @@ path rather than terminating the process directly.
       (and (not (get context :blocked))
            (get context :ui-view)
            (not (get context :text-input))
-           (> SEQ.num-tracks 0))))
+           (not (empty? (tracks))))))   ; (import eseq.kinds :refer (tracks))
   :on-select (lambda () (host-command "menu-pattern-double" (dict))))
 ```
 
@@ -92,7 +92,7 @@ The registry uses `(observe ...)`, a nonvisual reactive effect. Observers run
 once when defined and again when their dependencies change, discard their return
 value, and never emit widget trees or pause because a UI panel is hidden.
 
-Predicates should be pure. Their reactive reads, including SEQ fields and
+Predicates should be pure. Their reactive reads, including kind fields (eseq.kinds) and
 `native-menu-context`, determine when they re-evaluate. Enabled-state and callback
 updates reuse existing native objects. Label, shortcut, ordering, or structure
 changes replace the native tree; queued events from removed items are discarded.

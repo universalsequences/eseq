@@ -3,6 +3,18 @@ use super::super::*;
 /// Marks kept per generator: a few bars of sixteenths of lookahead.
 const GENERATOR_MARK_CAP: usize = 256;
 
+/// The latest of `marks` (oldest first) at or before audio sample `sample`.
+fn latest_generator_mark(
+    marks: &std::collections::VecDeque<(u64, f64)>,
+    sample: u64,
+) -> Option<f64> {
+    marks
+        .iter()
+        .rev()
+        .find(|(at, _)| *at <= sample)
+        .map(|(_, value)| *value)
+}
+
 impl SequencerState {
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
@@ -16,10 +28,6 @@ impl SequencerState {
         self.neural_visualization.lock().unwrap().clone()
     }
 
-    pub fn has_neural_visualization(&self) -> bool {
-        self.neural_visualization.lock().unwrap().num_neurons > 0
-    }
-
     pub fn set_graph_visualizations(&self, snapshots: Vec<GraphVisualizationSnapshot>) {
         *self.graph_visualizations.lock().unwrap() = snapshots;
     }
@@ -28,30 +36,16 @@ impl SequencerState {
         self.graph_visualizations.lock().unwrap().clone()
     }
 
-    /// Per published graph: its id and, per node, the `(note, velocity)`
-    /// pairs whose gate is open at audio-clock `sample`, oldest first. Reads only the sounding
-    /// windows, so it is cheap enough to poll every UI tick.
-    pub fn graph_node_sounding_at(&self, sample: u64) -> Vec<(u64, Vec<Vec<(f32, f32)>>)> {
-        self.graph_visualizations
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|snapshot| {
-                let nodes = (0..snapshot.num_nodes)
-                    .map(|node| {
-                        snapshot
-                            .node_sounding
-                            .get(node)
-                            .into_iter()
-                            .flatten()
-                            .filter(|note| note.is_sounding_at(sample))
-                            .map(|note| (note.note, note.velocity))
-                            .collect()
-                    })
-                    .collect();
-                (snapshot.id, nodes)
-            })
-            .collect()
+    /// Read graph `id`'s visualization snapshot in place (`None` before the
+    /// scheduler ran the graph), without copying it: the host kinds' live
+    /// graph fields read it every tick while observed.
+    pub fn with_graph_visualization<R>(
+        &self,
+        id: u64,
+        read: impl FnOnce(Option<&GraphVisualizationSnapshot>) -> R,
+    ) -> R {
+        let snapshots = self.graph_visualizations.lock().unwrap();
+        read(snapshots.iter().find(|snapshot| snapshot.id == id))
     }
 
     /// A generator tick's `(gen-mark v [key])`: `v` stamped at the audio
@@ -61,7 +55,11 @@ impl SequencerState {
     /// previous hit's end-of-gate mark) drops that stale future first.
     pub fn push_generator_mark(&self, id: u64, key: &str, sample: u64, value: f64) {
         let mut marks = self.generator_marks.lock().unwrap();
-        let queue = marks.entry((id, key.to_string())).or_default();
+        let queue = marks.entry((id, key.to_string())).or_insert_with(|| {
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+            Default::default()
+        });
         while queue.back().is_some_and(|(at, _)| *at > sample) {
             queue.pop_back();
         }
@@ -75,12 +73,22 @@ impl SequencerState {
     /// sample `sample`.
     pub fn generator_mark_at(&self, id: u64, key: &str, sample: u64) -> Option<f64> {
         let marks = self.generator_marks.lock().unwrap();
-        marks
-            .get(&(id, key.to_string()))?
-            .iter()
-            .rev()
-            .find(|(at, _)| *at <= sample)
-            .map(|(_, value)| *value)
+        latest_generator_mark(marks.get(&(id, key.to_string()))?, sample)
+    }
+
+    /// Run `read` with the mark a view shows per (generator id, key) slot,
+    /// under one lock: the latest at or before the audio clock while the
+    /// transport plays, else 0 (also 0 for a slot with no mark yet).
+    pub fn with_shown_generator_marks<R>(
+        &self,
+        read: impl FnOnce(&dyn Fn(&(u64, String)) -> f64) -> R,
+    ) -> R {
+        let (playing, sample) = (self.is_playing(), self.audio_rendered_sample());
+        let marks = self.generator_marks.lock().unwrap();
+        read(&|slot| {
+            let mark = playing.then(|| latest_generator_mark(marks.get(slot)?, sample));
+            mark.flatten().unwrap_or(0.0)
+        })
     }
 
     /// Every (generator id, key) that has stamped marks.
@@ -88,12 +96,30 @@ impl SequencerState {
         self.generator_marks.lock().unwrap().keys().cloned().collect()
     }
 
-    pub fn clear_generator_marks(&self) {
-        self.generator_marks.lock().unwrap().clear();
+    /// Moves whenever [`Self::generator_mark_keys`] changes.
+    pub fn generator_mark_keys_revision(&self) -> u64 {
+        self.generator_mark_keys_revision.load(Ordering::Acquire)
     }
 
-    pub fn has_graph_visualizations(&self) -> bool {
-        !self.graph_visualizations.lock().unwrap().is_empty()
+    /// Drop generator `id`'s marks (its sequencer was unpublished: a
+    /// redefinition under the same id starts with none).
+    pub fn drop_generator_marks(&self, id: u64) {
+        let mut marks = self.generator_marks.lock().unwrap();
+        let before = marks.len();
+        marks.retain(|(generator, _), _| *generator != id);
+        if marks.len() != before {
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn clear_generator_marks(&self) {
+        let mut marks = self.generator_marks.lock().unwrap();
+        if !marks.is_empty() {
+            marks.clear();
+            self.generator_mark_keys_revision
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     pub fn push_graph_control_command(&self, command: crate::graph::GraphControlCommand) {
@@ -131,23 +157,43 @@ impl SequencerState {
 
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
+        let before = history.len();
         history.extend(events);
+        if history.len() == before {
+            return;
+        }
         let overflow = history.len().saturating_sub(TRACK_OUTPUT_EVENT_HISTORY_CAP);
         if overflow > 0 {
             history.drain(0..overflow);
         }
+        self.track_output_events_revision
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn clear_track_output_events(&self) {
-        self.track_output_events.lock().unwrap().clear();
+        let mut history = self.track_output_events.lock().unwrap();
+        if !history.is_empty() {
+            history.clear();
+            self.track_output_events_revision
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    pub fn track_output_events(&self) -> Vec<TrackOutputEvent> {
-        self.track_output_events.lock().unwrap().clone()
+    /// The track output history's revision (see
+    /// [`Self::with_track_output_events`]): one atomic load.
+    pub fn track_output_events_revision(&self) -> u64 {
+        self.track_output_events_revision.load(Ordering::Relaxed)
     }
 
-    pub fn has_track_output_events(&self) -> bool {
-        !self.track_output_events.lock().unwrap().is_empty()
+    /// Read the track output history in place, oldest first, with its
+    /// revision as of the read (the host kinds' `transport.track-events`
+    /// reads it only when [`Self::track_output_events_revision`] moved).
+    pub fn with_track_output_events<R>(
+        &self,
+        read: impl FnOnce(u64, &[TrackOutputEvent]) -> R,
+    ) -> R {
+        let history = self.track_output_events.lock().unwrap();
+        read(self.track_output_events_revision(), &history)
     }
 
     pub fn set_track_output_current_beat(&self, beat: f64) {
@@ -252,6 +298,15 @@ impl SequencerState {
     }
 
     pub fn active_note_activity(&self, track: usize) -> Vec<ActiveNoteActivity> {
+        let mut notes = Vec::new();
+        self.active_note_activity_into(track, &mut notes);
+        notes
+    }
+
+    /// [`Self::active_note_activity`] into `out` (cleared first), so a
+    /// caller polling every tick reuses one buffer.
+    pub fn active_note_activity_into(&self, track: usize, out: &mut Vec<ActiveNoteActivity>) {
+        out.clear();
         let (
             Some(until),
             Some(scheduled_velocities),
@@ -263,30 +318,28 @@ impl SequencerState {
             self.live_note_velocity_bits.get(track),
             self.active_note_trigger_ids.get(track),
         ) else {
-            return Vec::new();
+            return;
         };
         let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
-        (0_u8..=127)
-            .filter_map(|note| {
-                let idx = note as usize;
-                let scheduled_active = until[idx].load(Ordering::Acquire) > rendered;
-                let live_velocity =
-                    f32::from_bits(live_velocities[idx].load(Ordering::Acquire)).clamp(0.0, 1.0);
-                if live_velocity <= 0.0 && !scheduled_active {
-                    return None;
-                }
-                let scheduled_velocity = if scheduled_active {
-                    f32::from_bits(scheduled_velocities[idx].load(Ordering::Relaxed))
-                } else {
-                    0.0
-                };
-                Some(ActiveNoteActivity {
-                    note,
-                    velocity: scheduled_velocity.max(live_velocity).clamp(0.0, 1.0),
-                    trigger_id: trigger_ids[idx].load(Ordering::Acquire),
-                })
+        out.extend((0_u8..=127).filter_map(|note| {
+            let idx = note as usize;
+            let scheduled_active = until[idx].load(Ordering::Acquire) > rendered;
+            let live_velocity =
+                f32::from_bits(live_velocities[idx].load(Ordering::Acquire)).clamp(0.0, 1.0);
+            if live_velocity <= 0.0 && !scheduled_active {
+                return None;
+            }
+            let scheduled_velocity = if scheduled_active {
+                f32::from_bits(scheduled_velocities[idx].load(Ordering::Relaxed))
+            } else {
+                0.0
+            };
+            Some(ActiveNoteActivity {
+                note,
+                velocity: scheduled_velocity.max(live_velocity).clamp(0.0, 1.0),
+                trigger_id: trigger_ids[idx].load(Ordering::Acquire),
             })
-            .collect()
+        }));
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
@@ -485,6 +538,26 @@ impl SequencerState {
             .current_neural_networks()
     }
 
+    /// A fresh id for a new neural network: above every network id any
+    /// scene holds and above every id minted before (the counter never
+    /// goes back, not with an undo, a scene rebuild or a project load), so
+    /// no id is ever reused and a held handle or history entry naming a
+    /// deleted network never reaches a newer one.
+    pub fn mint_neural_network_id(&self) -> u64 {
+        let floor = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let ids = scenes
+                .scenes
+                .iter()
+                .flat_map(|scene| &scene.neural_networks);
+            ids.map(|network| network.id).max().unwrap_or(0) + 1
+        };
+        let next = &self.next_neural_network_id;
+        let id = next.load(Ordering::Relaxed).max(floor);
+        next.store(id + 1, Ordering::Relaxed);
+        id
+    }
+
     pub fn edit_current_neural_networks<F, R>(&self, edit: F) -> Result<R, String>
     where
         F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
@@ -499,6 +572,28 @@ impl SequencerState {
                 .current_scene_index()
                 .min(bank.scene_count().saturating_sub(1));
             bank.edit_current_neural_networks(edit)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    /// [`Self::edit_current_neural_networks`] for the scene `scene` rather
+    /// than the current one: undo and redo of a host kind neural edit
+    /// (`NeuralNetworkPatch`) land in the scene the edit was made in.
+    pub fn edit_scene_neural_networks<F, R>(&self, scene: SceneId, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
+    {
+        let result = {
+            let mut bank = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let scene_idx = bank
+                .scene_index(scene)
+                .ok_or_else(|| format!("scene {} no longer exists", scene.0))?;
+            bank.edit_scene_neural_networks(scene_idx, edit)?
         };
         self.publish_scheduler_snapshot();
         Ok(result)

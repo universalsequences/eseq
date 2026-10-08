@@ -539,11 +539,12 @@ impl WidgetDefinition for BoxWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if node.props.contains_key("on-double-click") {
             Some(WidgetEvent::Custom(super::pointer_event_info(
                 "double-click",
-                KeyModifiers::empty(),
+                modifiers,
                 node,
                 local_col,
                 local_row,

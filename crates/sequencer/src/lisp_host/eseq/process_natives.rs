@@ -3453,19 +3453,17 @@ pub(in crate::lisp_host) fn register_process_chain_natives(
                     .ok_or_else(|| "unknown process handle".to_string())?;
                 instance.bindings.insert(port.clone(), Some(target.clone()));
             }
-            let updated = if write_process_chain_state {
-                state_for_connect.set_process_port_binding_for_instance(
+            // Whether a track's (or the project layer's) binding changed.
+            let changed = write_process_chain_state
+                && state_for_connect.set_process_port_binding_for_instance(
                     crate::process::ProcessInstanceId(*id),
                     &port,
                     target,
-                )
-            } else {
-                0
-            };
+                );
             if write_process_chain_state {
                 publish_process_authoring(&authoring_for_connect, &publish_for_connect);
             }
-            Ok(EValue::Number(updated as f64))
+            Ok(EValue::Bool(changed))
         },
     );
 }

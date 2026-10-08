@@ -2944,8 +2944,9 @@ impl App {
         op: crate::effects::filter_table_editor::EditOp,
         replacing_last: bool,
     ) -> Result<(), String> {
-        use crate::effects::filter_table_editor::with_session;
-        let (node_id, baked) = with_session(|session| {
+        // A read: the preview changes nothing the session shows.
+        use crate::effects::filter_table_editor::read_session;
+        let (node_id, baked) = read_session(|session| {
             let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
             Ok::<_, String>((
                 session.node_id,
@@ -3004,10 +3005,9 @@ impl App {
     /// and persistence treat it like any other table load. Returns the
     /// asset stem.
     pub fn filter_table_editor_save(&mut self, name: Option<&str>) -> Result<String, String> {
-        self.filter_table_editor_save_in(
-            name,
-            &crate::effects::filter_table_asset::user_asset_dir(),
-        )
+        let dir = (self.filter_table_save_dir.clone())
+            .unwrap_or_else(crate::effects::filter_table_asset::user_asset_dir);
+        self.filter_table_editor_save_in(name, &dir)
     }
 
     /// [`filter_table_editor_save`] with an explicit destination directory
@@ -3017,8 +3017,8 @@ impl App {
         name: Option<&str>,
         dir: &std::path::Path,
     ) -> Result<String, String> {
-        use crate::effects::filter_table_editor::{with_session, EditorTarget};
-        let (target, doc, baked, fallback_name) = with_session(|session| {
+        use crate::effects::filter_table_editor::{read_session, with_session, EditorTarget};
+        let (target, doc, baked, fallback_name) = read_session(|session| {
             let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
             Ok::<_, String>((
                 session.target,
@@ -3205,7 +3205,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -3230,6 +3230,7 @@ impl App {
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: input.input_channel,
                     }),
@@ -3249,7 +3250,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -3273,6 +3274,7 @@ impl App {
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: input.input_channel,
                     }),
@@ -3681,6 +3683,11 @@ impl App {
             },
             tick: 0,
         });
+    }
+
+    /// Whether an effect or instrument compile is running.
+    pub fn compile_pending(&self) -> bool {
+        self.editor.pending_compile.is_some()
     }
 
     /// Poll for async compile completion. Returns a status message if something finished.
@@ -4654,9 +4661,7 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        if EffectDescriptor::builtin_insert(name).is_none()
-            && !crate::effects::dgen_builtin::contains(name)
-        {
+        if !crate::effects::is_builtin_effect(name) {
             return Err(format!("Unknown built-in effect '{name}'"));
         }
         let effect_slot =
@@ -4774,7 +4779,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         descriptor.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -5512,6 +5517,7 @@ mod tests {
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 4,
             n_outputs: 1,

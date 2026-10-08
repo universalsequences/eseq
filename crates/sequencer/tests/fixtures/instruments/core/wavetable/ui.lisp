@@ -66,7 +66,7 @@
     (if (< mode 1.5) "bandpass" "highpass")))
 
 ;; :freq / :q pass the params' raw bindings, not `eseq.effects.custom-ui-runtime/custom-ui-param-value`.
-;; `eseq.effects.custom-ui-runtime/custom-ui-param-value` unwraps with `reactive-value`, an eager read that
+;; `eseq.effects.custom-ui-runtime/custom-ui-param-value` reads the value eagerly, which
 ;; subscribes this whole custom-UI subtree to the per-param value fields the
 ;; host rewrites on every drag event — one full subtree rerun per mouse move.
 ;; response-curve-editor declares `bands` bindable and resolves ReactiveRefs

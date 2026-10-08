@@ -16,13 +16,12 @@ fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
         }
         apply_group_bindings(&mut editor, group);
         for collapsed in [false, true] {
-            editor.runtime_mut().set_reactive(
-                "SEQ", "track-collapsed", test_bool_list(&[collapsed; 3]),
-            );
-            for selected in [&[0.0][..], &[1.0, 2.0][..]] {
-                editor.runtime_mut().set_reactive(
-                    "SEQ", "selected-tracks", test_number_list(selected),
-                );
+            for track in 0..3 {
+                let track = kind_track(editor.runtime(), track);
+                set_field(editor.runtime_mut(), track, "collapsed", Value::Bool(collapsed));
+            }
+            for selected in [&[0][..], &[1, 2][..]] {
+                select_kind_tracks(&mut editor, selected);
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 for track in [0, 1] {
@@ -36,6 +35,7 @@ fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
                         vec![map_value([
                             ("col", Value::Number(30.0)),
                             ("row", Value::Number(8.0)),
+                            ("at", map_value([("col", Value::Number(30.0)), ("row", Value::Number(8.0))])),
                         ])],
                     ).expect("open clicked track menu");
                     editor.refresh_runtime_side_effects();
@@ -46,7 +46,7 @@ fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
                     if track == 0 {
                         assert!(ungroup.is_none(), "ungroup is absent for a loose track");
                         editor.runtime_mut().eval_str(
-                            "(set! eseq.mixer/track-menu-open false)",
+                            "(let ((m eseq.mixer/strip-menu)) (set! m.open false))",
                         ).unwrap();
                     } else {
                         let ungroup = ungroup.expect("member track offers ungroup");
@@ -65,7 +65,7 @@ fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
                         assert_eq!(name, "remove-track-from-group");
                         assert_eq!(payload, &map_value([("track", Value::Number(1.0))]));
                         assert_eq!(
-                            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
+                            editor.runtime_mut().eval_str("(let ((m eseq.mixer/strip-menu)) m.open)").unwrap(),
                             Some(Value::Bool(false)),
                         );
                     }
@@ -85,17 +85,9 @@ fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     let mut group = rack_group_fixture(true);
     group.members = vec![9, 10];
     apply_group_bindings(&mut editor, group);
-    let clips = test_list((1..=20).map(|id| map_value([
-        ("id", Value::Number(id as f64)),
-        ("name", Value::String(format!("Clip {id}"))),
-    ])).collect());
-    for field in ["rack-clips", "rack-clip-banks"] {
-        editor.runtime_mut().set_reactive("SEQ", field, test_list(vec![map_value([
-            ("group-id", Value::Number(7.0)),
-            ("active", Value::Number(1.0)),
-            ("clips", clips.clone()),
-        ])]));
-    }
+    let names: Vec<String> = (1..=20).map(|id| format!("Clip {id}")).collect();
+    let bank: Vec<(u64, &str)> = names.iter().enumerate().map(|(i, n)| (i as u64 + 1, n.as_str())).collect();
+    seed_kind_rack_clips(&mut editor, 0, &bank, Some(1));
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     assert!(editor.switch_active_tile_to_buffer_named("*mixer*"));
@@ -224,7 +216,8 @@ fn assert_lower_panel(editor: &mut Editor, buffer: &str) {
 fn track_badge_double_click_toggles_panel_and_clears_delete_arm() {
     let mut editor = full_grid_editor_for_scroll_tests();
     for collapsed in [false, true] {
-        editor.runtime_mut().set_reactive("SEQ", "track-collapsed", test_bool_list(&[collapsed]));
+        let track = kind_track(editor.runtime(), 0);
+        set_field(editor.runtime_mut(), track, "collapsed", Value::Bool(collapsed));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let key = if collapsed { "/track-collapsed-label-0" } else { "mixer-v2-strip-label-0" };
@@ -308,18 +301,20 @@ fn group_badge_clicks_ignore_routes_from_unavailable_mod_outputs() {
     rack.pads.truncate(1);
     rack.choke_groups.truncate(1);
     apply_group_bindings(&mut editor, group);
-    for (field, value) in [
-        ("track-instrument-types", test_string_list(&["sampler"])),
-        ("track-mod-output-available", test_bool_list(&[false])),
-        ("mod-routes", test_list(vec![map_value([
-            ("source", Value::Number(0.0)),
-            ("dest-kind", Value::String("bus".into())),
-            ("dest", Value::Number(2.0)),
-            ("input", Value::Number(0.0)),
-        ])])),
-        ("selected-mod-routes", test_list(vec![])),
-    ] {
-        editor.runtime_mut().set_reactive("SEQ", field, value);
+    // The mixer's view: track 0 (a sampler) has no mod output, yet a route
+    // leaves it for the group bus's first input.
+    {
+        let rt = editor.runtime_mut();
+        let track = kind_track(rt, 0);
+        set_field(rt, track, "instrument-type", Value::String("sampler".into()));
+        set_field(rt, track, "mod-output", Value::Bool(false));
+        let group_bus = rt.keyed_instance("eseq.kinds:bus", &[2]).unwrap();
+        let route = rt.register_keyed_instance("eseq.kinds:route", &[0]).unwrap();
+        set_field(rt, route, "source", Value::Instance(track));
+        set_field(rt, route, "dest-bus", Value::Instance(group_bus));
+        set_field(rt, route, "input", Value::Number(1.0));
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "routes", instance_list([route]));
     }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();

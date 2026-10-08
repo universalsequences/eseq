@@ -213,4 +213,9 @@
 (def color_band (/ (svf bell_tone (clip (mod body_hz) 200 5000) color_q 1) color_q))
 (def colored (mix bell_tone color_band (clip (mod body) 0 0.9)))
 (def tone (mix sax-bore-2 (* 0.5 colored (clip velocity 0 1)) model))
-(out (* tone 2 (clip (mod gain) 0 1)) 1 @name audio)
+(def voice_out (* tone 2 (clip (mod gain) 0 1)))
+(out voice_out 1 @name audio)
+;; Held notes always count (a slow breath attack starts silent); after
+;; release the bore's ring is tracked by the output level.
+(use-defmacro voice-amp)
+(out (voice-amp (max (gt gate 0.5) env) voice_out voice_out) 2 @name amp @amp true)

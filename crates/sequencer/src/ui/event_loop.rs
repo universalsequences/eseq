@@ -81,14 +81,16 @@ pub(super) fn patch_is_only_scene_slots(patch: &app::history::EditPatch) -> bool
 
 /// True when replaying the entry needs no full topology/`ui_epoch` refresh:
 /// scene-slot writes repaint through their targeted invalidation, and node
-/// process-chain edits (eseq-waa9.23) republish the scheduler snapshot, whose
-/// version moves the tick's tracked graph-read sweep, which re-runs exactly
-/// the node bay / *processes* readers of that chain.
+/// process-chain edits (eseq-waa9.23) and graph override edits (host kind
+/// setters) republish the scheduler snapshot, whose version moves the tick's
+/// tracked graph-read sweep, which re-runs exactly the readers of what moved
+/// (the host kinds follow the scenes revision).
 pub(super) fn patch_replays_with_targeted_refresh(patch: &app::history::EditPatch) -> bool {
     match patch {
         app::history::EditPatch::SceneSlot(_)
         | app::history::EditPatch::SceneSlots(_)
-        | app::history::EditPatch::GraphNodeProcessChain(_) => true,
+        | app::history::EditPatch::GraphNodeProcessChain(_)
+        | app::history::EditPatch::GraphOverride(_) => true,
         app::history::EditPatch::Composite(patches) => {
             !patches.is_empty() && patches.iter().all(patch_replays_with_targeted_refresh)
         }
@@ -331,8 +333,9 @@ pub(crate) fn run_event_loop(
         match sequencer::midi_input::service::Service::start(wake) {
             Ok(service) => Some(service),
             Err(error) => {
-                editor.runtime_mut().set_reactive("MIDI", "error",
-                    Value::String(format!("Could not start MIDI service: {error}")));
+                present_settings(editor.runtime_mut(), |s| {
+                    s.midi_error = format!("Could not start MIDI service: {error}")
+                });
                 None
             }
         }
@@ -346,6 +349,10 @@ pub(crate) fn run_event_loop(
         piano_roll_history_gesture: None,
         preview_plock_variant: None,
         scroll_inertia: Default::default(),
+        pointer_down: false,
+        script_param_gesture: None,
+        script_arrangement_drag: None,
+        script_note_drag: None,
     };
 
     // Inline editor session state (instrument/effect creation/editing)
@@ -371,7 +378,7 @@ pub(crate) fn run_event_loop(
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
-        prev_meter_visibility: MeterVisibility::default(),
+        prev_meter_demand: MeterDemand::default(),
         prev_editor_macro_action: (String::new(), String::new()),
         prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
@@ -380,76 +387,33 @@ pub(crate) fn run_event_loop(
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
-        prev_transport_playhead: u32::MAX,
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
-        prev_published_sequencers_version: u64::MAX,
-        prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
-        prev_instances_fingerprint: u64::MAX,
         prev_current_track: usize::MAX,
-        prev_cpu_load_bits: u32::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
-        prev_output_latency_bits: u32::MAX,
-        prev_peak_l_level: -1.0f64,
-        prev_peak_r_level: -1.0f64,
         recording_history_open: false,
-        prev_master_recording: false,
-        prev_roll_mode: false,
-        prev_roll_rate: u32::MAX,
-        prev_sequence_rolling: false,
-        prev_roll_windows: Vec::new(),
-        prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
-        prev_armed_rack: None,
-        prev_track_peak_levels: Vec::new(),
-        prev_rack_slot_peak_levels: Vec::new(),
-        prev_bus_peak_levels: Vec::new(),
-        prev_modulator_phases: Vec::new(),
-        prev_modulator_levels: Vec::new(),
-        prev_mod_port_levels: Default::default(),
-        prev_mod_display_values: Default::default(),
-        prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
+        rack_pad_triggers: Vec::new(),
         prev_track_playheads: Vec::new(),
-        prev_track_process_lengths: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
-        prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
-        prev_process_scope_values_version: shared.state.process_scope_values_version(),
-        prev_process_scope_cells_version: shared.state.process_scope_values_version(),
-        prev_process_effective_params_version: shared.state.process_effective_params_version(),
-        prev_process_run_errors_version: None,
-        prev_process_effective_params: Default::default(),
-        prev_process_effective_sends: Default::default(),
-        prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
-        prev_fx_epoch: 0,
-        prev_fx_value_epoch: 0,
         prev_sound_binding_epoch: 0,
         prev_delete_target_version: 0,
         prev_multi_track_selection: Vec::new(),
-        track_param_sync_revision: None,
-        fx_param_sync_revision: None,
-        prev_focus_clip_surface: (None, None, u64::MAX),
-        prev_instrument_active_notes: Vec::new(),
-        prev_track_active_notes: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
-        prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
         // Force one complete track/rack publication on the first frame; an
         // analysis may have completed between graph binding and loop startup.
         prev_sampler_analysis_generation: u64::MAX,
-        prev_auto_follow: true,
-        prev_browser_preview_playing: false,
-        prev_queued_transport_scene: None,
-        prev_queued_track_clips: Vec::new(),
-        song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
         watched_sampler_voice_ids: Vec::new(),
+        host_kinds: Default::default(),
     };
     let (initial_modulator_phases, initial_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
@@ -457,7 +421,6 @@ pub(crate) fn run_event_loop(
         cached_peak_l_level: 0.0f64,
         cached_peak_r_level: 0.0f64,
         cached_track_peak_levels: vec![0.0; track_names.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids),
         cached_modulator_phases: initial_modulator_phases,
         cached_modulator_levels: initial_modulator_levels,
@@ -470,8 +433,6 @@ pub(crate) fn run_event_loop(
         cached_cpu_load_bits: 0.0f32.to_bits(),
         last_meter_poll_at: Instant::now() - METER_POLL_INTERVAL,
         last_cpu_ui_poll_at: Instant::now() - CPU_UI_POLL_INTERVAL,
-        last_neural_visualization_poll_at: Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL,
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now() - VOICE_COUNT_LOG_INTERVAL,
     };
     let mut live_audio_analyzer = LiveAudioAnalyzerManager::new(app.graph.lg);
@@ -595,88 +556,6 @@ pub(crate) fn run_event_loop(
             )));
         }
         app.graph_controller().reap_due_rack_teardowns();
-        let queued_transport_scene = shared
-            .state
-            .quantized_launches()
-            .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
-            .and_then(|target| match target {
-                sequencer::quantized_launch::PatternLaunchTarget::Scene { scene }
-                | sequencer::quantized_launch::PatternLaunchTarget::SceneTracks { scene, .. } => {
-                    Some(scene)
-                }
-                sequencer::quantized_launch::PatternLaunchTarget::TrackPattern { .. } => None,
-            });
-        if queued_transport_scene != frame.prev_queued_transport_scene {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "queued-scene",
-                Value::Number(
-                    queued_transport_scene
-                        .map(|scene| scene as f64)
-                        .unwrap_or(-1.0),
-                ),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            if editor_has_visible_buffer(&editor, "*transport*") {
-                editor.refresh_visible_layouts_for_buffer_named("*transport*");
-            }
-            editor.mark_needs_redraw();
-            frame.prev_queued_transport_scene = queued_transport_scene;
-        }
-        // Pending quantized clip launches, as the pattern id each track has
-        // queued (-1 = none). The queued clip is the just-assigned scene
-        // cell (the click assigns the cell up front and defers the audible
-        // restore), so resolve the pending SceneTracks target's cell. Drives
-        // the mixer grid's blinking queued-cell background.
-        let queued_track_clips: Vec<i64> = (0..app.tracks.len())
-            .map(|track| {
-                shared
-                    .state
-                    .quantized_launches()
-                    .pending_target(
-                        sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(track as u32),
-                    )
-                    .and_then(|target| match target {
-                        sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
-                            scene,
-                            ..
-                        } => shared
-                            .state
-                            .scene_track_pattern_id(scene, track)
-                            .map(|id| id.0 as i64),
-                        // Song-authority override launches name the pattern
-                        // directly.
-                        sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
-                            pattern,
-                            ..
-                        } => Some(pattern as i64),
-                        sequencer::quantized_launch::PatternLaunchTarget::Scene { .. } => None,
-                    })
-                    .unwrap_or(-1)
-            })
-            .collect();
-        if queued_track_clips != frame.prev_queued_track_clips {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "queued-track-clips",
-                Value::List(
-                    queued_track_clips
-                        .iter()
-                        .map(|id| Rc::new(RefCell::new(Value::Number(*id as f64))))
-                        .collect(),
-                ),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            if editor_has_visible_mixer_buffer(&editor) {
-                refresh_visible_mixer_layouts(&mut editor);
-            }
-            editor.mark_needs_redraw();
-            frame.prev_queued_track_clips = queued_track_clips;
-        }
         if let Err(error) = publish_sample_browser_results(&mut editor, &shared.sample_browser) {
             editor.handle_host_event(HostEvent::Error(format!(
                 "Failed to query samples.db browser state: {error}"
@@ -755,11 +634,7 @@ pub(crate) fn run_event_loop(
             frame.prev_agent_generation_watermark = agent_generation;
             {
                 let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "AGENT",
-                    "generation",
-                    Value::Number(agent_generation as f64),
-                );
+                present_agent(rt, agent_generation);
                 rt.run_reactive_cycle();
             }
             editor.refresh_runtime_side_effects();
@@ -778,7 +653,7 @@ pub(crate) fn run_event_loop(
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
-        if live_audio_analyzer.sync_visible(&editor, &app) {
+        if live_audio_analyzer.sync_visible(&editor, &app, &sessions) {
             editor.mark_needs_redraw();
         }
         if log_voice_counts && meters.last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL
@@ -792,6 +667,7 @@ pub(crate) fn run_event_loop(
         if animation_active { editor.mark_needs_redraw(); }
 
         // Native-owned loops drain translated input; the wgpu loop still polls.
+        #[cfg(not(target_os = "macos"))]
         let playing_now = shared.state.transport.playing.load(Ordering::Relaxed);
         #[cfg(not(target_os = "macos"))]
         let timeout = {
@@ -891,17 +767,32 @@ pub(crate) fn run_event_loop(
                             && raw_key.modifiers == crossterm::event::KeyModifiers::NONE
                             && app.history.active_gesture().is_some()
                         {
-                            match app::edit::cancel_active_gesture(&mut app) {
-                                Ok(true) => {
-                                    editor.show_transient_message("Parameter edit canceled")
-                                }
-                                Ok(false) => {}
-                                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
-                                    "Could not cancel parameter edit: {error:?}"
-                                ))),
+                            let mut ctx = LoopCtx {
+                                sessions: &mut sessions,
+                                meters: &mut meters,
+                                frame: &mut frame,
+                                gesture: &mut gesture,
+                                track_names: &mut track_names,
+                                shared: &shared,
+                            };
+                            match host_commands::notes::cancel_note_drag(&mut app, &mut ctx) {
+                                Some(Ok(())) => editor.show_transient_message("Note drag canceled"),
+                                Some(Err(error)) => editor.handle_host_event(HostEvent::Error(
+                                    format!("Could not cancel the note drag: {error:?}"),
+                                )),
+                                None => match app::edit::cancel_active_gesture(&mut app) {
+                                    Ok(true) => {
+                                        editor.show_transient_message("Parameter edit canceled")
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("Could not cancel parameter edit: {error:?}"),
+                                    )),
+                                },
                             }
                             pending_drag = None;
                             pointer_is_down = false;
+                            gesture.pointer_down = false;
                             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             return Ok(HostLoopControl::WaitUntil(Instant::now()));
@@ -1040,42 +931,11 @@ pub(crate) fn run_event_loop(
                                         &shared.state,
                                         &mut track_names,
                                         replay_track,
-                                        &shared.selected_steps,
-                                        &shared.piano_roll_selection,
                                         &shared.accumulator_names,
-                                        &shared.record_armed,
-                                        &meters.cached_track_peak_levels,
                                     );
-                                    sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                                    sync_modulator_phase_fields(
-                                        rt,
-                                        &meters.cached_modulator_phases,
-                                    );
-                                    sync_modulator_level_fields(
-                                        rt,
-                                        &meters.cached_modulator_levels,
-                                    );
-                                    sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
-                                sync_bus_mixer_state(rt, &app);
-                                sync_groups_bindings(rt, &app.groups, &app.grooves);
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "track-names",
-                                    build_track_names(&track_names),
-                                );
-                                if !app.tracks.is_empty() {
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "instrument-panel",
-                                        build_instrument_panel_value(
-                                            &app,
-                                            replay_track,
-                                            &shared.selected_steps,
-                                        ),
-                                    );
-                                }
+                                crate::param_words::set_track_word_names(&track_names);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 if topology_changed {
@@ -1160,30 +1020,6 @@ pub(crate) fn run_event_loop(
                             had_selection
                         };
                         if cleared_neural_selection {
-                            let selection = shared.selected_neural_neurons.lock().unwrap().clone();
-                            sync_selected_neural_neuron_bindings(
-                                editor.runtime_mut(),
-                                &shared.state,
-                                &selection,
-                            );
-                            let track = shared.current_track.load(Ordering::Relaxed);
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                editor.runtime_mut(),
-                                &app,
-                                &shared.state,
-                                track,
-                                &shared.selected_steps,
-                                Some(&selection),
-                            );
-                            sync_track_plocks_for_neural_selection(
-                                editor.runtime_mut(),
-                                &app,
-                                &shared.state,
-                                track,
-                                &shared.selected_steps,
-                                &selection,
-                            );
-                            frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             return Ok(HostLoopControl::WaitUntil(Instant::now()));
@@ -1201,7 +1037,6 @@ pub(crate) fn run_event_loop(
                         &mut app,
                         &shared.current_track,
                         &shared.selected_steps,
-                        &shared.expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
@@ -1213,7 +1048,10 @@ pub(crate) fn run_event_loop(
                     live_key_consumed = intercepted;
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
-                        let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
+                        // Rebuilding every panel's dispatch is heavy; only an
+                        // evaluated panel source (ui.lisp) needs it.
+                        let should_reload_custom_ui = should_reload_custom_ui_after_key(&key)
+                            && active_buffer_is_custom_ui_source(&editor);
                         let previous_track = shared.current_track.load(Ordering::Relaxed);
                         editor.handle_key(key);
                         if should_reload_custom_ui {
@@ -1231,6 +1069,7 @@ pub(crate) fn run_event_loop(
                 BackendEvent::Terminal(Event::Mouse(mouse)) => {
                     if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
                         pointer_is_down = true;
+                        gesture.pointer_down = true;
                         gesture.scroll_inertia.cancel();
                     }
                     let (precise_col, precise_row) = backend
@@ -1261,6 +1100,7 @@ pub(crate) fn run_event_loop(
                             }
                             pointer_released_this_loop = true;
                             pointer_is_down = false;
+                            gesture.pointer_down = false;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                         backend.set_widget_cursor(editor.widget_cursor());
@@ -1518,6 +1358,21 @@ pub(crate) fn run_event_loop(
                         continue;
                     }
                     let _ = current_track_for_app(&mut app, &shared.current_track);
+                    if name != "set-note" {
+                        // A script note drag's pending frame lands first.
+                        host_commands::notes::flush_note_drag(
+                            &mut app,
+                            &mut editor,
+                            &mut LoopCtx {
+                                sessions: &mut sessions,
+                                meters: &mut meters,
+                                frame: &mut frame,
+                                gesture: &mut gesture,
+                                track_names: &mut track_names,
+                                shared: &shared,
+                            },
+                        );
+                    }
                     match handle_macro_host_command(
                         &name,
                         &payload,
@@ -1550,6 +1405,20 @@ pub(crate) fn run_event_loop(
                 HostCommand::CompileInstrument { .. } | HostCommand::CompileEffect { .. } => {}
             }
         }
+        // A script note drag's frame: once per batch, before the host kinds
+        // sync reads the notes.
+        host_commands::notes::flush_note_drag(
+            &mut app,
+            &mut editor,
+            &mut LoopCtx {
+                sessions: &mut sessions,
+                meters: &mut meters,
+                frame: &mut frame,
+                gesture: &mut gesture,
+                track_names: &mut track_names,
+                shared: &shared,
+            },
+        );
 
         let mut project_load_still_pending = false;
         if app.has_pending_project_load() {
@@ -1617,7 +1486,7 @@ pub(crate) fn run_event_loop(
                         // mismatch) and drops the group's backing bus from the UI.
                         *shared.bus_state.lock().unwrap() = app.buses.clone();
                         // Push loaded groups into the shared runtime store; the
-                        // per-frame groups diff rebuilds the SEQ.groups reactive.
+                        // host kinds publish them.
                         *shared.track_groups.lock().unwrap() = app.groups.clone();
                         {
                             let mut sel = shared.selected_tracks.lock().unwrap();
@@ -1633,15 +1502,12 @@ pub(crate) fn run_event_loop(
                         } else {
                             shared.state.transport.track_playheads[ct].load(Ordering::Relaxed)
                         };
-                        let transport_playhead =
-                            shared.state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = shared.state.transport.bpm.load(Ordering::Relaxed);
                         if meters.last_cpu_ui_poll_at.elapsed() >= CPU_UI_POLL_INTERVAL {
                             meters.cached_cpu_load_bits =
                                 shared.state.transport.cpu_load_pct.load(Ordering::Relaxed);
                             meters.last_cpu_ui_poll_at = Instant::now();
                         }
-                        let cpu_load_pct = f32::from_bits(meters.cached_cpu_load_bits);
                         let playing = shared.state.transport.playing.load(Ordering::Relaxed);
                         let epoch = shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
                         meters.cached_peak_l_level = meter_display_level(f32::from_bits(
@@ -1663,155 +1529,14 @@ pub(crate) fn run_event_loop(
                         meters.last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
-                        sync_project_scene_state(rt, &shared.state);
-                        sync_project_state(rt, &app);
-                        // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
-                        // loaded group headers can resolve their backing bus index.
-                        sync_bus_mixer_state(rt, &app);
-                        sync_groups_bindings(rt, &app.groups, &app.grooves);
-                        rt.set_reactive("SEQ", "playing", Value::Bool(playing));
-                        rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-                        rt.set_reactive(
-                            "SEQ",
-                            "transport-playhead",
-                            Value::Number(transport_playhead as f64),
-                        );
-                        rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-peak-l",
-                            Value::Number(meters.cached_peak_l_level),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-peak-r",
-                            Value::Number(meters.cached_peak_r_level),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-recording",
-                            Value::Bool(shared.master_recording.load(Ordering::Acquire)),
-                        );
-                        sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                        sync_modulator_phase_fields(rt, &meters.cached_modulator_phases);
-                        sync_modulator_level_fields(rt, &meters.cached_modulator_levels);
-                        sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
-                        rt.set_reactive(
-                            "SEQ",
-                            "num-tracks",
-                            Value::Number(track_names.len() as f64),
-                        );
-                        set_current_track_reactive(rt, app.tracks.len(), ct);
-                        rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                        rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
-                        rt.set_reactive(
-                            "SEQ",
-                            "record-armed",
-                            build_record_armed_value(&shared.record_armed.lock().unwrap()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "selected-steps",
-                            build_selection_value(&shared.selected_steps),
-                        );
+                        sync_project_replacement(rt, &shared.state);
+                        record_preset_listings();
+                        crate::param_words::set_track_word_names(&track_names);
 
-                        if app.tracks.is_empty() {
-                            sync_playhead_fields(rt, 0, 1);
-                            rt.set_reactive("SEQ", "transport-playhead", Value::Number(0.0));
-                            rt.set_reactive("SEQ", "steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "durations", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "pans", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "delays", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
-                            sync_track_mixer_empty_state(rt);
-                            rt.set_reactive("SEQ", "effects", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-plock-any", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
-                        } else {
-                            sync_all_track_sequencer_state(
-                                rt,
-                                &shared.state,
-                                &app,
-                                ct,
-                                &shared.selected_steps,
-                            );
-                            sync_playhead_fields(
-                                rt,
-                                playhead as usize,
-                                shared.state.pattern.track_params[ct].get_num_steps(),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "transport-playhead",
-                                Value::Number(transport_playhead as f64),
-                            );
-                            rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                            sync_step_param_lists(rt, &shared.state, ct);
-                            sync_track_mixer_state(rt, &app, &shared.state);
-                            sync_track_peak_fields(rt, &meters.cached_track_peak_levels);
-                            sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                            rt.set_reactive(
-                                "SEQ",
-                                "effects",
-                                build_effects_value(
-                                    &shared.state,
-                                    ct,
-                                    &app.graph.effect_descriptors,
-                                    &shared.selected_steps,
-                                ),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "midi-effects",
-                                build_midi_effects_value(&shared.state, ct, &shared.selected_steps),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "instrument-panel",
-                                build_instrument_panel_value(&app, ct, &shared.selected_steps),
-                            );
+                        if !app.tracks.is_empty() {
                             *shared.accumulator_names.lock().unwrap() =
                                 build_accumulator_names(&app);
-                            let selected_neural_snapshot =
-                                shared.selected_neural_neurons.lock().unwrap().clone();
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                &app,
-                                &shared.state,
-                                ct,
-                                &shared.selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                rt,
-                                &app,
-                                &shared.state,
-                                ct,
-                                &shared.selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "step-has-plocks",
-                                build_step_has_plocks(
-                                    &shared.state,
-                                    ct,
-                                    &app.graph.effect_descriptors,
-                                ),
-                            );
-                            sync_track_plock_any_field(rt, &app, &shared.state, ct);
-                            sync_sidebar_browser(rt, &app, ct);
+                            sync_sidebar_browser(&app, ct);
                         }
 
                         rt.clear_subtree_effects_for_named_target("*sequencer*");
@@ -1826,22 +1551,12 @@ pub(crate) fn run_event_loop(
                             )));
                         }
                         shared.ui_invalidations.clear();
-                        shared.expanded_step_projection.clear();
 
                         frame.prev_current_track = ct;
                         frame.prev_playhead = playhead;
-                        frame.prev_transport_playhead = transport_playhead;
                         frame.prev_bpm = bpm;
                         frame.prev_playing = playing;
                         frame.prev_pattern_epoch = epoch;
-                        frame.prev_cpu_load_bits = meters.cached_cpu_load_bits;
-                        frame.prev_peak_l_level = meters.cached_peak_l_level;
-                        frame.prev_peak_r_level = meters.cached_peak_r_level;
-                        frame.prev_master_recording =
-                            shared.master_recording.load(Ordering::Acquire);
-                        frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
-                        frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
-                        frame.prev_modulator_levels = meters.cached_modulator_levels.clone();
                         frame.prev_track_playheads = track_playheads_snapshot(&shared.state, &app);
                         frame.prev_track_button_states = track_button_state_snapshot(&shared.state);
                         frame.prev_ui_epoch = shared.ui_epoch.load(Ordering::Relaxed);
@@ -1876,12 +1591,6 @@ pub(crate) fn run_event_loop(
             {
                 let mut print = shared.step_print.lock().unwrap();
                 print.release_device_param_gesture(&shared.state);
-                // The print overlay is a hold indicator: drop it on the same
-                // release that ends the gesture, without waiting for the next
-                // print tick (which may not run at all).
-                let dirty = sync_print_latch_rows(editor.runtime_mut(), &print);
-                drop(print);
-                flush_reactive_display_edit(&mut editor, dirty);
             }
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
@@ -1907,7 +1616,7 @@ pub(crate) fn run_event_loop(
                 .expect("completed saved instrument load must have pending state");
             let _ = editor
                 .runtime_mut()
-                .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                .eval_str("(eseq.browser/show-loading! \"\")");
             let display_name = instrument_display_name(&pending.name);
             match &completed_load {
                 Ok(_) => editor.show_toast(format!("Loaded {display_name}"), eseqlisp::ToastKind::Success),
@@ -1936,9 +1645,7 @@ pub(crate) fn run_event_loop(
                                 track_names: &mut track_names,
                                 track_pan_ids: &shared.track_pan_ids,
                                 record_armed: &shared.record_armed,
-                                selected_steps: &shared.selected_steps,
                                 accumulator_names: &shared.accumulator_names,
-                                cached_track_peak_levels: &meters.cached_track_peak_levels,
                                 group_id,
                                 pad_note,
                                 track_groups: &shared.track_groups,
@@ -1953,7 +1660,6 @@ pub(crate) fn run_event_loop(
                                 track,
                                 preset,
                                 &shared.current_track,
-                                &shared.selected_steps,
                                 &shared.ui_epoch,
                             );
                         }
@@ -1972,10 +1678,8 @@ pub(crate) fn run_event_loop(
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,
-                                state: &shared.state,
                                 current_track: &shared.current_track,
                                 track_names: &mut track_names,
-                                selected_steps: &shared.selected_steps,
                                 fx_epoch: &shared.fx_epoch,
                                 ui_epoch: &shared.ui_epoch,
                             },
@@ -1987,7 +1691,6 @@ pub(crate) fn run_event_loop(
                                 track,
                                 preset,
                                 &shared.current_track,
-                                &shared.selected_steps,
                                 &shared.ui_epoch,
                             );
                         }
@@ -2065,20 +1768,7 @@ pub(crate) fn run_event_loop(
                         }
                         sessions.editor_mode = None;
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                        rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(
-                                &app,
-                                shared.current_track.load(Ordering::Relaxed),
-                                &shared.selected_steps,
-                            ),
-                        );
+                        present_editor_closed(rt);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2088,12 +1778,10 @@ pub(crate) fn run_event_loop(
                     Err(error) => {
                         sessions.instrument_edit_session = Some(session);
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(format!("Failed to restore instrument: {error}")),
-                        );
+                        present_editor(rt, |e| {
+                            e.canceling = false;
+                            e.error = format!("Failed to restore instrument: {error}");
+                        });
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -2102,12 +1790,10 @@ pub(crate) fn run_event_loop(
                 Err(error) => {
                     sessions.instrument_edit_session = Some(session);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!("Failed to restore instrument: {error}")),
-                    );
+                    present_editor(rt, |e| {
+                        e.canceling = false;
+                        e.error = format!("Failed to restore instrument: {error}");
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.mark_needs_redraw();
@@ -2183,40 +1869,9 @@ pub(crate) fn run_event_loop(
                             }
                             sessions.editor_mode = None;
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-buffer-name",
-                                Value::String(String::new()),
-                            );
-                            match session.target {
-                                EffectEditTarget::Track { track, .. } => {
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "effects",
-                                        build_effects_value(
-                                            &shared.state,
-                                            track,
-                                            &app.graph.effect_descriptors,
-                                            &shared.selected_steps,
-                                        ),
-                                    );
-                                }
-                                EffectEditTarget::Bus { .. } => {
-                                    *shared.bus_state.lock().unwrap() = app.buses.clone();
-                                    sync_bus_mixer_state(rt, &app);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "bus-effects",
-                                        build_bus_effects_value_for_selection(
-                                            &app,
-                                            Some(&shared.selected_steps),
-                                        ),
-                                    );
-                                }
+                            present_editor_closed(rt);
+                            if let EffectEditTarget::Bus { .. } = session.target {
+                                *shared.bus_state.lock().unwrap() = app.buses.clone();
                             }
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
@@ -2231,12 +1886,10 @@ pub(crate) fn run_event_loop(
                         Err(error) => {
                             sessions.effect_edit_session = Some(session);
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!("Failed to restore effect: {error}")),
-                            );
+                            present_editor(rt, |e| {
+                                e.canceling = false;
+                                e.error = format!("Failed to restore effect: {error}");
+                            });
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
@@ -2246,12 +1899,10 @@ pub(crate) fn run_event_loop(
                 Err(error) => {
                     sessions.effect_edit_session = Some(session);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!("Failed to restore effect: {error}")),
-                    );
+                    present_editor(rt, |e| {
+                        e.canceling = false;
+                        e.error = format!("Failed to restore effect: {error}");
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.mark_needs_redraw();
@@ -2292,20 +1943,7 @@ pub(crate) fn run_event_loop(
                                         session.visible_revision_valid = true;
                                         replan_after_preview = session.learn_target_path.is_some();
                                         let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "editor-error",
-                                            Value::String(String::new()),
-                                        );
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "instrument-panel",
-                                            build_instrument_panel_value(
-                                                &app,
-                                                shared.current_track.load(Ordering::Relaxed),
-                                                &shared.selected_steps,
-                                            ),
-                                        );
+                                        present_editor(rt, |e| e.error.clear());
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2316,22 +1954,12 @@ pub(crate) fn run_event_loop(
                                     }
                                     Err(error) => {
                                         session.visible_revision_valid = false;
-                                        let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "editor-error",
-                                            Value::String(error),
-                                        );
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
+                                        editor_error(&mut editor, error);
                                     }
                                 },
                                 Err(error) => {
                                     session.visible_revision_valid = false;
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                                    editor_error(&mut editor, error);
                                 }
                             }
                         }
@@ -2340,14 +1968,7 @@ pub(crate) fn run_event_loop(
                 Err(()) => {
                     if let Some(session) = sessions.instrument_edit_session.as_mut() {
                         session.visible_revision_valid = false;
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String("Instrument preview compile thread crashed".to_string()),
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
+                        editor_error(&mut editor, "Instrument preview compile thread crashed");
                     }
                 }
             }
@@ -2363,22 +1984,15 @@ pub(crate) fn run_event_loop(
                     ) {
                         Ok(job) => {
                             replace_learn_job(&mut sessions.pending_learn_job, job);
-                            editor.runtime_mut().set_reactive(
-                                "SEQ",
-                                "learn-phase",
-                                Value::String("planning".to_string()),
-                            );
+                            present_learn(editor.runtime_mut(), |l| {
+                                l.phase = "planning".to_string()
+                            });
                             editor.runtime_mut().run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                         }
                         Err(error) => {
                             let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "learn-phase",
-                                Value::String("error".to_string()),
-                            );
-                            rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                            present_learn_error(rt, error);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                         }
@@ -2423,37 +2037,10 @@ pub(crate) fn run_event_loop(
                                             session.last_valid_layout = layout_override.or(layout);
                                             session.visible_revision_valid = true;
                                             let rt = editor.runtime_mut();
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "editor-error",
-                                                Value::String(String::new()),
-                                            );
-                                            match session.target {
-                                                EffectEditTarget::Track { track, .. } => {
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "effects",
-                                                        build_effects_value(
-                                                            &shared.state,
-                                                            track,
-                                                            &app.graph.effect_descriptors,
-                                                            &shared.selected_steps,
-                                                        ),
-                                                    );
-                                                }
-                                                EffectEditTarget::Bus { .. } => {
-                                                    *shared.bus_state.lock().unwrap() =
-                                                        app.buses.clone();
-                                                    sync_bus_mixer_state(rt, &app);
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "bus-effects",
-                                                        build_bus_effects_value_for_selection(
-                                                            &app,
-                                                            Some(&shared.selected_steps),
-                                                        ),
-                                                    );
-                                                }
+                                            present_editor(rt, |e| e.error.clear());
+                                            if let EffectEditTarget::Bus { .. } = session.target {
+                                                *shared.bus_state.lock().unwrap() =
+                                                    app.buses.clone();
                                             }
                                             rt.run_reactive_cycle();
                                             editor.refresh_runtime_side_effects();
@@ -2467,23 +2054,13 @@ pub(crate) fn run_event_loop(
                                         }
                                         Err(error) => {
                                             session.visible_revision_valid = false;
-                                            let rt = editor.runtime_mut();
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "editor-error",
-                                                Value::String(error),
-                                            );
-                                            rt.run_reactive_cycle();
-                                            editor.refresh_runtime_side_effects();
+                                            editor_error(&mut editor, error);
                                         }
                                     }
                                 }
                                 Err(error) => {
                                     session.visible_revision_valid = false;
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                                    editor_error(&mut editor, error);
                                 }
                             }
                         }
@@ -2492,14 +2069,7 @@ pub(crate) fn run_event_loop(
                 Err(()) => {
                     if let Some(session) = sessions.effect_edit_session.as_mut() {
                         session.visible_revision_valid = false;
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String("Effect preview compile thread crashed".to_string()),
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
+                        editor_error(&mut editor, "Effect preview compile thread crashed");
                     }
                 }
             }
@@ -2508,7 +2078,6 @@ pub(crate) fn run_event_loop(
             &mut app,
             &mut sessions,
             &mut editor,
-            shared.current_track.load(Ordering::Relaxed),
         );
         // Jev ghost-cable suggestions (eseq-c049): the patcher render pass
         // queues one request per newly selected node. Hold each until the
@@ -2822,7 +2391,6 @@ pub(crate) fn run_event_loop(
             TickInputs {
                 cols,
                 rows,
-                playing_now,
             },
             &mut frame_pacer,
             &mut ui_loop_stats,

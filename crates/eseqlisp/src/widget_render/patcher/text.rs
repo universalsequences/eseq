@@ -1,11 +1,14 @@
 use crate::layout::Rect;
 use crate::parser::{ASTParser, Expression, Parser, Token};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::lisp::{attribute_span_len, is_attribute_key};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
+use super::probe::{
+    PROBE_OP, canonical_probe_text, is_probe_text, probe_alias_names, probe_id_from_text,
+};
 use super::project::{
     OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_attributes,
     dgenlisp_operator_documentation, dgenlisp_operator_names,
@@ -119,6 +122,17 @@ pub(super) fn patcher_autocomplete_suggestions(
             );
             if "history".starts_with(&prefix) {
                 candidates.insert("history".to_string(), Some(patcher_history_documentation()));
+            }
+            // Patcher-only probe spellings; committing expands them to
+            // `probe … @view number|scope` (spec §6.2).
+            for alias in probe_alias_names() {
+                if alias.starts_with(&prefix) {
+                    let mut documentation = docs.get(PROBE_OP).cloned();
+                    if let Some(documentation) = documentation.as_mut() {
+                        documentation.category = Some("probe view".to_string());
+                    }
+                    candidates.insert(alias.to_string(), documentation);
+                }
             }
             for macro_patch in local_macros {
                 if macro_patch.name.to_lowercase().starts_with(&prefix) {
@@ -447,7 +461,7 @@ fn top_level_item_byte_spans(text: &str) -> Option<Vec<(usize, usize)>> {
 
 fn token_expression_end(tokens: &[crate::parser::SpannedToken], start: usize) -> Option<usize> {
     match tokens.get(start)?.token {
-        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt => {
+        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt | Token::HashQuote => {
             token_expression_end(tokens, start + 1)
         }
         Token::LeftParen => {
@@ -507,15 +521,36 @@ fn first_token_byte_span(text: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// Commit the active node text edit; returns whether the text changed.
+///
+/// Probe text is canonicalized on the way in: `number~` / `scope~` expand to
+/// `probe … @view number|scope`, and a probe without an `@id` keeps the id it
+/// had before this edit or gets a fresh one (spec §6.2), minted against
+/// `taken_probe_ids(state, edit_key)` — the ids in use outside this edit
+/// (typically [`super::probe::taken_probe_ids`]). It is only called for probe
+/// text, so an ordinary commit never loads the source to collect them.
 pub(super) fn commit_patcher_text_edit(
     state: &mut PatcherInteractionState,
     view_key: &str,
+    taken_probe_ids: impl FnOnce(&PatcherInteractionState, &str) -> HashSet<String>,
 ) -> bool {
     let Some(edit) = state.text_edit.take() else {
         return false;
     };
-    let committed_text = edit.text.trim().to_string();
+    let mut committed_text = edit.text.trim().to_string();
     let key = node_edit_key(view_key, &edit.node_id);
+    if is_probe_text(&committed_text)
+        && let Some(node_edit) = state.edit_state.nodes.get(&key)
+    {
+        let previous_id =
+            probe_id_from_text(&node_edit.text).or_else(|| probe_id_from_text(&edit.original_text));
+        let taken = taken_probe_ids(state, &key);
+        if let Some(canonical) =
+            canonical_probe_text(&committed_text, previous_id.as_deref(), &taken)
+        {
+            committed_text = canonical;
+        }
+    }
     let Some(node_edit) = state.edit_state.nodes.get_mut(&key) else {
         return false;
     };

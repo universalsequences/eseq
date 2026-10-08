@@ -2,4 +2,4 @@
 (capture-project (track :instrument "factory:Synths/Digi Drift"))
 (def capture-after-sync ()
   (eseq.browser/select-tab "instruments")
-  (set! eseq.browser/instrument-origin-filter "factory"))
+  (let ((p eseq.browser/instrument-pick)) (set! p.origin "factory")))

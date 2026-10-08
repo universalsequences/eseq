@@ -1,16 +1,18 @@
 ;; Generic parameter-grid rows used by instruments and effects.
 (module eseq.effects.param-grid)
 
+(import eseq.materials)
 (import eseq.effects.param-controls :as pc)
-(import eseq.effects.state :refer (instrument-panel-tab))
+(import eseq.effects.devices :as dv)
+(import eseq.effects.state :refer (instrument-view section-of select-section!))
+(import eseq.view-kit :refer (listed?))
 (import eseq.effects.effect-panels :refer (visible-params))
 
 (export fx-param-row
-        fx-list-contains?
         fx-param-grid)
 
 ;; Migration aliases (module spec §10). Identity aliases only: this file's
-;; three public names are called by their flat spelling from many still-
+;; two public names are called by their flat spelling from many still-
 ;; unconverted files (effects/panel-bodies.lisp, the effects/builtin/* panels,
 ;; effects/custom-effect-ui.lisp,
 ;; effects/instrument-modulation.lisp, ui/capture-fixtures/*) and from Rust
@@ -50,7 +52,7 @@
   (if (get p :integer-option-fallback) (round value) value))
 
 (def fx-param-row (p fx subtree-key)
-  (let ((p (param-with-resolved-options p)))
+  (let ((p (dv/with-prm fx (param-with-resolved-options p))))
     (subtree :key subtree-key
     (pc/param-mod-wrapper fx p (str subtree-key "-mod-wrapper")
     (box :height 1.25
@@ -60,12 +62,12 @@
             (label (substring (param-display-name p) 0 9) :font-size 12 :width 7
                    :color :dim :bg :transparent)
             (if (get p :boolean)
-              (button (if (pc/fx-param-on? p) "ON" "OFF")
+              (button (if (pc/fx-param-on-for? fx p) "ON" "OFF")
                    :width 5.5 :height 1.25 :padding 0 :font-size 11
                    :background-color :transparent
                    :border-color :transparent
                    :color :white
-                   :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                   :plock-active (pc/param-plock-active-prop fx p)
                    :plock-color-r (pc/param-plock-color-r)
                    :plock-color-g (pc/param-plock-color-g)
                    :plock-color-b (pc/param-plock-color-b)
@@ -74,10 +76,11 @@
                        (pc/fx-toggle-effect-value fx p)
                        (pc/fx-toggle-instrument-value p)))
               (if (get p :options)
-              (dropdown :value (pc/fx-param-text-value-for fx p)
+              (dropdown :value (pc/param-option-label fx p)
+                :value-index (pc/param-option-index fx p)
                 :options (get p :options)
                 :on-change (lambda (v) (pc/param-set-option fx p v))
-                :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                :plock-active (pc/param-plock-active-prop fx p)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
@@ -85,10 +88,10 @@
               (number-picker :value (pc/fx-param-value-for fx p)
                 :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
                 :decimals (if (get p :integer-option-fallback) 0 2)
-                :process-value (pc/param-process-value p)
-                :process-clamped (pc/param-process-clamped p)
-                :noui true :font-size 12 :text-color (pc/param-process-text-color fx p)
-                :plock-active (if (pc/param-plock-active? fx p) 1 0)
+                :process-value (pc/param-process-value-for fx p)
+                :process-clamped (pc/param-process-clamped-for fx p)
+                :noui true :font-size 12 :text-color (pc/param-knob-text-color fx p)
+                :plock-active (pc/param-plock-active-prop fx p)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
@@ -114,7 +117,7 @@
       (if (get fx :bus-fx)
         (str "bus-fx-slot-" (get fx :bus-idx) "-" (get fx :slot-idx) "-param-" (get p :idx))
         (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))))
-    (str "instrument-tab-" eseq.effects.state/instrument-panel-tab "-chunk-" ci "-param-" (get p :idx))))
+    (str "instrument-tab-" instrument-view.tab "-chunk-" ci "-param-" (get p :idx))))
 
 (def flat-grid (params fx)
   (h-stack :gap 1.5 :padding 0.525
@@ -123,13 +126,8 @@
         (each chunk |p pi|
           (fx-param-row p fx (param-subtree-key fx p ci)))))))
 
-(def fx-list-contains? (items value)
-  (> (len (filter |item| (= item value) items)) 0))
-
 (def has-metadata? (params)
-  (> (len (filter |p| (or (get p :group) (get p :env)) params)) 0))
-
-(defstate selected-sections '())
+  (not (empty? (filter |p| (or (get p :group) (get p :env)) params))))
 
 (def scope-key (fx)
   (if fx
@@ -138,24 +136,17 @@
       (if (get fx :bus-fx)
         (str "bus-fx-" (get fx :bus-idx) "-slot-" (get fx :slot-idx))
         (str "audio-fx-slot-" (get fx :slot-idx))))
-    (str "instrument-tab-" eseq.effects.state/instrument-panel-tab)))
-
-(def set-selected-section (scope-key section)
-  (set! selected-sections
-    (cons
-      (dict :scope scope-key :section section)
-      (filter |item| (not (= (get item :scope) scope-key))
-        selected-sections))))
+    (str "instrument-tab-" instrument-view.tab)))
 
 (def section-select-callback (fx section)
   (let ((scope-key (scope-key fx)))
     (lambda (info)
-      (set-selected-section scope-key section))))
+      (select-section! scope-key section))))
 
 (def group-names (params)
   (reduce |groups p|
     (if (get p :group)
-      (if (fx-list-contains? groups (get p :group))
+      (if (listed? (get p :group) groups)
         groups
         (append groups (list (get p :group))))
       groups)
@@ -236,15 +227,7 @@
       0)))
 
 (def selected-section (params groups fx)
-  (let ((scope-key (scope-key fx)))
-    (let ((entry
-            (nth
-              (filter |item| (= (get item :scope) scope-key)
-                selected-sections)
-              0)))
-      (if entry
-        (get entry :section)
-        (default-env-section params groups)))))
+  (section-of (scope-key fx) (default-env-section params groups)))
 
 (def panel-select-section (params groups group-name)
   (if (env-source-for-group params group-name)
@@ -295,11 +278,11 @@
                :height (compact-control-height) :gap 0.12 :align :center
         (label (compact-label p) :font-size 8.7 :width (compact-control-width)
                :color :dim :bg :transparent)
-        (button (if (pc/fx-param-on? p) "ON" "OFF")
+        (button (if (pc/fx-param-on-for? fx p) "ON" "OFF")
           :width 4.2 :height 1.05 :padding 0 :font-size 10.0
-          :background-color (if (pc/fx-param-on? p) :control-on-bg :mixer-control-bg)
-          :color (if (pc/fx-param-on? p) :control-on-fg :dim)
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :background-color (if (pc/fx-param-on-for? fx p) :control-on-bg :mixer-control-bg)
+          :color (if (pc/fx-param-on-for? fx p) :control-on-fg :dim)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
@@ -315,10 +298,11 @@
                :height (compact-control-height) :gap 0.12 :align :center
         (label (compact-label p) :font-size 8.7 :width (compact-control-width)
                :color :dim :bg :transparent)
-        (dropdown :value (pc/fx-param-text-value-for fx p)
+        (dropdown :value (pc/param-option-label fx p)
+          :value-index (pc/param-option-index fx p)
           :options (get p :options)
           :on-change (lambda (v) (pc/param-set-option fx p v))
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
           :plock-color-b (pc/param-plock-color-b)
@@ -334,13 +318,13 @@
           :value (pc/fx-param-value-for fx p)
           :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
           :decimals (if (get p :integer-option-fallback) 0 2)
-          :mod-offset (pc/param-mod-offset p)
-          :mod-scale (pc/param-mod-scale p)
-          :process-value (pc/param-process-value p)
+          :mod-offset (pc/param-mod-offset-for fx p)
+          :mod-scale (pc/param-mod-scale-for fx p)
+          :process-value (pc/param-process-value-for fx p)
           :unit (pc/param-control-unit fx p)
           :font-size 10.0 :label-font-size 8.8
-          :text-color (pc/param-process-text-color fx p) :label-color :dim
-          :plock-active (if (pc/param-plock-active? fx p) 1 0)
+          :text-color (pc/param-knob-text-color fx p) :label-color :dim
+          :plock-active (pc/param-plock-active-prop fx p)
           :plock-default (pc/param-plock-default fx p)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)
@@ -369,8 +353,8 @@
             :decimals decimals :unit unit
             :noui true :font-size 10.0
             :text-align :center
-            :text-color (pc/param-plock-text-color fx p) :edit-color :yellow
-            :plock-active (if (pc/param-plock-active? fx p) 1 0)
+            :text-color :dim :edit-color :yellow
+            :plock-active (pc/param-plock-active-prop fx p)
             :plock-color-r (pc/param-plock-color-r)
             :plock-color-g (pc/param-plock-color-g)
             :plock-color-b (pc/param-plock-color-b)
@@ -402,12 +386,10 @@
                   (host-command
                     (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
                     (dict :slot-idx (get fx :slot-idx)
-                          :target-node-id (get fx :target-node-id)
-                          :updates (list
-                            (dict :param-idx (get attack-p :idx) :value (get env :attack))
-                            (dict :param-idx (get decay-p :idx) :value (get env :decay))
-                            (dict :param-idx (get sustain-p :idx) :value (get env :sustain))
-                            (dict :param-idx (get release-p :idx) :value (get env :release)))
+                          :target-node-id (dv/fx-node-id fx)
+                          :updates (pc/effect-param-updates fx
+                            (list (list attack-p (get env :attack)) (list decay-p (get env :decay))
+                                  (list sustain-p (get env :sustain)) (list release-p (get env :release))))
                           :commit (not (get env :active))))
                   (do
                     (pc/param-set-control-value fx attack-p (get env :attack))
@@ -426,7 +408,7 @@
           (box :width :fill :flex 1))))))
 
 (def group-has-controls? (all-params group-params)
-  (> (len (filter |p| (normal-metadata-control? all-params p) group-params)) 0))
+  (not (empty? (filter |p| (normal-metadata-control? all-params p) group-params))))
 
 (def group-has-visible-panel? (all-params group-name)
   (group-has-controls? all-params

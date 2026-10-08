@@ -1,12 +1,12 @@
-//! Sound palette read surfaces (takes spec §17.6 / §18.3):
-//! `SEQ.sound-palette` (the open overlay's entries) and
-//! `SEQ.song-clip-sounds` (the timeline clip-dot identity join). Both diff by value
-//! before publishing, like `scene-names` — the underlying scenes have no
+//! Sound palette read surfaces (takes spec §17.6 / §18.3): the open
+//! overlay (recorded for the `sound-palette` host kind through `presented`),
+//! diffed by value before publishing — the underlying scenes have no
 //! revision counter and palette gestures can move refs without touching the
-//! committed-song revision.
+//! committed-song revision. The timeline clip-dot identity join is the host
+//! kinds' `clip.dot` / `dot-color`.
 
 use super::*;
-use crate::app::sound_palette::{PaletteEntry, PaletteTarget, SOUND_PALETTE_RGB};
+use crate::app::sound_palette::{PaletteEntry, SOUND_PALETTE_RGB};
 use eseqlisp::sound_glyph_data::{
     publish_sound_glyph_frames, retain_sound_glyph_frames, set_sound_glyph_play_keys,
     SoundGlyphFrame, SoundGlyphPiece,
@@ -16,30 +16,26 @@ use sequencer::delta_glyph::{
     ParamTaper,
 };
 use sequencer::effects::{ParamKind, ParamScaling};
-use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
 #[derive(Default)]
 pub(crate) struct SoundPaletteFrameState {
-    /// `(track, target, instrument name, entries)` of the last published
-    /// overlay, `None` when the last publish was Nil (closed).
-    cached: Option<(usize, PaletteTarget, String, Vec<PaletteEntry>)>,
+    /// The last published overlay, `None` when the last publish was Nil
+    /// (closed).
+    cached: Option<crate::presented::Palette>,
     /// Whether anything was ever published (so the first closed frame does
     /// not publish Nil over the registered default).
     published_open: bool,
-    cached_clip_sounds: Option<Vec<Vec<(u64, bool, Option<u8>)>>>,
     glyphs: GlyphFrames,
 }
 
 impl SoundPaletteFrameState {
-    /// Drop the published-row caches so the next sync republishes every color
-    /// field. Used when the theme's variant tint changes: the entries and clip
-    /// sounds are unchanged, only their displayed colors are.
+    /// Drop the published-row cache so the next sync republishes every color
+    /// field. Used when the theme's variant tint changes: the entries are
+    /// unchanged, only their displayed colors are.
     pub(crate) fn invalidate_published_colors(&mut self) {
         self.cached = None;
-        self.cached_clip_sounds = None;
     }
 }
 
@@ -674,7 +670,9 @@ fn cached_surface_glyph_hash(
     hash
 }
 
-fn glyph_key(track: usize, patch: u64) -> String {
+/// The sound-glyph source key of a track's patch (the palette rows' and the
+/// `sound` kind's `glyph-key`).
+pub(crate) fn sound_glyph_key(track: usize, patch: u64) -> String {
     format!("sound-glyph:track:{track}:patch:{patch}")
 }
 
@@ -996,7 +994,7 @@ pub(super) fn collect_glyph_frames(
         }
         let mut misses = Vec::new();
         for (index, entry) in resolved.iter().enumerate() {
-            let key = glyph_key(track, entry.patch.0);
+            let key = sound_glyph_key(track, entry.patch.0);
             active.insert(key.clone());
             let is_anchor = anchor_patch == Some(entry.patch);
             let mut hasher = DefaultHasher::new();
@@ -1270,34 +1268,12 @@ pub(super) fn collect_pattern_cell_glyph_frames(
     pending
 }
 
-fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>) {
-    match color
-        .map(usize::from)
-        .filter(|idx| *idx < SOUND_PALETTE_RGB.len())
-    {
-        Some(idx) => {
-            let [r, g, b] = super::track_and_mixer::themed_variant_rgb(SOUND_PALETTE_RGB[idx]);
-            map.insert(
-                "color".to_string(),
-                Rc::new(RefCell::new(Value::Number(idx as f64))),
-            );
-            map.insert(
-                "color-r".to_string(),
-                Rc::new(RefCell::new(Value::Number(r as f64))),
-            );
-            map.insert(
-                "color-g".to_string(),
-                Rc::new(RefCell::new(Value::Number(g as f64))),
-            );
-            map.insert(
-                "color-b".to_string(),
-                Rc::new(RefCell::new(Value::Number(b as f64))),
-            );
-        }
-        None => {
-            map.insert("color".to_string(), Rc::new(RefCell::new(Value::Nil)));
-        }
-    }
+/// A sound's palette color index and its themed color, `None` for no (or an
+/// unknown) color: the palette rows and clip dots (`clip.dot-color`).
+pub(crate) fn sound_palette_rgb(color: Option<u8>) -> Option<(usize, [f32; 3])> {
+    let idx = usize::from(color?);
+    let rgb = SOUND_PALETTE_RGB.get(idx)?;
+    Some((idx, super::track_and_mixer::themed_variant_rgb(*rgb)))
 }
 
 /// The track's instrument display name for the palette header — the same
@@ -1315,155 +1291,14 @@ fn palette_instrument_name(app: &app::App, track: usize) -> String {
     }
 }
 
-fn build_palette_value(
-    track: usize,
-    target: PaletteTarget,
-    instrument_name: &str,
-    entries: &[PaletteEntry],
-) -> Value {
-    let mut map = HashMap::new();
-    map.insert(
-        "track".to_string(),
-        Rc::new(RefCell::new(Value::Number(track as f64))),
-    );
-    map.insert(
-        "instrument-name".to_string(),
-        Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
-    );
-    let (kind, id) = match target {
-        PaletteTarget::Take(id) => ("take", Some(id.0)),
-        PaletteTarget::Pattern(id) => ("pattern", Some(id.0)),
-        PaletteTarget::Cell => ("cell", None),
-    };
-    map.insert(
-        "target-kind".to_string(),
-        Rc::new(RefCell::new(Value::String(kind.to_string()))),
-    );
-    map.insert(
-        "target-id".to_string(),
-        Rc::new(RefCell::new(match id {
-            Some(id) => Value::Number(id as f64),
-            None => Value::Nil,
-        })),
-    );
-    let rows = entries
-        .iter()
-        .map(|entry| {
-            let mut row = HashMap::new();
-            row.insert(
-                "patch-id".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.patch.0 as f64))),
-            );
-            row.insert(
-                "mix-id".to_string(),
-                Rc::new(RefCell::new(match entry.mix {
-                    Some(id) => Value::Number(id.0 as f64),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.name.clone()))),
-            );
-            row.insert(
-                "referents".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.referents.clone()))),
-            );
-            row.insert(
-                "referents-short".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.referents_short.clone()))),
-            );
-            row.insert(
-                "base".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_base))),
-            );
-            row.insert(
-                "track-sound".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_track_sound))),
-            );
-            row.insert(
-                "current".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_current))),
-            );
-            row.insert(
-                "glyph-key".to_string(),
-                Rc::new(RefCell::new(Value::String(glyph_key(track, entry.patch.0)))),
-            );
-            row.insert(
-                "preset".to_string(),
-                Rc::new(RefCell::new(match &entry.preset {
-                    Some(name) => Value::String(name.clone()),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "sample".to_string(),
-                Rc::new(RefCell::new(match &entry.sample {
-                    Some(name) => Value::String(name.clone()),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "diff-up".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.params_up as f64))),
-            );
-            row.insert(
-                "diff-down".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.params_down as f64))),
-            );
-            color_fields(&mut row, entry.color);
-            Rc::new(RefCell::new(Value::Map(row)))
-        })
-        .collect();
-    map.insert(
-        "entries".to_string(),
-        Rc::new(RefCell::new(Value::List(rows))),
-    );
-    Value::Map(map)
-}
-
-fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
-    Value::List(
-        tracks
-            .iter()
-            .map(|clips| {
-                let clips = clips
-                    .iter()
-                    .map(|(clip_id, dot, color)| {
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "clip-id".to_string(),
-                            Rc::new(RefCell::new(Value::Number(*clip_id as f64))),
-                        );
-                        map.insert("dot".to_string(), Rc::new(RefCell::new(Value::Bool(*dot))));
-                        color_fields(&mut map, *color);
-                        Rc::new(RefCell::new(Value::Map(map)))
-                    })
-                    .collect();
-                Rc::new(RefCell::new(Value::List(clips)))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) struct SoundPaletteSyncResult {
-    pub effects_dirty: bool,
-    pub paint_dirty: bool,
-}
-
-/// Publish the palette read surfaces, distinguishing effect work from paint
-/// resource changes. The clip-sounds join (two lock scopes + a full per-clip build)
-/// only runs while the arrangement is visible — nothing else reads it; the
-/// cache clears on hide so re-showing republishes fresh. The palette half
-/// stays ungated (cheap, and it also mounts in the *step* side panel).
+/// Publish the palette read surfaces; returns whether a paint resource
+/// (a glyph frame) changed. Ungated (cheap, and it also mounts in the *step*
+/// side panel).
 pub(crate) fn sync_sound_palette(
-    rt: &mut Runtime,
     app: &app::App,
     frame: &mut SoundPaletteFrameState,
-    arrangement_visible: bool,
     pattern_glyphs_visible: bool,
-) -> SoundPaletteSyncResult {
-    let mut dirty = false;
+) -> bool {
     let paint_before = eseqlisp::widget_render::widget_state_generation();
     if pattern_glyphs_visible {
         sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
@@ -1472,24 +1307,21 @@ pub(crate) fn sync_sound_palette(
         Some((track, target)) => {
             let entries = app.sound_palette_entries(track, target);
             sync_glyph_frames(app, track, &entries, &mut frame.glyphs);
-            let snapshot = (track, target, palette_instrument_name(app, track), entries);
-            if frame.cached.as_ref() != Some(&snapshot) {
-                dirty |= rt
-                    .set_reactive(
-                        "SEQ",
-                        "sound-palette",
-                        build_palette_value(snapshot.0, snapshot.1, &snapshot.2, &snapshot.3),
-                    )
-                    .effects_dirty;
-                frame.cached = Some(snapshot);
+            let palette = crate::presented::Palette {
+                track,
+                target,
+                instrument: palette_instrument_name(app, track),
+                entries,
+            };
+            if frame.cached.as_ref() != Some(&palette) {
+                frame.cached = Some(palette.clone());
+                crate::presented::present_palette(Some(palette));
                 frame.published_open = true;
             }
         }
         None => {
             if frame.published_open || frame.cached.is_some() {
-                dirty |= rt
-                    .set_reactive("SEQ", "sound-palette", Value::Nil)
-                    .effects_dirty;
+                crate::presented::present_palette(None);
                 frame.cached = None;
                 frame.published_open = false;
                 retain_sound_glyph_frames("sound-glyph:", &HashSet::new());
@@ -1497,27 +1329,7 @@ pub(crate) fn sync_sound_palette(
             }
         }
     }
-    if arrangement_visible {
-        let clip_sounds = app.song_clip_sounds();
-        if frame.cached_clip_sounds.as_ref() != Some(&clip_sounds) {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    "song-clip-sounds",
-                    build_clip_sounds_value(&clip_sounds),
-                )
-                .effects_dirty;
-            frame.cached_clip_sounds = Some(clip_sounds);
-        }
-    } else {
-        // Hidden: skip the join entirely and forget the cache so the next
-        // visible frame recomputes and republishes.
-        frame.cached_clip_sounds = None;
-    }
-    SoundPaletteSyncResult {
-        effects_dirty: dirty,
-        paint_dirty: paint_before != eseqlisp::widget_render::widget_state_generation(),
-    }
+    paint_before != eseqlisp::widget_render::widget_state_generation()
 }
 
 /// Rack composite surface tests (docs/rack-glyph-spec.md §4). These exercise
@@ -1564,6 +1376,7 @@ mod rack_glyph_tests {
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 1,
@@ -1868,6 +1681,7 @@ mod glyph_fingerprint_tests {
             scaling: ParamScaling::Linear,
             node_param_idx: 0,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         }

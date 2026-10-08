@@ -28,14 +28,6 @@ thread_local! {
     static DRAFT: std::cell::RefCell<Option<Draft>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
-    runtime.register_reactive("RESAMPLE", vec![
-        ("buffer", Value::Bool(false)),
-        ("duration", Value::Number(0.0)),
-        ("error", Value::String(String::new())),
-    ], true); // Presentation only; capture fixtures may seed a preview.
-}
-
 /// The audible span of an interleaved stereo print, in seconds, so the crop
 /// opens on what was played rather than on leading and trailing silence.
 pub(crate) fn audible_span(samples: &[f32], sample_rate: u32) -> Option<(f64, f64)> {
@@ -117,13 +109,11 @@ pub(crate) fn open(app: &app::App, editor: &mut Editor) -> Result<(), String> {
         editor.switch_active_tile_to_buffer_named("*sequencer*");
     }
     let rt = editor.runtime_mut();
-    rt.set_reactive("RESAMPLE", "buffer", buffer.to_value());
-    rt.set_reactive("RESAMPLE", "duration", Value::Number(duration));
-    rt.set_reactive("RESAMPLE", "error", Value::String(String::new()));
     let open = rt.global_value("eseq.resample/open").ok_or("Resample UI is unavailable")?;
     rt.invoke(open, vec![
         Value::Number(start), Value::Number(end),
         Value::String(capture_name()), build_string_list(&[DEFAULT_TAG.to_string()]),
+        buffer.to_value(), Value::Number(duration),
     ]).map_err(|error| format!("{error:?}"))?;
     Ok(())
 }
@@ -132,7 +122,6 @@ pub(crate) fn close(editor: &mut Editor) -> Result<(), String> {
     preview::stop();
     DRAFT.with(|draft| *draft.borrow_mut() = None);
     let rt = editor.runtime_mut();
-    rt.set_reactive("RESAMPLE", "buffer", Value::Bool(false));
     rt.eval_str("(eseq.resample/close)").map_err(|error| format!("{error:?}"))?;
     Ok(())
 }
@@ -202,7 +191,10 @@ pub(super) fn handle(
         _ => Ok(()),
     };
     if let Err(error) = result {
-        editor.runtime_mut().set_reactive("RESAMPLE", "error", Value::String(error.clone()));
+        let rt = editor.runtime_mut();
+        if let Some(show) = rt.global_value("eseq.resample/show-error") {
+            let _ = rt.invoke(show, vec![Value::String(error.clone())]);
+        }
         editor.show_transient_message(error);
     }
     editor.runtime_mut().run_reactive_cycle();

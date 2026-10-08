@@ -210,7 +210,14 @@ pub enum Token {
     Backtick, // ` (quasiquote)
     Comma,    // , (unquote)
     CommaAt,  // ,@ (unquote-splicing)
+    /// `#'` (kind-bindings spec §7.1): `#'t.volume` reads as
+    /// `(function t.volume)`, a binding to the field. Only `#` directly
+    /// followed by `'` is special; `#` elsewhere stays a symbol character.
+    HashQuote,
 }
+
+/// The head `#'x` reads as: `(function x)`.
+pub const FUNCTION_FORM: &str = "function";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpannedToken {
@@ -452,6 +459,11 @@ impl Parser {
                         self.next();
                         tokens.push(SpannedToken::new(Token::Backtick, start, self.pos));
                     }
+                    b'#' if self.peek_nth(1) == Some(b'\'') => {
+                        self.next();
+                        self.next();
+                        tokens.push(SpannedToken::new(Token::HashQuote, start, self.pos));
+                    }
                     b',' => {
                         self.next();
                         let token = if matches!(self.peek(), Some(b'@')) {
@@ -672,7 +684,7 @@ impl ASTParser {
             Some(Token::String(_)) => Err(ParserError::InvalidQuote),
             Some(Token::Keyword(_)) => Err(ParserError::InvalidQuote),
             Some(Token::Backtick) => Err(ParserError::InvalidQuote),
-            Some(Token::Comma | Token::CommaAt) => Err(ParserError::InvalidQuote),
+            Some(Token::Comma | Token::CommaAt | Token::HashQuote) => Err(ParserError::InvalidQuote),
             Some(Token::Symbol(s)) => {
                 let expression = Expression::QuoteSymbol(s.to_string());
                 self.next();
@@ -758,6 +770,14 @@ impl ASTParser {
                 let expr = self.parse_expression()?;
                 Ok(Expression::UnquoteSplicing(Box::new(expr)))
             }
+            Some(Token::HashQuote) => {
+                self.next(); // consume #'
+                let expr = self.parse_expression()?;
+                Ok(Expression::List(vec![
+                    Expression::Symbol(FUNCTION_FORM.to_string()),
+                    expr,
+                ]))
+            }
             Some(Token::RightParen) => Err(ParserError::ExpectedLeftParen),
             None => Err(ParserError::UnexpectedEOF),
         }
@@ -841,6 +861,7 @@ impl SpannedASTParser {
                         | Token::Backtick
                         | Token::Comma
                         | Token::CommaAt
+                        | Token::HashQuote
                 ) =>
             {
                 Err(ParserError::InvalidQuote)
@@ -961,6 +982,14 @@ impl SpannedASTParser {
                     SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte),
                 ))
             }
+            Token::HashQuote => {
+                self.next();
+                let expr = self.parse_expression()?;
+                let span =
+                    SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte);
+                let head = self.expr(ExprKind::Symbol(FUNCTION_FORM.to_string()), token.span);
+                Ok(self.expr(ExprKind::List(vec![head, expr]), span))
+            }
             Token::RightParen => Err(ParserError::ExpectedLeftParen),
         }
     }
@@ -1060,6 +1089,43 @@ mod tests {
         // this regression measures on platforms with small test stacks.
         std::mem::forget(expression);
         std::mem::forget(cloned);
+    }
+
+    #[test]
+    fn hash_quote_reads_as_a_function_form() {
+        let tokens = Parser::new("#'t.volume #x a# '#".to_string()).parse().unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::HashQuote,
+                Token::Symbol("t.volume".to_string()),
+                Token::Symbol("#x".to_string()),
+                Token::Symbol("a#".to_string()),
+                Token::Quote,
+                Token::Symbol("#".to_string()),
+            ],
+            "only `#` directly followed by `'` is the prefix"
+        );
+        let function = |path: &str| {
+            Expression::List(vec![
+                Expression::Symbol(FUNCTION_FORM.to_string()),
+                Expression::Symbol(path.to_string()),
+            ])
+        };
+        assert_eq!(
+            parse_str("(label :active #'t.selected)"),
+            vec![Expression::List(vec![
+                Expression::Symbol("label".to_string()),
+                Expression::Keyword("active".to_string()),
+                function("t.selected"),
+            ])]
+        );
+        let spanned = parse_spanned_str("(f #'k.on)");
+        let ExprKind::List(items) = &spanned[0].kind else {
+            panic!("list");
+        };
+        assert_eq!(items[1].to_legacy(), function("k.on"));
+        assert_eq!(items[1].origin.primary_span, SourceSpan::new(3, 9));
     }
 
     #[test]

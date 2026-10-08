@@ -1,7 +1,7 @@
 ;; Built-in effect panel shell, enable controls, and instrument header controls.
 (module eseq.effects.effect-panels)
 
-(import eseq.effects.state :as st)
+(import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.macro-state :as ms)
@@ -46,7 +46,6 @@
   :width 1.55 :height 1.0
   :paint-margin 0.1
   :state (active)
-  :bindable (active)
   :shader
   (sdf/fill (sdf/circle 0.86)
     (material :color (if (> active 0.5) :device-enabled :device-disabled))))
@@ -58,7 +57,7 @@
         (box :width 1.55 :height 0.04)
         (if p
           (fx-enabled-dot
-            :active (pc/fx-param-value p)
+            :active (pc/fx-param-value-for fx p)
             :on-click |x y r|
               (if fx
                 (pc/fx-toggle-effect-value fx p)
@@ -138,10 +137,10 @@
 
 (def instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
-    :bg (if (= st/instrument-panel-tab idx) :dark-gray :transparent)
-    :on-click |x y r| (set! st/instrument-panel-tab idx)
+    :bg (if (= instrument-view.tab idx) :dark-gray :transparent)
+    :on-click |x y r| (set! instrument-view.tab idx)
     (label text :font-size 11
-      :color (if (= st/instrument-panel-tab idx) :white :dim)
+      :color (if (= instrument-view.tab idx) :white :dim)
       :bg :transparent)))
 
 (def instrument-header-button (text active width click)
@@ -169,30 +168,27 @@
       :on-click click)))
 
 (def instrument-synth-button ()
-  (instrument-header-tab-button "synth" (and (= st/instrument-panel-tab 0) (not st/instrument-mods-open)) 4.5
-    (lambda (info) (do (set! st/instrument-panel-tab 0) (set! st/instrument-mods-open false)))))
+  (instrument-header-tab-button "synth" (and (= instrument-view.tab 0) (not instrument-view.mods-open)) 4.5
+    (lambda (info) (do (set! instrument-view.tab 0) (set! instrument-view.mods-open false)))))
 
 ;; src/ui/state_values/tests.rs slices the next def out of this file by its
 ;; exact flat def-header text (up to the following def's header text) and
-;; evals it headerless, so the def keeps its flat name and its body keeps
-;; the flat alias-mediated spellings (instrument-panel-tab /
-;; instrument-mods-open are eseq.effects.state defstates,
-;; macro-clear-mapping-arm / rack-macro-clear-mapping-arm are
-;; eseq.macro-state aliases, process-map-clear is an
-;; eseq.effects.param-controls alias) — they must resolve both inside this
-;; module and in a vanilla eval. Do not rename either def below.
+;; evals it headerless (referring eseq.effects.state's instrument-view), so
+;; the def keeps its flat name and its body its qualified calls — they must
+;; resolve both inside this module and in that eval. Do not rename either
+;; def below.
 (def instrument-toggle-mods-view ()
   (do
-    (set! eseq.effects.state/instrument-panel-tab 0)
-    (if (not eseq.effects.state/instrument-mods-open)
+    (set! instrument-view.tab 0)
+    (if (not instrument-view.mods-open)
       (do
         (eseq.macro-state/clear-mapping-arm)
         (eseq.effects.param-controls/process-map-clear)
         (eseq.macro-state/rack-clear-mapping-arm)))
-    (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
+    (set! instrument-view.mods-open (not instrument-view.mods-open))))
 
 (def instrument-mods-toggle-button ()
-  (instrument-header-tab-button "mods" (and (= st/instrument-panel-tab 0) st/instrument-mods-open) 4.0
+  (instrument-header-tab-button "mods" (and (= instrument-view.tab 0) instrument-view.mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
 ;; Sound-binding badge (takes spec 16.6): which source the panel below is
@@ -214,32 +210,32 @@
           :font-size 9 :color :dim :bg :transparent)))))
 
 (def instrument-keys-button ()
-  (instrument-header-tab-button "keys" (= st/instrument-panel-tab 1) 4.0
-    (lambda (info) (do (set! st/instrument-panel-tab 1) (set! st/instrument-mods-open false)))))
+  (instrument-header-tab-button "keys" (= instrument-view.tab 1) 4.0
+    (lambda (info) (do (set! instrument-view.tab 1) (set! instrument-view.mods-open false)))))
 
 (def effect-toggle-mods-view (fx)
   (let ((chain (pf/fx-effect-chain-kind fx))
-        (track (if (get fx :bus-fx) -1 (get fx :track-idx)))
+        (track (pc/effect-mods-track fx))
         (slot (get fx :slot-idx))
         (rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
         (bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
-    (if (and st/effect-mods-open
-             (= st/effect-mods-chain chain)
-             (= st/effect-mods-track track)
-             (= st/effect-mods-slot slot)
-             (= st/effect-mods-rack-slot rack-slot)
-             (= st/effect-mods-bus bus))
-      (set! st/effect-mods-open false)
+    (if (and effect-mods.open
+             (= effect-mods.chain chain)
+             (= effect-mods.track track)
+             (= effect-mods.slot slot)
+             (= effect-mods.rack-slot rack-slot)
+             (= effect-mods.bus bus))
+      (set! effect-mods.open false)
       (do
         (ms/clear-mapping-arm)
         (pc/process-map-clear)
         (ms/rack-clear-mapping-arm)
-        (set! st/effect-mods-open true)
-        (set! st/effect-mods-chain chain)
-        (set! st/effect-mods-track track)
-        (set! st/effect-mods-slot slot)
-        (set! st/effect-mods-rack-slot rack-slot)
-        (set! st/effect-mods-bus bus)))))
+        (set! effect-mods.open true)
+        (set! effect-mods.chain chain)
+        (set! effect-mods.track track)
+        (set! effect-mods.slot slot)
+        (set! effect-mods.rack-slot rack-slot)
+        (set! effect-mods.bus bus)))))
 
 (def effect-mods-toggle-button (fx)
   (instrument-header-tab-button "mods" (pc/effect-mods-active? fx) 4.0

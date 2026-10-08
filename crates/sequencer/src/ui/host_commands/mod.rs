@@ -1,24 +1,34 @@
 mod agent;
+mod arrangement;
 pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
 mod customize;
+mod devices;
 mod dispatch;
 mod drum_rack_v2;
-pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequencer_source};
+pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
 mod effects;
 pub(crate) mod export;
 mod file_menu;
+mod focus_steps;
 pub(crate) mod graph_node_processes;
+mod graphs;
+mod neural;
 pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};
 mod menu_actions;
 pub(crate) mod instances;
 mod instrument_authoring;
 mod instrument_params;
+mod lanes;
 mod learn;
 mod misc;
+pub(crate) mod notes;
 pub(crate) mod packages;
+mod panel;
+mod process_edit;
 mod project;
 mod rack;
+pub(crate) mod rack_kinds;
 pub(crate) mod rack_grooves;
 pub(crate) mod factory_promote;
 pub(crate) mod resample;
@@ -32,19 +42,24 @@ mod scene_slots;
 mod scripts;
 mod song;
 mod step_history;
+mod track_settings;
+use effects::{apply_device_param_base, rebuild_panel_if_needed};
+use step_history::{clear_plocks_command, step_list, track_steps};
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
 pub(crate) use routing::apply_bus_routing_command;
 pub(crate) use rack::initialize_loaded_rack_view;
+pub(crate) use rack::StripControl;
 pub(crate) use rack_grooves::apply_rack_groove_command;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]
 pub(crate) use tracks::apply_rename_group_host_command;
 pub(crate) use song::{apply_song_edit_command, apply_sound_palette_view_command};
+pub(crate) use arrangement::apply_capture_selection_command;
+pub(crate) use lanes::apply_capture_command as apply_capture_process_command;
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -55,14 +70,123 @@ use sequencer::app;
 
 use super::natives;
 use super::state_values::{
-    build_accumulator_names, build_effects_value, build_instrument_panel_value,
-    build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
-    build_track_names, load_instrument_preset_into_track, push_solo_mutes,
-    set_current_track_reactive, sync_all_track_sequencer_state, sync_fx_param_binding_fields,
-    sync_groups_bindings, sync_sidebar_browser, sync_step_param_lists,
-    sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
+    build_accumulator_names, load_instrument_preset_into_track, push_solo_mutes,
+    refresh_track_names_cache, sync_sidebar_browser,
 };
 use super::{map_number, map_string, map_u32, map_usize};
+
+/// A host kind setter's history edit (a script's `set!`), under the
+/// gesture rules (kind-bindings spec §14.2b "Gestures"): an edit landing
+/// while another gesture is active (a user's drag) gets an undo entry of its
+/// own beside it, neither splitting nor joining the drag; otherwise a
+/// continuous edit while the pointer is down stays open and the script's
+/// later continuous edits join it (a drag view's `set!` per frame is one
+/// entry, ended by the release), and any other edit ends its entry at once.
+/// A non-continuous edit during the script's own drag (a flag toggled
+/// mid-drag) is an entry beside that drag, which stays open, when its
+/// command is a device-value edit of another device (eseq-0l17.55) or of the
+/// dragged device itself, whose entry and the drag's are then rebased so
+/// each undoes only what it changed (eseq-0l17.72;
+/// [`app::edit::command_can_land_beside_active_gesture`]); otherwise it
+/// still ends the drag's entry.
+pub(super) struct ScriptEdit {
+    beside: std::cell::Cell<bool>,
+    continuous: bool,
+    /// A non-continuous edit landing during the script's own open drag.
+    in_script_drag: bool,
+}
+
+impl ScriptEdit {
+    /// Begin a script edit; `continuous` says whether it moves a value a
+    /// drag moves (and so may join the script's drag).
+    pub(super) fn begin(app: &app::App, ctx: &crate::LoopCtx<'_>, continuous: bool) -> Self {
+        let active = app.history.active_gesture().map(|active| active.id);
+        let script_drag = active.is_some() && active == ctx.gesture.script_param_gesture;
+        Self {
+            beside: std::cell::Cell::new(active.is_some() && !script_drag),
+            continuous,
+            in_script_drag: script_drag && !continuous,
+        }
+    }
+
+    /// Apply `command`; returns whether the model changed. During the
+    /// script's own drag, a device-value command lands beside it.
+    pub(super) fn apply(&self, app: &mut app::App, command: app::AppCommand) -> bool {
+        if self.in_script_drag && app::edit::command_can_land_beside_active_gesture(app, &command) {
+            self.beside.set(true);
+        }
+        self.apply_with(app, |app| app::try_apply_command(app, command))
+            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
+    }
+
+    /// Apply an edit `apply` makes (beside the active gesture when the edit
+    /// lands beside it).
+    pub(super) fn apply_with<T>(
+        &self,
+        app: &mut app::App,
+        apply: impl FnOnce(&mut app::App) -> T,
+    ) -> T {
+        if self.beside.get() {
+            app::edit::apply_beside_gesture(app, apply)
+        } else {
+            apply(app)
+        }
+    }
+
+    /// Begin, apply the history edit `apply` makes and end, as one script
+    /// edit; returns whether the model changed.
+    pub(super) fn run(
+        app: &mut app::App,
+        ctx: &mut crate::LoopCtx<'_>,
+        continuous: bool,
+        apply: impl FnOnce(&mut app::App) -> Result<app::edit::EditOutcome, app::edit::EditError>,
+    ) -> Result<bool, String> {
+        let script = Self::begin(app, ctx, continuous);
+        let outcome = script.apply_with(app, apply);
+        let changed = outcome.as_ref().is_ok_and(app::edit::EditOutcome::changed);
+        script.end(app, ctx, changed);
+        outcome
+            .map(|_| changed)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// Whether this edit joins the script's drag: continuous, the pointer
+    /// is down and it is not beside another gesture.
+    pub(super) fn drags(&self, ctx: &crate::LoopCtx<'_>) -> bool {
+        !self.beside.get() && self.continuous && ctx.gesture.pointer_down
+    }
+
+    /// End the edit: a continuous edit stays open while the pointer is
+    /// down; an edit beside a gesture leaves that gesture alone.
+    pub(super) fn end(self, app: &mut app::App, ctx: &mut crate::LoopCtx<'_>, changed: bool) {
+        if self.beside.get() {
+            return;
+        }
+        if self.continuous && ctx.gesture.pointer_down {
+            // A drag view: its later `set!`s join this entry until release.
+            ctx.gesture.script_param_gesture = app.history.active_gesture().map(|active| active.id);
+        } else {
+            if changed {
+                app::edit::finish_active_gesture(app);
+            }
+            ctx.gesture.script_param_gesture = None;
+        }
+    }
+}
+
+/// The targets of the script drag `slot` holds, while its gesture is the
+/// active one under `key` (a drag's frames are tied to its gesture id).
+pub(super) fn open_drag_targets<'a, T>(
+    app: &app::App,
+    slot: &'a mut Option<(app::history::GestureId, T)>,
+    key: &app::history::MergeKey,
+) -> Option<&'a mut T> {
+    let active = app.history.active_gesture()?;
+    match slot {
+        Some((id, targets)) if *id == active.id && active.merge_key == *key => Some(targets),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MacroHostCommandOutcome {
@@ -128,10 +252,13 @@ pub(crate) fn handle_macro_host_command(
                 return Ignored;
             };
             let quantize = map_string(map, "quantize")
-                .map(|value| match value.as_str() {
-                    "off" => sequencer::macro_engine::StealQuantize::Off,
-                    "sixteenth" | "1/16" => sequencer::macro_engine::StealQuantize::Sixteenth,
-                    _ => sequencer::macro_engine::StealQuantize::Bar,
+                .map(|value| {
+                    use sequencer::macro_engine::StealQuantize;
+                    // Lenient, as ever: `1/16` too, anything unknown a bar.
+                    match value.as_str() {
+                        "1/16" => StealQuantize::Sixteenth,
+                        label => StealQuantize::from_label(label).unwrap_or(StealQuantize::Bar),
+                    }
                 })
                 .unwrap_or(existing.quantize);
             let bool_value = |key: &str, fallback: bool| {
@@ -258,11 +385,8 @@ pub(crate) fn handle_macro_host_command(
             ) else {
                 return Ignored;
             };
-            let curve = match curve.as_str() {
-                "linear" => sequencer::macro_engine::MacroCurve::Linear,
-                "exp" | "exponential" => sequencer::macro_engine::MacroCurve::Exp,
-                "log" | "logarithmic" => sequencer::macro_engine::MacroCurve::Log,
-                _ => return Ignored,
+            let Some(curve) = sequencer::macro_engine::MacroCurve::from_label(&curve) else {
+                return Ignored;
             };
             app::AppCommand::MacroSetCurve {
                 id,
@@ -292,9 +416,7 @@ pub(crate) struct AddTrackInstrumentCtx<'a> {
     pub(crate) track_names: &'a mut Vec<String>,
     pub(crate) track_pan_ids: &'a Arc<Mutex<Vec<i32>>>,
     pub(crate) record_armed: &'a Arc<Mutex<Vec<bool>>>,
-    pub(crate) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(crate) accumulator_names: &'a Arc<Mutex<Vec<String>>>,
-    pub(crate) cached_track_peak_levels: &'a [f64],
     pub(crate) group_id: Option<u64>,
     /// Pad note the new member claims when the drop landed on an empty
     /// drum-rack pad cell (docs/drum-rack-v2-spec.md, "Track budget").
@@ -333,9 +455,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         track_names,
         track_pan_ids,
         record_armed,
-        selected_steps,
         accumulator_names,
-        cached_track_peak_levels,
         group_id,
         pad_note,
         track_groups,
@@ -374,46 +494,10 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         push_solo_mutes(lg_raw, app, state);
     }
     record_armed.lock().unwrap().push(false);
+    crate::param_words::set_track_word_names(track_names);
 
     let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
-    rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-    set_current_track_reactive(rt, app.tracks.len(), selected);
-    rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    sync_all_track_sequencer_state(rt, state, app, selected, selected_steps);
-    rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
-    sync_step_param_lists(rt, state, selected);
-    sync_track_mixer_state(rt, app, state);
-    sync_groups_bindings(rt, &app.groups, &app.grooves);
-    sync_track_peak_fields(rt, cached_track_peak_levels);
-    rt.set_reactive(
-        "SEQ",
-        "effects",
-        build_effects_value(
-            state,
-            selected,
-            &app.graph.effect_descriptors,
-            selected_steps,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "midi-effects",
-        build_midi_effects_value(state, selected, selected_steps),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected, selected_steps),
-    );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, selected, selected_steps);
-    sync_fx_param_binding_fields(rt, app, state, selected, selected_steps);
-    rt.set_reactive(
-        "SEQ",
-        "step-has-plocks",
-        build_step_has_plocks(state, selected, &app.graph.effect_descriptors),
-    );
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -433,7 +517,6 @@ pub(crate) fn apply_dropped_instrument_preset(
     track: usize,
     preset: &str,
     current_track: &Arc<AtomicUsize>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) {
     if let Err(error) = load_instrument_preset_into_track(app, track, preset) {
@@ -442,12 +525,7 @@ pub(crate) fn apply_dropped_instrument_preset(
     }
     let selected = current_track.load(Ordering::Relaxed);
     let rt = editor.runtime_mut();
-    rt.set_reactive(
-        "SEQ",
-        "instrument-panel",
-        build_instrument_panel_value(app, selected, selected_steps),
-    );
-    sync_sidebar_browser(rt, app, selected);
+    sync_sidebar_browser(app, selected);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -457,10 +535,8 @@ pub(crate) fn apply_dropped_instrument_preset(
 pub(crate) struct SwapTrackInstrumentCtx<'a> {
     pub(crate) app: &'a mut app::App,
     pub(crate) editor: &'a mut Editor,
-    pub(crate) state: &'a Arc<SequencerState>,
     pub(crate) current_track: &'a Arc<AtomicUsize>,
     pub(crate) track_names: &'a mut Vec<String>,
-    pub(crate) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(crate) fx_epoch: &'a Arc<AtomicUsize>,
     pub(crate) ui_epoch: &'a Arc<AtomicUsize>,
 }
@@ -475,10 +551,8 @@ pub(crate) fn finish_swapped_instrument_track(
     let SwapTrackInstrumentCtx {
         app,
         editor,
-        state,
         current_track,
         track_names,
-        selected_steps,
         fx_epoch,
         ui_epoch,
     } = ctx;
@@ -492,38 +566,7 @@ pub(crate) fn finish_swapped_instrument_track(
     app.ui.cursor_track = selected_track;
     if !app.tracks.is_empty() {
         let rt = editor.runtime_mut();
-        set_current_track_reactive(rt, app.tracks.len(), selected_track);
-        sync_track_name_state(rt, track_names, app);
-        sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
-        rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
-        sync_step_param_lists(rt, state, selected_track);
-        rt.set_reactive(
-            "SEQ",
-            "effects",
-            build_effects_value(
-                state,
-                selected_track,
-                &app.graph.effect_descriptors,
-                selected_steps,
-            ),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "midi-effects",
-            build_midi_effects_value(state, selected_track, selected_steps),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "instrument-panel",
-            build_instrument_panel_value(app, selected_track, selected_steps),
-        );
-        sync_track_params(rt, app, state, selected_track, selected_steps);
-        sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
-        rt.set_reactive(
-            "SEQ",
-            "step-has-plocks",
-            build_step_has_plocks(state, selected_track, &app.graph.effect_descriptors),
-        );
+        refresh_track_names_cache(track_names, app);
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");

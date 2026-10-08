@@ -2,4 +2,4 @@
   (track :sampler :name "Sampler"))
 
 (def capture-after-sync ()
-  (eseq.transport/open-application-menu "Create" (dict :col 8 :row 2)))
+  (eseq.transport/open-application-menu "Create" (dict :at (dict :col 8 :row 2))))

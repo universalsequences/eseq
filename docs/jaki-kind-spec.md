@@ -47,8 +47,9 @@ Both are kind-agnostic: nothing below names jaki except §5.
   pattern as its symbols (one cell per `.`, a double cell per `-`, figures
   and cycles set apart). While the transport plays, the symbol under the
   playhead lights up: the tick calls `(gen-mark (+ (gen-tick) 1))`, which
-  stamps the value at the boundary's audio sample; the host publishes the
-  latest sounded mark as `SEQ.generator-mark-<id>` (0 when stopped) and the
+  stamps the value at the boundary's audio sample; the instance's generator
+  shows the latest sounded mark as its `""` mark's value (`(generator-mark-named
+  (generator-of self) "")`, kind-bindings spec §14.2t; 0 when stopped) and the
   strip, its own `subtree`, locates that tick in the pattern
   (`alez.jaki.core/locate`, `alez.jaki.core/preview`). The window follows the
   playhead two cycles at a time.

@@ -825,6 +825,12 @@ impl ProjectScenes {
         ))
     }
 
+    /// A scene's mod connections alone ([`Self::scene_metadata`] without
+    /// the neural networks and composed graph overrides).
+    pub fn scene_mod_connections(&self, scene_idx: usize) -> Option<Vec<ModConnection>> {
+        Some(self.scenes.get(scene_idx)?.mod_connections.clone())
+    }
+
     pub fn scene_snapshot(&self, scene_idx: usize) -> Option<PatternSnapshot> {
         let scene = self.scenes.get(scene_idx)?;
         let mut snapshot = PatternSnapshot::new_default(self.track_pools.len(), &[]);
@@ -1141,10 +1147,23 @@ impl ProjectScenes {
     where
         F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
     {
+        self.edit_scene_neural_networks(self.current_scene, edit)
+    }
+
+    /// Edit the neural networks of scene `scene_idx` (an error when there is
+    /// no such scene).
+    pub fn edit_scene_neural_networks<F, R>(
+        &mut self,
+        scene_idx: usize,
+        edit: F,
+    ) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
+    {
         let scene = self
             .scenes
-            .get_mut(self.current_scene)
-            .ok_or_else(|| "current scene out of range".to_string())?;
+            .get_mut(scene_idx)
+            .ok_or_else(|| "scene out of range".to_string())?;
         edit(&mut scene.neural_networks)
     }
 

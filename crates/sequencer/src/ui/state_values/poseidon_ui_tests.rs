@@ -29,24 +29,16 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(poseidon_inst)])),
-            ("bus-effects", test_list(vec![])),
-        ],
-        true,
-    );
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(poseidon_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()
@@ -54,7 +46,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -68,6 +60,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         .eval_str(&custom_ui_source)
         .expect("load poseidon custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("poseidon fx lisp status after refresh: {status}");
@@ -108,7 +101,12 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         editor.runtime_mut().invoke(panel.props["on-click"].clone(), vec![Value::Bool(false)]).unwrap();
         editor.refresh_runtime_side_effects();
         for mode in [0, 1] {
-            editor.runtime_mut().set_reactive("SEQ", "poseidon-test-filter_mode", Value::Number(mode as f64));
+            set_panel_param(
+                &mut editor,
+                &kinds,
+                "poseidon-test-filter_mode",
+                Value::Number(mode as f64),
+            );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let current = editor.widget_layout().unwrap();
@@ -139,8 +137,8 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
                 let env = find_layout_node_by_debug_name(display, "tri-envelope").unwrap();
                 let prefix = if section == 2 { "feg" } else { "aeg" };
                 for (prop, suffix) in [("attack", "attack_ms"), ("decay", "decay_ms"), ("sustain", "sustain"), ("release", "release_ms")] {
-                    let Value::ReactiveRef { field, .. } = &env.props[prop] else { panic!("bound envelope {prop}"); };
-                    assert_eq!(field, &format!("poseidon-test-{prefix}_{suffix}"));
+                    let field = bound_field(env.props.get(prop)).unwrap_or_else(|| panic!("bound envelope {prop}"));
+                    assert_eq!(field, format!("poseidon-test-{prefix}_{suffix}"));
                 }
                 editor.drain_host_commands();
                 let event = Value::Map([("attack", 12.0), ("decay", 230.0), ("sustain", 0.45), ("release", 340.0)]
@@ -191,7 +189,7 @@ fn poseidon_display_preserves_oscillator_envelope_and_filter_modes() {
         editor.refresh_runtime_side_effects();
         // Read the scoped selection via the same dispatcher used by the panel.
         let selected = editor.runtime_mut().eval_str(r#"
-            (do (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+            (do (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                 eseq.vanilla/custom-ui-selected-section)
         "#).unwrap();
         assert_eq!(selected, Some(Value::Number(owner as f64)));

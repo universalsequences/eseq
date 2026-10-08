@@ -21,20 +21,23 @@
 ;;     their explicit `eseq.materials/` names rather than module imports.
 ;;   * Bus selection reads and writes use the explicit
 ;;     `eseq.seq-core-state/selected-bus` state name.
-;;   * No `import` lines at all — everything this file reads from outside is
-;;     either a Rust native (`reactive-get`, the `seq-*` family) or a
-;;     `defstate`. That also makes the file trivially safe under hazards
-;;     (n)/(n2), neither of which applies since no Rust harness reads it.
+;;   * Host state comes from eseq.kinds (docs/kind-bindings-spec.md): tracks
+;;     and buses are instances, meters, faders and mute/solo states are `#'`
+;;     bindings. eseq.materials is imported so `rec-arm-dot`'s shader
+;;     (`eseq.materials/color`) and the sliders' material resolve when this
+;;     file loads on its own.
+;;   * `bus-row-label` and `display-buses` duplicate eseq.mixer's on purpose:
+;;     importing eseq.mixer would evaluate the live mixer (its `*mixer*`
+;;     effect-buffer and keymap) just to share two small functions.
 ;;   * Widget `:key` props auto-qualify, so the hand-rolled `mixer-` prefix is
 ;;     stripped from them; `(subtree :key …)` strings are left byte-identical
 ;;     (hazard a), as is the `"*mixer*"` buffer name.
 
 (module eseq.legacy.mixer)
+(import eseq.materials)
+(import eseq.kinds :refer (tracks buses selection))
 
 (export)
-
-(def track-peak (i)
-  (reactive-get "SEQ" (str "track-peak-" i)))
 
 (defwidget track-container
   :width 1.5 :height 1.5
@@ -159,120 +162,120 @@
           (min diag1 diag2))
         (material :color fg-col)))))
 
-(def bus-row-label (i)
-  (if (= i 0) "M" (if (= i 1) "A" (if (= i 2) "B" (str i)))))
+(def bus-row-label (b)
+  (match b.index
+    0 "M"
+    1 "A"
+    2 "B"
+    _ (str b.index)))
 
-(def has-mix-bus? ()
-  (and (> (len SEQ.bus-names) 0) (= (nth SEQ.bus-names 0) "Mix")))
+;; The buses in display order: the main mix (first in the bus list) last.
+(def display-buses ()
+  (let ((all (buses))
+        (mix (first all)))
+    (if (and (> (len all) 1) (= mix.name "Mix"))
+      (append (rest all) (list (first all)))
+      all)))
 
-(def display-bus-index (display-i)
-  (if (or (not (has-mix-bus?)) (<= (len SEQ.bus-names) 1))
-    display-i
-    (if (= display-i (- (len SEQ.bus-names) 1))
-      0
-      (+ display-i 1))))
+(def current? (t)
+  (and (< eseq.seq-core-state/selected-bus 0) (= selection.track t)))
 
 (effect-buffer "*mixer*"
   (v-stack :padding 0.5 :gap 0.25
-    (each (range 0 (+ SEQ.num-tracks (len SEQ.bus-names))) |row|
-      (if (< row SEQ.num-tracks)
-        (let ((i row)
-              (name (nth SEQ.track-names row)))
-          (subtree :key (str "mixer-track-row-" i)
-            (box :background "track-container"
-              :padding 0.5
-              :even (mod i 2)
-              :selected (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) 1 0)
-
-              (h-stack :gap 0.5 :align :center
-                (box :width 2 :height 1.5
-                  :background "rec-arm-dot"
-                  :key (str "track-arm-" i)
-                  :active (if (nth SEQ.record-armed i) 1 0)
-                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-record-arm i)))
-                (button (str (+ i 1))
-                  :key (str "track-mute-" i)
-                  :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :active (bind-seq-nth "track-mutes" i)
-                  :background-color (mute-button-bg false)
-                  :active-background-color (mute-button-bg true)
-                  :color :blue
-                  :active-color :gray
-                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-mute i)))
-                (button "S"
-                  :key (str "track-solo-" i)
-                  :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :active (bind-seq-nth "track-solos" i)
-                  :background-color (solo-button-bg false)
-                  :active-background-color (solo-button-bg true)
-                  :color :gray
-                  :active-color :white
-                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-solo i)))
-                (box :width 8.6 :height 1
-                  :key (str "track-select-" i)
-                  :bg (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :blue :dark-gray)
-                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track i))
-                  (label (substring name 0 12) :font-size 11 :width 8.6
-                    :active (bind-seq-nth "track-muted-effective" i)
-                    :active-color :dark-gray
-                    :color (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :white :gray)
-                    :bg :transparent))
-                (box :width 5.2
-                  (v-stack :gap 0.18
-                    (hslider :min 0 :max 1 :width 5
-                      :key (str "track-volume-" i)
-                      :value (nth SEQ.track-volumes i)
-                      :material (eseq.materials/slider-material)
-                      :on-change (lambda (v) (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track-volume i v))))
-                    (subtree :key (str "mixer-track-meter-" i)
-                      (mixer-track-meter :level (track-peak i)))))
-                (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i) (> SEQ.num-tracks 1))
-                  (box :width 1.6 :height 1.2 :align :center
-                    :bg :transparent
-                    :key (str "track-delete-" i)
-                    :on-click |x y r| (host-command "delete-track" (dict :track i))
-                    :background "delete-track-icon"
-                    :active 0)
-                  (label "" :width 1.6 :bg :transparent))))))
-        (let ((display-i (- row SEQ.num-tracks))
-              (i (display-bus-index (- row SEQ.num-tracks)))
-              (name (nth SEQ.bus-names i)))
-          (subtree :key (str "mixer-bus-row-" i)
-            (box :background "track-container"
-              :padding 0.5
-              :even (mod row 2)
-              :selected (if (= eseq.seq-core-state/selected-bus i) 1 0)
-              (h-stack :gap 0.5 :align :center
-                (label "" :width 2 :height 1.5 :bg :transparent)
-                (button (bus-row-label i)
-                  :key (str "bus-mute-" i)
-                  :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :active (bind-seq-nth "bus-mutes" i)
-                  :background-color (mute-button-bg false)
-                  :active-background-color (mute-button-bg true)
-                  :color :blue
-                  :active-color :gray
-                  :on-click |x y r| (seq-toggle-bus-mute i))
-                (button "S"
-                  :key (str "bus-solo-" i)
-                  :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :active (bind-seq-nth "bus-solos" i)
-                  :background-color (solo-button-bg false)
-                  :active-background-color (solo-button-bg true)
-                  :color :gray
-                  :active-color :white
-                  :on-click |x y r| (seq-toggle-bus-solo i))
-                (box :width 8.6 :height 1
-                  :key (str "bus-select-" i)
-                  :bg (if (= eseq.seq-core-state/selected-bus i) :blue :dark-gray)
-                  :on-click |x y r| (do (seq-clear-selection) (set! eseq.seq-core-state/selected-bus i))
-                  (label (substring name 0 12) :font-size 11 :width 8.6
-                    :color (if (= eseq.seq-core-state/selected-bus i) :white :gray)
-                    :bg :transparent))
-                (box :width 5.2
-                  (hslider :min 0 :max 1 :width 5
-                    :key (str "bus-volume-" i)
-                    :value (nth SEQ.bus-volumes i)
-                    :material (eseq.materials/slider-material)
-                    :on-change (lambda (v) (seq-set-bus-volume i v))))
-                (label "" :width 1.6 :bg :transparent)))))))))
+    (each (tracks) |t|
+      (subtree :key (str "mixer-track-row-" t.index)
+        (box :background "track-container"
+          :padding 0.5
+          :even (mod t.index 2)
+          :selected (if (current? t) 1 0)
+          (h-stack :gap 0.5 :align :center
+            (box :width 2 :height 1.5
+              :background "rec-arm-dot"
+              :key (str "track-arm-" t.index)
+              :active (if t.armed 1 0)
+              :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (toggle! t.armed)))
+            (button (str (+ t.index 1))
+              :key (str "track-mute-" t.index)
+              :width 1.55 :height 1.2 :padding 0 :font-size 10
+              :active #'t.muted
+              :background-color (mute-button-bg false)
+              :active-background-color (mute-button-bg true)
+              :color :blue
+              :active-color :gray
+              :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (toggle! t.muted)))
+            (button "S"
+              :key (str "track-solo-" t.index)
+              :width 1.55 :height 1.2 :padding 0 :font-size 10
+              :active #'t.soloed
+              :background-color (solo-button-bg false)
+              :active-background-color (solo-button-bg true)
+              :color :gray
+              :active-color :white
+              :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (toggle! t.soloed)))
+            (box :width 8.6 :height 1
+              :key (str "track-select-" t.index)
+              :bg (if (current? t) :blue :dark-gray)
+              :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (set! selection.track t))
+              ;; Dark while silent (muted or soloed away): lit while heard.
+              (label (substring t.name 0 12) :font-size 11 :width 8.6
+                :active #'t.audible
+                :color :dark-gray
+                :active-color (if (current? t) :white :gray)
+                :bg :transparent))
+            (box :width 5.2
+              (v-stack :gap 0.18
+                (hslider :min 0 :max 1 :width 5
+                  :key (str "track-volume-" t.index)
+                  :value #'t.volume
+                  :material (eseq.materials/slider-material)
+                  :on-change (lambda (v) (do (set! eseq.seq-core-state/selected-bus -1) (set! t.volume v))))
+                (subtree :key (str "mixer-track-meter-" t.index)
+                  (mixer-track-meter :level #'t.peak))))
+            (if (and (current? t) (> (len (tracks)) 1))
+              (box :width 1.6 :height 1.2 :align :center
+                :bg :transparent
+                :key (str "track-delete-" t.index)
+                :on-click |x y r| (host-command "delete-track" (dict :track t.index))
+                :background "delete-track-icon"
+                :active 0)
+              (label "" :width 1.6 :bg :transparent))))))
+    (each (display-buses) |b|
+      (subtree :key (str "mixer-bus-row-" b.index)
+        (box :background "track-container"
+          :padding 0.5
+          :even (mod b.index 2)
+          :selected (if (= eseq.seq-core-state/selected-bus b.index) 1 0)
+          (h-stack :gap 0.5 :align :center
+            (label "" :width 2 :height 1.5 :bg :transparent)
+            (button (bus-row-label b)
+              :key (str "bus-mute-" b.index)
+              :width 1.55 :height 1.2 :padding 0 :font-size 10
+              :active #'b.muted
+              :background-color (mute-button-bg false)
+              :active-background-color (mute-button-bg true)
+              :color :blue
+              :active-color :gray
+              :on-click |x y r| (toggle! b.muted))
+            (button "S"
+              :key (str "bus-solo-" b.index)
+              :width 1.55 :height 1.2 :padding 0 :font-size 10
+              :active #'b.soloed
+              :background-color (solo-button-bg false)
+              :active-background-color (solo-button-bg true)
+              :color :gray
+              :active-color :white
+              :on-click |x y r| (toggle! b.soloed))
+            (box :width 8.6 :height 1
+              :key (str "bus-select-" b.index)
+              :bg (if (= eseq.seq-core-state/selected-bus b.index) :blue :dark-gray)
+              :on-click |x y r| (do (seq-clear-selection) (set! eseq.seq-core-state/selected-bus b.index))
+              (label (substring b.name 0 12) :font-size 11 :width 8.6
+                :color (if (= eseq.seq-core-state/selected-bus b.index) :white :gray)
+                :bg :transparent))
+            (box :width 5.2
+              (hslider :min 0 :max 1 :width 5
+                :key (str "bus-volume-" b.index)
+                :value #'b.volume
+                :material (eseq.materials/slider-material)
+                :on-change (lambda (v) (set! b.volume v))))
+            (label "" :width 1.6 :bg :transparent)))))))

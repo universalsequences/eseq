@@ -1,32 +1,39 @@
 ;; ui/sequencer.lisp — Project step sequencer view.
 ;; Renders to *sequencer* buffer. Shows every track's step grid laid out
 ;; vertically. Loaded by ui/main.lisp.
+;;
+;; The view's host state comes from eseq.kinds (docs/kind-bindings-spec.md):
+;; tracks, their steps, process chains and lanes, groups and their buses,
+;; drum rack pads and clips. The step cells, the playhead bars, the expanded
+;; editor's slots and the header's meter, fader, arm, mute and solo bind
+;; their fields with #' (`step-cell` takes the step and its track), so
+;; playback, step edits, mixing and metering repaint without re-running a
+;; row. The step cursor, the selection anchor, the expanded editors, the lane
+;; patchbay, the pad grid and the menus are this view's own state: `:key ()`
+;; singletons below, and the expanded editor's per-track fields on the track
+;; (`t.expanded`, `param-mode`, `cursor`, `page`).
 
 (module eseq.sequencer)
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
-
-;; Migration aliases (module spec §10 step 2) for the names unconverted callers
-;; still spell flat.  Nine are lisp-side — arrangement.lisp reuses the track
-;; header and its selection binding, mixer.lisp opens the piano roll,
-;; seq-panels.lisp toggles the expanded lane, seq-grid-mode.lisp routes the
-;; *sequencer* keymap (both the `(seqv-handle-key …)` call and the "C-h"
-;; `mode-bind-key` handler string, which dispatches through `invoke_global` and
-;; therefore through the alias rung).  The rest are entry points src/ui/input.rs and
-;; the Rust state_values / ui tests drive by name.  Deleted as each consumer
-;; converts.
+;; Load-order edge: the `defwidget` shaders below call `eseq.materials/color`,
+;; a macro that must exist when the shader compiles (a missing one is a
+;; defwidget evaluation error, kind-bindings spec §7.3).
+(import eseq.materials)
 
 (import eseq.track-collapse)
 
-;; Drum rack v2: rack lookups over SEQ.groups (docs/drum-rack-v2-spec.md).
+;; Drum rack v2: the pad grid's note geometry (docs/drum-rack-v2-spec.md).
 (import eseq.drum-rack-v2)
 
 (import eseq.seq-panels)
 ;; Expr cards' edit buffers (the node bay's edit button, the error dot).
 (import eseq.expr-buffer)
 ;; Process-port arm/bind state shared with the fx panel (lane strip map button).
-(import eseq.effects.param-controls :as pc)
+(import eseq.effects.param-controls :as pc :refer (process-map))
+(import eseq.seqv-track-params :as tp)
+(import eseq.step-grid-interactions :as sgi)
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
@@ -35,29 +42,57 @@
 (import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of named rgb-part dimmed-part
+                               track-color-part))
+(import eseq.kinds :refer (track tracks groups selection transport project process-library
+                           launch-rack-clip! save-rack-clip-as! delete-rack-clip! take-none
+                           take-governed set-bar-transpose! set-process-enabled! set-inlet!
+                           set-fanout! set-lane-steps! move-process! add-process!
+                           remove-process! bind-port! add-fanout! unbind-port! clear-port!
+                           remove-fanout! graph-of))
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
-        harmony-snap-meter process-scope-cells-for
-        lane-patch-run-error lane-patch-expr-error lane-patch-hidden-in-port-count
-        lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
-        lane-patch-node-select lane-patch-node-host?
-        track-selected-binding
-        expanded-track-ids
+        harmony-snap-meter lane-patch-expr-error lane-patch-hidden-in-port-count
+        lane-patch-node-selected-id lane-patch-node-select lane-patch-node-host? node-of
+        process-of
+        grid-cursor
+        grid-select
+        seq-view
+        clip-menu
+        clip-rename
+        lane-edit
+        patch-view
+        card-menu
+        lane-add
+        pad-view
+        pad-menu
+        expanded-tracks
         select-track-for-edit
         open-piano-roll-for-track
         show-fx-for-group
         set-track-expanded
+        shown-page
+        slot-step
+        set-expanded-step-param
+        set-expanded-current-param
+        goto-page
         lane-patch-show
         lane-patch-select-cable
         lane-patch-cable-selected?
         lane-patch-delete-selected
         lane-patch-select-lane
         lane-patch-lane-selected?
+        lane-patch-connect
+        lane-patch-remove-card
+        lane-patch-move-card
         lane-add-pick
         lane-add-options
         lane-add-labels
         lane-patch-add-menu lane-patch-add-menu-grouped
         lane-patch-pending-port
+        lane-toggle-edit-scope
+        lane-slider-step
+        set-lane-slider-step
         track-param-mode
         set-track-param-mode
         track-cursor
@@ -71,320 +106,309 @@
         collapse-all-tracks
         toggle-current-track-expanded
         handle-key
+        track-click
         track-menu-click
         drop-sample-on-track
         drop-on-track
         drop-new-track
         step-slider-track-material
         track-header
+        grid-items
         grid-step-pointer-down
         grid-step-pointer-up
-        track-current-step
-        track-current-page
+        process-lane-options
         select-process-lane-option
-        pad-selected?
-        selected-pad
-        open-pad-member-fx
-        rack-pad-grid
-        rack-pad-context-menu
+        pad-grid
+        pad-map
+        pad-page
+        set-pad-page
+        pad-cell-note
+        pad-at
+        pad-cell-drop-meta
+        drop-on-pad-cell
+        drop-pad-on-note
+        focused-pad
+        focus-pad!
+        open-pad!
         open-pad-menu
         choose-pad-role
-        rack-pad-map)
+        pad-selected?
+        rack-pad-context-menu)
 
-(def track-peak (i)
-  (bind-seq (str "track-peak-" i)))
+;; ── View state ──
 
-(def track-volume-field (track)
-  (str "track-" track "-volume"))
+;; The step cursor the grid draws: the shared step cursor
+;; (`eseq.seq-core-state/cursor-step-value`), mirrored by
+;; `cursor-step-changed` whenever it moves. The selected tracks' cells show
+;; it, wrapped to each track's length.
+(def-kind grid-cursor
+  :key ()
+  :state ((step 0)))
 
-(def track-volume-binding (track)
-  (bind-seq (track-volume-field track)))
+;; The stable end of a Finder-style range selection (shift-click); a plain
+;; selection starts a new range, cmd-click leaves it alone.
+(def-kind grid-select
+  :key ()
+  :state ((anchor track :default nil)))
 
-(def track-volume-value (track)
-  (if (< track (len SEQ.track-volumes))
-    (nth SEQ.track-volumes track)
-    1.0))
+;; The expanded step editors, by stable track id (`t.tid`), so they follow
+;; their track through a delete and its undo or a reorder: the expanded
+;; tracks' tids, and per track its param mode (`(dict :tid tid :mode m)`)
+;; and step cursor (`(dict :tid tid :step s)`). No render reads them: rows
+;; draw the track's own fields (`t.expanded`, `param-mode`, `cursor`,
+;; `page`), so one track's toggle, mode or page re-renders that row alone;
+;; `*seq-expand-sync*` keeps those fields in step with these lists.
+(def-kind seq-view
+  :key ()
+  :state ((expanded '())
+          (modes '())
+          (cursors '())))
 
-(def track-volume-from-event (track event)
-  (let ((sx (get event :sx)))
-    (if (= sx nil)
-      (track-volume-value track)
-      (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0)))))))
+;; The rack clip menu (where it opened, the clip it targets) and the inline
+;; clip rename in progress (the clip, nil when none is, and the draft).
+(def-kind clip-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (clip rack-clip :default nil)))
 
-(def set-track-volume-from-event (track event)
-  (do
-    (activate-track-for-edit track)
-    (seq-set-track-volume track (track-volume-from-event track event))))
+(def-kind clip-rename
+  :key ()
+  :state ((clip rack-clip :default nil)
+          (draft "")))
 
-(def track-color-r-binding (track)
-  (bind-seq-nth "track-color-r-effective" track))
+;; The lane strip's edit scope (`all`: project lanes edit the shared slot
+;; every track inherits, else this track's fork) and the UI-only slider step
+;; per lane: `(dict :key k :step s)` entries keyed by the lane's process id
+;; and inlet, so a forked lane keeps its own step (0 = free).
+(def-kind lane-edit
+  :key ()
+  :state ((all false)
+          (steps '())))
 
-(def track-color-g-binding (track)
-  (bind-seq-nth "track-color-g-effective" track))
+;; The lane patchbay: shown under the strip, the out port being dragged (or
+;; armed by a click; -1 when idle: port id 0 is a legal port) and its place
+;; as the port shader compares it (`pending-bay`, `pending-slot`: see
+;; `port-bay`), the selected cable (a dict, nil for none), the graph node
+;; bays registered by the views that expand a node (`(ns graph node)` lists,
+;; newest first) and a node bay's selected process (its proc-id; -1 for
+;; none).
+(def-kind patch-view
+  :key ()
+  :state ((show true)
+          (pending -1)
+          (pending-bay -1)
+          (pending-slot -1)
+          (cable :any :default nil)
+          (node-targets '())
+          (node-selected -1)))
 
-(def track-color-b-binding (track)
-  (bind-seq-nth "track-color-b-effective" track))
+;; A patchbay card's menu: where it opened, the bay's namespace and the
+;; process it targets (its proc-id and name).
+(def-kind card-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (bay -1)
+          (proc-id -1)
+          (name "")))
+
+;; The process the + box just added, waiting for the host to list it so its
+;; lane can be selected: the track, the class and the proc-ids the track had
+;; before (`*lane-add-sync*` resolves it).
+(def-kind lane-add
+  :key ()
+  :state ((track track :default nil)
+          (class "")
+          (known '())))
+
+;; The pad grid: the rack whose page was set last and that page (any other
+;; rack opens on its own default page), and the pad the rack panel focuses.
+(def-kind pad-view
+  :key ()
+  :state ((group group :default nil)
+          (page 0)
+          (focus pad :default nil)))
+
+;; The pad grid's role menu: where it opened and the pad it targets.
+(def-kind pad-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (pad pad :default nil)))
+
+;; ── Tracks ──
+
+;; Track i, from a position the host hands over (drop meta, a key handler,
+;; the step cursor hook); nil when there is none.
+(def track-at (i) (if (= i nil) nil (track i)))
+
+(def pointer-volume (event)
+  (max 0.0 (min 1.0 (* 0.5 (+ event.sx 1.0)))))
+
+;; x's (a track's or a bus's) volume from a fader click or drag.
+(def set-volume! (x event)
+  (unless (= event.sx nil)
+    (set! x.volume (pointer-volume event))))
+
+;; `text` cut to `max-chars`, ending in ".." when cut.
+(def clip-label (text max-chars)
+  (let ((s (str text)))
+    (if (> (len s) max-chars)
+      (str (substring s 0 (- max-chars 2)) "..")
+      s)))
 
 (def track-name-max-chars 9)
 
-(def track-name-display (name)
-  (if (> (len name) track-name-max-chars)
-    (str (substring name 0 (- track-name-max-chars 2)) "..")
-    name))
+(def track-name-display (name) (clip-label name track-name-max-chars))
 
-;; Bound, never a raw `selected-bus` read: reading the defstate here made
-;; every track row (and every arrangement lane reusing this binding) re-render
-;; on each bus/group selection. The *sel-sync* projection in
-;; ui/seq-core-state.lisp owns that read and gates the Rust-owned per-track
-;; selection into one bindable field per row (eseq-4jv).
-(def track-selected-binding (i)
-  (eseq.seq-core-state/track-selected-vis-binding i))
+;; Entry `(dict :tid tid …)` of `entries` for t, or nil.
+(def entry-for (entries t) (find-by-key entries :tid t.tid))
 
-(def track-color (i)
-  (if (< i (len SEQ.track-colors))
-    (nth SEQ.track-colors i)
-    (list 0.34 0.48 0.98)))
+;; `entries` with t's entry replaced by `(dict :tid t.tid key value)`, less
+;; those of tracks no longer listed.
+(def with-entry (entries t key value)
+  (let ((tids (map (lambda (x) x.tid) (tracks))))
+    (cons (dict :tid t.tid key value)
+          (filter (lambda (entry)
+                    (let ((tid (get entry :tid)))
+                      (and (not (= tid t.tid)) (listed? tid tids))))
+                  entries))))
 
-(def track-color-r (i muted)
-  (let ((r (nth (track-color i) 0)))
-    (if muted (+ (* r 0.34) (* 0.10 0.66)) r)))
+(def project-cursor-step (t step)
+  (mod step (max 1 t.num-steps)))
 
-(def track-color-g (i muted)
-  (let ((g (nth (track-color i) 1)))
-    (if muted (+ (* g 0.34) (* 0.10 0.66)) g)))
-
-(def track-color-b (i muted)
-  (let ((b (nth (track-color i) 2)))
-    (if muted (+ (* b 0.34) (* 0.11 0.66)) b)))
-
-(def row-bg (selected muted)
-  (if selected
-    :mixer-strip-selected-bg
-    (if muted
-      :mixer-strip-muted-bg
-      :buffer-bg)))
-
-(def row-border (selected)
-  (if selected
-    :mixer-strip-selected-border
-    :mixer-strip-border))
-
-(def timebase-options
-  '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
-
-(def track-timebase (i)
-  (if (< i (len SEQ.track-timebases))
-    (nth SEQ.track-timebases i)
-    "16"))
-
-(def set-row-timebase (track label)
-  (let ((plock-selected
-      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (if plock-selected
-        (seq-plock-timebase label)
-        (seq-set-timebase label)))))
-
-(defstate expanded-track-ids '())
-
-(defstate track-editor-state '())
-
-(def list-contains? (xs item)
-  (> (len (filter (lambda (x) (= x item)) xs)) 0))
-
-(def list-remove (xs item)
-  (filter (lambda (x) (not (= x item))) xs))
-
-(def expanded-track-field (track-id)
-  (str "track-expanded-" track-id))
-
-(def track-id-at (track)
-  (if (< track (len SEQ.track-ids))
-    (nth SEQ.track-ids track)
-    track))
-
-(def track-index-for-id (track-id)
-  (let ((matches
-      (filter
-        (lambda (i) (= (nth SEQ.track-ids i) track-id))
-        (range 0 (len SEQ.track-ids)))))
-    (if (> (len matches) 0)
-      (nth matches 0)
-      -1)))
-
-(def project-cursor-step (track step)
-  (mod step (max 1 (track-num-steps track))))
-
-;; `cursor-step` is a mutable vanilla global; a module must read it through its
-;; owner's accessor or the late-binding heal freezes the value (§10 hazard m).
-(def global-cursor-step-for-track (track)
-  (project-cursor-step track (eseq.seq-core-state/cursor-step-value)))
-
-(def sync-track-cursor-to-global (track)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (set-track-cursor
-      (track-id-at track)
-      (eseq.seq-core-state/cursor-step-value))
-    nil))
+(def sync-track-cursor-to-global (t)
+  (set-track-cursor t (eseq.seq-core-state/cursor-step-value)))
 
 (def sync-all-track-cursors-to-global ()
-  (for-each
-    (lambda (track) (sync-track-cursor-to-global track))
-    (range 0 (len SEQ.track-ids))))
+  (for-each sync-track-cursor-to-global (tracks)))
 
-;; Plain selections reset the range anchor; additive clicks leave it intact.
-(def track-selection-anchor nil)
-
-;; Selecting an edit target must not change workspace layout. Opening FX is an
-;; explicit gesture owned by show-fx-for-track (track-name double-click).
-(def select-track-for-edit (track)
-  (do
-    (set! track-selection-anchor track)
-    (set! eseq.seq-core-state/selected-bus -1)
-    (if (= SEQ.current-track track) nil (seq-clear-selection))
-    (seq-set-track track)
-    (sync-track-cursor-to-global track)))
+;; Selecting an edit target must not change workspace layout: opening an
+;; editor is an explicit gesture (a name double-click opens the piano roll).
+(def select-track-for-edit (t)
+  (set! grid-select.anchor t)
+  (set! eseq.seq-core-state/selected-bus -1)
+  (unless t.selected (seq-clear-selection))
+  (set! selection.track t)
+  (sync-track-cursor-to-global t))
 
 (def track-selection-click? (event)
-  (or (get event :shift) (get event :additive-selection)))
+  (or event.shift event.additive-selection))
 
-(def track-click (event track)
-  (do
-    (if (get event :shift)
-      (let ((anchor (if (= track-selection-anchor nil)
-                      SEQ.current-track
-                      track-selection-anchor)))
-        (do
-          (set! track-selection-anchor anchor)
-          (set! eseq.seq-core-state/selected-bus -1)
-          (seq-select-tracks
-            (eseq.seq-core-state/track-range-in-order
-              (eseq.drum-rack-v2/visible-track-order) anchor track)
-            track)))
-      (if (get event :additive-selection)
-        (do
-          (set! eseq.seq-core-state/selected-bus -1)
-          (seq-toggle-track-selected track))
-        (select-track-for-edit track)))
-    (sync-track-cursor-to-global track)))
+;; Shift-click = select the range from the anchor in the grid's visual order;
+;; cmd-click = toggle membership; a plain click selects the track for edit.
+;; A held anchor whose track is gone falls back to the current track.
+(def track-click (event t)
+  (if event.shift
+    (let ((held grid-select.anchor)
+          (anchor (if (listed? held (tracks)) held (or selection.track t))))
+      (set! grid-select.anchor anchor)
+      (set! eseq.seq-core-state/selected-bus -1)
+      (seq-select-tracks
+        (map (lambda (m) m.index)
+          (eseq.seq-core-state/track-range-in-order
+            (eseq.drum-rack-v2/visible-track-order) anchor t))
+        t.index))
+    (if event.additive-selection
+      (do
+        (set! eseq.seq-core-state/selected-bus -1)
+        (seq-toggle-track-selected t.index))
+      (select-track-for-edit t)))
+  (sync-track-cursor-to-global t))
 
 ;; Modified track-control clicks select tracks without also editing a control.
-(def track-control-click (event track action)
+(def track-control-click (event t action)
   (if (track-selection-click? event)
-    (track-click event track)
+    (track-click event t)
     (action)))
 
-(def activate-track-for-edit (track)
-  (select-track-for-edit track))
+;; A header control's click on t: a modified click selects tracks, a plain
+;; one selects t for edit and runs `action`.
+(def track-toggle-click (t action)
+  (lambda (event)
+    (track-control-click event t
+      (lambda () (select-track-for-edit t) (action)))))
 
-(def open-piano-roll-for-track (track)
-  (do
-    ;; A badge's first click may arm deletion; double-click is navigation.
-    (seq-clear-delete-target)
-    (activate-track-for-edit track)
-    (if (eseq.track-collapse/empty-instrument? track)
-      (eseq.browser/open-device-picker)
-      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
-        (eseq.seq-panels/seq-show-fx-lower-panel)
-        (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track)))))
+(def open-piano-roll-for-track (t)
+  ;; A badge's first click may arm deletion; double-click is navigation.
+  (seq-clear-delete-target)
+  (select-track-for-edit t)
+  (if (= t.instrument-type "empty")
+    (eseq.browser/open-device-picker)
+    (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+      (eseq.seq-panels/seq-show-fx-lower-panel)
+      (eseq.seq-panels/seq-open-piano-roll-bottom-for-track t.index))))
 
-(def show-fx-for-track (track)
-  (do
-    (select-track-for-edit track)
-    (if (eseq.track-collapse/empty-instrument? track)
-      (eseq.browser/open-device-picker)
-      (eseq.seq-panels/seq-show-fx-lower-panel))))
+;; ── Expanded step editors ──
 
-(def track-expanded? (track-id)
-  (reactive-get "SEQV" (expanded-track-field track-id)))
+(def expanded-tracks ()
+  (filter (lambda (t) t.expanded) (tracks)))
 
-(def set-track-expanded (track-id expanded)
-  (do
-    (reactive-set "SEQV" (expanded-track-field track-id) expanded)
-    (if expanded
-      (let ((track (track-index-for-id track-id)))
-        (if (>= track 0)
-          (sync-expanded-step-slots-for track track-id)
-          nil))
-      (seqv-clear-expanded-step-slots track-id))
-    (set! expanded-track-ids
-      (if expanded
-        (if (list-contains? expanded-track-ids track-id)
-          expanded-track-ids
-          (append expanded-track-ids (list track-id)))
-        (list-remove expanded-track-ids track-id)))))
+(def set-track-expanded (t expanded)
+  (let ((others (filter (lambda (tid) (not (= tid t.tid))) seq-view.expanded)))
+    (set! seq-view.expanded (if expanded (cons t.tid others) others)))
+  (set! t.expanded expanded))
 
-(def editor-state-for (track-id)
-  (let ((matches (filter
-      (lambda (state) (= (get state :id) track-id))
-      track-editor-state)))
-    (if (> (len matches) 0)
-      (nth matches 0)
-      (dict :id track-id :param-mode 0 :cursor-step nil))))
+;; Steps per page (and slots in an expanded editor).
+(def slots-per-page eseq.seq-core-state/page-size)
 
-(def upsert-editor-state (track-id next-state)
-  (if (list-contains? (map (lambda (state) (get state :id)) track-editor-state) track-id)
-    (set! track-editor-state
-      (map
-        (lambda (state)
-          (if (= (get state :id) track-id) next-state state))
-        track-editor-state))
-    (set! track-editor-state (append track-editor-state (list next-state)))))
+;; Track t's 16-step pages (one at least).
+(def track-pages (t)
+  (max 1 (floor (/ (+ t.num-steps (- slots-per-page 1)) slots-per-page))))
 
-(def track-param-mode (track-id)
-  (get (editor-state-for track-id) :param-mode))
+;; The page step `step` of track t is on.
+(def page-of-step (t step)
+  (min (floor (/ step slots-per-page)) (- (track-pages t) 1)))
 
-(def set-track-param-mode (track-id mode)
-  (do
-    (upsert-editor-state track-id
-      (merge (editor-state-for track-id) :param-mode mode))
-    (let ((track (track-index-for-id track-id)))
-      (if (>= track 0)
-        (sync-expanded-step-slots-for track track-id)
-        nil))))
+;; t's own step cursor while it holds one (`seq-view.cursors`), else the
+;; shared cursor; wrapped to its length.
+(def track-cursor (t)
+  (let ((entry (entry-for seq-view.cursors t)))
+    (project-cursor-step t (if entry (get entry :step) grid-cursor.step))))
 
-(def track-cursor (track-id)
-  (let ((track (track-index-for-id track-id)))
-    (if (>= track 0)
-      (let ((stored-step (reactive-get "SEQV" (str "cursor-step-" track-id))))
-        (if (= stored-step nil)
-          (global-cursor-step-for-track track)
-          (project-cursor-step track stored-step)))
-      0)))
+(def track-param-mode (t)
+  (let ((entry (entry-for seq-view.modes t)))
+    (if entry (get entry :mode) 0)))
 
-(def cursor-highlight-field (track step)
-  (str "seqv-track-cursor-" track "-" step))
+;; t's editor fields: param mode `mode`, step cursor `cursor` and the page it
+;; is on, each written only when it changes.
+(def put-editor-state (t mode cursor)
+  (unless (= t.param-mode mode) (set! t.param-mode mode))
+  (unless (= t.cursor cursor) (set! t.cursor cursor))
+  (let ((page (page-of-step t cursor)))
+    (unless (= t.page page) (set! t.page page))))
 
-(def cursor-highlight-binding (track step)
-  (bind "SEQV" (cursor-highlight-field track step)))
-
-;; Clearing must target the exact field set last time. Recomputing it from the
-;; stored step goes stale when num-steps or the id->index mapping changed in
-;; between, leaving ghost cursor highlights behind.
-(def set-track-cursor (track-id step)
-  (let ((track (track-index-for-id track-id)))
-    (if (>= track 0)
-      (let ((previous-field (reactive-get "SEQV" (str "cursor-field-" track-id)))
-          (next-field (cursor-highlight-field track (project-cursor-step track step)))
-          (projected-step (project-cursor-step track step)))
-        (do
-          (reactive-set "SEQV" (str "cursor-step-" track-id) projected-step)
-          (if (or (= previous-field nil) (= previous-field next-field))
-            nil
-            (reactive-set "SEQV" previous-field false))
-          (reactive-set "SEQV" next-field true)
-          (reactive-set "SEQV" (str "cursor-field-" track-id) next-field)
-          (if (track-expanded? track-id)
-            (sync-expanded-step-slots-for track track-id)
-            nil)))
-      nil)))
-
-(def cursor-step-changed (track step)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (set-track-cursor (track-id-at track) step)
+;; The track fields keyed by position (`expanded`, `param-mode`, `cursor`,
+;; `page`) follow their track by its tid: when tracks move (a delete, its
+;; undo, a reorder) or a length changes, each position takes the state of the
+;; track now there. Nil-returning, like `*sel-sync*`; only the fields that
+;; change re-render their rows.
+(effect-buffer "*seq-expand-sync*"
+  (let ((tids seq-view.expanded))
+    (for-each (lambda (t)
+                (let ((expanded (listed? t.tid tids)))
+                  (unless (= t.expanded expanded)
+                    (set! t.expanded expanded))
+                  (put-editor-state t (track-param-mode t) (track-cursor t))))
+      (tracks))
     nil))
+
+(def set-track-param-mode (t mode)
+  (set! seq-view.modes (with-entry seq-view.modes t :mode mode))
+  (put-editor-state t mode t.cursor))
+
+(def set-track-cursor (t step)
+  (let ((cursor (project-cursor-step t step)))
+    (set! seq-view.cursors (with-entry seq-view.cursors t :step cursor))
+    (put-editor-state t (track-param-mode t) cursor)))
+
+;; The step cursor moved to `step` on the track at position `track` (the
+;; grid's cursor hook): the grid draws it there.
+(def cursor-step-changed (track step)
+  (set! grid-cursor.step step)
+  (let ((t (track-at track)))
+    (when t (set-track-cursor t step))))
 
 ;; Stub-then-override protocol (module spec §10 hazard i). The flat name stays
 ;; pinned through the §3 cross-module def escape hatch because
@@ -393,17 +417,13 @@
 (def eseq.vanilla/sequencer-cursor-step-changed (track step)
   (eseq.sequencer/cursor-step-changed track step))
 
-(def current-track-id ()
-  (track-id-at SEQ.current-track))
-
-(def current-track-expanded? ()
-  (track-expanded? (current-track-id)))
-
 (def current-selected-step ()
-  (track-cursor (current-track-id)))
+  (let ((t selection.track))
+    (if t (track-cursor t) 0)))
 
 (def current-param-mode ()
-  (track-param-mode (current-track-id)))
+  (let ((t selection.track))
+    (if t (track-param-mode t) 0)))
 
 ;; Returns a widget stable key for Rust to look up verbatim
 ;; (`current_step_param_number_picker_key`, src/ui/input.rs:762, feeds
@@ -412,113 +432,102 @@
 ;; Rust has to emit the qualified spelling itself — the module name is part of
 ;; the value, not just of the def.
 (def current-number-picker-key ()
-  (str "eseq.sequencer/expanded-param-number-picker-" (current-track-id)))
+  (let ((t selection.track))
+    (if t (str "eseq.sequencer/expanded-param-number-picker-" t.tid) "")))
 
 (def select-current-param-mode (mode)
-  (set-track-param-mode (current-track-id) mode))
+  (let ((t selection.track))
+    (when t (set-track-param-mode t mode))))
 
 (def param-mode-for-key (key)
   (if (not (= (len key) 1))
     -1
-    (if (or (= key "v") (= key "V"))
-      0
-      (if (or (= key "d") (= key "D"))
-        1
-        (if (or (= key "t") (= key "T"))
-          3
-          (if (or (= key "p") (= key "P"))
-            4
-            (if (or (= key "s") (= key "S"))
-              5
-              (if (or (= key "x") (= key "X"))
-                (if (> (len SEQ.process-lanes) 0) eseq.seqv-track-params/seqv-process-lane-mode-offset -1)
-                -1))))))))
+    (match (string-downcase key)
+      "v" 0
+      "d" 1
+      "t" 3
+      "p" 4
+      "s" 5
+      "x" (let ((t selection.track))
+            (if (and t (not (empty? t.lanes)))
+              tp/seqv-process-lane-mode-offset
+              -1))
+      _ -1)))
 
 ;; A selected drum rack keeps its bus selection: Cmd+A then spans its members
 ;; (step-grid-interactions/select-all-steps).
 (def select-all-current-track-steps ()
-  (do
-    (if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0)
-      nil
-      (set! eseq.seq-core-state/selected-bus -1))
-    (eseq.step-grid-interactions/select-all-steps)))
+  (unless (eseq.drum-rack-v2/selected-bus-rack)
+    (set! eseq.seq-core-state/selected-bus -1))
+  (sgi/select-all-steps))
 
 (def collapse-all-tracks ()
-  (do
-    (for-each
-      (lambda (track-id) (set-track-expanded track-id false))
-      expanded-track-ids)
-    (set! expanded-track-ids '())))
+  (for-each (lambda (t) (set-track-expanded t false)) (expanded-tracks)))
 
 (def toggle-current-track-expanded ()
-  (let ((track-id (current-track-id)))
-    (do
-      (set! eseq.seq-core-state/selected-bus -1)
-      (set-track-expanded track-id (not (track-expanded? track-id))))))
+  (let ((t selection.track))
+    (set! eseq.seq-core-state/selected-bus -1)
+    (when t (set-track-expanded t (not t.expanded)))))
 
+;; The grid's keys: a param mode's letter picks that mode, the others run
+;; their action. Whether the key was handled.
 (def handle-key (key text)
   (let ((mode (param-mode-for-key key)))
     (if (>= mode 0)
       (do (select-current-param-mode mode) true)
-      (if (= key "LEFT")
-        (do (eseq.step-grid-interactions/cursor-left) true)
-        (if (= key "RIGHT")
-          (do (eseq.step-grid-interactions/cursor-right) true)
-          (if (= key "C-a")
-            (do (select-all-current-track-steps) true)
-            (if (or (= key "C-h") (= key "C-H"))
-              (do (collapse-all-tracks) true)
-              (if (or (= key "BS") (= key "Delete"))
-                (do
-                  (if (lane-patch-delete-selected)
-                    nil
-                    (eseq.step-grid-interactions/delete-selected-steps))
-                  true)
-                (if (= key "RET")
-                  (do (eseq.step-grid-interactions/cursor-toggle) true)
-                  false)))))))))
+      (let ((action (match key
+                      "LEFT" sgi/cursor-left
+                      "RIGHT" sgi/cursor-right
+                      "C-a" select-all-current-track-steps
+                      "C-h" collapse-all-tracks
+                      "C-H" collapse-all-tracks
+                      "BS" delete-key
+                      "Delete" delete-key
+                      "RET" sgi/cursor-toggle
+                      _ nil)))
+        (when action (action) true)))))
 
-(def track-menu-click (track)
-  (let ((track-id (track-id-at track)))
-    (do
-      (activate-track-for-edit track)
-      (set-track-expanded track-id (not (track-expanded? track-id))))))
+;; BS / Delete: a selected patch-bay cable goes first, else the selected steps.
+(def delete-key ()
+  (unless (lane-patch-delete-selected)
+    (sgi/delete-selected-steps)))
+
+(def track-menu-click (t)
+  (select-track-for-edit t)
+  (set-track-expanded t (not t.expanded)))
+
+;; ── Drops ──
+;; Drop events carry the host's drop meta: a track by position, the address
+;; the add/drop host commands take.
 
 (def drop-sample-on-track (event)
-  (let ((payload (get event :payload))
-        (target (get event :target)))
-    (let ((path (get payload :path))
-          (track (get target :track)))
-      (if path
-        (do
-          (if (not (get target :from-pad))
-            (activate-track-for-edit track))
-          (eseq.browser/drop-sample-on-track event))
-        (status "Drop a sample file, not a folder")))))
+  (let ((target (get event :target))
+        (t (track-at (get target :track))))
+    (if (get (get event :payload) :path)
+      (do
+        (when (and t (not (get target :from-pad)))
+          (select-track-for-edit t))
+        (eseq.browser/drop-sample-on-track event))
+      (status "Drop a sample file, not a folder"))))
 
 (def drop-on-track (event)
-  (if (= (get event :drag-type) "sound")
+  (if (listed? (get event :drag-type) (list "sound" "instrument" "instrument-preset"))
     (eseq.browser/drop-sound-on-track event)
-    (if (or (= (get event :drag-type) "instrument")
-            (= (get event :drag-type) "instrument-preset"))
-      (eseq.browser/drop-sound-on-track event)
-      (drop-sample-on-track event))))
+    (drop-sample-on-track event)))
 
 (def drop-new-track (event)
-  (let ((payload (get event :payload)))
-    (let ((path (get payload :path))
-          (name (get payload :name)))
-      (if (= (get event :drag-type) "sound")
-        (if path
-          (host-command "add-track-from-sound" (dict :path path))
-          (status "Drop a Sound item, not a folder"))
-        (if (= (get event :drag-type) "instrument")
-          (eseq.browser/drop-instrument-new-track payload)
-          (if (= (get event :drag-type) "instrument-preset")
-            (eseq.browser/drop-preset-new-track payload nil)
-            (if path
-              (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-              (status "Drop a sample file, not a folder"))))))))
+  (let ((payload (get event :payload))
+        (path (get payload :path)))
+    (match (get event :drag-type)
+      "sound" (if path
+                (host-command "add-track-from-sound" (dict :path path))
+                (status "Drop a Sound item, not a folder"))
+      "instrument" (eseq.browser/drop-instrument-new-track payload)
+      "instrument-preset" (eseq.browser/drop-preset-new-track payload nil)
+      _ (if path
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+          (status "Drop a sample file, not a folder")))))
+
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -560,28 +569,47 @@
         (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
           (eseq.materials/color
             (rgba
-              (if (= active 1) 0.85 0.5)
-              (if (= active 1) 0.05 0.5)
-              (if (= active 1) 0.05 0.5)
+              (if (= active 1) 0.85 0.3)
+              (if (= active 1) 0.05 0.3)
+              (if (= active 1) 0.05 0.3)
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
 
+;; A group's color badge (its color by value).
 (defwidget seqv-track-color-badge
   :width 0.68 :height 1.5
   :paint-margin 0.08
   :state (track-r track-g track-b)
-  :bindable (track-r track-g track-b)
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.28)
       (rgba track-r track-g track-b 1.0)))
   )
 
+;; Shader color c (a vec3) pulled toward gray, as a track that is not heard
+;; (or whose lane a take governs) draws it: `eseq.view-kit/dimmed` in a
+;; shader. Shaders spell it `eseq.sequencer/silenced` (module spec §10
+;; hazard h).
+(defmacro silenced (c)
+  `(+ (* ,c 0.34) (* (vec3 0.10 0.10 0.11) 0.66)))
+
+;; A track's color badge: its color, pulled toward gray while it is not
+;; heard (muted, or silenced by a solo).
+(defwidget seqv-track-badge
+  :width 0.68 :height 1.5
+  :paint-margin 0.08
+  :state (track)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.28)
+      (rgba
+        (if (= track.audible 1) track.color (eseq.sequencer/silenced track.color))
+        1.0))))
+
 (defwidget seqv-track-volume-meter
   :width 8.2 :height 1.05
   :paint-margin 0.28
   :state (level volume)
-  :bindable (level volume)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
         (vol (min 1.0 (max 0.0 volume)))
@@ -649,32 +677,33 @@
     
     (sdf/fill (sdf/rounded-rect (* 0.96 width) (* 0.93 height) 0.98)
       (material
-        :lighting (lighting :edge-min -0.45 :edge-max 0.4
-          :light (vec3 0.1 -1.2 2.4) :shininess 24.0)
+        :lighting (lighting :edge-min -0.25 :edge-max 0.4
+          :light (vec3 0.1 -1.2 0.4) :shininess 24.0)
         :color 
         (if expanded 
           (rgba 0.18 0.18 0.20 1.0) 
-          :bg) 
+          :mixer-strip-bg) 
         ))
     (sdf/fill
       (sdf/translate -0.48 0
         (sdf/circle 0.12))
-      (material :color (rgba 0.60 0.62 0.68 1.0)))
+      (material :color :fg))
     (sdf/fill (sdf/circle 0.12)
-      (material :color (rgba 0.60 0.62 0.68 1.0)))
+      (material :color :fg))
     (sdf/fill
       (sdf/translate 0.48 0
         (sdf/circle 0.12))
-      (material :color (rgba 0.60 0.62 0.68 1.0)))))
+      (material :color :fg))))
 
 ;; Module spec §10 hazard (h): the two `:material` props that call this expand
 ;; much later, at shader-compile time, in a throwaway *implicit-module*
 ;; compiler, so "current module" there is `eseq.vanilla` and a bare call would
 ;; not find this macro.  Both call sites spell it `eseq.sequencer/…`.
 ;; Renamed off `seqv-aqua-slider-track-material` rather than mechanically
-;; stripped: bare `aqua-slider-track-material` is ui/materials.lisp's compat
-;; alias for `eseq.materials/slider-track-material`, and in that same
-;; implicit-module expansion the alias rung would have won.
+;; stripped: bare `aqua-slider-track-material` was ui/materials.lisp's compat
+;; alias for `eseq.materials/slider-track-material` (both gone with the
+;; legacy step grid, eseq-0l17.77), and in that same implicit-module
+;; expansion the alias rung would have won.
 (defmacro step-slider-track-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
@@ -697,170 +726,208 @@
                 (+ (* track-b 0.30) 0.08)
                 0.85))))))
 
+
+;; One grid row's playhead bar (row `row`, steps 16·row onward, of `track`):
+;; the playing step's column, and an amber underline beneath the step a
+;; length lane (`length!`) last set the pattern length to, drawn first so
+;; the playhead passes over it.
 (defwidget seqv-playhead-row-bar
   :width 48.8 :height 0.24
   :paint-margin 0.18
-  :state (col len-col)
-  :bindable (col len-col)
+  :state (track row)
   :shader
-  (sdf/layer
-  ;; Length-lane marker (`length!`): an amber underline beneath the step the
-  ;; lane last set the pattern length to. Drawn first so the playhead passes
-  ;; over it.
-  (if (< len-col 0)
+  (let ((col (if (= (floor (/ track.playhead 16.0)) row) (- track.playhead (* row 16.0)) -1.0))
+        (len-col (if (= (floor (/ track.length-step 16.0)) row)
+                   (- track.length-step (* row 16.0))
+                   -1.0)))
+    (sdf/layer
+      (if (< len-col 0)
+        (rgba 0 0 0 0)
+        (let ((len-start (/ (+ len-col 0.08) 16.0))
+              (len-end (/ (+ len-col 0.92) 16.0))
+              (len-half-w (* 0.5 aspect (- len-end len-start))))
+          (sdf/fill
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect len-half-w 0.2 0.06))
+            (material :color (rgba 0.94 0.63 0.24 0.95)))))
+      (if (< col 0)
+        (rgba 0 0 0 0)
+        (let ((step-w (/ 1.0 16.0))
+              (center (/ (+ col 0.5) 16.0))
+              (trail-start (max 0.0 (- center (* step-w 1.55))))
+              (start (- center (* step-w 0.46)))
+              (end (+ center (* step-w 0.46)))
+              (trail-half-w (* 0.5 aspect (- end trail-start)))
+              (__half_w (* 0.5 aspect (- end start)))
+              (__half_h 0.32)
+              (__radius 0.07))
+          (sdf/layer
+            (sdf/fill
+              (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ trail-start end)))))
+                    (y (* 0.5 y)))
+                (sdf/rounded-rect trail-half-w 0.09 0.06))
+              (material
+                :color
+                (rgba 0.32 0.48 1.0
+                  (* 0.42
+                    (smoothstep trail-start center (/ (+ x aspect) (* 2.0 aspect)))
+                    (smoothstep 0.82 0.0 (abs y))))))
+            (sdf/fill
+              (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ start end)))))
+                    (y (* 0.5 y)))
+                (sdf/rounded-rect __half_w __half_h __radius))
+              (material
+                :color
+                (mix
+                  (rgba 0.20 0.42 1.0 0.38)
+                  (rgba 0.82 0.92 1.0 1.0)
+                  (smoothstep 0.85 0.0 (abs y)))
+                :shadow (shadow
+                  :color (rgba 0.25 0.45 1.0 0.72)
+                  :blur 0.12
+                  :offset (vec2 0 0))))))))))
+
+;; The lamp behind row `row`'s number in `track`'s grid, the row's
+;; background: lit while the playhead plays in that row.
+(defwidget seqv-row-lamp
+  :width 1 :height 1
+  :state (track row)
+  :shader
+  (if (< track.playhead 0)
     (rgba 0 0 0 0)
-    (let ((len-start (/ (+ len-col 0.08) 16.0))
-          (len-end (/ (+ len-col 0.92) 16.0))
-          (len-half-w (* 0.5 aspect (- len-end len-start))))
-      (sdf/fill
-        (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
-              (y (* 0.5 y)))
-          (sdf/rounded-rect len-half-w 0.2 0.06))
-        (material :color (rgba 0.94 0.63 0.24 0.95)))))
-  (if (< col 0)
-    (rgba 0 0 0 0)
-    (let ((step-w (/ 1.0 16.0))
-          (center (/ (+ col 0.5) 16.0))
-          (trail-start (max 0.0 (- center (* step-w 1.55))))
-          (start (- center (* step-w 0.46)))
-          (end (+ center (* step-w 0.46)))
-          (trail-half-w (* 0.5 aspect (- end trail-start)))
-          (__half_w (* 0.5 aspect (- end start)))
-          (__half_h 0.32)
-          (__radius 0.07))
+    (if (= (floor (/ track.playhead 16.0)) row)
       (sdf/layer
         (sdf/fill
-          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ trail-start end)))))
-                (y (* 0.5 y)))
-            (sdf/rounded-rect trail-half-w 0.09 0.06))
-          (material
-            :color
-            (rgba 0.32 0.48 1.0
-              (* 0.42
-                (smoothstep trail-start center (/ (+ x aspect) (* 2.0 aspect)))
-                (smoothstep 0.82 0.0 (abs y))))))
-        (sdf/fill
-          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ start end)))))
-                (y (* 0.5 y)))
-            (sdf/rounded-rect __half_w __half_h __radius))
-          (material
-            :color
-            (mix
-              (rgba 0.20 0.42 1.0 0.38)
-              (rgba 0.82 0.92 1.0 1.0)
-              (smoothstep 0.85 0.0 (abs y)))
-            :shadow (shadow
-              :color (rgba 0.25 0.45 1.0 0.72)
-              :blur 0.12
-              :offset (vec2 0 0)))))))))
+            (sdf/rounded-rect width height 0.25)
+          (material :color (rgba 1.00 1.08 1.0 0.25))))
+      (rgba 0 0 0 0))))
 
+;; The step shell's layers, shared by the grid's `seqv-step-shell` and the
+;; expanded editor's `seqv-slot-shell`: the gate `active`, the p-lock kind
+;; `lock` (0 none, 1 a lock, 2 a p-lock variant) with the variant's color
+;; `variant` (a vec3), and `under`, layers drawn first (the grid's duration
+;; span). The widget declares `track`, `selected` and `off-fill-r/-g/-b`.
+;; Shaders spell it `eseq.sequencer/step-shell-shader` (hazard h).
+(defmacro step-shell-shader (active lock variant &rest under)
+  `(let ((active ,active)
+         (plock-kind ,lock)
+         (muted (- 1.0 track.audible))
+         (tc (if (= track.governed 1) (eseq.sequencer/silenced track.color) track.color))
+         (vcol (rgba ,variant 1.0))
+         (seqcol (rgba 0.545 0.545 0.588 0.95))
+         (radius (if (= active 1) 1 0.7))
+         (border input-color)
+         (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
+     (sdf/layer
+       ,@under
+       ;; border
+       (sdf/fill (sdf/circle (* radius 0.8))
+         (material
+           :lighting (lighting :edge-min -0.12 :edge-max 0.9
+             :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
+           :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2))
+                     (eseq.materials/color border border))))
+       (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
+         (material
+           :lighting (lighting :edge-min -0.15 :edge-max 1.0
+             :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
+           :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
+       ;; p-lock indicator
+       (sdf/fill
+         (sdf/translate 0.0 0.89
+           (sdf/rounded-rect 0.17 0.08 0.09))
+         (material
+           ;; The tick tracks p-locks, not the gate: off steps are a
+           ;; deliberate p-lock target (warp bpm, sampler ranges) and must
+           ;; show the same indicator an on step shows. Only the muted
+           ;; neutral fill still keys off `active`.
+           :color (if (= plock-kind 0)
+                    (if (= active 1)
+                      (if (= muted 1) border (rgba 0 0 0 0))
+                      (rgba 0 0 0 0))
+                    (if (= muted 1)
+                      border
+                      (if (= plock-kind 2) vcol seqcol)))
+           :shadow (shadow
+                     :color (if (= muted 1)
+                              (rgba 0 0 0 0)
+                              (if (= plock-kind 2) (rgba ,variant 0.70) (rgba 0 0 0 0)))
+                     :blur (if (= muted 1) 0.0 (if (= plock-kind 2) 0.12 0.0))
+                     :offset (vec2 0 0))))
+       ;; toggled fill
+       (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.7)))
+         (material
+           :lighting (lighting :edge-min -0.25 :edge-max 1.25
+             :light (vec3 0.01 -0.2 1.8) :shininess 32.0)
+           :color (if (= active 1)
+                    (if (= muted 1)
+                      (* 0.7 (eseq.materials/color offcol border))
+                      (eseq.materials/color
+                        (rgba (* tc (vec3 0.72 0.72 0.82)) 1.0)
+                        (rgba tc 1.0)))
+                    (rgba 0 0 0 0)))))))
+
+;; A step's shell: its gate, selection, p-lock tick (in the variant's color
+;; for a p-lock variant) and, while the step is held by an earlier step's
+;; duration, the span that duration covers. `selected` is the step's
+;; (`#'step.selected`): a scalar state, so the renderer's selected rim
+;; (`:selected-color`) follows it. Colored by its track, dimmed while a take
+;; governs the lane; a track that is not heard swaps the colored layers for
+;; neutral ones.
 (defwidget seqv-step-shell
   :width 1.5 :height 2.5
   :paint-margin 1
-  :state (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b off-fill-r off-fill-g off-fill-b)
-  :bindable (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b)
+  :state (step track selected off-fill-r off-fill-g off-fill-b)
   :shader
-  (if (= hide 1)
-    (rgba 0 0 0 0)
-    (let ((vcol (rgba variant-r variant-g variant-b 1.0))
-        (seqcol (rgba 0.545 0.545 0.588 0.95))
-        (radius (if (= active 1) 1 0.7))
-        (border input-color)
-        (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
-      ;; duration visualization
-      (sdf/layer
-        (sdf/fill
-          (sdf/translate 0.0 0.0
-            (sdf/rounded-rect (* 3.0 width) (* 1.0 height) 0))
-          (material
-            :lighting (lighting :edge-min -0.32 :edge-max 1.293
-              :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-            :color (* 0.7 (if (= duration 1)
-                (if (= muted 1)
-                  (rgba 0 0 0 0)
-                  (eseq.materials/color
-                    (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
-                    (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
-                (rgba 0 0 0 0)))))
-        ;; border
-        (sdf/fill (sdf/circle (* radius 0.8))
-          (material
-            :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
-            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (eseq.materials/color border border)))
-          )
-        
-        (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
-          (material
-            :lighting (lighting :edge-min -0.15 :edge-max 1.0
-              :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
-            :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
-        ;; p-lock indicator
-        (sdf/fill
-          (sdf/translate 0.0 0.89
-            (sdf/rounded-rect 0.17 0.08 0.09))
-          (material
-            ;; The tick tracks p-locks, not the gate: off steps are a
-            ;; deliberate p-lock target (warp bpm, sampler ranges) and must
-            ;; show the same indicator an on step shows. Only the muted
-            ;; neutral fill still keys off `active`.
-            :color (if (= plock-kind 0)
-              (if (= active 1)
-                (if (= muted 1)
-                  border
-                  (rgba 0 0 0 0))
-                (rgba 0 0 0 0))
-              (if (= muted 1)
-                border
-                (if (= plock-kind 2)
-                  vcol
-                  seqcol)))
-            :shadow (shadow
-              :color (if (= muted 1)
-                (rgba 0 0 0 0)
-                (if (= plock-kind 2)
-                  (rgba variant-r variant-g variant-b 0.70)
-                  (rgba 0 0 0 0)))
-              :blur (if (= muted 1)
-                0.0
-                (if (= plock-kind 2) 0.12 0.0))
-              :offset (vec2 0 0))))
-        ;; toggled fill
-        (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
-          (material
-            :lighting (lighting :edge-min -0.15 :edge-max 1.15
-              :light (vec3 0.01 -0.4 1.8) :shininess 32.0)
-            :color (if (= active 1)
-              (if (= muted 1)
-                (* 0.7 (eseq.materials/color offcol border))
-                (eseq.materials/color
-                  (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-                  (rgba track-r track-g track-b 1.0)))
-              (rgba 0 0 0 0))))))))
+  (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color
+    ;; duration span
+    (sdf/fill
+      (sdf/translate 0.0 0.0
+        (sdf/rounded-rect (* 3.0 width) (* 1.0 height) 0))
+      (material
+        :lighting (lighting :edge-min -0.32 :edge-max 1.293
+          :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
+        :color (* 0.7 (if (= step.held 1)
+                        (if (= muted 1)
+                          (rgba 0 0 0 0)
+                          (eseq.materials/color
+                            (mix border (rgba (* tc 0.85) 0.5) (if (= selected 1) 0.8 0.6))
+                            (if (= selected 1) border (rgba tc 0.6))))
+                        (rgba 0 0 0 0)))))))
 
-;; SEQ.song-track-governed carries one number per track (takes spec 10 UX):
-;; 0 = the lane is not playing a take (pattern lanes stay fully editable —
-;; jam with the step sequencer while the arrangement plays), 1 = the lane is
-;; take-governed (dimmed steps + non-interactive grid + lit Back-to-Song
-;; play button), 2 = a take lane the performer manually latched away
-;; (editable again; the grey play button returns it to the song).
-(def track-take-state (i)
-  (let ((state (nth SEQ.song-track-governed i)))
-    (if (= state nil) 0 state)))
+;; The step cursor's frame around step `index` of `track`: drawn while the
+;; track is selected and `cursor` (bound: the grid's `grid-cursor.step`, an
+;; expanded editor's `t.cursor`), wrapped to the track's length, is on it.
+(defwidget seqv-step-cursor
+  :width 1 :height 1
+  :state (index track cursor)
+  :shader
+  (let ((n (max 1.0 track.num-steps))
+        (at (- cursor (* n (floor (/ cursor n))))))
+    (sdf/layer
+      (sdf/stroke (sdf/rounded-rect (* width 0.94) (* height 0.99) 0.10)
+        0.055
+        (rgba 0.72 0.76 0.84 (* 0.95 (if (= index at) 1 0) track.in-selection))))))
 
-(def track-song-governed? (i)
-  (= (track-take-state i) 1))
+;; A track's take state (`track.governed`, takes spec 10 UX): take-none, the
+;; lane plays its pattern and stays fully editable (jam with the step
+;; sequencer while the arrangement plays); take-governed, a take plays on the
+;; lane (dimmed steps, non-interactive grid, lit Back-to-Song play button);
+;; take-latched, a take lane the performer manually latched away (editable
+;; again; the grey play button returns it to the song).
+(def song-governed? (t)
+  (= t.governed take-governed))
 
 ;; Per-track take-lane indicator / Back-to-Song button: a play triangle that
 ;; sits lit green while a take governs the lane and grey while the lane is
 ;; manually latched (clicking then hands it back to the song). `take-state`
-;; is the SEQ.song-track-governed value (0/1/2); at 0 the triangle renders
-;; fully transparent — the box is ALWAYS in the layout so lanes flipping
-;; between pattern and take never trigger a re-layout, only a repaint.
+;; is `track.governed`; at take-none the triangle renders fully transparent
+;; — the box is ALWAYS in the layout so lanes flipping between pattern and
+;; take never trigger a re-layout, only a repaint.
 (defwidget seqv-back-to-song-icon
   :width 1.5 :height 1.5
   :state (take-state)
-  :bindable (take-state)
   :shader
   (sdf/layer
     (sdf/fill
@@ -880,7 +947,6 @@
 (defwidget seqv-back-to-song-bg
   :width 1.5 :height 1.5
   :state (take-state)
-  :bindable (take-state)
   :shader
         (if (= take-state 1)
           (rgba 0.3 0.3 0.3 0.5)
@@ -888,49 +954,33 @@
             (rgba 0.32 0.33 0.37 0.5)
             (rgba 0 0 0 0))))
 
-;; Legacy step tick, moved verbatim from ui/step-grid.lisp when the *metal*
-;; buffer was unplugged from main.lisp. The expanded lane used it until its
-;; toggle switched to the shared `seqv-step-shell`; kept only so a reloaded
-;; step-grid.lisp still resolves (its identical copy is harmless — this one
-;; loads later and wins).
-(defwidget metal-track-tick
-  :width 1.5 :height 1.5
-  :state (active plocked selected track-r track-g track-b)
-  :bindable (active plocked selected track-r track-g track-b)
-  :shader
-  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
-    (sdf/translate 0 sel-y
-      (sdf/layer
-        (sdf/fill (sdf/circle 1)
-          (material
-            :lighting (lighting :edge-min -0.35 :edge-max 0.5
-              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-            :color
-            (* (if (= active 1) 1 0.3)
-               (eseq.materials/color
-                 (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
-                 (rgba track-r track-g track-b 1.0)))))))))
-
 ;; Compact mixer track row — the common track actions plus an inline
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; Names and structural edits rebuild only this header. Mute/solo styling
 ;; uses bindings throughout, including the name, so it never rebuilds a tree.
-(def track-header (i is-bare-track)
-  (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
-    (track-header-body i is-bare-track)))
+;; The arrangement draws its track headers with this one (`bare` true).
+(def track-header (t bare)
+  (subtree :key (str "seqv-track-header-" t.tid)
+    (track-header-body t bare)))
 
-(def track-volume-control (i)
-  (v-stack (box :height 0.13 )
+;; A fader over x's (a track's or a bus's) level meter, keyed `key`.
+(def volume-meter (key x on-click on-drag)
+  (v-stack (box :height 0.13)
     (box
-      :key (str "track-volume-control-" i)
+      :key key
       :width 8.2 :height 1.25
       :background "seqv-track-volume-meter"
-      :level (track-peak i)
-      :volume (track-volume-binding i)
-      :on-click (lambda (event)
-        (track-control-click event i (lambda () (set-track-volume-from-event i event))))
-      :on-drag (lambda (event) (set-track-volume-from-event i event))))
-  )
+      :level #'x.peak
+      :volume #'x.volume
+      :on-click on-click
+      :on-drag on-drag)))
+
+(def track-volume-control (t)
+  (volume-meter (str "track-volume-control-" t.index) t
+    (lambda (event)
+      (track-control-click event t
+        (lambda () (select-track-for-edit t) (set-volume! t event))))
+    (lambda (event) (select-track-for-edit t) (set-volume! t event))))
 
 ;; Step-grid sizing knob (content-tiers spec: customize tier). Every step
 ;; cell, the ghost filler cells that pad short rows, and the track colour
@@ -945,6 +995,10 @@
   :type :number :min 1 :max 4 :step 0.05
   :doc "Height (cells) of each step in the sequencer grid; track rows and the colour badge scale with it.")
 
+(defcustom step-cell-inner-fill-scale 1.0
+  :type :number :min 0.1 :max 1 :step 0.05
+  :doc "Scale of inner fill size of step cells.")
+
 ;; Header colour badge: stock 2.0 at the stock 1.55 step height.
 (def track-color-badge-height ()
   (* step-cell-height 1.29))
@@ -953,105 +1007,103 @@
 (def track-row-label-height ()
   (* step-cell-height 0.71))
 
-(def track-header-body (i is-bare-track)
-  (let ((name (nth SEQ.track-names i)))
+;; A header toggle (mute, solo) lit by `on`, a binding.
+(def header-toggle (text key on &key (bg :sequencer-toggle-off-bg)
+                    (active-bg :sequencer-solo-on-bg) (color :gray)
+                    (active-color :sequencer-solo-on-fg) (on-click nil))
+  (button text
+    :key key
+    :width 1.55 :height 1.2 :padding 0 :font-size 10
+    :border-color :transparent
+    :active on
+    :background-color bg
+    :active-background-color active-bg
+    :color color
+    :active-color active-color
+    :on-click on-click))
+
+(def track-header-body (t bare)
+  (let ((i t.index)
+        (c t.color))
     (box :background "seqv-track-container"
       :padding 0.1
-      
-      :on-click (lambda (event) (track-click event i))
+
+      :on-click (lambda (event) (track-click event t))
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "color-badge-" i)
           :width 0.68 :height (track-color-badge-height)
-          :background "seqv-track-color-badge"
-          :track-r (track-color-r-binding i)
-          :track-g (track-color-g-binding i)
-          :track-b (track-color-b-binding i)
-          :on-click (lambda (event) (track-click event i)))
+          :background "seqv-track-badge"
+          :track t
+          :on-click (lambda (event) (track-click event t)))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "arm-" i)
-          :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-record-arm i))))))
-        (if is-bare-track (box :width 1.55))
-        (button (str (+ i 1))
-          :key (str "mute-" i)
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :border-color :transparent
-          :active (bind-seq-nth "track-mutes" i)
-          :background-color :control-on-bg
-          :active-background-color :sequencer-toggle-off-bg
-          :color :control-on-fg
-          :active-color :gray
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-mute i))))))
-        (button "S"
-          :key (str "solo-" i)
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :active (bind-seq-nth "track-solos" i)
-          :background-color :sequencer-toggle-off-bg
-          :active-background-color :sequencer-solo-on-bg
-          :border-color :transparent
-          :color :gray
-          :active-color :sequencer-solo-on-fg
-          :on-click (lambda (event)
-            (track-control-click event i
-              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-solo i))))))
+          :active #'t.armed
+          :on-click (track-toggle-click t (lambda () (toggle! t.armed))))
+        (if bare (box :width 1.55))
+        (header-toggle (str (+ i 1)) (str "mute-" i) #'t.muted
+          :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
+          :color :control-on-fg :active-color :gray
+          :on-click (track-toggle-click t (lambda () (toggle! t.muted))))
+        (header-toggle "S" (str "solo-" i) #'t.soloed
+          :on-click (track-toggle-click t (lambda () (toggle! t.soloed))))
         (box :width 8.6 :height 1
           :key (str "select-" i)
           :background-color :transparent
-          :on-click (lambda (event) (track-click event i))
-          :on-double-click (lambda (evt) (open-piano-roll-for-track i))
-          (badge (track-name-display name)
+          :on-click (lambda (event) (track-click event t))
+          :on-double-click (lambda (evt) (open-piano-roll-for-track t))
+          ;; Lit (the plain look) while the track is heard: a binding
+          ;; cannot be negated, so the silenced look is `:color`.
+          (badge (track-name-display t.name)
             :key (str "track-name-label-" i)
-            :icon (eseq.track-collapse/type-icon i)
-            ;; Bound track color fills the device glyph (Logic-style).
-            :track-r (track-color-r-binding i)
-            :track-g (track-color-g-binding i)
-            :track-b (track-color-b-binding i)
+            :icon (eseq.track-collapse/instrument-icon t.instrument-type)
+            ;; The track color fills the device glyph (Logic-style),
+            ;; dimmed while the track is silent.
+            :track-r (dimmed-part c 0 true)
+            :track-g (dimmed-part c 1 true)
+            :track-b (dimmed-part c 2 true)
+            :muted-track-r (rgb-part c 0)
+            :muted-track-g (rgb-part c 1)
+            :muted-track-b (rgb-part c 2)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent
             :border-color :transparent
             :highlight-color :transparent
             :shadow-color :transparent
-            :muted (bind-seq-nth "track-muted-effective" i)
-            :color :dim
-            :muted-color (rgba 0.4 0.4 0.4 0.6)
+            :muted #'t.audible
+            :color (rgba 0.4 0.4 0.4 0.6)
+            :muted-color :dim
             :bg :transparent))
         (box :width 0.5)
-        (track-volume-control i)
+        (track-volume-control t)
         ;; Take-lane indicator (takes spec 10 UX): green = a take governs
         ;; the lane (steps dim, grid read-only); grey = the performer
         ;; latched the lane away — click returns it to the song; invisible
-        ;; on pattern lanes. Always laid out — the reactive take-state only
+        ;; on pattern lanes. Always laid out — the bound take state only
         ;; repaints the widget, so pattern<->take flips never re-layout.
-        (box :width 2 :height :fill 
+        (box :width 2 :height :fill
           :background "seqv-back-to-song-bg"
-          :take-state (bind-seq-nth "song-track-governed" i)
+          :take-state #'t.governed
           (box :width 2 :height 1.5
             :background "seqv-back-to-song-icon"
             :key (str "back-to-song-" i)
-            :take-state (bind-seq-nth "song-track-governed" i)
-            :on-click |x y r|
-            (if (> (track-take-state i) 0)
-              (seq-song-back-to-song-track i)
-              nil)))))))
+            :take-state #'t.governed
+            :on-click (lambda (event)
+              (when (> t.governed take-none)
+                (set! t.latched false)))))))))
 
-(def track-actions (i)
+(def track-actions (t)
   (h-stack :gap 0.35 :padding 0.85
     (box
-      :key (str "expand-" i)
+      :key (str "expand-" t.index)
       :width 3.5 :height 1.0
       :background "seqv-ellipsis-button"
-      :expanded (if (track-expanded? (nth SEQ.track-ids i)) 1 0)
+      :expanded (if t.expanded 1 0)
       :on-click (lambda (event)
-        (track-control-click event i (lambda () (track-menu-click i)))))
-    (box :width 0.1 :height 0.0)
-    ))
+        (track-control-click event t (lambda () (track-menu-click t)))))
+    (box :width 0.1 :height 0.0)))
 
 (def row-width 16)
 
@@ -1072,6 +1124,8 @@
     expanded-step-playhead-height
     (* 3 expanded-step-column-gap)))
 
+;; A step-cell gesture's track (nil between gestures) and, while dragging a
+;; step's duration edge, that step.
 (def drag-track nil)
 (def duration-drag-source nil)
 
@@ -1079,429 +1133,258 @@
   (let ((sx (get evt :sx)))
     (and (not (= sx nil)) (> sx 0.48))))
 
-(def set-duration-from-drag (track source step)
-  (do
-    (seq-set-track track)
-    (seq-set-step-param source :duration (max 1 (min 32 (+ (- step source) 1))))))
-
-(def grid-step-select-drag-start (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (do
-      (set! eseq.seq-core-state/selected-bus -1)
-      (seq-set-track track)
-      (set! drag-track track)
-      (eseq.step-grid-interactions/step-select-drag-start step evt))))
-
-(def grid-step-select-drag-over (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (if (and (= drag-track track) (not (= duration-drag-source nil)))
-      (set-duration-from-drag track duration-drag-source step)
-      (if (= drag-track track)
-        (do
-          (seq-set-track track)
-          (eseq.step-grid-interactions/step-select-drag-over-for-track track step evt))
-        nil))))
+(def set-duration-from-drag (source step)
+  (set! selection.track source.track)
+  (seq-set-step-param source.index :duration (max 1 (min 32 (+ (- step source.index) 1)))))
 
 ;; Song-governed lanes are non-interactive (takes spec 10 UX): while the
 ;; arrangement holds launch authority the Seq grid is a dimmed read-only view
 ;; of the session pattern — edits would silently target a pattern the lane is
 ;; not playing.
-(def grid-step-pointer-down (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (let ((use-selection (= SEQ.current-track track)))
-      (do
+(def grid-step-pointer-down (s evt)
+  (let ((t s.track))
+    (unless (song-governed? t)
+      ;; Read before selecting: a selection applies on the current track only.
+      (let ((use-selection t.selected)
+            (edge-drag (and s.active
+                            (not (sgi/selection-click? evt))
+                            (duration-edge? evt))))
         (set! eseq.seq-core-state/selected-bus -1)
-        (seq-set-track track)
-        (set! drag-track track)
-        (if (and (seq-track-step-active? track step) (not (eseq.step-grid-interactions/selection-click? evt)) (duration-edge? evt))
+        (set! selection.track t)
+        (set! drag-track t)
+        (if edge-drag
           (do
-            (set! duration-drag-source step)
-            (eseq.step-grid-interactions/step-clear-drag-state)
+            (set! duration-drag-source s)
+            (sgi/step-clear-drag-state)
             (eseq.seq-core-state/cool-off-follow)
-            (eseq.step-grid-interactions/set-track-cursor-step step)
-            (set-duration-from-drag track step step))
-          (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))))
+            (sgi/set-cursor-step-for-track t.index s.index)
+            (set-duration-from-drag s s.index))
+          (sgi/step-pointer-down-for-track
+            t.index s.index evt use-selection))))))
 
-(def grid-step-double-click (track step evt)
-  (if (track-song-governed? track)
-    nil
-    (do
-      (seq-set-track track)
-      (eseq.step-grid-interactions/step-double-click-for-track track step evt))))
+(def grid-step-drag (s evt)
+  (let ((t s.track))
+    (when (and (= drag-track t) (not (song-governed? t)))
+      (if duration-drag-source
+        (set-duration-from-drag duration-drag-source s.index)
+        (do
+          (set! selection.track t)
+          (sgi/step-select-drag-over-for-track t.index s.index evt))))))
 
-(def grid-step-pointer-up (track step evt)
-  (do
-    (if (and (= drag-track track)
-          (= duration-drag-source nil)
-          (not (track-song-governed? track)))
-      (do
-        (seq-set-track track)
-        (eseq.step-grid-interactions/step-pointer-up step evt))
-      nil)
+(def grid-step-double-click (s evt)
+  (let ((t s.track))
+    (unless (song-governed? t)
+      (set! selection.track t)
+      (sgi/step-double-click-for-track t.index s.index evt))))
+
+(def grid-step-pointer-up (s evt)
+  (let ((t s.track))
+    (when (and (= drag-track t) (not duration-drag-source) (not (song-governed? t)))
+      (set! selection.track t)
+      (sgi/step-pointer-up s.index evt))
     (set! drag-track nil)
     (set! duration-drag-source nil)))
-
-;; Single tight step button (no slider, no number).
-(def track-step-value (lists track step fallback)
-  (let ((track-list (if (< track (len lists)) (nth lists track) '())))
-    (if (< step (len track-list))
-      (nth track-list step)
-      fallback)))
 
 (def step-odd (step)
   (let ((odd1 (mod (floor (/ step 4)) 2))
       (odd2 (mod (floor (/ step 32)) 2)))
     (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
-(def step-cell (track step)
-  ;; Step cells use the step-color channels: same as the track color but
-  ;; additionally dimmed while the lane is take-governed. Muting is passed
-  ;; separately so the shader can replace colored layers with opaque neutral
-  ;; materials instead of receiving an already-dimmed track color.
-  (let ((track-r (bind-seq-nth "step-color-r-effective" track))
-      (track-g (bind-seq-nth "step-color-g-effective" track))
-      (track-b (bind-seq-nth "step-color-b-effective" track))
-      (muted (bind-seq-nth "track-muted-effective" track))
-      (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
-      (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
-      (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
-      (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
+;; Step s of track t: the cursor frame around the step's shell.
+(def step-cell (t s)
+  (box
+    :width step-cell-width :height step-cell-height
+    :key (str "step-cell-" t.index "-" s.index)
+    :on-mouse-down (lambda (evt) (grid-step-pointer-down s evt))
+    :on-drag (lambda (evt) (grid-step-drag s evt))
+    :on-mouse-up (lambda (evt) (grid-step-pointer-up s evt))
+    :on-double-click (lambda (evt) (grid-step-double-click s evt))
+    :background "seqv-step-cursor"
+    :index s.index
+    :track t
+    :cursor #'grid-cursor.step
     (box
       :width step-cell-width :height step-cell-height
-      :key (str "step-cell-" track "-" step)
-      :on-mouse-down (lambda (evt)
-        (grid-step-pointer-down track step evt))
-      :on-drag (lambda (evt)
-        (grid-step-select-drag-over track step evt))
-      :on-mouse-up (lambda (evt)
-        (grid-step-pointer-up track step evt))
-      :on-double-click (lambda (evt)
-        (grid-step-double-click track step evt))
-      :active (cursor-highlight-binding track step)
-      :selected (track-selected-binding track)
-      :hide 0
-      :background "cursor-highlight"
-      (box
-        :width step-cell-width :height step-cell-height
-        :align :center
-        :active (bind-seq (str "seq-track-step-active-" track "-" step))
-        :plock-kind plock-kind
-        :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-        :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-        :muted muted
-        :hide 0
-        :track-r track-r :track-g track-g :track-b track-b
-        :variant-r variant-r :variant-g variant-g :variant-b variant-b
-        :color :sequencer-step-border
-        :selected-color :sequencer-step-selected-border
-        :off-fill (if (= (step-odd step) 1)
-          :sequencer-step-off-fill-alt
-          :sequencer-step-off-fill)
-        :background "seqv-step-shell"))))
+      :align :center
+      :step s
+      :track t
+      :selected #'s.selected
+      :color :sequencer-step-border
+      :selected-color :sequencer-step-selected-border
+      :off-fill (if (= (step-odd s.index) 1)
+        :sequencer-step-off-fill-alt
+        :sequencer-step-off-fill)
+      :background "seqv-step-shell")))
 
-(def playhead-row (track track-id row)
+(def playhead-row (t row)
   (box
-    :key (str "playhead-row-" track-id "-" row)
+    :key (str "playhead-row-" t.tid "-" row)
     :width (* row-width step-cell-width) :height 0.24
     :background "seqv-playhead-row-bar"
-    :col (bind-seq (str "track-playhead-row-" track "-" row))
-    :len-col (bind-seq (str "track-length-row-" track "-" row))))
+    :track t
+    :row row))
+
+;; Row `row`'s number beside a grid of `rows` rows (hidden for one row).
+(def row-label (row rows)
+  (box :height (track-row-label-height) :v-align :center
+    (v-stack :gap 0
+      (label (+ row 1)
+        :color (if (> rows 1) :dim :buffer-bg)
+        :v-align :center
+        :width 0.1 :bg :transparent :font-size 8)
+      (box :width 0.2 :height (* (track-row-label-height) 0.02)))))
+
+;; Track t's step grid: 16 cells a row, the last row padded with plain
+;; spacers (hit testing reaches the track row through them), a playhead bar
+;; under each row. A row's number lights by its lamp (a repaint), so the
+;; playhead moving on never re-renders a row.
+(def track-grid (t)
+  (let ((rows (chunks t.steps row-width))
+        (count (max 1 (len rows))))
+    (box :key (str "track-step-grid-" t.index) :padding 0.15
+      (box :background-color :buffer-bg
+        (v-stack :gap -0.04
+          (box :width 0.1 :height 0.342 :bg :transparent)
+          (each (range 0 count) |row|
+            (let ((steps (if (< row (len rows)) (nth rows row) (list))))
+              (v-stack :gap -0.16
+                (box :background "seqv-row-lamp" :track t :row (if (> count 1) row -1) 
+                  (h-stack :align :center
+                    (box :width 0.1)
+                    (row-label row count)
+                    (h-stack :gap 0.0
+                      (each steps |s| (step-cell t s))
+                      (each (range (len steps) row-width) |col|
+                        (box :width step-cell-width :height step-cell-height)))))
+                (h-stack (box :width 1)
+                  (playhead-row t row))))))))))
+
+;; ── The expanded step editor ──
+;; One track's editor: a tab per built-in step param and a selector over its
+;; process lanes (the param mode, `t.param-mode`), sixteen slots showing the
+;; steps of one page (`shown-page`), the cursor step's value, the pages with
+;; their bar transposes, and for a lane mode its strip and patchbay. Slots
+;; bind their step's fields; the slot grid, the cursor picker and the pages
+;; are subtrees of their own, so a page turn, a cursor move or a bar
+;; transpose re-runs one of them, never the row.
+
+;; The expanded editor's twin of `seqv-step-shell`: its gate, selection and
+;; p-lock tick, without the duration span.
+(defwidget seqv-slot-shell
+  :width 1.5 :height 2.5
+  :paint-margin 1
+  :state (step track selected off-fill-r off-fill-g off-fill-b)
+  :shader
+  (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color))
+
+;; A slot past the pattern's end: an off step's shell.
+(defwidget seqv-slot-shell-off
+  :width 1.5 :height 2.5
+  :paint-margin 1
+  :state (track selected off-fill-r off-fill-g off-fill-b)
+  :shader
+  (eseq.sequencer/step-shell-shader 0 0 (vec3 0 0 0)))
 
 ;; Expanded view twin of the grid's length underline: amber bar beneath the
-;; step number of the step a length lane last set the pattern length to.
+;; number of step `index`, while a length lane last set `track`'s pattern
+;; length to it.
 (defwidget seqv-slot-length-mark
   :width 2.8 :height 0.3
-  :state (active)
-  :bindable (active)
+  :state (track index)
   :shader
-  (if (= active 1)
+  (if (= track.length-step index)
     (sdf/layer
       (sdf/fill (sdf/rounded-rect (* 0.62 aspect) 0.5 0.2)
         (material :color (rgba 0.94 0.63 0.24 0.95))))
     (rgba 0 0 0 0)))
 
-(def track-num-steps (track)
-  (if (< track (len SEQ.track-num-steps))
-    (nth SEQ.track-num-steps track)
-    16))
+;; The page t's editor shows: the playhead's while the transport plays and
+;; the editor follows it (no step selection), else its cursor's.
+(def shown-page (t)
+  (if (and transport.playing selection.auto-follow (empty? selection.steps)
+           (>= t.playhead-page 0))
+    (min t.playhead-page (- (track-pages t) 1))
+    t.page))
 
-(def expanded-track-color-r (track)
-  (nth (track-color track) 0))
+;; Step `index` of track t, or nil past its pattern's end (`nth` reads nil
+;; out of range).
+(def step-at (t index) (nth t.steps index))
 
-(def expanded-track-color-g (track)
-  (nth (track-color track) 1))
+;; The step slot i shows on page `page` of track t, or nil.
+(def slot-step (t page i)
+  (step-at t (+ (* page slots-per-page) i)))
 
-(def expanded-track-color-b (track)
-  (nth (track-color track) 2))
+;; The current track's selected steps (instances of t, the current track).
+(def selected-steps (t)
+  (let ((steps t.steps))
+    (map (lambda (i) (nth steps i))
+      (filter (lambda (i) (< i (len steps))) (seq-selected-step-indexes-native)))))
 
-(def expanded-slider-fill (track)
-  (rgba (expanded-track-color-r track) (expanded-track-color-g track) (expanded-track-color-b track) 1.0))
+(def drop-step-selection ()
+  (when (seq-has-selection?) (seq-clear-selection)))
 
-;; Process lanes draw in the process accent so a lane never reads as a
-;; builtin step param.
-(def expanded-slider-fill-for-mode (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    :process-lane-accent
-    (expanded-slider-fill track)))
+;; Put the shared step cursor on `step` of t, naming t: right after
+;; `select-track-for-edit` the current track still reads as the old one.
+(def set-expanded-cursor (t step)
+  (sgi/set-cursor-step-for-track t.index step))
 
-(def expanded-slider-muted-fill (track)
-  (rgba
-    (+ (* (expanded-track-color-r track) 0.30) (* 0.08 0.70))
-    (+ (* (expanded-track-color-g track) 0.30) (* 0.08 0.70))
-    (+ (* (expanded-track-color-b track) 0.30) (* 0.12 0.70))
-    0.50))
+;; Select t for edit and put its cursor on `step`, as every editor edit does.
+(def focus-step (t step)
+  (select-track-for-edit t)
+  (eseq.seq-core-state/cool-off-follow)
+  (set-expanded-cursor t step))
 
-(def expanded-slider-muted-dot (track)
-  (rgba
-    (+ (* (expanded-track-color-r track) 0.28) (* 0.25 0.72))
-    (+ (* (expanded-track-color-g track) 0.28) (* 0.25 0.72))
-    (+ (* (expanded-track-color-b track) 0.28) (* 0.30 0.72))
-    0.55))
+(def expanded-step-click (t s evt)
+  (focus-step t s.index)
+  (if (sgi/selection-click? evt)
+    (sgi/step-select-drag-start-for-track t.index s.index evt)
+    (seq-clear-selection)))
 
-(def track-current-step (track track-id)
-  (track-cursor track-id))
+(def expanded-step-drag (t s evt)
+  (sgi/step-select-drag-over-for-track-no-cursor t.index s.index evt))
 
-(def page-count (track)
-  (max 1 (floor (/ (+ (track-num-steps track) (- eseq.seq-core-state/page-size 1)) eseq.seq-core-state/page-size))))
+(def expanded-step-pointer-down (t s evt)
+  ;; Read before selecting: a selection applies on the current track only.
+  (let ((use-selection t.selected))
+    (select-track-for-edit t)
+    (set-expanded-cursor t s.index)
+    (sgi/step-pointer-down-for-track t.index s.index evt use-selection)))
 
-(def track-current-page (track track-id)
-  (min (floor (/ (track-current-step track track-id) eseq.seq-core-state/page-size)) (- (page-count track) 1)))
+(def expanded-step-pointer-up (t s evt)
+  (select-track-for-edit t)
+  (set-expanded-cursor t s.index)
+  (sgi/step-pointer-up s.index evt))
 
-(def playhead-page (track)
-  (let ((page (reactive-get "SEQ" (str "track-playhead-page-" track))))
-    (min
-      (if page page 0)
-      (- (page-count track) 1))))
+(def expanded-step-double-click (t s evt)
+  (select-track-for-edit t)
+  (sgi/step-double-click-for-track t.index s.index evt))
 
-(def visible-page (track track-id)
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
-    (playhead-page track)
-    (track-current-page track track-id)))
-
-(def page-offset (track track-id)
-  (* (visible-page track track-id) eseq.seq-core-state/page-size))
-
-(def expanded-step-index (track track-id i)
-  (+ (page-offset track track-id) i))
-
-(def expanded-step-visible? (track track-id i)
-  (< (expanded-step-index track track-id i) (track-num-steps track)))
-
-(def sync-expanded-step-slots-for (track track-id)
-  (seqv-sync-expanded-step-slots
-    track
-    track-id
-    (visible-page track track-id)
-    (track-param-mode track-id)
-    (track-current-step track track-id)))
-
-(def slot-field (name track-id slot)
-  (str "seqv-slot-" name "-" track-id "-" slot))
-
-(def slot-param-field (kind track-id mode slot)
-  (str "seqv-slot-param-" kind "-" track-id "-" mode "-" slot))
-
-(def slot-page-active-field (track-id page)
-  (str "seqv-page-active-" track-id "-" page))
-
-;; Per-bar transpose (Cirklon P3 bar XPOSE), one value per 16-step page.
-;; Two slots per bar: the semitone value the picker edits, and a flag the
-;; picker binds to `:active` so a bar at 0 stays dim (a number-picker picks
-;; its colour from `:active`, and 0 is a legal value here, not an absence).
-(def slot-bar-transpose-field (track-id bar)
-  (str "seqv-bar-transpose-" track-id "-" bar))
-
-(def slot-bar-transpose-set-field (track-id bar)
-  (str "seqv-bar-transpose-set-" track-id "-" bar))
-
-(def bar-transpose-binding (track-id bar)
-  (bind-seq (slot-bar-transpose-field track-id bar)))
-
-(def bar-transpose-set-binding (track-id bar)
-  (bind-seq (slot-bar-transpose-set-field track-id bar)))
-
-(def slot-step-index-binding (track-id slot)
-  (bind-seq (slot-field "step-index" track-id slot)))
-
-(def slot-step-index-value (track-id slot)
-  (reactive-value (slot-step-index-binding track-id slot)))
-
-(def slot-visible-binding (track-id slot)
-  (bind-seq (slot-field "visible" track-id slot)))
-
-(def slot-visible? (track-id slot)
-  (> (reactive-value (slot-visible-binding track-id slot)) 0.5))
-
-(def slot-label-binding (track-id slot)
-  (bind-seq (slot-field "step-label" track-id slot)))
-
-(def slot-active-binding (track-id slot)
-  (bind-seq (slot-field "active" track-id slot)))
-
-(def slot-plocked-binding (track-id slot)
-  (bind-seq (slot-field "plocked" track-id slot)))
-
-(def slot-plock-kind-binding (track-id slot)
-  (bind-seq (slot-field "plock-kind" track-id slot)))
-
-(def slot-variant-r-binding (track-id slot)
-  (bind-seq (slot-field "variant-r" track-id slot)))
-
-(def slot-variant-g-binding (track-id slot)
-  (bind-seq (slot-field "variant-g" track-id slot)))
-
-(def slot-variant-b-binding (track-id slot)
-  (bind-seq (slot-field "variant-b" track-id slot)))
-
-(def slot-selected-binding (track-id slot)
-  (bind-seq (slot-field "selected" track-id slot)))
-
-(def slot-playhead-binding (track-id slot)
-  (bind-seq (slot-field "playhead-active" track-id slot)))
-
-(def slot-cursor-binding (track-id slot)
-  (bind-seq (slot-field "cursor-active" track-id slot)))
-
-(def slot-param-slider-binding (track-id mode slot)
-  (bind-seq (slot-param-field "slider" track-id mode slot)))
-
-(def slot-param-haptic-binding (track-id mode slot)
-  (bind-seq (slot-param-field "haptic" track-id mode slot)))
-
-(def page-active-binding (track-id page)
-  (bind-seq (slot-page-active-field track-id page)))
-
-(def expanded-cursor-param-binding (track-id)
-  (bind-seq (str "seqv-cursor-param-value-" track-id)))
-
-(def expanded-cursor-sync-index-binding (track-id)
-  (bind-seq (str "seqv-cursor-sync-index-" track-id)))
-
-(def step-active-binding (track step)
-  (bind-seq (str "seq-track-step-active-" track "-" step)))
-
-(def step-plocked-binding (track step)
-  (bind-seq (str "seq-track-step-plocked-" track "-" step)))
-
-(def step-selected-binding (track step)
-  (bind-seq (str "seq-track-step-selected-" track "-" step)))
-
-(def step-param-slider-binding (track mode step)
-  (bind-seq (str "seq-track-step-param-slider-" track "-" mode "-" step)))
-
-(def step-param-haptic-binding (track mode step)
-  (bind-seq (str "seq-track-step-param-haptic-" track "-" mode "-" step)))
-
-(def expanded-sync-label-index (label)
-  (reduce |acc index|
-    (if (= label (nth SEQ.sync-labels index)) index acc)
-    0
-    (range 0 (len SEQ.sync-labels))))
-
-(def set-expanded-cursor (track track-id step)
-  (do
-    (eseq.step-grid-interactions/set-track-cursor-step step)))
-
-(def expanded-step-click (track track-id step evt)
-  (if (expanded-step-visible? track track-id (- step (page-offset track track-id)))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (set-expanded-cursor track track-id step)
-      (if (eseq.step-grid-interactions/selection-click? evt)
-        (eseq.step-grid-interactions/step-select-drag-start step evt)
-        (seq-clear-selection)))
-    nil))
-
-(def expanded-step-drag (track track-id step evt)
-  (do
-    (eseq.step-grid-interactions/step-select-drag-over-for-track-no-cursor track step evt)))
-
-(def expanded-step-pointer-down (track track-id step evt)
-  (let ((use-selection (= SEQ.current-track track)))
-    (do
-      (activate-track-for-edit track)
-      (set-expanded-cursor track track-id step)
-      (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))
-
-(def expanded-step-pointer-up (track track-id step evt)
-  (do
-    (activate-track-for-edit track)
-    (set-expanded-cursor track track-id step)
-    (eseq.step-grid-interactions/step-pointer-up step evt)))
-
-(def expanded-slot-click (track track-id slot evt)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (expanded-step-click track track-id step evt)
-      nil)))
-
-(def expanded-slot-drag (track track-id slot evt)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (expanded-step-drag track track-id step evt)
-      nil)))
-
-(def expanded-slot-pointer-down (track track-id slot evt)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (expanded-step-pointer-down track track-id step evt)
-      nil)))
-
-(def expanded-slot-pointer-up (track track-id slot evt)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (expanded-step-pointer-up track track-id step evt)
-      nil)))
-
-(def expanded-step-double-click (track track-id step evt)
-  (do
-    (activate-track-for-edit track)
-    (eseq.step-grid-interactions/step-double-click-for-track track step evt)))
-
-(def expanded-slot-double-click (track track-id slot evt)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (expanded-step-double-click track track-id step evt)
-      nil)))
-
-;; ---------------------------------------------------------------------------
+;; ── Lane slider steps ──
 ;; UI-only slider step per process lane. The process keeps floats; this only
 ;; quantizes what the expanded sliders and the row picker write, so a lane
 ;; whose range is wider than 1 (acc, tacc) moves in whole numbers by default.
 ;; 0..1 lanes stay floats (int/gate lanes already round via :decimals 0).
-;; Keyed by instance-id + inlet so a forked lane keeps its own step. 0 = free.
-(defstate lane-slider-steps '())
 
-(def lane-step-key (lane) (str (get lane :instance-id) "-" (get lane :inlet)))
+(def lane-step-key (lane) (str lane.process.proc-id "-" lane.inlet))
 
-(def lane-range (lane) (- (get lane :max) (get lane :min)))
-
-(def lane-stepped? (lane) (> (lane-range lane) 1))
-
-(def lane-slider-step-entry (lane)
-  (let ((key (lane-step-key lane)))
-    (reduce |acc entry| (if (= (get entry :key) key) entry acc) nil lane-slider-steps)))
+(def lane-stepped? (lane) (> (- lane.max lane.min) 1))
 
 (def lane-slider-step (lane)
   (if (lane-stepped? lane)
-    (let ((entry (lane-slider-step-entry lane)))
+    (let ((entry (find-by-key lane-edit.steps :key (lane-step-key lane))))
       (if entry (get entry :step) 1))
-    (if (= (get lane :decimals) 0) 1 0)))
+    (if (= lane.decimals 0) 1 0)))
 
 (def set-lane-slider-step (lane step)
   (let ((key (lane-step-key lane)))
-    (set! lane-slider-steps
+    (set! lane-edit.steps
       (cons (dict :key key :step step)
-            (filter (lambda (entry) (not (= (get entry :key) key))) lane-slider-steps)))))
+            (filter (lambda (entry) (not (= (get entry :key) key))) lane-edit.steps)))))
 
 (def lane-slider-step-quantize (lane value)
   (let ((step (lane-slider-step lane))
-        (lo (get lane :min))
-        (hi (get lane :max)))
+        (lo lane.min)
+        (hi lane.max))
     (if (> step 0)
       (min hi (max lo (+ lo (* step (round (/ (- value lo) step))))))
       value)))
@@ -1512,239 +1395,177 @@
     (if (= step (round step)) 0
       (if (= (* step 10) (round (* step 10))) 1 2))))
 
-(def expanded-lane-param-value (track mode value)
-  (lane-slider-step-quantize (eseq.seqv-track-params/seqv-track-process-lane track mode) value))
+;; The row picker's step and precision in mode `mode` of t (`lane` its lane,
+;; or nil).
+(def expanded-param-step (lane)
+  (if lane (lane-slider-step lane) 0))
 
-(def expanded-param-step (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    (lane-slider-step (eseq.seqv-track-params/seqv-track-process-lane track mode))
-    0))
+(def expanded-param-decimals (t mode lane)
+  (if lane
+    (lane-slider-step-decimals (lane-slider-step lane))
+    (tp/seqv-track-param-decimals t mode)))
 
-(def expanded-param-decimals (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    (lane-slider-step-decimals (expanded-param-step track mode))
-    (eseq.seqv-track-params/seqv-track-param-decimals track mode)))
+;; ── Editor edits ──
 
-(def set-expanded-slot-param (track track-id slot mode slider-value)
-  (let ((step (slot-step-index-value track-id slot)))
-    (if (>= step 0)
-      (set-expanded-step-param track track-id step mode slider-value)
-      nil)))
+;; A slot's slider moved to `position` on step s of t: the step's own value,
+;; or every selected step's when s is one of them.
+(def set-expanded-step-param (t s mode position)
+  (focus-step t s.index)
+  (let ((lane (tp/seqv-track-process-lane t mode)))
+    (if (tp/seqv-process-lane-mode? mode)
+      (when lane
+        (let ((v (lane-slider-step-quantize lane
+                   (tp/seqv-track-step-slider-param-value t mode position))))
+          (if (sgi/step-selected? s.index)
+            (set-lane-steps! lane (selected-steps t) v)
+            (do (drop-step-selection)
+                (set-lane-steps! lane (list s) v)))))
+      (let ((v (tp/seqv-track-step-slider-param-value t mode position)))
+        (if (sgi/step-selected? s.index)
+          (seq-set-step-param-plock (tp/seqv-param-keyword mode) v)
+          (do (drop-step-selection)
+              (tp/seqv-set-step-value! s mode v)))))))
 
-(def set-expanded-step-param (track track-id step mode slider-value)
-  (do
-    (activate-track-for-edit track)
-    (eseq.seq-core-state/cool-off-follow)
-    (set-expanded-cursor track track-id step)
-    (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-      (eseq.step-grid-interactions/seq-set-process-lane-from-step
-        track
-        mode
-        step
-        (expanded-lane-param-value track mode
-          (eseq.seqv-track-params/seqv-track-step-slider-param-value track mode slider-value)))
-      (eseq.step-grid-interactions/seq-set-step-param-from-step
-        step
-        (eseq.seqv-track-params/seqv-param-keyword mode)
-        (eseq.seqv-track-params/seqv-step-slider-param-value mode slider-value)))))
+;; The row's number picker is one control for the whole row: with a step
+;; selection it writes every selected step, otherwise the cursor step.
+(def set-expanded-current-param (t mode value)
+  (let ((s (step-at t (track-cursor t)))
+        (lane (tp/seqv-track-process-lane t mode)))
+    (when s
+      (focus-step t s.index)
+      (if (tp/seqv-process-lane-mode? mode)
+        (when lane
+          (set-lane-steps! lane
+            (if (seq-has-selection?) (selected-steps t) (list s))
+            (lane-slider-step-quantize lane (tp/seqv-track-step-param-value t mode value))))
+        (let ((v (tp/seqv-track-step-param-value t mode value)))
+          (if (seq-has-selection?)
+            (seq-set-step-param-plock (tp/seqv-param-keyword mode) v)
+            (tp/seqv-set-step-value! s mode v)))))))
 
-(def set-expanded-current-param (track track-id mode value)
-  (do
-    (activate-track-for-edit track)
-    (eseq.seq-core-state/cool-off-follow)
-    (eseq.step-grid-interactions/set-track-cursor-step (track-current-step track track-id))
-    ;; The track's number picker is one control for the whole row: with a
-    ;; selection it writes every selected step, otherwise the cursor step.
-    (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-      (eseq.step-grid-interactions/seq-set-process-lane-from-selection-or-step
-        track
-        mode
-        (track-current-step track track-id)
-        (expanded-lane-param-value track mode
-          (eseq.seqv-track-params/seqv-track-step-param-value track mode value)))
-      (eseq.step-grid-interactions/seq-set-step-param-from-selection-or-step
-        (track-current-step track track-id)
-        (eseq.seqv-track-params/seqv-param-keyword mode)
-        (eseq.seqv-track-params/seqv-step-param-value mode value)))))
+(def goto-page (t page)
+  (focus-step t (min (* page slots-per-page) (- (max 1 t.num-steps) 1))))
 
-(def set-expanded-timebase (track label)
-  (let ((plock-selected
-      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (if plock-selected
-        (seq-plock-timebase label)
-        (seq-set-timebase label)))))
+(def resize-pattern (t action)
+  (select-track-for-edit t)
+  (eseq.seq-core-state/cool-off-follow)
+  (action)
+  (sync-all-track-cursors-to-global))
 
-(def goto-page (track track-id page)
-  (let ((step (min (* page eseq.seq-core-state/page-size) (- (max 1 (track-num-steps track)) 1))))
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-core-state/cool-off-follow)
-      (eseq.step-grid-interactions/set-track-cursor-step step))))
+;; ── Param tabs and the lane selector ──
 
-(def double-track-pattern (track track-id)
-  (do
-    (activate-track-for-edit track)
-    (eseq.seq-core-state/cool-off-follow)
-    (seq-double-track-pattern)
-    (sync-all-track-cursors-to-global)))
-
-(def halve-track-pattern (track track-id)
-  (do
-    (activate-track-for-edit track)
-    (eseq.seq-core-state/cool-off-follow)
-    (seq-halve-track-pattern)
-    (sync-all-track-cursors-to-global)))
-
-(def param-tab-width (mode)
-  7.8)
-
-(def clip-label (text max-chars)
-  (let ((s (str text)))
-    (if (> (len s) max-chars)
-      (str (substring s 0 (- max-chars 2)) "..")
-      s)))
-
-(def param-header-name (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    (clip-label (eseq.seqv-track-params/seqv-track-param-name track mode) 28)
-    (eseq.seqv-track-params/seqv-param-name mode)))
+(def param-header-name (t mode)
+  (if (tp/seqv-process-lane-mode? mode)
+    (clip-label (tp/seqv-track-param-name t mode) 28)
+    (tp/seqv-track-param-name t mode)))
 
 (def param-header-width (mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode) 17.8 6.4))
+  (if (tp/seqv-process-lane-mode? mode) 17.8 6.4))
 
 ;; Step-param name a process port binds to when a tab is clicked while a
 ;; process map is armed. Names resolve through the scheduler's step-param
 ;; table, so they must be the long forms.
 (def param-tab-step-param (mode)
-  (if (= mode 0) "velocity"
-    (if (= mode 1) "duration"
-      (if (= mode 3) "transpose"
-        (if (= mode 4) "pan"
-          (if (= mode 5) "sync"
-            (if (= mode 6) "delay"
-              (if (= mode 7) "retrig"
-                (if (= mode 8) "rate" "")))))))))
+  (match mode
+    0 "velocity"
+    1 "duration"
+    3 "transpose"
+    4 "pan"
+    5 "sync"
+    6 "delay"
+    7 "retrig"
+    8 "rate"
+    _ ""))
 
-;; A process map armed on this track whose port can take a step param.
-(def param-tab-map-armed? (track)
+;; The process of track or graph node t whose proc-id is `id`, or nil.
+(def process-of (t id)
+  (first (filter (lambda (p) (= p.proc-id id)) t.processes)))
+
+;; The port the process map has armed, while it is on track t, or nil.
+;; COMPAT(eseq-0l17.14): eseq.effects.param-controls' process map holds the
+;; port by track position, proc-id and name.
+(def armed-port (t)
+  (when (and (pc/process-map-active?) (= process-map.track t.index))
+    (let ((p (process-of t process-map.instance-id)))
+      (when p (named p.ports process-map.port)))))
+
+;; A process map armed on t whose port can take a step param.
+(def param-tab-map-armed? (t)
   (and (pc/process-map-active?)
-       (= pc/process-map-track track)
-       (or (= pc/process-map-target-kind "")
-           (= pc/process-map-target-kind "step-param"))))
+       (= process-map.track t.index)
+       (or (= process-map.target-kind "")
+           (= process-map.target-kind "step-param"))))
 
-(def param-tab-bind (track mode)
-  ;; Disarm first: a failing bind must never leave the tabs stuck in the
-  ;; armed tint. The bind's own error surfaces through the editor log.
-  (let ((map-track pc/process-map-track)
-        (map-instance pc/process-map-instance-id)
-        (map-port pc/process-map-port)
-        (add (lane-armed-port-bound?))
+;; Whether a lane edit on p writes the shared project slot: the scope chip
+;; says all tracks and p is a project lane.
+(def edit-all? (p)
+  (and lane-edit.all p.project))
+
+;; Bind the armed port to mode's step param (a fan-out entry when the port is
+;; bound already). Disarm first: a failing bind must never leave the tabs
+;; stuck in the armed tint; its error reaches the status line.
+(def param-tab-bind (t mode)
+  (let ((pt (armed-port t))
         (param (param-tab-step-param mode)))
-    (do
-      (pc/process-map-clear)
-      (if add
-        (if (lane-edit-all?)
-          (seq-add-process-port-fanout map-track map-instance map-port
-            (dict :kind "step-param" :param param) :all)
-          (seq-add-process-port-fanout map-track map-instance map-port
-            (dict :kind "step-param" :param param)))
-        (if (lane-edit-all?)
-          (seq-bind-process-port map-track map-instance map-port
-            (dict :kind "step-param" :param param) :all)
-          (seq-bind-process-port map-track map-instance map-port
-            (dict :kind "step-param" :param param))))
-      (status (str (if add "Added fan-out → " "Mapped process port → ") param
-                   (if (lane-edit-all?) " (all tracks)" ""))))))
+    (pc/process-map-clear)
+    (when pt
+      (let ((add (= pt.status "bound"))
+            (all (edit-all? pt.process)))
+        (if add
+          (add-fanout! pt param :all all)
+          (bind-port! pt param :all all))
+        (status (str (if add "Added fan-out → " "Mapped process port → ") param
+                     (if all " (all tracks)" "")))))))
 
-(def param-tab (track track-id mode tab-label)
-  (let ((armed (param-tab-map-armed? track)))
-    (box :width (param-tab-width mode) :height 2
-      :key (str "expanded-param-tab-" track-id "-" mode)
-      :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
+(def param-tab (t mode tab-label)
+  (let ((armed (param-tab-map-armed? t))
+        (current (= t.param-mode mode)))
+    (box :width 7.8 :height 2
+      :key (str "expanded-param-tab-" t.tid "-" mode)
+      :bg (if current (tp/seqv-param-color mode) :dark-gray)
       :background-color (if armed :process-map-arm-bg (rgba 0 0 0 0))
       :corner-radius (eseq.seq-core-state/radius 6)
-      :on-click |x y r| (if armed
-                          (param-tab-bind track mode)
-                          (do (activate-track-for-edit track) (set-track-param-mode track-id mode)))
+      :on-click (lambda (event)
+        (if armed
+          (param-tab-bind t mode)
+          (do (select-track-for-edit t) (set-track-param-mode t mode))))
       (label tab-label :font-size 12
-        :color (if armed
-                 :process-lane-accent
-                 (if (= (track-param-mode track-id) mode) :primary :dim))
+        :color (if armed :process-lane-accent (if current :primary :dim))
         :bg :transparent))))
 
-(def process-lane-instance-lane-count (track instance-id)
-  (reduce |acc lane| (if (= (get lane :instance-id) instance-id) (+ acc 1) acc)
-    0
-    (eseq.seqv-track-params/seqv-track-process-lanes track)))
+;; Lane l's selector label. Default project lanes read like the built-in
+;; step params ("prob", "acc A"); a lane the user added to this track reads
+;; as its minted instance name ("grab 2"), qualified by the inlet only when
+;; the process carries more than one lane. Anything unnamed keeps the
+;; numbered class/inlet form.
+(def process-lane-option-label (l)
+  (let ((p l.process))
+    (if p.default-lane
+      l.short-label
+      (if (and p.roster (not (= p.instance-name "")))
+        (if (> (len p.lanes) 1) (str p.instance-name " " l.inlet) p.instance-name)
+        (str (+ l.position 1) " " l.short-label)))))
 
-(def process-lane-option-label (track lane-idx)
-  (let ((lane (nth (eseq.seqv-track-params/seqv-track-process-lanes track) lane-idx)))
-    ;; Default project lanes read like the builtin step params ("prob",
-    ;; "acc A"); a lane the user added to this track reads as its minted
-    ;; instance name ("grab 2"), qualified by the inlet only when the class
-    ;; carries more than one lane. Anything unnamed keeps the numbered
-    ;; class/inlet form.
-    (if (get lane :default-lane)
-      (get lane :short-label)
-      (let ((instance-name (get lane :instance-name)))
-        (if (and (get lane :roster) (not (= instance-name nil)))
-          (if (> (process-lane-instance-lane-count track (get lane :instance-id)) 1)
-            (str instance-name " " (get lane :inlet))
-            instance-name)
-          (str (+ lane-idx 1) " " (get lane :short-label)))))))
+(def process-lane-options (t)
+  (cons "none" (map process-lane-option-label t.lanes)))
 
-(def process-lane-options (track)
-  (append
-    (list "none")
-    (map
-      (lambda (lane-idx) (process-lane-option-label track lane-idx))
-      (range 0 (len (eseq.seqv-track-params/seqv-track-process-lanes track))))))
 
-(def process-lane-selector-value (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    (let ((lane-idx (eseq.seqv-track-params/seqv-process-lane-index mode)))
-      (if (and (>= lane-idx 0) (< lane-idx (len (eseq.seqv-track-params/seqv-track-process-lanes track))))
-        (process-lane-option-label track lane-idx)
-        "none"))
-    "none"))
+(def select-process-lane-option (t label)
+  (let ((lane (first (filter (lambda (l) (= (process-lane-option-label l) label)) t.lanes))))
+    (select-track-for-edit t)
+    (if lane
+      (set-track-param-mode t (+ tp/seqv-process-lane-mode-offset lane.position))
+      (when (tp/seqv-process-lane-mode? (track-param-mode t))
+        (set-track-param-mode t 3)))))
 
-(def process-lane-selector-index (track label)
-  (if (= label "none")
-    -1
-    (reduce |acc lane-idx|
-      (if (= label (process-lane-option-label track lane-idx)) lane-idx acc)
-      -1
-      (range 0 (len (eseq.seqv-track-params/seqv-track-process-lanes track))))))
-
-(def selected-process-lane (track mode)
-  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-    (let ((lane-idx (eseq.seqv-track-params/seqv-process-lane-index mode)))
-      (if (and (>= lane-idx 0) (< lane-idx (len (eseq.seqv-track-params/seqv-track-process-lanes track))))
-        (nth (eseq.seqv-track-params/seqv-track-process-lanes track) lane-idx)
-        nil))
-    nil))
-
-(def select-process-lane-option (track track-id label)
-  (let ((lane-idx (process-lane-selector-index track label)))
-    (do
-      (activate-track-for-edit track)
-      (if (>= lane-idx 0)
-        (set-track-param-mode track-id (+ eseq.seqv-track-params/seqv-process-lane-mode-offset lane-idx))
-        (if (eseq.seqv-track-params/seqv-process-lane-mode? (track-param-mode track-id))
-          (set-track-param-mode track-id 3)
-          nil)))))
-
-(def process-lane-selector (track track-id mode)
+;; t's lane selector, on `lane` (the lane its editor shows, or nil).
+(def process-lane-selector (t lane)
   (dropdown
-    :value (process-lane-selector-value track mode)
-    :key (str "expanded-process-lane-selector-" track-id)
-    :options (process-lane-options track)
-    :on-change (lambda (v) (select-process-lane-option track track-id v))
+    :value (if lane (process-lane-option-label lane) "none")
+    :key (str "expanded-process-lane-selector-" t.tid)
+    :options (process-lane-options t)
+    :on-change (lambda (v) (select-process-lane-option t v))
     :width 10.8 :height 1.45 :font-size 10))
-
 
 ;; ---------------------------------------------------------------------------
 ;; Lane strip: the selected process lane's two ends (docs/default-process-lanes-spec.md).
@@ -1755,53 +1576,45 @@
 ;;      process-map state the fx panel uses; step tabs, other lanes and
 ;;      device params all light up as targets)
 ;; plus the slot's scalar inlets (source, lag, lo, hi) and reorder buttons.
-
-;; Edit scope for project lanes: "track" forks the slot for this track only
-;; (bindings, mode, lo/hi, lane values); "all" writes the shared slot that
-;; every track inherits. Cirklon's per-track aux config by default, the
-;; global effect on purpose.
-(defstate lane-edit-scope "track")
-
-(def lane-edit-all? () (= lane-edit-scope "all"))
+;;
+;; Edit scope for project lanes (`lane-edit.all`): "this track" forks the
+;; slot for this track only (bindings, mode, lo/hi, lane values); "all
+;; tracks" writes the shared slot that every track inherits. Cirklon's
+;; per-track aux config by default, the global effect on purpose.
 
 (def lane-toggle-edit-scope ()
-  (set! lane-edit-scope (if (lane-edit-all?) "track" "all")))
+  (toggle! lane-edit.all))
 
 (def lane-scope-chip ()
-  (button (if (lane-edit-all?) "all tracks" "this track")
+  (button (if lane-edit.all "all tracks" "this track")
     :key "lane-edit-scope-toggle"
     :height 1.0 :padding 0.2 :font-size 7.5
-    :background-color (if (lane-edit-all?) :process-lane-accent :transparent)
+    :background-color (if lane-edit.all :process-lane-accent :transparent)
     :border-color :process-lane-accent
-    :color (if (lane-edit-all?) :black :dim)
+    :color (if lane-edit.all :black :dim)
     :on-click (lambda (event) (lane-toggle-edit-scope))))
 
-;; Bypass toggle for the selected lane. A project lane forks this track
-;; only (the shared slot keeps running elsewhere) unless the scope chip says
-;; "all tracks"; roster and track lanes are per track already. Per pattern,
-;; undoable, like every other slot edit.
-(def lane-toggle-enabled (track slot)
-  (if (lane-patch-node? track)
-    (do
-      (graph-node-process-enable (lane-patch-node-graph track) (lane-patch-node-index track)
-        (get slot :instance-id) (not (get slot :enabled)))
-      (lane-patch-node-touch))
-    (seq-set-process-slot-enabled track (get slot :instance-id)
-      (not (get slot :enabled))
-      (if (and (get slot :project) (lane-edit-all?)) :all nil))))
+;; Bypass toggle for process `id` of bay ns (`enabled` its state now). A
+;; project lane forks this track only (the shared slot keeps running
+;; elsewhere) unless the scope chip says "all tracks"; roster lanes and a
+;; graph node's processes are their owner's alone. Per pattern, undoable,
+;; like every other slot edit.
+(def lane-toggle-enabled (ns id enabled)
+  (let ((p (bay-process ns id)))
+    (when p (set-process-enabled! p (not enabled) :all (edit-all? p)))))
 
-(def lane-strip-enable-button (track slot)
-  (button (if (get slot :enabled) "on" "off")
-    :key (str "lane-enable-" (get slot :instance-id))
+(def lane-strip-enable-button (p)
+  (button (if p.enabled "on" "off")
+    :key (str "lane-enable-" p.proc-id)
     :width 2.2 :height 1.0 :padding 0.2 :font-size 7.5
-    :background-color (if (get slot :enabled) :process-lane-accent :transparent)
+    :background-color (if p.enabled :process-lane-accent :transparent)
     :border-color :process-lane-accent
-    :color (if (get slot :enabled) :black :dim)
-    :on-click (lambda (event) (lane-toggle-enabled track slot))))
+    :color (if p.enabled :black :dim)
+    :on-click (lambda (event) (lane-toggle-enabled p.track.index p.proc-id p.enabled))))
 
-;; The dot in a patch-bay box: filled while the lane runs on this track.
-;; An SDF circle rather than a rounded box, which reads as a square at
-;; this size (the same accent literal as `lane-chip`).
+;; The dot in a patch-bay card: filled while the process runs. An SDF circle
+;; rather than a rounded box, which reads as a square at this size (the same
+;; accent literal as `lane-chip`).
 (defwidget lane-patch-enable-dot-shape
   :width 1.4 :height 0.8
   :state (active)
@@ -1812,395 +1625,296 @@
         (rgba 0.94 0.63 0.24 1.0)
         (rgba 0.5 0.5 0.5 0.84)))))
 
-(def lane-patch-enable-dot (track entry)
+(def lane-patch-enable-dot (ns entry)
   (box :width 1.4 :height 0.8 :padding 0
     :background "lane-patch-enable-dot-shape"
     :key (str "lane-patch-enable-" (get entry :instance-id))
     :active (if (get entry :enabled) 1 0)
-    :on-click (lambda (event) (lane-toggle-enabled track entry))))
+    :on-click (lambda (event)
+      (lane-toggle-enabled ns (get entry :instance-id) (get entry :enabled)))))
 
-(def track-process-slots (track)
-  (if (< track (len SEQ.track-process-slots))
-    (nth SEQ.track-process-slots track)
-    '()))
+;; The process of p's track whose `wire` port is wired to lane l, or nil.
+(def lane-writer (t l)
+  (first (filter (lambda (q)
+                   (let ((wire (named q.ports "wire")))
+                     (and wire
+                          (= wire.target-process l.process)
+                          (= wire.target-inlet l.inlet))))
+           t.processes)))
 
-(def track-process-slot (track instance-id)
-  (reduce |acc slot| (if (= (get slot :instance-id) instance-id) slot acc)
-    nil
-    (track-process-slots track)))
-
-(def slot-port-named (slot name)
-  (reduce |acc port| (if (= (get port :name) name) port acc)
-    nil
-    (if (get slot :ports) (get slot :ports) '())))
-
-(def slot-first-port-where (slot key)
-  (reduce |acc port| (if (and (= acc nil) (get port key)) port acc)
-    nil
-    (if (get slot :ports) (get slot :ports) '())))
-
-(def slot-inlet-named (slot name)
-  (reduce |acc inlet| (if (= (get inlet :name) name) inlet acc)
-    nil
-    (if (get slot :inlets) (get slot :inlets) '())))
-
-(def slot-display-name (slot)
-  (if (get slot :instance-name) (get slot :instance-name) (get slot :name)))
-
-;; The slot whose `wire` port is bound to this lane's inlet, or nil.
-(def lane-writer-slot (track lane)
-  (reduce |acc slot|
-    (let ((wire (slot-port-named slot "wire")))
-      (if (and (= acc nil)
-               wire
-               (= (get wire :target-instance-id) (get lane :instance-id))
-               (= (get wire :target-inlet) (get lane :inlet)))
-        slot
-        acc))
-    nil
-    (track-process-slots track)))
-
-;; Chain order is dropdown order: a writer below its reader lands next fire.
-(def lane-wire-backward? (track writer lane)
-  (> (get writer :slot-index) (get lane :slot-index)))
-
-(def lane-target-label (port)
-  (if (= port nil)
-    "unbound"
-    (if (get port :target-step-param)
-      (get port :target-step-param)
-      (if (get port :target-instance-id)
-        (let ((target (track-process-slot SEQ.current-track (get port :target-instance-id))))
-          (if target (slot-display-name target) (get port :target)))
-        (get port :target)))))
+;; What port (or fan-out entry) x writes, as the strip names it: a step
+;; param, the process it wires into, or its own label.
+(def target-label (x)
+  (if (not (= x.target-step-param ""))
+    x.target-step-param
+    (if x.target-process x.target-process.name x.target)))
 
 (def lane-chip (text filled dim)
-  ;; `filled` / `dim` are 1 or 0. No border: a thin SDF border on a small
-  ;; rounded box floods it with the border color.
+  ;; No border: a thin SDF border on a small rounded box floods it with the
+  ;; border color.
   (box :height 1.1 :padding 0.25 :corner-radius (eseq.seq-core-state/radius 6)
-    :background-color (if (= filled 1)
-                        (if (= dim 1) (rgba 0.94 0.63 0.24 0.45) :process-lane-accent)
+    :background-color (if filled
+                        (if dim (rgba 0.94 0.63 0.24 0.45) :process-lane-accent)
                         (rgba 0.94 0.63 0.24 0.14))
     (label text :font-size 9
-      :color (if (= filled 1) :black (if (= dim 1) :dim :process-lane-accent))
+      :color (if filled :black (if dim :dim :process-lane-accent))
       :bg :transparent)))
 
 (def lane-strip-row-label (text)
   (label text :v-align :center :width 2.4 :font-size 8 :color :dim :bg :transparent))
 
-(def lane-strip-in-row (track lane)
-  (let ((writer (lane-writer-slot track lane)))
+;; Chain order is fire order: a writer below its reader lands next fire.
+(def lane-strip-in-row (t l)
+  (let ((writer (lane-writer t l)))
     (h-stack :width :fill :gap 0.3 :align :center
       (lane-strip-row-label "IN")
       (if writer
-        (lane-chip (str "← " (slot-display-name writer)) 1 (if (lane-wire-backward? track writer lane) 1 0))
-        (lane-chip "lane" 0 0)))))
+        (lane-chip (str "← " writer.name) true (> writer.index l.process.index))
+        (lane-chip "lane" false false)))))
 
-(def lane-strip-mode-button (track slot text value)
-  (let ((mode-inlet (slot-inlet-named slot "mode"))
-        (current (if (> (get mode-inlet :value) 0.5) 1 0)))
+(def lane-strip-mode-button (p text value)
+  (let ((mode (named p.inlets "mode"))
+        (current (if (> mode.value 0.5) 1 0)))
     (button text
-      :key (str "lane-mode-" (get slot :instance-id) "-" value)
+      :key (str "lane-mode-" p.proc-id "-" value)
       :flex 1 :height 1.1 :padding 0 :font-size 8.5
       :background-color (if (= current value) :process-lane-accent :transparent)
       :border-color :transparent
       :color (if (= current value) :black :dim)
-      :on-click (lambda (event)
-        (if (lane-edit-all?)
-          (seq-set-process-inlet track (get slot :instance-id) "mode" value :all)
-          (seq-set-process-inlet track (get slot :instance-id) "mode" value))))))
+      :on-click (lambda (event) (set-inlet! mode value :all (edit-all? p))))))
 
-(def lane-strip-mode-row (track slot)
-  (if (slot-inlet-named slot "mode")
+(def lane-strip-mode-row (p)
+  (if (named p.inlets "mode")
     (h-stack :width :fill :gap 0.15 :padding 0.1 :corner-radius (eseq.seq-core-state/radius 6)
       :background-color (rgba 0 0 0 0.25)
-      (lane-strip-mode-button track slot "accumulate" 0)
-      (lane-strip-mode-button track slot "pass" 1))
-    (box :height 0)))
+      (lane-strip-mode-button p "accumulate" 0)
+      (lane-strip-mode-button p "pass" 1))
+    (nothing)))
 
 ;; Fan-out rows: extra targets on the OUT port, each with its own lo..hi
 ;; that the port value is rescaled into (the slot's lo/hi is the source).
-(def lane-fanout-label (entry)
-  (if (get entry :target-step-param)
-    (get entry :target-step-param)
-    (if (get entry :target-instance-id)
-      (let ((target (track-process-slot SEQ.current-track (get entry :target-instance-id))))
-        (if target (slot-display-name target) (get entry :target)))
-      (get entry :target))))
-
-(def lane-fanout-range-picker (track slot port entry which)
+(def lane-fanout-range-picker (p pt fo bound)
   (number-picker
-    :key (str "lane-fanout-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index) "-" which)
-    :value (get entry which)
+    :key (str "lane-fanout-" p.proc-id "-" pt.name "-" fo.index "-" bound)
+    :value (if (= bound "lo") fo.lo fo.hi)
     :min -1000 :max 1000 :decimals 1
     :noui true :font-size 8.5 :text-color :white :text-align :right
-    :on-change (lambda (value)
-      (let ((lo (if (= which :lo) value (get entry :lo)))
-          (hi (if (= which :hi) value (get entry :hi))))
-        (if (lane-edit-all?)
-          (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi :all)
-          (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi))))
+    :on-change (lambda (value) (set-fanout! fo bound value :all (edit-all? p)))
     :width 3.5 :height 1.0))
 
-(def lane-fanout-row (track slot port entry)
+(def lane-fanout-row (p pt fo)
   (h-stack :width :fill :gap 0.25 :align :center
-    :key (str "lane-fanout-row-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index))
+    :key (str "lane-fanout-row-" p.proc-id "-" pt.name "-" fo.index)
     (box :width 2.4 :height 0.1)
-    (lane-chip (str "→ " (lane-fanout-label entry)) 1 0)
+    (lane-chip (str "→ " (target-label fo)) true false)
     (box :flex 1 :height 0.1)
-    (lane-fanout-range-picker track slot port entry :lo)
-    ;(label "…" :font-size 8 :color :dim :bg :transparent)
-    (lane-fanout-range-picker track slot port entry :hi)
+    (lane-fanout-range-picker p pt fo "lo")
+    (lane-fanout-range-picker p pt fo "hi")
     (button "×"
-      :key (str "lane-fanout-remove-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index))
+      :key (str "lane-fanout-remove-" p.proc-id "-" pt.name "-" fo.index)
+      :width 1.2 :height 1.0 :padding 0 :font-size 9
+      :background-color :transparent :border-color :transparent :color :dim
+      :on-click (lambda (event) (remove-fanout! fo :all (edit-all? p))))))
+
+(def mappable-port (p)
+  (first (filter (lambda (pt) pt.mappable) p.ports)))
+
+(def lane-fanout-rows (p)
+  (let ((pt (mappable-port p)))
+    (when pt (each pt.fanout |fo| (lane-fanout-row p pt fo)))))
+
+;; × on a port that writes somewhere (its own binding or its class hint):
+;; disconnects it outright, so the lane drives nothing until it is mapped
+;; again. Fan-out rows have their own ×.
+(def lane-port-unbind-button (p pt)
+  (if (and (not pt.disconnected) (not (= pt.status "unbound")))
+    (button "×"
+      :key (str "lane-unbind-" p.proc-id "-" pt.name)
       :width 1.2 :height 1.0 :padding 0 :font-size 9
       :background-color :transparent :border-color :transparent :color :dim
       :on-click (lambda (event)
-        (if (lane-edit-all?)
-          (seq-remove-process-port-fanout track (get slot :instance-id) (get port :name) (get entry :index) :all)
-          (seq-remove-process-port-fanout track (get slot :instance-id) (get port :name) (get entry :index)))))))
-
-(def lane-fanout-rows (track slot)
-  (let ((port (slot-first-port-where slot :mappable)))
-    (if port
-      (each (if (get port :fanout) (get port :fanout) '()) |entry|
-        (lane-fanout-row track slot port entry))
-      nil)))
-
-;; While mapping, a port that is already bound gains the clicked target as a
-;; fan-out entry instead of replacing its binding.
-(def lane-armed-port-bound? ()
-  (let ((slot (track-process-slot pc/process-map-track pc/process-map-instance-id)))
-    (if slot
-      (let ((port (slot-port-named slot pc/process-map-port)))
-        (and port (= (get port :status) "bound") true))
-      false)))
-
-;; × on a port that writes somewhere: disconnects it outright (manual
-;; binding dropped, authored hint muted) so the lane drives nothing until
-;; it is mapped again. Fan-out rows have their own ×.
-(def lane-port-unbind-button (track slot port)
-  (if (get port :disconnectable)
-    (button "×"
-      :key (str "lane-unbind-" (get slot :instance-id) "-" (get port :name))
-      :width 1.2 :height 1.0 :padding 0 :font-size 9
-      :background-color :transparent :border-color :transparent :color :dim
-      :on-click (lambda (event)
-        (do
-          (if (lane-edit-all?)
-            (seq-unbind-process-port track (get slot :instance-id) (get port :name) :all)
-            (seq-unbind-process-port track (get slot :instance-id) (get port :name)))
-          (pc/process-map-clear)
-          (status (str "Disconnected " (slot-display-name slot) " " (get port :name)
-                       (if (lane-edit-all?) " (all tracks)" ""))))))
+        (unbind-port! pt :all (edit-all? p))
+        (pc/process-map-clear)
+        (status (str "Disconnected " p.name " " pt.name
+                     (if (edit-all? p) " (all tracks)" "")))))
     (box :width 1.2 :height 1.0)))
 
-(def lane-strip-out-row (track slot)
-  (let ((port (slot-first-port-where slot :mappable))
-        (armed (and port (pc/process-map-port-active? track slot port))))
-    (if port
-      (h-stack :width :fill :gap 0.3 :align :center
-        (lane-strip-row-label "OUT")
-        (lane-chip (str "→ " (lane-target-label port))
-          (if (= (get port :status) "unbound") 0 1)
-          (if (= (get port :status) "hint") 1 0))
-        (box :flex 1 :height 0.1)
-        (button (if armed "mapping" "map")
-          :key (str "lane-map-" (get slot :instance-id))
-          :width 5.2 :height 1.1 :padding 0 :font-size 8.5
-          :background-color (if armed :process-lane-accent :transparent)
-          :border-color :process-lane-accent
-          :color (if armed :black :process-lane-accent)
-          :on-click (lambda (event)
-            (pc/process-map-arm-port track slot port)))
-        (lane-port-unbind-button track slot port))
-      (box :height 0))))
+;; COMPAT(eseq-0l17.14): eseq.effects.param-controls' process map takes the
+;; legacy slot and port shapes.
+(def map-slot (p) (dict :instance-id p.proc-id))
+(def map-port (pt) (dict :name pt.name :target-kind pt.target-kind))
+
+(def lane-strip-out-row (t p)
+  (let ((pt (mappable-port p)))
+    (if pt
+      (let ((armed (pc/process-map-port-active? t.index (map-slot p) (map-port pt))))
+        (h-stack :width :fill :gap 0.3 :align :center
+          (lane-strip-row-label "OUT")
+          (lane-chip (str "→ " (if (= pt.status "unbound") "unbound" (target-label pt)))
+            (not (= pt.status "unbound"))
+            (= pt.status "hint"))
+          (box :flex 1 :height 0.1)
+          (button (if armed "mapping" "map")
+            :key (str "lane-map-" p.proc-id)
+            :width 5.2 :height 1.1 :padding 0 :font-size 8.5
+            :background-color (if armed :process-lane-accent :transparent)
+            :border-color :process-lane-accent
+            :color (if armed :black :process-lane-accent)
+            :on-click (lambda (event)
+              (pc/process-map-arm-port t.index (map-slot p) (map-port pt))))
+          (lane-port-unbind-button p pt)))
+      (nothing))))
 
 ;; The `wire` port is what a lane-to-lane map binds (OTHER LANES while
 ;; mapping): the raw value feeds another lane's inlet. It has no hint and
 ;; is not the mappable OUT port, so it gets its own row while bound.
-(def lane-strip-wire-row (track slot)
-  (let ((port (slot-port-named slot "wire")))
-    (if (and port (= (get port :status) "bound"))
+(def lane-strip-wire-row (p)
+  (let ((pt (named p.ports "wire")))
+    (if (and pt (= pt.status "bound"))
       (h-stack :width :fill :gap 0.3 :align :center
         (lane-strip-row-label "WIRE")
-        (lane-chip (str "→ " (lane-target-label port)) 1 0)
+        (lane-chip (str "→ " (target-label pt)) true false)
         (box :flex 1 :height 0.1)
-        (lane-port-unbind-button track slot port))
-      (box :height 0))))
+        (lane-port-unbind-button p pt))
+      (nothing))))
 
 ;; Scalar inlets the strip edits in place. `mode` has its own row.
-(def lane-strip-inlet-row (track slot inlet)
+(def lane-strip-inlet-row (p i)
   (h-stack :width :fill :gap 0.3 :align :center
-    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
-    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    :key (str "lane-inlet-" p.proc-id "-" i.name)
+    (label i.name :flex 1 :font-size 8.5 :color :white :bg :transparent)
     (number-picker
-      :key (str "lane-inlet-control-" (get slot :instance-id) "-" (get inlet :name))
-      :value (get inlet :value)
-      :min (get inlet :min)
-      :max (get inlet :max)
-      :decimals (get inlet :decimals)
+      :key (str "lane-inlet-control-" p.proc-id "-" i.name)
+      :value i.value
+      :min i.min
+      :max i.max
+      :decimals i.decimals
       :noui true :font-size 9 :text-color :white :text-align :right
-      :on-change (lambda (value)
-        (if (lane-edit-all?)
-          (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) value :all)
-          (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) value)))
+      :on-change (lambda (value) (set-inlet! i value :all (edit-all? p)))
       :width 4.6 :height 1.0)))
 
 ;; Track-typed inlets (grab's `source`) pick from the track list by name.
 (def lane-track-option (index)
-  (str (+ index 1) " " (if (< index (len SEQ.track-names)) (nth SEQ.track-names index) "")))
+  (let ((t (track-at index)))
+    (str (+ index 1) " " (if t t.name ""))))
 
 (def lane-track-options ()
-  (map lane-track-option (range 0 (len SEQ.track-names))))
+  (map (lambda (t) (lane-track-option t.index)) (tracks)))
 
-(def lane-track-option-index (label)
-  (reduce |acc index| (if (= label (lane-track-option index)) index acc)
-    0
-    (range 0 (len SEQ.track-names))))
-
-(def lane-strip-track-inlet-row (track slot inlet)
+(def lane-strip-track-inlet-row (p i)
   (h-stack :width :fill :gap 0.3 :align :center
-    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
-    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    :key (str "lane-inlet-" p.proc-id "-" i.name)
+    (label i.name :flex 1 :font-size 8.5 :color :white :bg :transparent)
     (dropdown
-      :key (str "lane-inlet-track-" (get slot :instance-id) "-" (get inlet :name))
-      :value (lane-track-option (floor (get inlet :value)))
+      :key (str "lane-inlet-track-" p.proc-id "-" i.name)
+      :value (lane-track-option (floor i.value))
       :bg-color :mixer-strip-bg
       :badge-color :mixer-strip-selected-bg
       :border-color :mixer-strip-selected-bg
       :options (lane-track-options)
       :on-change (lambda (label)
-        (let ((index (lane-track-option-index label)))
-          (if (lane-edit-all?)
-            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index :all)
-            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index))))
+        (set-inlet! i (max 0 (index-of (lane-track-options) label)) :all (edit-all? p)))
       :width 7.5 :height 1.1 :font-size 8.5)))
 
 ;; Enum inlets (cmp's `op`, roll's `rate`) pick from the definition's option
 ;; list. The inlet value is the option index, so the row maps label <-> index.
-(def lane-enum-option (inlet index)
-  (let ((options (if (get inlet :options) (get inlet :options) '())))
-    (if (and (< -1 index) (< index (len options))) (nth options index) "")))
+(def lane-enum-option (i index)
+  (or (nth i.options index) ""))
 
-(def lane-enum-option-index (inlet label)
-  (let ((options (if (get inlet :options) (get inlet :options) '())))
-    (reduce |acc index| (if (= label (nth options index)) index acc)
-      0
-      (range 0 (len options)))))
-
-(def lane-strip-enum-inlet-row (track slot inlet)
+(def lane-strip-enum-inlet-row (p i)
   (h-stack :width :fill :gap 0.3 :align :center
-    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
-    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    :key (str "lane-inlet-" p.proc-id "-" i.name)
+    (label i.name :flex 1 :font-size 8.5 :color :white :bg :transparent)
     (dropdown
-      :key (str "lane-inlet-enum-" (get slot :instance-id) "-" (get inlet :name))
-      :value (lane-enum-option inlet (floor (get inlet :value)))
-      :options (if (get inlet :options) (get inlet :options) '())
+      :key (str "lane-inlet-enum-" p.proc-id "-" i.name)
+      :value (lane-enum-option i (floor i.value))
+      :options i.options
       :on-change (lambda (label)
-        (let ((index (lane-enum-option-index inlet label)))
-          (if (lane-edit-all?)
-            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index :all)
-            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index))))
+        (set-inlet! i (max 0 (index-of i.options label)) :all (edit-all? p)))
       :width 7.5 :height 1.1 :font-size 8.5)))
 
-(def lane-strip-inlets (track slot)
+(def lane-strip-inlets (p)
   ;; `mode` has its own row; `reset` is written by the shared reset lane's
   ;; wire, never typed.
-  (each (filter (lambda (inlet) (not (or (= (get inlet :name) "mode") (= (get inlet :name) "reset"))))
-                (if (get slot :inlets) (get slot :inlets) '()))
-        |inlet|
-    (if (= (get inlet :kind) "track")
-      (lane-strip-track-inlet-row track slot inlet)
-      (if (= (get inlet :kind) "enum")
-        (lane-strip-enum-inlet-row track slot inlet)
-        (lane-strip-inlet-row track slot inlet)))))
+  (each (filter (lambda (i) (not (or (= i.name "mode") (= i.name "reset")))) p.inlets) |i|
+    (match i.type
+      "track" (lane-strip-track-inlet-row p i)
+      "enum" (lane-strip-enum-inlet-row p i)
+      _ (lane-strip-inlet-row p i))))
 
-;; UI-only slider step (see lane-slider-steps): only lanes wider than 1 get
+;; UI-only slider step (see lane-edit.steps): only lanes wider than 1 get
 ;; one. 0 reads "free" and hands the sliders back their floats.
-(def lane-strip-step-row (track lane)
-  (if (lane-stepped? lane)
+(def lane-strip-step-row (l)
+  (if (lane-stepped? l)
     (h-stack :width :fill :gap 0.3 :align :center
-      :key (str "lane-step-row-" (lane-step-key lane))
+      :key (str "lane-step-row-" (lane-step-key l))
       (label "step" :flex 1 :font-size 8.5 :color :dim :bg :transparent)
       (number-picker
-        :key (str "lane-step-control-" (lane-step-key lane))
-        :value (lane-slider-step lane)
+        :key (str "lane-step-control-" (lane-step-key l))
+        :value (lane-slider-step l)
         :min 0 :max 16 :step 0.25 :drag-rows 64
-        :decimals (lane-slider-step-decimals (lane-slider-step lane))
+        :decimals (lane-slider-step-decimals (lane-slider-step l))
         :value-labels '((0 "free"))
         :noui true :font-size 9 :text-color :dim :text-align :right
-        :on-change (lambda (value) (set-lane-slider-step lane value))
+        :on-change (lambda (value) (set-lane-slider-step l value))
         :width 4.6 :height 1.0))
-    (box :height 0)))
+    (nothing)))
 
-;; Reorder within the chain: move before the previous slot, or after the next.
-(def lane-strip-neighbor (track slot delta)
-  (let ((slots (track-process-slots track))
-        (idx (+ (get slot :slot-index) delta)))
-    (if (and (>= idx 0) (< idx (len slots))) (nth slots idx) nil)))
+;; Reorder within the chain: move before the previous process, or after the
+;; next.
+(def chain-neighbor (t p delta)
+  (nth t.processes (+ p.index delta)))
 
-(def lane-strip-move-button (track slot text delta)
-  (let ((neighbor (lane-strip-neighbor track slot delta)))
+(def lane-strip-move-button (t p text delta)
+  (let ((neighbor (chain-neighbor t p delta)))
     (button text
-      :key (str "lane-move-" (get slot :instance-id) "-" delta)
+      :key (str "lane-move-" p.proc-id "-" delta)
       :width 1.6 :height 1.0 :padding 0 :font-size 9
       :background-color :transparent :border-color :transparent
       :color (if neighbor :dim (rgba 1 1 1 0.15))
       :on-click (lambda (event)
-        (if neighbor
-          (if (< delta 0)
-            (seq-move-process-slot-before track (get slot :instance-id) (get neighbor :instance-id))
-            (let ((after (lane-strip-neighbor track slot 2)))
-              (seq-move-process-slot-before track (get slot :instance-id)
-                (if after (get after :instance-id) nil))))
-          nil)))))
+        (when neighbor
+          (move-process! p (if (< delta 0) neighbor (chain-neighbor t p 2))))))))
 
-;; Scope: the lane's state history on this track (one sample per fire),
-;; published by the scheduler as SEQ.track-process-scopes. Accumulators show
-;; their running value, rand its held roll, count its count. Empty until the
-;; lane has fired on this track.
-(def lane-scope-entry (track slot)
-  (if SEQ.track-process-scopes
-    (let ((entries (if (< track (len SEQ.track-process-scopes))
-                     (nth SEQ.track-process-scopes track)
-                     '())))
-      (reduce |acc entry| (if (= (get entry :instance-id) (get slot :instance-id)) entry acc)
-        nil
-        entries))
-    nil))
+;; Scope: the lane's state history on this track (one sample per fire): its
+;; class's first state cell. Accumulators show their running value, rand its
+;; held roll, count its count. Nothing until the lane has fired on this
+;; track. A subtree of its own, so a fire re-runs the scope alone; it carries
+;; the strip's row gap above it, so an empty scope takes no room.
+(def lane-scope-bound (p name fallback)
+  (let ((i (named p.inlets name)))
+    (if i i.value fallback)))
 
-(def lane-scope-bound (slot name fallback)
-  (let ((inlet (slot-inlet-named slot name)))
-    (if inlet (get inlet :value) fallback)))
-
-(def lane-strip-scope-row (track slot)
-  (let ((entry (lane-scope-entry track slot)))
-    (if (= (get slot :class) "lane-harmony")
-      (harmony-snap-meter (str "lane-harmony-meter-" track "-" (get slot :instance-id))
-        (if entry (get entry :cells) nil)
-        13.5)
-    (if (and entry (> (len (get entry :values)) 0))
-      (v-stack :width :fill :gap 0.15
-        (h-stack :width :fill :gap 0.3 :align :center
-          (lane-strip-row-label "NOW")
-          (label (fmt "{:.2}" (get entry :current))
-            :v-align :center
-            :font-size 10 :color :process-lane-accent :bg :transparent)
-          (box :flex 1 :height 0.1)
-          (label (get entry :state) :font-size 8 :color :dim :bg :transparent :v-align :center))
-        (box :width :fill :height 2.6 :corner-radius (eseq.seq-core-state/radius 6) :padding 0.2
-          :background-color (rgba 0 0 0 0.3)
-          (linegraph
-            :key (str "lane-scope-" track "-" (get slot :instance-id))
-            :width :fill :height :fill
-            :values (get entry :values)
-            :total-points 64
-            :min (lane-scope-bound slot "lo" 0)
-            :max (lane-scope-bound slot "hi" 1)
-            :line-color :process-lane-accent
-            :area true)))
-      nil))))
+(def lane-strip-scope-row (t p)
+  (subtree :key (str "lane-scope-row-" t.tid "-" p.proc-id)
+    (if (= p.class-name "lane-harmony")
+      (v-stack :gap 0
+        (box :height lane-strip-gap)
+        (harmony-snap-meter (str "lane-harmony-meter-" t.index "-" p.proc-id) p 13.5))
+      (let ((cell (first p.cells))
+            (values (if cell cell.values '())))
+        (if (> (len values) 0)
+          (v-stack :width :fill :gap 0.15
+            (box :height (- lane-strip-gap 0.15))
+            (h-stack :width :fill :gap 0.3 :align :center
+              (lane-strip-row-label "NOW")
+              (label (fmt "{:.2}" (nth values (- (len values) 1)))
+                :v-align :center
+                :font-size 10 :color :process-lane-accent :bg :transparent)
+              (box :flex 1 :height 0.1)
+              (label cell.name :font-size 8 :color :dim :bg :transparent :v-align :center))
+            (box :width :fill :height 2.6 :corner-radius (eseq.seq-core-state/radius 6) :padding 0.2
+              :background-color (rgba 0 0 0 0.3)
+              (linegraph
+                :key (str "lane-scope-" t.index "-" p.proc-id)
+                :width :fill :height :fill
+                :values values
+                :total-points 64
+                :min (lane-scope-bound p "lo" 0)
+                :max (lane-scope-bound p "hi" 1)
+                :line-color :process-lane-accent
+                :area true)))
+          (nothing))))))
 
 
 ;; ── Harmony snap meter ──────────────────────────────────────────────────────
@@ -2209,7 +1923,7 @@
 ;; the centre), the scale degree it came from and went to over the chord
 ;; root, the twelve degrees above that root (chord tones solid, key tones
 ;; faint, the landing lit, a moved-from note outlined), the tier of each side
-;; and where the chord came from. `cells` is nil until the slot has fired.
+;; and where the chord came from. Empty cells read as before the first fire.
 
 (def harmony-degree-names (list "R" "b9" "9" "b3" "3" "11" "#11" "5" "b13" "13" "b7" "7"))
 (def harmony-bit-values (list 1 2 4 8 16 32 64 128 256 512 1024 2048))
@@ -2218,9 +1932,16 @@
 (def harmony-bit? (mask pc)
   (>= (mod (floor (/ mask (nth harmony-bit-values pc))) 2) 1))
 
-(def harmony-cell (cells name fallback)
-  (let ((values (get cells name)))
-    (if (and values (> (len values) 0)) (nth values (- (len values) 1)) fallback)))
+;; The history of process p's state cell `name` (newest last), empty for
+;; none.
+(def cell-history (p name)
+  (let ((cell (named p.cells name)))
+    (if cell cell.values '())))
+
+;; The newest value of p's cell `name`, or `fallback`.
+(def harmony-cell (p name fallback)
+  (let ((values (cell-history p name)))
+    (if (> (len values) 0) (nth values (- (len values) 1)) fallback)))
 
 (def harmony-degree-name (pc root)
   (nth harmony-degree-names (mod (+ (- pc root) 12) 12)))
@@ -2229,9 +1950,11 @@
   (if (>= score 0.99) "chord" (if (>= score 0.6) "key" (if (>= score 0.3) "color" "clash"))))
 
 (def harmony-source-label (kind)
-  (if (= kind 1) "src: pattern"
-    (if (= kind 2) "src: output"
-      (if (= kind 3) "src: neuron" "no source"))))
+  (match kind
+    1 "src: pattern"
+    2 "src: output"
+    3 "src: neuron"
+    _ "no source"))
 
 (def harmony-signed (snap)
   (if (> snap 0) (str "+" (fmt "{:.0}" snap)) (fmt "{:.0}" snap)))
@@ -2240,54 +1963,53 @@
 ;; to each edge.
 (def harmony-snap-bar (snap width)
   (let ((tick 0.1)
-        (unit (/ (- width 0.1) 12))
         (fill (* (min 6 (abs snap)) (/ (- width 0.1) 12)))
         (half (/ (- width 0.1) 2)))
     (box :width width :height 0.9 :padding 0 :corner-radius 3
       :background-color (rgba 0 0 0 0.35)
       (h-stack :gap 0 :align :center
         (box :width (- half (if (< snap 0) fill 0)) :height 0.9 :bg :transparent)
-        (if (< snap 0)
-          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
-          nil)
+        (when (< snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent))
         (box :width tick :height 0.9 :background-color (rgba 1 1 1 0.45))
-        (if (> snap 0)
-          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
-          nil)))))
+        (when (> snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent))))))
 
 (def harmony-degree-cell (key i root chord key-mask in-pc out-pc snap)
-  (let ((pc (mod (+ root i) 12)))
-    (let ((landed (= pc out-pc))
-          (moved-from (and (not (= snap 0)) (= pc in-pc))))
-      (box
-        :key (str key "-deg-" i)
-        :width 1.06 :height 0.95 :padding 0 :corner-radius 2
-        :h-align :center :v-align :center
-        :background-color (if landed :process-lane-accent
-                            (if (harmony-bit? chord pc) (rgba 1 1 1 0.30)
-                              (if (harmony-bit? key-mask pc) (rgba 1 1 1 0.10)
-                                (rgba 0 0 0 0.30))))
-        :border-color (if moved-from harmony-meter-miss :transparent)
-        :border-width (if moved-from 0.1 0)
-        (label (nth harmony-degree-names i)
-          :font-size 6.5 :h-align :center :v-align :center :bg :transparent
-          :color (if landed :black
-                   (if (harmony-bit? chord pc) :foreground :dim)))))))
+  (let ((pc (mod (+ root i) 12))
+        (landed (= pc out-pc))
+        (moved-from (and (not (= snap 0)) (= pc in-pc))))
+    (box
+      :key (str key "-deg-" i)
+      :width 1.06 :height 0.95 :padding 0 :corner-radius 2
+      :h-align :center :v-align :center
+      :background-color (if landed :process-lane-accent
+                          (if (harmony-bit? chord pc) (rgba 1 1 1 0.30)
+                            (if (harmony-bit? key-mask pc) (rgba 1 1 1 0.10)
+                              (rgba 0 0 0 0.30))))
+      :border-color (if moved-from harmony-meter-miss :transparent)
+      :border-width (if moved-from 0.1 0)
+      (label (nth harmony-degree-names i)
+        :font-size 6.5 :h-align :center :v-align :center :bg :transparent
+        :color (if landed :black
+                 (if (harmony-bit? chord pc) :foreground :dim))))))
 
-(def harmony-snap-meter (key cells width)
-  (let ((kind (if cells (harmony-cell cells :source-kind 0) 0))
-        (history (if cells (get cells :snap) nil)))
-    (if (or (= cells nil) (= kind 0))
-      (label (if cells "no source sounding: nothing to follow yet" "waiting for a fire")
+;; Process p's meter (a lane-harmony process, or nil before it is listed).
+(def harmony-snap-meter (key p width)
+  (let ((fired (and p (> (len (cell-history p "source-kind")) 0)))
+        (kind (if fired (harmony-cell p "source-kind" 0) 0))
+        (history (if fired (cell-history p "snap") '())))
+    (if (= kind 0)
+      (label (if fired "no source sounding: nothing to follow yet" "waiting for a fire")
         :width width :height 1.0 :font-size 8 :color :dim :bg :transparent)
-      (let ((snap (harmony-cell cells :snap 0))
-            (root (harmony-cell cells :root 0))
-            (in-pc (harmony-cell cells :in-pc 0))
-            (out-pc (harmony-cell cells :out-pc 0))
-            (chord (harmony-cell cells :chord-mask 0))
-            (key-mask (harmony-cell cells :key-mask 0))
-            (in-score (harmony-cell cells :in-score 1))
-            (out-score (harmony-cell cells :out-score 1)))
+      (let ((snap (harmony-cell p "snap" 0))
+            (root (harmony-cell p "root" 0))
+            (in-pc (harmony-cell p "in-pc" 0))
+            (out-pc (harmony-cell p "out-pc" 0))
+            (chord (harmony-cell p "chord-mask" 0))
+            (key-mask (harmony-cell p "key-mask" 0))
+            (in-score (harmony-cell p "in-score" 1))
+            (out-score (harmony-cell p "out-score" 1)))
         (v-stack :gap 0.25 :width width
           (h-stack :gap 0.3 :align :center
             (label (if (= snap 0)
@@ -2321,82 +2043,181 @@
               :width (- (/ width 2) 0.3) :height 0.9 :font-size 7.5 :h-align :right
               :color :dim :bg :transparent)))))))
 
-;; Scope cells of the process instance whose runtime id is `id` (a graph
-;; node's patch slot: its instance id), or nil before it has fired. Reads
-;; SEQ.process-scope-cells, so call it inside a subtree.
-(def process-scope-cells-for (id)
-  (let ((entries SEQ.process-scope-cells))
-    (if entries
-      (reduce |acc entry| (if (= (get entry :runtime-id) id) (get entry :cells) acc)
-        nil
-        entries)
-      nil)))
-
 ;; ---------------------------------------------------------------------------
-;; Lane patchbay (docs/default-process-lanes-spec.md, patchbay): every lane of
-;; the composed chain in fire order, cables between their connectable ports.
-;; Data comes from SEQ.track-lane-patch; the cables, the drag and the cable
-;; click are the generic patch-port machinery the mixer's mod ports use.
-;; Cable ids: an out port is `(track * 4096 + slot-index) * 16 + ordinal`, an
-;; in port is (slot-index, ordinal) on its own track's closure. The track is
-;; folded in because every expanded track's patchbay shares one layout and
-;; the cable renderer keys sources by that number alone.
+;; Lane patchbay (docs/default-process-lanes-spec.md, patchbay): every process
+;; of a chain in fire order, cables between their connectable ports; the
+;; cables, the drag and the cable click are the generic patch-port machinery
+;; the mixer's mod ports use. A bay is addressed by its cable namespace `ns`:
+;; a track's position, or a registered graph node's namespace (from
+;; `lane-patch-node-base` up). Its cards are patch entries derived from its
+;; owner's processes (`bay-entries`: `t.processes`, a node's `n.processes`),
+;; edited through the process setters. Cable ids: an out port is
+;; `(ns * 4096 + process index) * 16 + ordinal` (its place among the
+;; process's connectable ports), an in port (process index, ordinal among
+;; `p.in-ports`). The namespace is folded in because every expanded track's
+;; patchbay shares one layout and the cable renderer keys sources by that
+;; number alone.
 
-(defstate lane-patch-view true)
-;; Out port id being dragged (or armed by a click); -1 when idle. Port id 0
-;; is a legal port, so never test this with a bare `if`.
-(defstate lane-patch-pending -1)
-;; The selected cable, a dict of writer/port/reader/inlet/source, or nil.
-(defstate lane-patch-selected nil)
-
-(def lane-patch-show (on) (set! lane-patch-view on))
+(def lane-patch-show (on) (set! patch-view.show on))
 
 ;; Node patches (docs/graph-node-processes-spec.md §6): the same patchbay
-;; drawn over a graph node's process chain. A node target is a cable
-;; namespace at or above `lane-patch-node-base`, registered by the panel that
-;; expands the node so every lane-patch-* function can find the graph handle
-;; behind a namespace and route edits to the graph-node-process-* natives.
-;; The host derives a node's namespace from its graph (instance) id and the
-;; node (`graph-node-patch-namespace`, the band `graph-node-lane-patch` mints
-;; port ids in), so node k of two graphs never shares one
-;; (docs/instance-kinds-spec.md §7).
+;; drawn over a graph node's process chain. A node bay's namespace is
+;; registered by the view that expands the node, so the bay finds the graph
+;; node behind it. The host derives a node's namespace from its graph
+;; (instance) id and the node (`graph-node-patch-namespace`), so node k of two
+;; graphs never shares one (docs/instance-kinds-spec.md §7).
 (def lane-patch-node-base 1024)
-(def lane-patch-node? (track) (>= track lane-patch-node-base))
+(def lane-patch-node? (ns) (>= ns lane-patch-node-base))
 (def lane-patch-node-namespace (graph node) (graph-node-patch-namespace graph node))
-;; (namespace graph node) triples, newest first.
-(defstate lane-patch-node-targets '())
-;; Bumped after every node-patch edit: the graph natives are not reactive.
-(defstate lane-patch-node-version 0)
-;; The selected slot (instance id) in a node bay; -1 = none.
-(defstate lane-patch-node-selected -1)
 
-(def lane-patch-node-touch () (set! lane-patch-node-version (+ lane-patch-node-version 1)))
-(def lane-patch-node-version-value () lane-patch-node-version)
-(def lane-patch-node-selected-id () lane-patch-node-selected)
-(def lane-patch-node-select (instance-id) (set! lane-patch-node-selected instance-id))
+(def lane-patch-node-selected-id () patch-view.node-selected)
+(def lane-patch-node-select (id) (set! patch-view.node-selected id))
 
-;; Call from the event that expands a node (never from a render): returns the
-;; namespace to draw the bay with.
+;; Call from the event that expands node `node` of instance `graph` (never
+;; from a render): returns the namespace to draw the bay with.
 (def lane-patch-register-node (graph node)
   (let ((ns (lane-patch-node-namespace graph node)))
-    (do
-      (set! lane-patch-node-targets
-        (append (list (list ns graph node))
-                (filter (lambda (t) (not (= (nth t 0) ns))) lane-patch-node-targets)))
-      (set! lane-patch-pending -1)
-      (set! lane-patch-selected nil)
-      ns)))
+    (set! patch-view.node-targets
+      (cons (list ns graph node)
+            (filter (lambda (target) (not (= (nth target 0) ns))) patch-view.node-targets)))
+    (patch-idle!)
+    ns))
 
 ;; Whether `graph` (an instance) has registered a node bay: its kind hosts
 ;; node editors, with the `expanded-node` view field the *processes* dock
 ;; reads (ui/processes-buffer.lisp).
 (def lane-patch-node-host? (graph)
-  (reduce |acc t| (if acc true (= (nth t 1) graph)) false lane-patch-node-targets))
+  (listed? graph (map (lambda (target) (nth target 1)) patch-view.node-targets)))
 
-(def lane-patch-node-target (ns)
-  (reduce |acc t| (if (and (= acc nil) (= (nth t 0) ns)) t acc) nil lane-patch-node-targets))
-(def lane-patch-node-graph (ns) (let ((t (lane-patch-node-target ns))) (if t (nth t 1) nil)))
-(def lane-patch-node-index (ns) (let ((t (lane-patch-node-target ns))) (if t (nth t 2) 0)))
+(def node-target (ns)
+  (first (filter (lambda (target) (= (nth target 0) ns)) patch-view.node-targets)))
+
+;; The instance and node index behind node bay ns.
+(def node-bay-graph (ns) (let ((target (node-target ns))) (when target (nth target 1))))
+(def node-bay-index (ns) (let ((target (node-target ns))) (if target (nth target 2) 0)))
+
+;; The graph node instance behind node bay ns, or nil (its graph not
+;; published yet, or the node past the active count).
+(def node-of (ns)
+  (let ((target (node-target ns))
+        (g (when target (graph-of (nth target 1)))))
+    (when g (nth g.nodes (nth target 2)))))
+
+;; Bay ns's processes in fire order: its track's chain or its node's patch
+;; (none while its owner is gone).
+(def bay-processes (ns)
+  (if (lane-patch-node? ns)
+    (let ((n (node-of ns))) (if n n.processes '()))
+    (let ((t (track-at ns))) (if t t.processes '()))))
+
+;; Process `id` of bay ns, or nil.
+(def bay-process (ns id)
+  (let ((owner (if (lane-patch-node? ns) (node-of ns) (track-at ns))))
+    (when owner (process-of owner id))))
+
+(def port-id (ns slot ordinal) (+ (* (+ (* ns 4096) slot) 16) ordinal))
+(def lane-patch-port-ns (port-id) (floor (/ port-id (* 16 4096))))
+(def lane-patch-port-slot (ns port-id) (- (floor (/ port-id 16)) (* ns 4096)))
+(def lane-patch-port-ordinal (port-id) (- port-id (* 16 (floor (/ port-id 16)))))
+
+;; Port `id`'s place as the port shader compares it with the pending port
+;; (`patch-view.pending-bay` / `pending-slot`): its bay's namespace and its
+;; slot and ordinal in the bay (`id mod 4096·16`). A shader holds floats, so
+;; a whole port id (past 2^24 in a node bay) would round onto its
+;; neighbours: the namespace is folded below 2^24 (only node bays of graphs
+;; 4096 apart share a fold).
+(def port-bay (id) (mod (lane-patch-port-ns id) 16777216))
+(def port-slot (id) (mod id 65536))
+
+(def connectable-ports (p) (filter (lambda (pt) pt.connectable) p.ports))
+
+;; The inlet (a lane or a scalar inlet) of process p named `name`: what a
+;; cable into its in port binds.
+(def wire-target (p name)
+  (let ((lane (first (filter (lambda (l) (= l.inlet name)) p.lanes))))
+    (if lane lane (named p.inlets name))))
+
+;; The reader entries of port pt (its own wire unless disconnected, then its
+;; fan-out entries' wires), as patch entries list them.
+(def port-readers (pt)
+  (append
+    (if (and pt.target-process (not pt.disconnected))
+      (let ((r pt.target-process))
+        (list (dict :slot-index r.index :instance-id r.proc-id :inlet pt.target-inlet
+                    :source "primary" :fanout-index nil)))
+      '())
+    (map (lambda (fo)
+           (let ((r fo.target-process))
+             (dict :slot-index r.index :instance-id r.proc-id :inlet fo.target-inlet
+                   :source "fanout" :fanout-index fo.index)))
+      (filter (lambda (fo) fo.target-process) pt.fanout))))
+
+;; Process p's out ports in bay ns: its connectable ports, each with its
+;; cable id, whether a new cable takes its own binding (none of its own, or
+;; disconnected) and its readers.
+(def process-out-ports (ns p)
+  (let ((ports (connectable-ports p)))
+    (map (lambda (ordinal)
+           (let ((pt (nth ports ordinal)))
+             (dict :name pt.name :ordinal ordinal :port-id (port-id ns p.index ordinal)
+                   :primary-free (or pt.disconnected (not pt.manual))
+                   :readers (port-readers pt))))
+      (range 0 (len ports)))))
+
+;; Bay ns's entries: its processes in fire order as patch entries (the
+;; cards' shape: a process's name, flags, in ports with their writers and out
+;; ports with their readers, and the process itself). The cables are listed
+;; once, `(reader slot, inlet, out port id)` in out port order, and each in
+;; port takes the out ports of its own.
+(def bay-entries (ns)
+  (let ((processes (bay-processes ns))
+        (outs (map (lambda (p) (process-out-ports ns p)) processes))
+        (cables (reduce |acc ports|
+                  (reduce |acc port|
+                    (append acc (map (lambda (r) (list (get r :slot-index) (get r :inlet)
+                                                       (get port :port-id)))
+                                  (get port :readers)))
+                    acc ports)
+                  '() outs))
+        (writers-of (lambda (index inlet)
+                      (map (lambda (c) (nth c 2))
+                        (filter (lambda (c) (and (= (nth c 0) index) (= (nth c 1) inlet)))
+                          cables)))))
+    (map (lambda (p)
+           (dict :process p :slot-index p.index :instance-id p.proc-id :name p.name
+                 :class p.class-name :project p.project :enabled p.enabled
+                 :expr p.expr :expr-line p.expr-line
+                 :compile-error (if (= p.compile-error "") nil p.compile-error)
+                 :in-ports (map (lambda (ordinal)
+                                  (let ((inlet (nth p.in-ports ordinal)))
+                                    (dict :name inlet :ordinal ordinal
+                                          :writers (writers-of p.index inlet))))
+                             (range 0 (len p.in-ports)))
+                 :out-ports (nth outs p.index)))
+      processes)))
+
+(def lane-patch-list (entry key)
+  (or (and entry (get entry key)) '()))
+
+;; Bay entries and their ports by position (`nth` reads nil out of range).
+(def lane-patch-out-port (entries ns port-id)
+  (nth (lane-patch-list (nth entries (lane-patch-port-slot ns port-id)) :out-ports)
+       (lane-patch-port-ordinal port-id)))
+
+(def lane-patch-in-port (entries slot ordinal)
+  (nth (lane-patch-list (nth entries slot) :in-ports) ordinal))
+
+;; The reader entry of an out port that lands on (reader slot, inlet), or nil.
+(def lane-patch-reader (out-port reader-slot inlet)
+  (first (filter (lambda (reader) (and (= (get reader :slot-index) reader-slot)
+                                       (= (get reader :inlet) inlet)))
+           (lane-patch-list out-port :readers))))
+
+;; A cable pointing up the chain lands next fire (writes only flow forward
+;; within one fire).
+(def lane-patch-in-port-backward? (ns slot port)
+  (not (empty? (filter (lambda (writer) (> (lane-patch-port-slot ns writer) slot))
+                 (lane-patch-list port :writers)))))
 
 (def lane-patch-port-style
   (ui/style
@@ -2404,16 +2225,25 @@
       :brightness 1.45
       :transition (dict :brightness 0.08 :ease :smoothstep))))
 
+;; A patchbay port. An out port draws pending while it is the pending port:
+;; `armed-bay` / `armed-slot` bind the pending port's place
+;; (`patch-view.pending-bay` / `pending-slot`), compared with its own
+;; (`bay-key`, `slot-key`), so arming a port repaints the ports alone.
+;; `pending-port` (bound to `patch-view.pending`) is for the patch machinery,
+;; which compares it with the port's id (`:track`) exactly; the shader does
+;; not read it (a float would round a node bay's ids together).
 (defwidget lane-patch-port
   :width 1.5 :height 1.0
   :paint-margin 0.012
-  :state (active pending output selected)
+  :state (active output selected pending-port armed-bay armed-slot bay-key slot-key)
   :shader
   (let ((outer (if active
           (if selected
             :mod-port-selected
             (if output
-              (if pending :mod-port-pending :mod-port-output)
+              (if (= armed-slot slot-key)
+                (if (= armed-bay bay-key) :mod-port-pending :mod-port-output)
+                :mod-port-output)
               :mod-port-input))
           :mod-port-inactive))
       (inner (if active
@@ -2425,207 +2255,162 @@
       (sdf/fill (sdf/circle (* width 0.53))
         (material :color inner)))))
 
-(def track-lane-patch (track)
-  (if (lane-patch-node? track)
-    (let ((graph (lane-patch-node-graph track)))
-      (if graph
-        (do lane-patch-node-version (graph-node-lane-patch graph (lane-patch-node-index track)))
-        '()))
-    (if (< track (len SEQ.track-lane-patch))
-      (nth SEQ.track-lane-patch track)
-      '())))
+;; Make port `id` the pending one (-1: none), each field written only when
+;; it changes.
+(def set-pending! (id)
+  (let ((bay (if (< id 0) -1 (port-bay id)))
+        (slot (if (< id 0) -1 (port-slot id))))
+    (unless (= patch-view.pending id) (set! patch-view.pending id))
+    (unless (= patch-view.pending-bay bay) (set! patch-view.pending-bay bay))
+    (unless (= patch-view.pending-slot slot) (set! patch-view.pending-slot slot))))
 
-(def lane-patch-entry (track slot-index)
-  (let ((entries (track-lane-patch track)))
-    (if (and (< -1 slot-index) (< slot-index (len entries)))
-      (nth entries slot-index)
-      nil)))
+(def clear-cable! ()
+  (when patch-view.cable (set! patch-view.cable nil)))
 
-(def lane-patch-port-track (port-id) (floor (/ port-id (* 16 4096))))
-(def lane-patch-port-slot (track port-id) (- (floor (/ port-id 16)) (* track 4096)))
-(def lane-patch-port-ordinal (port-id) (- port-id (* 16 (floor (/ port-id 16)))))
+;; No port pending and no cable selected.
+(def patch-idle! ()
+  (set-pending! -1)
+  (clear-cable!))
 
-(def lane-patch-list (entry key)
-  (if (and entry (get entry key)) (get entry key) '()))
-
-(def lane-patch-out-port (track port-id)
-  (let ((ports (lane-patch-list (lane-patch-entry track (lane-patch-port-slot track port-id)) :out-ports))
-        (ordinal (lane-patch-port-ordinal port-id)))
-    (if (< ordinal (len ports)) (nth ports ordinal) nil)))
-
-(def lane-patch-in-port (track slot-index ordinal)
-  (let ((ports (lane-patch-list (lane-patch-entry track slot-index) :in-ports)))
-    (if (and (< -1 ordinal) (< ordinal (len ports))) (nth ports ordinal) nil)))
-
-;; The reader entry of an out port that lands on (reader slot, inlet), or nil.
-(def lane-patch-reader (out-port reader-slot inlet)
-  (reduce |acc reader|
-    (if (and (= acc nil)
-             (= (get reader :slot-index) reader-slot)
-             (= (get reader :inlet) inlet))
-      reader
-      acc)
-    nil
-    (lane-patch-list out-port :readers)))
-
-;; A cable pointing up the chain lands next fire (writes only flow forward
-;; within one fire).
-(def lane-patch-in-port-backward? (track slot-index port)
-  (reduce |acc writer| (or acc (> (lane-patch-port-slot track writer) slot-index))
-    false
-    (lane-patch-list port :writers)))
-
-(def lane-patch-clear-pending () (set! lane-patch-pending -1))
+(def lane-patch-clear-pending () (set-pending! -1))
 
 (def lane-patch-arm (port-id)
-  (do
-    (set! lane-patch-pending port-id)
-    (set! lane-patch-selected nil)))
+  (set-pending! port-id)
+  (clear-cable!))
 
-(def lane-patch-inlet-target (entry inlet)
-  (dict :kind "process-inlet"
-        :process (get entry :class)
-        :inlet inlet
-        :instance-id (get entry :instance-id)))
-
-;; Wire out port `port-id` into (reader slot, in-port ordinal). The first
-;; cable out of a port takes its primary binding; every further cable is a
-;; fan-out entry on the port (identity range, so the value passes through).
-(def lane-patch-connect (track port-id reader-slot ordinal)
-  (let ((writer (lane-patch-entry track (lane-patch-port-slot track port-id)))
-        (out-port (lane-patch-out-port track port-id))
-        (reader (lane-patch-entry track reader-slot))
-        (in-port (lane-patch-in-port track reader-slot ordinal)))
-    (do
-      (set! lane-patch-pending -1)
-      (if (not (= (lane-patch-port-track port-id) track))
-        (status "Cables stay within a track")
-      (if (or (= writer nil) (= out-port nil) (= reader nil) (= in-port nil))
+;; Wire out port `port-id` into (reader slot, in-port ordinal) of bay ns. The
+;; first cable out of a port takes its primary binding (when it has none of
+;; its own, or is disconnected); every further cable is a fan-out entry on
+;; the port (identity range, so the value passes through).
+(def lane-patch-connect (ns port-id reader-slot ordinal)
+  (let ((entries (bay-entries ns))
+        (writer-slot (lane-patch-port-slot ns port-id))
+        (writer (nth entries writer-slot))
+        (out-port (lane-patch-out-port entries ns port-id))
+        (reader (nth entries reader-slot))
+        (in-port (lane-patch-in-port entries reader-slot ordinal)))
+    (set-pending! -1)
+    (if (not (= (lane-patch-port-ns port-id) ns))
+      (status "Cables stay within a track")
+      (if (not (and writer out-port reader in-port))
         (status "Nothing to wire")
-        (if (= (lane-patch-port-slot track port-id) reader-slot)
+        (if (= writer-slot reader-slot)
           (status "A lane cannot feed itself")
           (if (lane-patch-reader out-port reader-slot (get in-port :name))
             (status "Already wired")
-            (let ((target (lane-patch-inlet-target reader (get in-port :name)))
-                  (writer-id (get writer :instance-id))
-                  (port-name (get out-port :name)))
-              (do
-                (if (lane-patch-node? track)
-                  (let ((graph (lane-patch-node-graph track))
-                        (node (lane-patch-node-index track)))
-                    (do
-                      (if (get out-port :primary-free)
-                        (graph-node-process-wire graph node writer-id port-name (get reader :instance-id) (get in-port :name))
-                        (graph-node-process-fanout-add graph node writer-id port-name (get reader :instance-id) (get in-port :name)))
-                      (lane-patch-node-touch)))
-                  (if (get out-port :primary-free)
-                    (if (lane-edit-all?)
-                      (seq-bind-process-port track writer-id port-name target :all)
-                      (seq-bind-process-port track writer-id port-name target))
-                    (if (lane-edit-all?)
-                      (seq-add-process-port-fanout track writer-id port-name target :all)
-                      (seq-add-process-port-fanout track writer-id port-name target))))
-                (status (str "Wired " (get writer :name) " → " (get reader :name) " " (get in-port :name)
-                             (if (< reader-slot (lane-patch-port-slot track port-id)) " (next fire)" "")
-                             (if (and (not (lane-patch-node? track)) (lane-edit-all?)) " (all tracks)" ""))))))))))))
+            (let ((writer-id (get writer :instance-id))
+                  (reader-id (get reader :instance-id))
+                  (port (get out-port :name))
+                  (inlet (get in-port :name))
+                  (primary (get out-port :primary-free))
+                  (p (bay-process ns writer-id))
+                  (r (bay-process ns reader-id))
+                  (all (and p (edit-all? p))))
+              (let ((pt (when p (named p.ports port)))
+                    (target (when r (wire-target r inlet))))
+                (when (and pt target)
+                  (if primary
+                    (bind-port! pt target :all all)
+                    (add-fanout! pt target :all all))))
+              (status (str "Wired " (get writer :name) " → " (get reader :name) " " inlet
+                           (if (< reader-slot writer-slot) " (next fire)" "")
+                           (if all " (all tracks)" ""))))))))))
 
-(def lane-patch-in-click (track slot-index ordinal)
-  (if (< lane-patch-pending 0)
-    nil
-    (lane-patch-connect track lane-patch-pending slot-index ordinal)))
+(def lane-patch-in-click (ns slot ordinal)
+  (when (>= patch-view.pending 0)
+    (lane-patch-connect ns patch-view.pending slot ordinal)))
 
-(def lane-patch-select-cable (track port-id reader-slot ordinal)
-  (let ((out-port (if (= (lane-patch-port-track port-id) track) (lane-patch-out-port track port-id) nil))
-        (in-port (lane-patch-in-port track reader-slot ordinal)))
-    (if (and out-port in-port)
-      (let ((reader (lane-patch-reader out-port reader-slot (get in-port :name))))
-        (if reader
-          (do
-            (set! lane-patch-pending -1)
-            (set! lane-patch-selected
-              (dict :track track
-                    :port-id port-id
-                    :writer-slot (lane-patch-port-slot track port-id)
-                    :port (get out-port :name)
-                    :reader-slot reader-slot
-                    :ordinal ordinal
-                    :inlet (get in-port :name)
-                    :source (get reader :source)
-                    :fanout-index (get reader :fanout-index)))
-            (status "Cable selected: × or Backspace removes it"))
-          nil))
-      nil)))
+;; Select the cable from out port `port-id` into (reader slot, ordinal) of
+;; bay ns.
+(def lane-patch-select-cable (ns port-id reader-slot ordinal)
+  (let ((entries (bay-entries ns))
+        (writer-slot (lane-patch-port-slot ns port-id))
+        (out-port (when (= (lane-patch-port-ns port-id) ns)
+                    (lane-patch-out-port entries ns port-id)))
+        (in-port (lane-patch-in-port entries reader-slot ordinal))
+        (reader (when (and out-port in-port)
+                  (lane-patch-reader out-port reader-slot (get in-port :name)))))
+    (when reader
+      (set-pending! -1)
+      (set! patch-view.cable
+        (dict :ns ns
+              :port-id port-id
+              :writer-slot writer-slot
+              :writer-id (get (nth entries writer-slot) :instance-id)
+              :port (get out-port :name)
+              :reader-slot reader-slot
+              :ordinal ordinal
+              :inlet (get in-port :name)
+              :source (get reader :source)
+              :fanout-index (get reader :fanout-index)))
+      (status "Cable selected: × or Backspace removes it"))))
 
-(def lane-patch-selected-sources (slot-index ordinal)
-  (if (and lane-patch-selected
-           (= (get lane-patch-selected :reader-slot) slot-index)
-           (= (get lane-patch-selected :ordinal) ordinal))
-    (list (get lane-patch-selected :port-id))
-    '()))
+(def lane-patch-selected-sources (ns slot ordinal)
+  (let ((cable patch-view.cable))
+    (if (and cable
+             (= (get cable :ns) ns)
+             (= (get cable :reader-slot) slot)
+             (= (get cable :ordinal) ordinal))
+      (list (get cable :port-id))
+      '())))
 
-;; Remove `cable` (a lane-patch-selected dict). The × chip passes the cable
-;; it rendered with: its click lands on mouse-down, after the host's
-;; on-patch-miss for that same press has already cleared the selection.
+;; Remove `cable` (a patch-view.cable dict) while its writer still holds it.
+;; The × chip passes the cable it rendered with: its click lands on
+;; mouse-down, after the host's on-patch-miss for that same press has already
+;; cleared the selection.
 (def lane-patch-remove-cable (cable)
-  (if cable
-    (let ((track (get cable :track)))
-      (let ((writer (lane-patch-entry track (get cable :writer-slot))))
-        (do
-          (set! lane-patch-selected nil)
-          (if writer
-            (if (lane-patch-node? track)
-              (let ((graph (lane-patch-node-graph track))
-                    (node (lane-patch-node-index track)))
-                (do
-                  (if (= (get cable :source) "fanout")
-                    (graph-node-process-fanout-remove graph node (get writer :instance-id) (get cable :port) (get cable :fanout-index))
-                    (graph-node-process-unwire graph node (get writer :instance-id) (get cable :port)))
-                  (lane-patch-node-touch)))
-              (if (= (get cable :source) "fanout")
-                (if (lane-edit-all?)
-                  (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index) :all)
-                  (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index)))
-                (if (lane-edit-all?)
-                  (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
-                  (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port)))))
-            nil))))
-    nil))
+  (when cable
+    (clear-cable!)
+    (let ((ns (get cable :ns))
+          (id (get cable :writer-id))
+          (port (get cable :port))
+          (index (get cable :fanout-index))
+          (fanout (= (get cable :source) "fanout")))
+      (let ((p (bay-process ns id))
+            (pt (when p (named p.ports port))))
+        (when pt
+          (if fanout
+            (let ((fo (nth pt.fanout index)))
+              (when fo (remove-fanout! fo :all (edit-all? p))))
+            (clear-port! pt :all (edit-all? p))))))))
 
-(def lane-patch-remove-selected (track) (lane-patch-remove-cable lane-patch-selected))
-
-(def lane-patch-cable-selected? () (if lane-patch-selected true false))
-(def lane-patch-pending-port () lane-patch-pending)
+(def lane-patch-cable-selected? () (if patch-view.cable true false))
+(def lane-patch-pending-port () patch-view.pending)
 
 ;; Backspace / Delete in the sequencer buffer: a selected cable goes first,
 ;; otherwise the keys keep deleting steps. Returns true when a cable went.
 (def lane-patch-delete-selected ()
-  (if lane-patch-selected
-    (do
-      (lane-patch-remove-selected (get lane-patch-selected :track))
-      true)
+  (if patch-view.cable
+    (do (lane-patch-remove-cable patch-view.cable) true)
     false))
 
-(def lane-patch-out-port-widget (track entry port)
-  (let ((port-id (get port :port-id)))
+(def lane-patch-out-port-widget (ns entry port)
+  (let ((id (get port :port-id)))
     (lane-patch-port
       :key (str "lane-patch-out-" (get entry :instance-id) "-" (get port :name))
       :patch-port true
       :direction :out
-      :track port-id
+      :track id
       :active true
-      :pending (= lane-patch-pending port-id)
+      ;; The patch machinery's drag source (bound: compared with :track).
+      :pending-port #'patch-view.pending
+      :armed-bay #'patch-view.pending-bay
+      :armed-slot #'patch-view.pending-slot
+      :bay-key (port-bay id)
+      :slot-key (port-slot id)
       :output true
       :selected false
       :style lane-patch-port-style
-      :on-mouse-down |x y r| (lane-patch-arm port-id)
-      :on-click |x y r| (lane-patch-arm port-id)
+      :on-mouse-down (lambda (event) (lane-patch-arm id))
+      :on-click (lambda (event) (lane-patch-arm id))
       :on-patch-cancel (lambda (source) (lane-patch-clear-pending))
-      :on-patch-miss (lambda () (set! lane-patch-selected nil)))))
+      :on-patch-miss (lambda () (clear-cable!)))))
 
-(def lane-patch-in-port-widget (track entry port)
-  (let ((slot-index (get entry :slot-index))
+(def lane-patch-in-port-widget (ns entry port)
+  (let ((slot (get entry :slot-index))
         (ordinal (get port :ordinal))
-        (backward (lane-patch-in-port-backward? track (get entry :slot-index) port)))
+        (selected (lane-patch-selected-sources ns slot ordinal))
+        (backward (lane-patch-in-port-backward? ns slot port)))
     (h-stack :height 1.1 :gap 0.1 :align :center
       :key (str "lane-patch-in-" (get entry :instance-id) "-" (get port :name))
       (lane-patch-port
@@ -2633,81 +2418,68 @@
         :patch-port true
         :direction :in
         :dest-kind "lane"
-        :dest slot-index
+        :dest slot
         :input ordinal
         :connected-sources (lane-patch-list port :writers)
-        :selected-sources (lane-patch-selected-sources slot-index ordinal)
+        :selected-sources selected
         :active true
-        :pending false
         :output false
-        :selected (> (len (lane-patch-selected-sources slot-index ordinal)) 0)
+        :selected (not (empty? selected))
         :style lane-patch-port-style
-        :on-patch-drop (lambda (source dest input) (lane-patch-connect track source dest input))
-        :on-cable-click (lambda (source dest input) (lane-patch-select-cable track source dest input))
-        :on-click |x y r| (lane-patch-in-click track slot-index ordinal)
-        :on-mouse-up |x y r| (lane-patch-in-click track slot-index ordinal))
+        :on-patch-drop (lambda (source dest input) (lane-patch-connect ns source dest input))
+        :on-cable-click (lambda (source dest input) (lane-patch-select-cable ns source dest input))
+        :on-click (lambda (event) (lane-patch-in-click ns slot ordinal))
+        :on-mouse-up (lambda (event) (lane-patch-in-click ns slot ordinal)))
       (label (str (get port :name) (if backward " ↑" ""))
         :height 1.1 :font-size 8.5 :v-align :center
         :color (if backward :process-lane-accent :dim) :bg :transparent))))
 
-;; The strip's selected lane, as the patchbay sees it: the lane entry index
-;; (dropdown order) of the first lane inlet on the slot with `instance-id`.
-(def lane-patch-lane-index (track instance-id)
-  (let ((lanes (eseq.seqv-track-params/seqv-track-process-lanes track)))
-    (reduce |acc index|
-      (if (and (< acc 0) (= (get (nth lanes index) :instance-id) instance-id)) index acc)
-      -1
-      (range 0 (len lanes)))))
+;; Bay ns's selected process (its proc-id; nil for none): a node bay's
+;; selected process, or the process of the lane a track's editor shows.
+(def lane-patch-selected-id (ns)
+  (if (lane-patch-node? ns)
+    patch-view.node-selected
+    (let ((t (track-at ns))
+          (lane (when t (tp/seqv-track-process-lane t t.param-mode))))
+      (when lane lane.process.proc-id))))
 
-(def lane-patch-lane-selected? (track track-id instance-id)
-  (if (lane-patch-node? track)
-    (= lane-patch-node-selected instance-id)
-    (let ((lane (selected-process-lane track (track-param-mode track-id))))
-      (if lane (= (get lane :instance-id) instance-id) false))))
+;; Whether process `id` is bay ns's selection.
+(def lane-patch-lane-selected? (ns id)
+  (= (lane-patch-selected-id ns) id))
 
-;; Clicking a box selects its lane in the strip, the same as picking it in
-;; the dropdown, so the card and the painted lane follow the patchbay.
-(def lane-patch-select-lane (track track-id instance-id)
-  (if (lane-patch-node? track)
-    ;; The *processes* dock follows the selection (its inspector, and an
-    ;; expr card's code tile; expr spec §7).
-    (set! lane-patch-node-selected instance-id)
-    (let ((index (lane-patch-lane-index track instance-id)))
-      (if (< index 0)
-        nil
-        (do
-          (activate-track-for-edit track)
-          (set-track-param-mode track-id
-            (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index)))))))
+;; Clicking a card selects its lane in the strip, the same as picking it in
+;; the dropdown, so the card and the painted lane follow the patchbay; a node
+;; bay's selection drives the *processes* dock (its inspector, and an expr
+;; card's code tile; expr spec §7).
+(def lane-patch-select-lane (ns id)
+  (if (lane-patch-node? ns)
+    (set! patch-view.node-selected id)
+    (let ((t (track-at ns))
+          (lane (when t (first (filter (lambda (l) (= l.process.proc-id id)) t.lanes)))))
+      (when lane
+        (select-track-for-edit t)
+        (set-track-param-mode t (+ tp/seqv-process-lane-mode-offset lane.position))))))
 
 ;; ── Expr cards (docs/expr-process-spec.md §2) ──────────────────────────
 ;; The same uniform box as every card: the preview of its body rides the
 ;; out-port row, and the title row gains the error dot and an edit button
 ;; that opens the body's text buffer (eseq.expr-buffer).
 
-;; Latest scheduler run error of process runtime `runtime-id`, or nil. A
-;; node slot runs under its instance id. Read inside a subtree: the field
-;; republishes whenever any process's error set changes.
-(def lane-patch-run-error (runtime-id)
-  (let ((errors SEQ.process-run-errors))
-    (if errors
-      (reduce |acc e| (if (and (= acc nil) (= (get e :runtime-id) runtime-id)) (get e :error) acc)
-        nil errors)
-      nil)))
-
 ;; Why an expr card shows its error dot, or nil: a body with no compiled
-;; class, a failed commit from its edit buffer, or a failed run. Commit and
-;; run errors are node-bay only until track expr cards (eseq-waa9.18).
-(def lane-patch-expr-error (track entry)
+;; class, a failed commit from its edit buffer, or a failed run (its
+;; process's `error`, a node slot's under its own id). Commit and run errors
+;; are node-bay only until track expr cards (eseq-waa9.18).
+(def lane-patch-expr-error (ns entry)
   (let ((id (get entry :instance-id))
+        (p (get entry :process))
         (compile-error (get entry :compile-error)))
     (if compile-error
       compile-error
-      (if (lane-patch-node? track)
-        (let ((committed (eseq.expr-buffer/commit-error
-                           (lane-patch-node-graph track) (lane-patch-node-index track) id)))
-          (if committed committed (lane-patch-run-error id)))
-        nil))))
+      (when (lane-patch-node? ns)
+        (let ((committed (eseq.expr-buffer/commit-error (node-bay-graph ns) (node-bay-index ns) id)))
+          (if committed
+            committed
+            (when (and p (not (= p.error ""))) p.error)))))))
 
 ;; Red, where the enable dot is orange and ports are orange/blue.
 (defwidget lane-patch-error-dot-shape
@@ -2719,30 +2491,28 @@
 
 ;; Its own subtree: a run error changing on the scheduler repaints the dot,
 ;; not the bay.
-(def lane-patch-expr-error-dot (track entry)
+(def lane-patch-expr-error-dot (ns entry)
   (subtree :key (str "lane-patch-expr-error-" (get entry :instance-id))
     (box :width 1.2 :height 0.8 :padding 0
       :background "lane-patch-error-dot-shape"
-      :active (if (lane-patch-expr-error track entry) 1 0))))
+      :active (if (lane-patch-expr-error ns entry) 1 0))))
 
-(def lane-patch-expr-edit-button (track track-id entry)
+(def lane-patch-expr-edit-button (ns entry)
   (button "edit"
     :key (str "lane-patch-expr-edit-" (get entry :instance-id))
     :width 2.2 :height 0.8 :padding 0.05 :font-size 6.5
     :background-color :transparent :border-color :process-lane-accent
     :color :process-lane-accent
     :on-click (lambda (event)
-      (do
-        (lane-patch-select-lane track track-id (get entry :instance-id))
-        (eseq.expr-buffer/open-node-slot
-          (lane-patch-node-graph track) (lane-patch-node-index track)
-          (get entry :instance-id) (get entry :slot-index))))))
+      (lane-patch-select-lane ns (get entry :instance-id))
+      (eseq.expr-buffer/open-node-slot (node-bay-graph ns) (node-bay-index ns)
+        (get entry :instance-id) (get entry :slot-index)))))
 
 ;; The body as one clipped line (the host collapses its whitespace).
 (def lane-patch-expr-preview-chars 13)
 (def lane-patch-expr-preview (entry)
   (let ((line (get entry :expr-line)))
-    (if (or (= line nil) (= line ""))
+    (if (or (not line) (= line ""))
       "(empty)"
       (if (> (len line) lane-patch-expr-preview-chars)
         (str (substring line 0 (- lane-patch-expr-preview-chars 1)) "…")
@@ -2759,193 +2529,151 @@
   (let ((ports (lane-patch-list entry :in-ports)))
     (if (<= (len ports) lane-patch-in-port-capacity)
       ports
-      (let ((wired (len (filter lane-patch-port-wired? ports))))
-        (nth
-          (reduce |st port|
-            (if (lane-patch-port-wired? port)
-              (list (append (nth st 0) (list port)) (nth st 1))
-              (if (> (nth st 1) 0)
-                (list (append (nth st 0) (list port)) (- (nth st 1) 1))
-                st))
-            (list '() (max 0 (- (- lane-patch-in-port-capacity 1) wired)))
-            ports)
-          0)))))
+      ;; Every wired port, and the first unwired ones up to the capacity
+      ;; less the badge.
+      (let ((unwired (filter (lambda (port) (not (lane-patch-port-wired? port))) ports))
+            (room (max 0 (- (- lane-patch-in-port-capacity 1) (- (len ports) (len unwired)))))
+            (shown (map (lambda (i) (get (nth unwired i) :name))
+                     (range 0 (min room (len unwired))))))
+        (filter (lambda (port) (or (lane-patch-port-wired? port) (listed? (get port :name) shown)))
+          ports)))))
 
 (def lane-patch-hidden-in-port-count (entry)
   (- (len (lane-patch-list entry :in-ports)) (len (lane-patch-visible-in-ports entry))))
 
 (def lane-patch-overflow-badge (entry)
   (let ((hidden (lane-patch-hidden-in-port-count entry)))
-    (if (> hidden 0)
+    (when (> hidden 0)
       (label (str "+" hidden)
         :key (str "lane-patch-in-overflow-" (get entry :instance-id))
-        :height 1.1 :font-size 8 :v-align :center :color :dim :bg :transparent)
-      nil)))
+        :height 1.1 :font-size 8 :v-align :center :color :dim :bg :transparent))))
 
 ;; ── Card delete + drag reorder ─────────────────────────────────────────
 ;; Right-click a card for its menu; drag a card onto another to move it
 ;; there (it takes the drop target's position, like the scene pills). Both
 ;; the track bay and graph-node bays route through here.
 
-;; The open card menu: :track :instance-id :name :col :row, nil when closed.
-(defstate lane-patch-card-menu nil)
+(def lane-patch-open-card-menu (ns entry event)
+  (set! card-menu.bay ns)
+  (set! card-menu.proc-id (get entry :instance-id))
+  (set! card-menu.name (get entry :name))
+  (open-menu! card-menu event))
 
-(def lane-patch-open-card-menu (track entry event)
-  (set! lane-patch-card-menu
-    (dict :track track :instance-id (get entry :instance-id) :name (get entry :name)
-      :col (get event :col) :row (get event :row))))
+(def lane-patch-entry-ids (ns)
+  (map (lambda (p) p.proc-id) (bay-processes ns)))
 
-(def lane-patch-close-card-menu () (set! lane-patch-card-menu nil))
+;; A track's lane selector is a position in t.lanes, so a reorder or delete
+;; would leave it on whichever lane slides into its place. Point it at the
+;; lane it was on in the new process order `ids` (proc-ids), at its
+;; neighbour when that lane's process is gone, or back at transpose when no
+;; lane is left (as picking "none" does). Node bays select by proc-id and
+;; need nothing here.
+(def lane-patch-reselect-lane (t ids)
+  (let ((lane (tp/seqv-track-process-lane t t.param-mode)))
+    (when lane
+      (let ((moved (reduce |acc id|
+                     (append acc (filter (lambda (l) (= l.process.proc-id id)) t.lanes))
+                     '() ids))
+            (index (index-of moved lane)))
+        (set-track-param-mode t
+          (if (empty? moved)
+            3
+            (+ tp/seqv-process-lane-mode-offset
+               (if (>= index 0) index (min lane.position (- (len moved) 1))))))))))
 
-(def lane-patch-entry-ids (track)
-  (map (lambda (entry) (get entry :instance-id)) (track-lane-patch track)))
+(def lane-patch-remove-card (ns id)
+  (patch-idle!)
+  (let ((p (bay-process ns id)))
+    (when p
+      (if p.track
+        (lane-patch-reselect-lane p.track
+          (filter (lambda (other) (not (= other id))) (lane-patch-entry-ids ns)))
+        (when (= patch-view.node-selected id) (set! patch-view.node-selected -1)))
+      (remove-process! p))))
 
-(def lane-patch-id-index (ids id)
-  (reduce |acc index| (if (and (< acc 0) (= (nth ids index) id)) index acc)
-    -1
-    (range 0 (len ids))))
+;; Move process `id` of bay ns to the place of process `target-id`.
+;; (No core take / drop: the new order is spliced by index.)
+(def lane-patch-move-card (ns id target-id)
+  (let ((ids (lane-patch-entry-ids ns))
+        (from (index-of ids id))
+        (to (index-of ids target-id)))
+    (unless (or (< from 0) (< to 0) (= from to))
+      (patch-idle!)
+      (let ((p (bay-process ns id))
+            (rest (filter (lambda (other) (not (= other id))) ids))
+            (moved (append (map (lambda (i) (nth rest i)) (range 0 to))
+                           (list id)
+                           (map (lambda (i) (nth rest i)) (range to (len rest))))))
+        (when p
+          (when p.track (lane-patch-reselect-lane p.track moved))
+          ;; Before the process now after it, or last.
+          (move-process! p
+            (when (< (+ to 1) (len moved)) (bay-process ns (nth moved (+ to 1))))))))))
 
-;; `ids` with the id at `from` moved to position `to`.
-(def lane-patch-ids-moved (ids from to)
-  (let ((rest (map (lambda (index) (nth ids index))
-                (filter (lambda (index) (not (= index from))) (range 0 (len ids))))))
-    (append
-      (map (lambda (index) (nth rest index)) (range 0 to))
-      (list (nth ids from))
-      (map (lambda (index) (nth rest index)) (range to (len rest))))))
-
-;; The track's lane selector is an index, so a reorder or delete would leave
-;; it on whichever lane slides into that index. Point it at the lane it was
-;; on in the new card order `ids` (or its neighbour when that lane is gone).
-;; Node bays select by instance id and need nothing here.
-(def lane-patch-reselect-lane (track track-id ids)
-  (let ((lane (selected-process-lane track (track-param-mode track-id)))
-        (lane-ids (map (lambda (lane) (get lane :instance-id))
-                    (eseq.seqv-track-params/seqv-track-process-lanes track))))
-    (if (= lane nil)
-      nil
-      (let ((new-lane-ids (filter (lambda (id) (>= (lane-patch-id-index lane-ids id) 0)) ids))
-            (old-index (lane-patch-id-index lane-ids (get lane :instance-id))))
-        (let ((index (lane-patch-id-index new-lane-ids (get lane :instance-id))))
-          (if (>= index 0)
-            (set-track-param-mode track-id
-              (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index))
-            (if (> (len new-lane-ids) 0)
-              (set-track-param-mode track-id
-                (+ eseq.seqv-track-params/seqv-process-lane-mode-offset
-                   (min old-index (- (len new-lane-ids) 1))))
-              nil)))))))
-
-(def lane-patch-remove-card (track track-id instance-id)
-  (do
-    (set! lane-patch-pending -1)
-    (set! lane-patch-selected nil)
-    (if (lane-patch-node? track)
-      (do
-        (graph-node-process-remove (lane-patch-node-graph track) (lane-patch-node-index track)
-          instance-id)
-        (if (= lane-patch-node-selected instance-id) (set! lane-patch-node-selected -1) nil)
-        (lane-patch-node-touch))
-      (let ((ids (filter (lambda (id) (not (= id instance-id))) (lane-patch-entry-ids track))))
-        (do
-          (lane-patch-reselect-lane track track-id ids)
-          (seq-remove-process-slot track instance-id))))))
-
-(def lane-patch-move-card (track track-id instance-id target-id)
-  (let ((ids (lane-patch-entry-ids track)))
-    (let ((from (lane-patch-id-index ids instance-id))
-          (to (lane-patch-id-index ids target-id)))
-      (if (or (< from 0) (< to 0) (= from to))
-        nil
-        (do
-          (set! lane-patch-pending -1)
-          (set! lane-patch-selected nil)
-          (if (lane-patch-node? track)
-            (do
-              (graph-node-process-move (lane-patch-node-graph track) (lane-patch-node-index track)
-                instance-id (- to from))
-              (lane-patch-node-touch))
-            (let ((moved (lane-patch-ids-moved ids from to)))
-              (do
-                (lane-patch-reselect-lane track track-id moved)
-                (seq-move-process-slot-before track instance-id
-                  (if (< (+ to 1) (len moved)) (nth moved (+ to 1)) nil))))))))))
-
-(def lane-patch-card-drop (track track-id event)
-  (lane-patch-move-card track track-id
+(def lane-patch-card-drop (ns event)
+  (lane-patch-move-card ns
     (get (get event :payload) :instance-id)
     (get (get event :target) :instance-id)))
 
 ;; Each bay drags its own type, so a card never drops into another bay.
-(def lane-patch-card-drag-type (track) (str "lane-patch-card-" track))
+(def lane-patch-card-drag-type (ns) (str "lane-patch-card-" ns))
 
 ;; Mounted inside each bay; only the bay the menu was opened from draws it.
-(def lane-patch-card-context-menu (track track-id)
-  (let ((menu lane-patch-card-menu))
-    (context-menu
-      :is-open (if (= menu nil) false (= (get menu :track) track))
-      :anchor-col (or (get menu :col) 0)
-      :anchor-row (or (get menu :row) 0)
-      :on-close (lambda () (lane-patch-close-card-menu))
-      (menu-item (str "Delete " (or (get menu :name) "process"))
-        :key (str "lane-patch-card-menu-delete-" track)
-        :on-select (lambda (event)
-          (do
-            (lane-patch-close-card-menu)
-            (lane-patch-remove-card track track-id (get menu :instance-id))))))))
+;; A subtree of its own: opening and closing it re-runs the menus alone.
+(def lane-patch-card-context-menu (ns)
+  (subtree :key (str "lane-patch-card-menu-run-" ns)
+    (lane-patch-card-context-menu-body ns)))
 
-(def lane-patch-column (track track-id entry)
-  (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id)))
-      (expr (get entry :expr)))
+(def lane-patch-card-context-menu-body (ns)
+  (context-menu
+    :is-open (and card-menu.open (= card-menu.bay ns))
+    :anchor card-menu.at
+    :on-close (lambda () (set! card-menu.open false))
+    (menu-item (str "Delete " (if (= card-menu.name "") "process" card-menu.name))
+      :key (str "lane-patch-card-menu-delete-" ns)
+      :on-select (lambda (event)
+        (set! card-menu.open false)
+        (lane-patch-remove-card ns card-menu.proc-id)))))
+
+;; One card; `selected-id` is the bay's selected proc-id
+;; (`lane-patch-selected-id`).
+(def lane-patch-column (ns entry selected-id)
+  (let ((id (get entry :instance-id))
+        (expr (get entry :expr)))
     (box :padding 0.4 :corner-radius (eseq.seq-core-state/radius 12)
-      :key (str "lane-patch-col-" (get entry :instance-id))
-      :drag-type (lane-patch-card-drag-type track)
+      :key (str "lane-patch-col-" id)
+      :drag-type (lane-patch-card-drag-type ns)
       :drag-modifier :none
-      :drag-payload (dict :instance-id (get entry :instance-id))
-      :drop-types (list (lane-patch-card-drag-type track))
-      :drop-meta (dict :instance-id (get entry :instance-id))
+      :drag-payload (dict :instance-id id)
+      :drop-types (list (lane-patch-card-drag-type ns))
+      :drop-meta (dict :instance-id id)
       :drop-hover-border-color :mixer-strip-selected-border
-      :on-drop (lambda (event) (lane-patch-card-drop track track-id event))
-      :on-right-click (lambda (event) (lane-patch-open-card-menu track entry event))
+      :on-drop (lambda (event) (lane-patch-card-drop ns event))
+      :on-right-click (lambda (event) (lane-patch-open-card-menu ns entry event))
       :background-color (if (get entry :enabled) (rgba 1 1 1 0.04) (rgba 1 1 1 0.015))
       :selected-background-color :mixer-strip-selected-bg
-      :selected selected
+      :selected (= selected-id id)
       :selected-border-color :mixer-strip-selected-border
       :height 3
-      :on-click (lambda (event) (lane-patch-select-lane track track-id (get entry :instance-id)))
+      :on-click (lambda (event) (lane-patch-select-lane ns id))
       (v-stack :width 10.0 :gap 0.0 :align :start
         (h-stack :width :fill :gap 0.3 :align :center
           (label (get entry :name) :flex 1 :font-size 8 :v-align :center
             :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
-          (if expr (lane-patch-expr-error-dot track entry) nil)
-          (if (and expr (lane-patch-node? track)) (lane-patch-expr-edit-button track track-id entry) nil)
-          (lane-patch-enable-dot track entry))
+          (when expr (lane-patch-expr-error-dot ns entry))
+          (when (and expr (lane-patch-node? ns)) (lane-patch-expr-edit-button ns entry))
+          (lane-patch-enable-dot ns entry))
         (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
           (each (lane-patch-visible-in-ports entry) |port|
-            (lane-patch-in-port-widget track entry port))
+            (lane-patch-in-port-widget ns entry port))
           (lane-patch-overflow-badge entry))
         (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
           (each (lane-patch-list entry :out-ports) |port|
-            (lane-patch-out-port-widget track entry port))
-          (if expr
+            (lane-patch-out-port-widget ns entry port))
+          (when expr
             (label (lane-patch-expr-preview entry)
-              :key (str "lane-patch-expr-preview-" (get entry :instance-id))
-              :flex 1 :height 1.1 :font-size 7.5 :v-align :center :color :dim :bg :transparent)
-            nil))
-        ))))
-
-(def lane-patch-toggle-chip ()
-  (button (if lane-patch-view "lane" "patch")
-    :key "lane-patch-view-toggle"
-    :height 1.0 :padding 0.2 :font-size 7.5
-    :background-color (if lane-patch-view :process-lane-accent :transparent)
-    :border-color :process-lane-accent
-    :color (if lane-patch-view :black :dim)
-    :on-click (lambda (event)
-      (do
-        (set! lane-patch-pending -1)
-        (set! lane-patch-selected nil)
-        (set! lane-patch-view (not lane-patch-view))))))
+              :key (str "lane-patch-expr-preview-" id)
+              :flex 1 :height 1.1 :font-size 7.5 :v-align :center :color :dim :bg :transparent)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The patch bay's + box (eseq-53y7.3): appends one process instance to THIS
@@ -2953,90 +2681,56 @@
 ;; its per-step values stay scene-locked. The box is a filterable
 ;; menu-button: typing narrows the classes and picking one adds it at once.
 
-;; The slot just added, waiting for the host to publish it so its lane can be
-;; selected: a dict of :track / :track-id / :instance-id, nil when idle. The
-;; roster edit runs off the command queue, so the lane index only exists a
-;; frame or more later; `lane-add-resolve-pending` picks it up then.
-(defstate lane-add-pending nil)
-
 ;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES),
 ;; then lane classes that are only ever added per track (length).
-(def lane-add-default-classes ()
+(def lane-add-default-classes
   (list "lane-prob" "lane-reset" "lane-rand" "lane-count" "lane-acc"
         "lane-grab" "lane-cmp" "lane-veto" "lane-roll" "lane-length"))
 
-;; Library defs carry their class name as the label; the default lanes read
-;; better without the `lane-` prefix every def-process name needs.
-(def lane-add-entry-label (entry)
-  (let ((name (get entry :name))
-        (label (get entry :label)))
-    (let ((shown (if (= label nil) name (if (= label "") name label))))
-      (if (= (substring shown 0 5) "lane-") (substring shown 5) shown))))
-
-(def lane-add-class-label (class-name)
-  (lane-add-entry-label (dict :name class-name :label class-name)))
-
-(def lane-add-library-entry (name)
-  (reduce |acc entry| (if (= acc nil) (if (= (get entry :name) name) entry acc) acc)
-    nil
-    SEQ.process-library))
-
-(def lane-add-default-class? (name)
-  (reduce |acc class| (or acc (= class name)) false (lane-add-default-classes)))
+;; The default lanes read better without the `lane-` prefix every
+;; def-process name needs.
+(def lane-add-label (name)
+  (if (= (substring name 0 5) "lane-") (substring name 5) name))
 
 ;; Default lane classes first, in project-layer order, then every other
-;; def-process in the published library.
+;; def-process in the library.
 (def lane-add-options ()
   (append
-    (filter
-      (lambda (entry) (if (= entry nil) false true))
-      (map (lambda (class) (lane-add-library-entry class)) (lane-add-default-classes)))
-    (filter
-      (lambda (entry) (not (lane-add-default-class? (get entry :name))))
-      SEQ.process-library)))
+    (filter (lambda (c) c)
+      (map (lambda (name) (named process-library.classes name)) lane-add-default-classes))
+    (filter (lambda (c) (not (listed? c.name lane-add-default-classes))) process-library.classes)))
 
 ;; The menu's rows, parallel to `lane-add-options`.
 (def lane-add-labels ()
-  (map (lambda (entry) (lane-add-entry-label entry)) (lane-add-options)))
+  (map (lambda (c) (lane-add-label c.name)) (lane-add-options)))
 
-;; The menu hands back the row's label; map it back to its class name.
+;; The menu hands back the row's label; map it back to its class.
 (def lane-add-class-for-label (label)
-  (reduce |acc entry|
-    (if (= acc nil) (if (= (lane-add-entry-label entry) label) (get entry :name) nil) acc)
-    nil
-    (lane-add-options)))
+  (first (filter (lambda (c) (= (lane-add-label c.name) label)) (lane-add-options))))
 
-;; Pick: mint the slot on the roster, then remember the id so the lane gets
-;; selected (its strip opens) as soon as the host publishes the new chain.
-(def lane-add-pick (track track-id class-name)
-  (if (= class-name nil)
-    nil
-    (let ((instance-id (seq-add-track-process-slot track class-name)))
-      (do
-        (set! lane-patch-pending -1)
-        (set! lane-patch-selected nil)
-        (if (= instance-id nil)
-          nil
-          (do
-            (set! lane-add-pending
-              (dict :track track :track-id track-id :instance-id instance-id))
-            (status (str "Added " (lane-add-class-label class-name)
-                         " to this track (every scene)"))))))))
+;; Add a process of class c to t's own lanes, and remember it so its lane is
+;; selected (its strip opens) once the host lists it.
+(def lane-add-pick (t c)
+  (when c
+    (patch-idle!)
+    (set! lane-add.known (map (lambda (p) p.proc-id) t.processes))
+    (set! lane-add.class c.name)
+    (set! lane-add.track t)
+    (add-process! t c)
+    (status (str "Added " (lane-add-label c.name) " to this track (every scene)"))))
 
-;; Render-time resolution of the pending selection, the way scene-banks.lisp
-;; waits for an appended bank: harmless while the lane is not published yet.
-(def lane-add-resolve-pending (track)
-  (if (= lane-add-pending nil)
-    nil
-    (if (= (get lane-add-pending :track) track)
-      (let ((instance-id (get lane-add-pending :instance-id))
-            (track-id (get lane-add-pending :track-id)))
-        (if (< (lane-patch-lane-index track instance-id) 0)
-          nil
-          (do
-            (set! lane-add-pending nil)
-            (lane-patch-select-lane track track-id instance-id))))
-      nil)))
+;; Once the track lists the process `lane-add-pick` added, stops waiting and
+;; selects its lane, if it has one (inert while nothing is pending).
+(effect-buffer "*lane-add-sync*"
+  (let ((t lane-add.track)
+        (added (when t (first (filter (lambda (p) (and (= p.class-name lane-add.class)
+                                                         (not (listed? p.proc-id lane-add.known))))
+                                  t.processes)))))
+    (when added
+      (set! lane-add.track nil)
+      (unless (empty? added.lanes)
+        (lane-patch-select-lane t.index added.proc-id)))
+    nil))
 
 ;; The patch bay's add control, shared with graph-node patch bays: same
 ;; footprint as a lane cell, and a filterable menu so typing narrows the
@@ -3065,13 +2759,13 @@
     :hover-bg :dropdown-hover-bg
     :on-change on-pick))
 
-(def lane-patch-add-cell (track track-id)
-  (lane-patch-add-menu (str "lane-patch-add-" track-id) "+  add lane"
+(def lane-patch-add-cell (t)
+  (lane-patch-add-menu (str "lane-patch-add-" t.tid) "+  add lane"
     (lane-add-labels) "Filter lanes…"
-    (lambda (label) (lane-add-pick track track-id (lane-add-class-for-label label)))))
+    (lambda (label) (lane-add-pick t (lane-add-class-for-label label)))))
 
-(def lane-patch-remove-button (track)
-  (let ((cable lane-patch-selected))
+(def lane-patch-remove-button ()
+  (let ((cable patch-view.cable))
     (button "× cable"
       :key "lane-patch-remove-cable"
       :height 1.0 :padding 0.2 :font-size 7.5
@@ -3081,421 +2775,468 @@
 
 ;; The patchbay sits under the step sliders and the lane strip, spanning the
 ;; expanded track: one box per lane in fire order (left fires first), so a
-;; cable pointing left lands next fire (marked ↑ on the in port). The strip
-;; card's chip toggles it and holds the edit scope; the only control here is
-;; the remove chip that appears while a cable is selected.
-(def lane-patch-grid-row-with (track track-id entries from to add-cell)
-  (h-stack :width :fill :gap 0.2 :align :start
-    :key (str "lane-patch-grid-row-" track-id "-" from)
-    (each (range from to) |index|
-      ;; The last entry of the grid is the + box, not a lane.
-      (if (< index (len entries))
-        (lane-patch-column track track-id (nth entries index))
-        add-cell))))
+;; cable pointing left lands next fire (marked ↑ on the in port). Six cells a
+;; row, read left to right then top to bottom; the + box (`add-cell`) counts
+;; as a cell and follows the last lane onto a new row when needed. A subtree
+;; of its own, so a cable, card or inlet edit re-runs the bay and not the
+;; row it sits in; a port being armed only repaints.
+(def lane-patch-grid (ns key add-cell)
+  (subtree :key (str "lane-patchbay-run-" key)
+    ;; An unkeyed root: the subtree's key would replace the bay's, which
+    ;; tests find.
+    (v-stack :width :fill
+      (lane-patch-grid-body ns key add-cell))))
 
-(def lane-patch-grid-row (track track-id entries from to)
-  (lane-patch-grid-row-with track track-id entries from to (lane-patch-add-cell track track-id)))
+(def lane-patch-grid-body (ns key add-cell)
+  (let ((entries (bay-entries ns))
+        (columns 6)
+        (cable patch-view.cable)
+        (selected-id (lane-patch-selected-id ns))
+        (count (+ (len entries) 1)))
+    (v-stack :width :fill :gap 0.1 :padding 0.3
+      :key (str "lane-patchbay-" key)
+      (each (range 0 (ceil (/ count columns))) |row|
+        (h-stack :width :fill :gap 0.2 :align :start
+          :key (str "lane-patch-grid-row-" key "-" (* row columns))
+          (each (range (* row columns) (min count (* (+ row 1) columns))) |index|
+            (if (< index (len entries))
+              (lane-patch-column ns (nth entries index) selected-id)
+              add-cell))))
+      (when (and cable (= (get cable :ns) ns)) (lane-patch-remove-button))
+      (lane-patch-card-context-menu ns))))
 
 ;; A graph node's patch: the same cards, ports and cables over the node's
 ;; chain (docs/graph-node-processes-spec.md §6). `ns` comes from
 ;; `lane-patch-register-node`; `add-cell` is the host panel's add-process box.
 (def lane-patchbay-node (ns add-cell)
-  (let ((entries (track-lane-patch ns))
-        (count (+ (len (track-lane-patch ns)) 1))
-        (columns 6))
-    (v-stack :width :fill :gap 0.1 :padding 0.3
-      :key (str "lane-patchbay-" ns)
-      (each (range 0 (ceil (/ count columns))) |row|
-        (lane-patch-grid-row-with ns ns entries
-          (* row columns) (min count (* (+ row 1) columns)) add-cell))
-      (if (and lane-patch-selected (= (get lane-patch-selected :track) ns))
-        (lane-patch-remove-button ns)
-        nil)
-      (lane-patch-card-context-menu ns ns))))
+  (lane-patch-grid ns ns add-cell))
 
-;; Wrap after six cells, read left to right then top to bottom. The + box
-;; counts as an entry and follows the last lane onto a new row when needed.
-(def lane-patchbay (track track-id)
-  (let ((entries (track-lane-patch track)))
-    (do
-      (lane-add-resolve-pending track)
-      (let ((count (+ (len entries) 1))
-            (columns 6))
-        (v-stack :width :fill :gap 0.1 :padding 0.3
-          :key (str "lane-patchbay-" track-id)
-          (each (range 0 (ceil (/ count columns))) |row|
-            (lane-patch-grid-row track track-id entries
-              (* row columns) (min count (* (+ row 1) columns))))
-          (if lane-patch-selected (lane-patch-remove-button track) nil)
-          (lane-patch-card-context-menu track track-id))))))
+;; Track t's patchbay, under a lane mode (`lane` its lane) while the bay
+;; shows.
+(def lane-patchbay-under (t lane)
+  (when (and patch-view.show lane)
+    (lane-patch-grid t.index t.tid (lane-patch-add-cell t))))
 
-(def lane-patchbay-under (track track-id mode)
-  (if (and lane-patch-view (selected-process-lane track mode))
-    (lane-patchbay track track-id)
-    nil))
+(def lane-strip-gap 0.35)
 
-(def lane-strip (track track-id mode)
-  (let ((lane (selected-process-lane track mode))
-      (slot (if lane (track-process-slot track (get lane :instance-id)) nil)))
-    (if (and lane slot)
-      (box :width 20 :padding 0.5 :corner-radius (eseq.seq-core-state/radius 10)
-        :key (str "lane-strip-" track-id "-" (get slot :instance-id))
-        :background-color (rgba 1 1 1 0.04)
-        :border-width 0.08 :border-color (rgba 1 1 1 0.08)
-        (v-stack :width :fill :gap 0.35
-          (h-stack :width :fill :gap 0.3 :align :center
-            (label (slot-display-name slot)
-              :v-align :center
-              :font-size 11 :color :process-lane-accent :bg :transparent)
-            (box :flex 1 :height 0.1)
-            (lane-strip-enable-button track slot)
-            (if (get slot :project)
-              (lane-scope-chip)
-              (label "track lane" :v-align :center :font-size 7.5 :color :dim :bg :transparent))
-; removed this intentionally:            (lane-patch-toggle-chip)
-            (lane-strip-move-button track slot "▲" -1)
-            (lane-strip-move-button track slot "▼" 1))
-          (lane-strip-in-row track lane)
-          (lane-strip-mode-row track slot)
-          (lane-strip-out-row track slot)
-          (lane-fanout-rows track slot)
-          (lane-strip-wire-row track slot)
-          (lane-strip-scope-row track slot)
-          (lane-strip-inlets track slot)
-          (lane-strip-step-row track lane)))
-      nil)))
+;; Track t's strip for `lane` (the lane its editor shows, or nil). A subtree
+;; of its own: an inlet, wiring or mapping edit re-runs the strip, not the
+;; row.
+(def lane-strip (t lane)
+  (when lane
+    (subtree :key (str "lane-strip-run-" t.tid)
+      ;; An unkeyed root: the subtree's key would replace the strip's, which
+      ;; tests find.
+      (h-stack (lane-strip-body t lane)))))
+
+(def lane-strip-body (t lane)
+  (let ((p lane.process))
+    (box :width 20 :padding 0.5 :corner-radius (eseq.seq-core-state/radius 10)
+      :key (str "lane-strip-" t.tid "-" p.proc-id)
+      :background-color (rgba 1 1 1 0.04)
+      :border-width 0.08 :border-color (rgba 1 1 1 0.08)
+      (v-stack :width :fill :gap lane-strip-gap
+        (h-stack :width :fill :gap 0.3 :align :center
+          (label p.name
+            :v-align :center
+            :font-size 11 :color :process-lane-accent :bg :transparent)
+          (box :flex 1 :height 0.1)
+          (lane-strip-enable-button p)
+          (if p.project
+            (lane-scope-chip)
+            (label "track lane" :v-align :center :font-size 7.5 :color :dim :bg :transparent))
+          (lane-strip-move-button t p "▲" -1)
+          (lane-strip-move-button t p "▼" 1))
+        (lane-strip-in-row t lane)
+        (lane-strip-mode-row p)
+        (lane-strip-out-row t p)
+        (lane-fanout-rows p)
+        (v-stack :width :fill :gap 0
+          (lane-strip-wire-row p)
+          (lane-strip-scope-row t p))
+        (lane-strip-inlets p)
+        (lane-strip-step-row lane)))))
 
 ;; While a lane's map button is armed, the other lanes on the track offer
 ;; their inlets as wire targets (bound through the writer's `wire` port).
-(def other-lanes-armed? (track)
-  (and (pc/process-map-active?)
-       (= pc/process-map-track track)
-       (let ((slot (track-process-slot track pc/process-map-instance-id)))
-         (and slot (slot-port-named slot "wire") true))))
+(def armed-wire-port (t)
+  (let ((pt (armed-port t)))
+    (when pt (named pt.process.ports "wire"))))
 
-(def other-lane-chip (track lane)
-  (button (get lane :short-label)
-    :key (str "other-lane-" track "-" (get lane :instance-id) "-" (get lane :inlet))
+(def other-lane-chip (t wire l)
+  (button l.short-label
+    :key (str "other-lane-" t.index "-" l.process.proc-id "-" l.inlet)
     :height 1.1 :padding 0.25 :font-size 9
     :background-color :process-map-arm-bg
     :border-color :process-lane-accent
     :color :process-lane-accent
     :on-click (lambda (event)
-      (let ((map-instance pc/process-map-instance-id))
-        (do
-          (pc/process-map-clear)
-          (if (lane-edit-all?)
-            (seq-bind-process-port track map-instance "wire"
-              (dict :kind "process-inlet"
-                    :process (get lane :class)
-                    :inlet (get lane :inlet)
-                    :instance-id (get lane :instance-id))
-              :all)
-            (seq-bind-process-port track map-instance "wire"
-              (dict :kind "process-inlet"
-                    :process (get lane :class)
-                    :inlet (get lane :inlet)
-                    :instance-id (get lane :instance-id))))
-          (status (str "Wired → " (get lane :short-label)
-                       (if (lane-edit-all?) " (all tracks)" ""))))))))
+      (let ((all (edit-all? wire.process)))
+        (pc/process-map-clear)
+        (bind-port! wire l :all all)
+        (status (str "Wired → " l.short-label (if all " (all tracks)" "")))))))
 
-(def other-lanes-row (track)
-  (if (other-lanes-armed? track)
-    (h-stack :width :fill :gap 0.3 :align :center :padding 0.2
-      (label "OTHER LANES" :font-size 8 :color :dim :bg :transparent)
-      (each (filter (lambda (lane) (not (= (get lane :instance-id) pc/process-map-instance-id)))
-                    (eseq.seqv-track-params/seqv-track-process-lanes track))
-            |lane|
-        (other-lane-chip track lane)))
-    nil))
+;; The OTHER LANES row under t's editor, while a map is armed on t. A subtree
+;; of its own, so arming a map re-runs it and not the expanded rows. It
+;; carries the editor's row gap above it (the editor stacks it at gap 0), so
+;; it takes no room while hidden.
+(def other-lanes-row (t)
+  (subtree :key (str "other-lanes-run-" t.tid)
+    (v-stack :width :fill :gap 0
+      (let ((wire (armed-wire-port t)))
+        (when wire
+          (v-stack :width :fill :gap 0
+            (box :height 0.1)
+            (h-stack :width :fill :gap 0.3 :align :center :padding 0.2
+              (label "OTHER LANES" :font-size 8 :color :dim :bg :transparent)
+              (each (filter (lambda (l) (not (= l.process wire.process))) t.lanes) |l|
+                (other-lane-chip t wire l)))))))))
 
-(def expanded-track-quick-controls (track track-id)
-  (let ((mode (track-param-mode track-id)))
-    (v-stack 
-      (box :height 0.4 :width 1)
-      (h-stack :gap 0.55 :align :center
-        (box :width (param-header-width mode) :height 1.3
-          :key (str "expanded-step-summary-" track-id)
-          (label (param-header-name track mode)
-            :font-size 11 :width (param-header-width mode) :color :white :bg :transparent))
+;; ── The editor ──
+
+;; What every slot's slider shares in mode `mode` of t (`lane` its lane, or
+;; nil): the ranges, the curve, the fill and the track color. Read once per
+;; slot grid, outside the slots' own subtrees.
+(def slot-slider-look (t mode lane)
+  (let ((r (track-color-part t 0 false))
+        (g (track-color-part t 1 false))
+        (b (track-color-part t 2 false)))
+    (dict :slider-min (tp/seqv-track-param-slider-min t mode)
+          :slider-max (tp/seqv-track-param-slider-max t mode)
+          :origin (tp/seqv-track-param-origin t mode)
+          :min (tp/seqv-track-param-min t mode)
+          :max (tp/seqv-track-param-max t mode)
+          :pivot-position (tp/seqv-param-haptic-pivot-position mode)
+          :pivot-value (tp/seqv-track-param-haptic-pivot-value t mode)
+          :exponent (tp/seqv-param-haptic-exponent mode)
+          :items (if (= mode 5) project.sync-options '())
+          :fill (if (tp/seqv-process-lane-mode? mode) :process-lane-accent (rgba r g b 1.0))
+          :r r :g g :b b)))
+
+;; Slot i's slider on step s (nil past the pattern's end), at `value` (the
+;; slider position) showing `haptic` (the value), lit by `active`, drawn by
+;; `look` (`slot-slider-look`). Process lanes draw in the process accent so a
+;; lane never reads as a built-in step param.
+(def slot-vslider (t s mode i look value haptic active)
+  (vslider :height expanded-step-slider-height
+    :key (str "expanded-step-slider-" t.tid "-" i)
+    :width (if (= mode 5) 2 1)
+    :min (get look :slider-min) :max (get look :slider-max)
+    :origin (get look :origin)
+    :value value
+    :haptic-value haptic
+    :haptic-min (get look :min)
+    :haptic-max (get look :max)
+    :haptic-pivot-position (get look :pivot-position)
+    :haptic-pivot-value (get look :pivot-value)
+    :haptic-exponent (get look :exponent)
+    :items (get look :items)
+    :font-size 11
+    :color :white
+    :fill (get look :fill)
+    :dot-color :dark-gray
+    :active active
+    :track-r (get look :r)
+    :track-g (get look :g)
+    :track-b (get look :b)
+    :material (eseq.sequencer/step-slider-track-material)
+    :on-change (lambda (v) (when s (set-expanded-step-param t s mode v)))))
+
+;; Slot i's slider: a linear step param binds its field, so an edit only
+;; repaints. A curved one (its slider position is a curve of the value)
+;; reads its value in a subtree of its own, so an edit re-runs that slot; a
+;; lane slot reads an element of `lane.values` the same way, so a lane edit
+;; re-runs every lane slot (all sixteen read the one list).
+(def slot-slider (t s mode lane look i)
+  (if (or (not s) (and (tp/seqv-process-lane-mode? mode) (not lane)))
+    (slot-vslider t s mode i look 0 0 (if s #'s.active false))
+    (if (or lane (tp/seqv-param-curved? mode))
+      (subtree :key (str "expanded-step-slider-run-" t.tid "-" i)
+        ;; An unkeyed root: the subtree's key would replace the slider's,
+        ;; which tests find.
+        (h-stack
+          (let ((v (if lane (nth lane.values s.index) (tp/seqv-step-value s mode))))
+            (slot-vslider t s mode i look (tp/seqv-param-slider-position mode v) v #'s.active))))
+      (let ((ref (tp/seqv-step-ref s mode)))
+        (slot-vslider t s mode i look ref ref #'s.active)))))
+
+;; Slot i's gate toggle: the slot twin of the compact grid's step shell, so
+;; it shows the p-lock tick (variant colors included) and the gate, selection
+;; and muted looks.
+(def slot-toggle (t s i)
+  (let ((off-fill (if (= (step-odd i) 1) :sequencer-step-off-fill-alt :sequencer-step-off-fill)))
+    (if s
+      (box
+        :key (str "expanded-step-toggle-" t.tid "-" i)
+        :step s
+        :track t
+        :selected #'s.selected
+        :color :sequencer-step-border
+        :selected-color :sequencer-step-selected-border
+        :off-fill off-fill
+        :background "seqv-slot-shell"
+        :align :center :width 3 :height expanded-step-toggle-height
+        :on-mouse-down (lambda (evt) (expanded-step-pointer-down t s evt))
+        :on-drag (lambda (evt) (expanded-step-drag t s evt))
+        :on-mouse-up (lambda (evt) (expanded-step-pointer-up t s evt))
+        :on-double-click (lambda (evt) (expanded-step-double-click t s evt)))
+      (box
+        :key (str "expanded-step-toggle-" t.tid "-" i)
+        :track t
+        :selected false
+        :color :sequencer-step-border
+        :selected-color :sequencer-step-selected-border
+        :off-fill off-fill
+        :background "seqv-slot-shell-off"
+        :align :center :width 3 :height expanded-step-toggle-height))))
+
+;; Slot i on page `page`: step s's slider, gate, number, length mark and
+;; playhead dot, framed while it holds the editor's cursor.
+(def expanded-slot (t mode lane look page i)
+  (let ((s (slot-step t page i))
+        (index (+ (* page slots-per-page) i)))
+    (box :padding expanded-step-column-padding
+      :key (str "expanded-step-column-" t.tid "-" i)
+      :background "seqv-step-cursor"
+      :index index
+      :track t
+      :cursor #'t.cursor
+      :on-click (lambda (evt) (when s (expanded-step-click t s evt)))
+      :on-drag (lambda (evt) (when s (expanded-step-drag t s evt)))
+      (v-stack :align :center :gap expanded-step-column-gap
+        (slot-slider t s mode lane look i)
+        (slot-toggle t s i)
+        (number-label
+          :key (str "expanded-step-label-" t.tid "-" i)
+          :value (+ index 1)
+          :active (if s #'s.selected false)
+          :active-color :yellow
+          :decimals 0
+          :width 2.8
+          :height expanded-step-label-height
+          :h-align :center
+          :font-size 10 :bg :transparent
+          :color :dim)
+        (box :key (str "expanded-step-length-" t.tid "-" i)
+          :width 2.8 :height 0.3
+          :background "seqv-slot-length-mark"
+          :track t
+          :index index)
+        (step-playhead-dot
+          :key (str "expanded-step-playhead-" t.tid "-" i)
+          :active (if s #'s.playing false))))))
+
+;; The sixteen slots of the page t's editor shows in mode `mode` (`lane` its
+;; lane, or nil). A subtree: a page turn (the cursor's, or the playhead's
+;; while following) re-runs the slots alone.
+(def expanded-step-grid (t mode lane)
+  (subtree :key (str "expanded-steps-" t.tid)
+    (let ((page (shown-page t))
+          (look (slot-slider-look t mode lane)))
+      (grid
+        :cols 16
+        :col-width 4
+        :row-height expanded-step-row-height
+        :align :stretch
+        (each (range 0 slots-per-page) |i|
+          (expanded-slot t mode lane look page i))))))
+
+;; The cursor step's value in mode `mode` (`lane` its lane, or nil): a sync
+;; label picker in sync mode, else a number picker (0 in a lane mode with no
+;; lane). A subtree: a cursor move re-runs the picker alone.
+(def expanded-cursor-picker (t mode lane)
+  (subtree :key (str "expanded-cursor-param-" t.tid)
+    ;; An unkeyed root: the picker's key is the one Rust looks up
+    ;; (`current-number-picker-key`).
+    (h-stack
+      (let ((s (step-at t t.cursor)))
         (if (= mode 5)
           (dropdown
-            :key (str "expanded-sync-picker-" track-id)
-            :value-index (expanded-cursor-sync-index-binding track-id)
-            :options SEQ.sync-labels
+            :key (str "expanded-sync-picker-" t.tid)
+            :value-index (if s #'s.sync 0)
+            :options project.sync-options
             :on-change (lambda (label)
-              (set-expanded-current-param track track-id mode (expanded-sync-label-index label)))
+              (set-expanded-current-param t mode (max 0 (index-of project.sync-options label))))
             :width 8 :height 1.3 :font-size 11)
-          (number-picker :key (str "expanded-param-number-picker-" track-id)
+          (number-picker :key (str "expanded-param-number-picker-" t.tid)
             :border-color :white
-            :value (expanded-cursor-param-binding track-id)
-            :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode)
-            :decimals (expanded-param-decimals track mode)
-            :step (expanded-param-step track mode)
-            :on-change (lambda (v) (set-expanded-current-param track track-id mode v))
-            :width 8 :height 1.3 :font-size 11))
-        (h-stack :gap 0.4 :align :center
-          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :key (str "expanded-half-" track-id)
-            :on-click |x y r| (halve-track-pattern track track-id)
-            (v-stack :align :center
-              (label "-"
-                :font-size 12
-                :color :white
-                :bg :transparent)))
-          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :key (str "expanded-double-" track-id)
-            :on-click |x y r| (double-track-pattern track track-id)
-            (v-stack :align :center
-              (label "+"
-                :font-size 12
-                :color :white
-                :bg :transparent)))
-          (box :background "transport-btn-bg" :padding 0.2 :height 2.75
-            :key (str "expanded-pages-" track-id)
-            (h-stack :gap 0.1 :align :center
-              (each (range 0 (page-count track)) |page|
+            :value (if s
+                     (if (tp/seqv-process-lane-mode? mode)
+                       (if lane (nth lane.values s.index) 0)
+                       (tp/seqv-step-ref s mode))
+                     0)
+            :min (tp/seqv-track-param-min t mode) :max (tp/seqv-track-param-max t mode)
+            :decimals (expanded-param-decimals t mode lane)
+            :step (expanded-param-step lane)
+            :on-change (lambda (v) (set-expanded-current-param t mode v))
+            :width 8 :height 1.3 :font-size 11))))))
+
+;; The pattern's pages, the shown one lit, each over its bar transpose (Cirklon
+;; P3 bar XPOSE; dim while 0). A subtree: a page turn or a transpose re-runs
+;; the pages alone.
+(def expanded-pages (t)
+  (subtree :key (str "expanded-pages-run-" t.tid)
+    (h-stack
+      (let ((shown (shown-page t))
+            (transposes t.bar-transposes))
+        (box :background "transport-btn-bg" :padding 0.2 :height 2.75
+          :key (str "expanded-pages-" t.tid)
+          (h-stack :gap 0.1 :align :center
+            (each (range 0 (track-pages t)) |page|
+              (let ((transpose (or (nth transposes page) 0)))
                 (v-stack :gap 0.15 :align :center
-                  :key (str "expanded-page-slot-" track-id "-" page)
-                  (box :width eseq.step-grid-interactions/page-button-width :height 1.1
-                    :key (str "expanded-page-" track-id "-" page)
+                  :key (str "expanded-page-slot-" t.tid "-" page)
+                  (box :width sgi/page-button-width :height 1.1
+                    :key (str "expanded-page-" t.tid "-" page)
                     :background "pattern-pill-bg"
-                    :active (page-active-binding track-id page)
+                    :active (= page shown)
                     :style eseq.transport/pattern-control-style
-                    :on-click |x y r| (goto-page track track-id page)
+                    :on-click (lambda (event) (goto-page t page))
                     (v-stack :align :center
                       (label (fmt " {} " (+ page 1))
                         :font-size 11
-                        :active (page-active-binding track-id page)
+                        :active (= page shown)
                         :active-color :white
                         :color :dim
                         :bg :transparent)))
                   (number-picker
-                    :key (str "expanded-bar-transpose-" track-id "-" page)
-                    :value (bar-transpose-binding track-id page)
+                    :key (str "expanded-bar-transpose-" t.tid "-" page)
+                    :value transpose
                     :min -60 :max 60 :step 1 :decimals 0
-                    :active (bar-transpose-set-binding track-id page)
+                    :active (not (= transpose 0))
                     :active-color :white
                     :text-color :dim
                     :noui true
                     :text-align :center
-                    :on-change (lambda (v) (seq-set-bar-transpose track page v))
-                    :width eseq.step-grid-interactions/page-button-width
+                    :on-change (lambda (v) (set-bar-transpose! t page v))
+                    :width sgi/page-button-width
                     :height 1.1 :font-size 7))))))))))
 
-(def expanded-track-editor (track track-id)
-  (let ((mode (track-param-mode track-id)))
-    (box :padding 0.85
-      (box 
-        :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
-        (v-stack :width :fill :padding 0.35 :gap 0.1
-          (h-stack :gap 0.5
-            (box :width 1)
-            (param-tab track track-id 0 "vel")
-            (param-tab track track-id 1 "dur")
-            (param-tab track track-id 3 "tpose")
-            (param-tab track track-id 4 "pan")
-            (param-tab track track-id 5 "sync")
-            (param-tab track track-id 6 "delay")
-            (param-tab track track-id 7 "rtrg")
-            (param-tab track track-id 8 "rate")
-            (process-lane-selector track track-id mode)
-            )
-          
+;; The row's quick controls over t's editor in mode `mode` (`lane` its lane,
+;; or nil).
+(def expanded-track-quick-controls (t mode lane)
+  (v-stack
+    (box :height 0.4 :width 1)
+    (h-stack :gap 0.55 :align :center
+      (box :width (param-header-width mode) :height 1.3
+        :key (str "expanded-step-summary-" t.tid)
+        (label (param-header-name t mode)
+          :font-size 11 :width (param-header-width mode) :color :white :bg :transparent))
+      (expanded-cursor-picker t mode lane)
+      (h-stack :gap 0.4 :align :center
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :key (str "expanded-half-" t.tid)
+          :on-click (lambda (event) (resize-pattern t seq-halve-track-pattern))
+          (v-stack :align :center
+            (label "-"
+              :font-size 12
+              :color :white
+              :bg :transparent)))
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :key (str "expanded-double-" t.tid)
+          :on-click (lambda (event) (resize-pattern t seq-double-track-pattern))
+          (v-stack :align :center
+            (label "+"
+              :font-size 12
+              :color :white
+              :bg :transparent)))
+        (expanded-pages t)))))
+
+;; t's param tabs and lane selector (`lane` the lane its editor shows, or
+;; nil). A subtree of its own: arming a process map (the tabs' armed tint)
+;; re-runs the tabs, not the row.
+(def expanded-param-tabs (t lane)
+  (subtree :key (str "expanded-tabs-" t.tid)
+    (h-stack :gap 0.5
+      (box :width 1)
+      (param-tab t 0 "vel")
+      (param-tab t 1 "dur")
+      (param-tab t 3 "tpose")
+      (param-tab t 4 "pan")
+      (param-tab t 5 "sync")
+      (param-tab t 6 "delay")
+      (param-tab t 7 "rtrg")
+      (param-tab t 8 "rate")
+      (process-lane-selector t lane))))
+
+;; t's editor in mode `mode` (`lane` its lane, or nil). The tabs, the slots,
+;; the strip, the patchbay and the OTHER LANES row are subtrees of their own,
+;; so a map, cable, card or inlet edit re-runs one of them and never the
+;; expanded rows; the OTHER LANES row stacks at gap 0 with the editor's body
+;; and carries its own gap.
+(def expanded-track-editor (t mode lane)
+  (box :padding 0.85
+    (box
+      :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
+      (v-stack :width :fill :padding 0.35 :gap 0.1
+        (expanded-param-tabs t lane)
+        (v-stack :width :fill :gap 0
           (h-stack :gap 0.5 :padding 0 :align :start
-            (v-stack 
-              (grid
-                :cols 16
-                :col-width 4
-                :row-height expanded-step-row-height
-                :align :stretch
-                (each (range 0 eseq.seq-core-state/page-size) |i|
-                  (box :padding expanded-step-column-padding
-                    :key (str "expanded-step-column-" track-id "-" i)
-                    :background "cursor-highlight"
-                    :active (slot-cursor-binding track-id i)
-                    :selected (track-selected-binding track)
-                    :on-click (lambda (evt)
-                      (expanded-slot-click track track-id i evt))
-                    :on-drag (lambda (evt)
-                      (expanded-slot-drag track track-id i evt))
-                    (v-stack :align :center :gap expanded-step-column-gap
-                      (let ((active-ref (slot-active-binding track-id i))
-                          (selected-ref (slot-selected-binding track-id i))
-                          (track-r (expanded-track-color-r track))
-                          (track-g (expanded-track-color-g track))
-                          (track-b (expanded-track-color-b track)))
-                        (list
-                          (vslider :height expanded-step-slider-height
-                            :key (str "expanded-step-slider-" track-id "-" i)
-                            :width (if (= mode 5) 2 1)
-                            :min (eseq.seqv-track-params/seqv-track-param-slider-min track mode) :max (eseq.seqv-track-params/seqv-track-param-slider-max track mode)
-                            :origin (eseq.seqv-track-params/seqv-track-param-origin track mode)
-                            :value (slot-param-slider-binding track-id mode i)
-                            :haptic-value (slot-param-haptic-binding track-id mode i)
-                            :haptic-min (eseq.seqv-track-params/seqv-track-param-min track mode)
-                            :haptic-max (eseq.seqv-track-params/seqv-track-param-max track mode)
-                            :haptic-pivot-position (eseq.seqv-track-params/seqv-param-haptic-pivot-position mode)
-                            :haptic-pivot-value (eseq.seqv-track-params/seqv-track-param-haptic-pivot-value track mode)
-                            :haptic-exponent (eseq.seqv-track-params/seqv-param-haptic-exponent mode)
-                            :items (if (= mode 5) SEQ.sync-labels '())
-                            :font-size 11
-                            :color :white
-                            :fill (expanded-slider-fill-for-mode track mode)
-                            :dot-color :dark-gray
-                            :active active-ref
-                            :track-r track-r
-                            :track-g track-g
-                            :track-b track-b
-                            :material (eseq.sequencer/step-slider-track-material)
-                            :on-change (lambda (v)
-                              (set-expanded-slot-param track track-id i mode v)))
-                          ;; Same shell widget as the compact grid's step-cell, so
-                          ;; the expanded toggle inherits its p-lock tick (incl.
-                          ;; variant colors) and active/selected/muted rendering.
-                          (box
-                            :key (str "expanded-step-toggle-" track-id "-" i)
-                            :active active-ref
-                            :plock-kind (slot-plock-kind-binding track-id i)
-                            :selected selected-ref
-                            :duration 0
-                            :muted (bind-seq-nth "track-muted-effective" track)
-                            :hide 0
-                            :track-r (bind-seq-nth "step-color-r-effective" track)
-                            :track-g (bind-seq-nth "step-color-g-effective" track)
-                            :track-b (bind-seq-nth "step-color-b-effective" track)
-                            :variant-r (slot-variant-r-binding track-id i)
-                            :variant-g (slot-variant-g-binding track-id i)
-                            :variant-b (slot-variant-b-binding track-id i)
-                            :color :sequencer-step-border
-                            :selected-color :sequencer-step-selected-border
-                            :off-fill (if (= (step-odd i) 1)
-                              :sequencer-step-off-fill-alt
-                              :sequencer-step-off-fill)
-                            :background "seqv-step-shell"
-                            :align :center :width 3 :height expanded-step-toggle-height
-                            :on-mouse-down (lambda (evt)
-                              (expanded-slot-pointer-down track track-id i evt))
-                            :on-drag (lambda (evt)
-                              (expanded-slot-drag track track-id i evt))
-                            :on-mouse-up (lambda (evt)
-                              (expanded-slot-pointer-up track track-id i evt))
-                            :on-double-click (lambda (evt)
-                              (expanded-slot-double-click track track-id i evt)))))
-                      (number-label
-                        :key (str "expanded-step-label-" track-id "-" i)
-                        :value (slot-label-binding track-id i)
-                        :active (slot-selected-binding track-id i)
-                        :active-color :yellow
-                        :decimals 0
-                        :width 2.8
-                        :height expanded-step-label-height
-                        :h-align :center
-                        :font-size 10 :bg :transparent
-                        :color :dim)
-                      (box :key (str "expanded-step-length-" track-id "-" i)
-                        :width 2.8 :height 0.3
-                        :background "seqv-slot-length-mark"
-                        :active (bind-seq (str "seqv-slot-length-active-" track-id "-" i)))
-                      (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
-                        (step-playhead-dot
-                          :active (slot-playhead-binding track-id i)))))))
-              (lane-patchbay-under track track-id mode))
-            
-            (lane-strip track track-id mode))
-          (other-lanes-row track)
-          ))
-      )
-    )
-  )
+            (v-stack
+              (expanded-step-grid t mode lane)
+              (lane-patchbay-under t lane))
+            (lane-strip t lane))
+          (other-lanes-row t))))))
 
-(def track-grid (track-idx)
-  (let ((num-steps (nth SEQ.track-num-steps track-idx))
-      (rows (max 1 (floor (/ (+ num-steps (- row-width 1)) row-width)))))
-    (box :key (str "track-step-grid-" track-idx) :padding 0.15
-      (box :background-color :buffer-bg
-        (v-stack :gap -0.04
-          (box :width 0.1 :height 0.342 :bg :transparent)
-          (each (range 0 rows) |row|
-            (v-stack :gap -0.16
-              (h-stack :align :center
-                (box :width 0.1)
-                
-                (box  :height (track-row-label-height) :v-align :center 
-                  (v-stack :gap 0
-                    ;; `active` is a reactive float slot the label reads at paint
-                    ;; time, so the playing row brightens without re-evaluating or
-                    ;; re-laying out the grid.
-                    (label (+ row 1)
-                      :color (if (> rows 1) :dim :buffer-bg)
-                      :active (if (> rows 1) (bind-seq (str "track-playhead-row-active-" track-idx "-" row)) 0)
-                      :active-color :white
-                    :v-align :center
-                      :width 0.1 :bg :transparent :font-size 8)
-                    (box :width 0.2 :height (* (track-row-label-height) 0.02))
-                    )
-                  )
-                (h-stack :gap 0.0
-                  (each (range 0 row-width) |col|
-                    (let ((step (+ (* row row-width) col)))
-                      (if (< step num-steps)
-                        (step-cell track-idx step)
-                        ;; Preserve the grid width without an interactive ghost
-                        ;; step: hit testing must reach the enclosing track row.
-                        (box :width step-cell-width :height step-cell-height))))))
-              (h-stack (box :width 1)
-                (playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
-    )
-  )
+;; t's expanded row: its header and quick controls over its editor, in its
+;; param mode (`t.param-mode`; a lane mode's lane read once here).
+(def expanded-track-row (t bare)
+  (let ((mode t.param-mode)
+        (lane (tp/seqv-track-process-lane t mode)))
+    (v-stack
+      :width :fill :gap 0.2
+      (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+        (track-header t bare)
+        (expanded-track-quick-controls t mode lane)
+        (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+        (track-actions t))
+      (expanded-track-editor t mode lane))))
 
-;; Which sound payloads a track will accept as a replacement of what it already
-;; plays. Shared by the track row and the pad grid's occupied cells: dropping on
-;; a pad replaces that pad's sound on its member track, so the two must agree.
-(def sound-drop-types (i)
-  (if (eseq.track-collapse/replaceable-instrument? i)
+;; Which sound payloads track t will accept as a replacement of what it
+;; already plays. Shared by the track row and the pad grid's occupied cells:
+;; dropping on a pad replaces that pad's sound on its member track, so the
+;; two must agree.
+(def sound-drop-types (t)
+  (if (eseq.track-collapse/replaceable-type? t.instrument-type)
     (list "sample" "instrument" "instrument-preset" "sound")
-    (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample"))))
+    (list "sample")))
 
 ;; One track's grid row. Rack members render through this exact path — a rack
 ;; member is an ordinary track, so its pattern length, timebase p-locks,
 ;; accumulator and expanded step editor all come along for free.
-;; :muted is a binding (not a value read) so mute/solo changes update the row
-;; chrome without rerunning the enclosing subtree.
-(def track-row (i is-bare-track)
-  (box :width :fill
-      :key (str "track-drop-" i)
-      :selected (track-selected-binding i)
-      :muted (bind-seq-nth "track-muted-effective" i)
-      :background-color :buffer-bg
-      :selected-background-color :mixer-strip-selected-bg
-      :muted-background-color :mixer-strip-muted-bg
-      :border-width 2
-      :corner-radius (eseq.seq-core-state/radius 10)
-      :border-color :mixer-strip-border
-      :selected-border-color :mixer-strip-selected-border
-      :muted-border-color :mixer-strip-border
-      :drop-hover-border-color :mixer-strip-selected-border
-      :drop-types (sound-drop-types i)
-      :drop-meta (dict :kind "track" :track i)
-      :on-drop (lambda (event) (drop-on-track event))
-      :padding 0.0145
-      :on-click (lambda (event) (track-click event i))
-      :on-double-click (lambda (event) (open-piano-roll-for-track i))
-      (if (track-expanded? (nth SEQ.track-ids i))
-        (v-stack 
-          :width :fill :gap 0.2
+;; The selection and the silenced look are bindings (not value reads) so
+;; selection, mute and solo changes update the row chrome without rerunning
+;; the enclosing subtree. A binding cannot be negated: `:muted` is bound to
+;; `t.audible`, so the plain props carry the silenced look.
+(def track-row (t bare)
+  (let ((i t.index))
+    (box :width :fill
+        :key (str "track-drop-" i)
+        :selected #'t.in-selection
+        :muted #'t.audible
+        :background-color :mixer-strip-muted-bg
+        :selected-background-color :mixer-strip-selected-bg
+        :muted-background-color :buffer-bg
+        :border-width 2
+        :corner-radius (eseq.seq-core-state/radius 10)
+        :border-color :mixer-strip-border
+        :selected-border-color :mixer-strip-selected-border
+        :muted-border-color :mixer-strip-border
+        :drop-hover-border-color :mixer-strip-selected-border
+        :drop-types (sound-drop-types t)
+        :drop-meta (dict :kind "track" :track i)
+        :on-drop (lambda (event) (drop-on-track event))
+        :padding 0.0145
+        :on-click (lambda (event) (track-click event t))
+        :on-double-click (lambda (event) (open-piano-roll-for-track t))
+        (if t.expanded
+          (expanded-track-row t bare)
           (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-            (track-header i is-bare-track)
-            (expanded-track-quick-controls i (nth SEQ.track-ids i))
-            (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-            (track-actions i))
-          (expanded-track-editor i (nth SEQ.track-ids i)))
-        (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-          (v-stack (box :height 0.1)
-            (track-header i is-bare-track))
-          (track-grid i)
-          (box :flex 1 :width :fill :height 0.1 :bg :transparent)
-          (track-actions i)))))
+            (v-stack (box :height 0.1)
+              (track-header t bare))
+            (track-grid t)
+            (box :flex 1 :width :fill :height 0.1 :bg :transparent)
+            (track-actions t))))))
 
 ;; ── Track groups ────────────────────────────────────────────────────────
 ;; Regular groups and drum racks share one nested block: a header row owns the
@@ -3503,11 +3244,11 @@
 ;; beneath as ordinary rows. A drum rack additionally owns pad-play arming and
 ;; rack-specific member chrome; regular groups deliberately have no Arm control.
 
-(def group-ui-kind (gidx)
-  (if (eseq.drum-rack-v2/rack? gidx) "rack" "group"))
+(def group-ui-kind (g)
+  (if g.rack "rack" "group"))
 
-(def group-element-key (gidx element)
-  (str (group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
+(def group-element-key (g element)
+  (str (group-ui-kind g) "-" element "-" g.gid))
 
 ;; Keep group fills opaque because the rounded-box renderer draws its border
 ;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
@@ -3516,604 +3257,109 @@
 (def group-container-bg (c)
   (let ((bg THEME.buffer_bg))
     (rgba
-      (+ (* (nth c 0) 0.22) (* (nth bg 0) 0.78))
-      (+ (* (nth c 1) 0.22) (* (nth bg 1) 0.78))
-      (+ (* (nth c 2) 0.22) (* (nth bg 2) 0.78))
+      (+ (* (rgb-part c 0) 0.22) (* (nth bg 0) 0.78))
+      (+ (* (rgb-part c 1) 0.22) (* (nth bg 1) 0.78))
+      (+ (* (rgb-part c 2) 0.22) (* (nth bg 2) 0.78))
       1.0)))
 
-(def group-bus-volume-from-event (bus-idx event)
-  (let ((sx (get event :sx)))
-    (if (= sx nil)
-      nil
-      (seq-set-bus-volume bus-idx (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0))))))))
-
-;; Volume/meter for a group's backing bus. Group bus lists are rebuilt per
-;; frame, so an unresolved index degrades to a spacer instead of an error.
-(def group-volume-control (gidx bus-idx)
-  (v-stack (box :height 0.13)
-    (if (>= bus-idx 0)
-      (box
-        :key (group-element-key gidx "volume-control")
-        :width 8.2 :height 1.25
-        :background "seqv-track-volume-meter"
-        :level (bind-seq (str "bus-peak-" bus-idx))
-        :volume (bind-seq-nth "bus-volumes" bus-idx)
-        :on-click (lambda (event) (group-bus-volume-from-event bus-idx event))
-        :on-drag (lambda (event) (group-bus-volume-from-event bus-idx event)))
+;; Volume/meter for a group's backing bus b; a spacer while it has none.
+(def group-volume-control (g b)
+  (if b
+    (let ((set-from (lambda (event) (set-volume! b event))))
+      (volume-meter (group-element-key g "volume-control") b set-from set-from))
+    (v-stack (box :height 0.13)
       (box :width 8.2 :height 1.25 :bg :transparent))))
 
 ;; Selecting a group selects its backing bus, exactly as the mixer header does,
 ;; so the fx panel follows the group chain.
-(def select-group (gidx)
-  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
-    (if (>= bus-idx 0)
-      (set! eseq.seq-core-state/selected-bus bus-idx)
-      false)))
+(def select-group (g)
+  (when g.bus (set! eseq.seq-core-state/selected-bus g.bus.index)))
 
-(def show-fx-for-group (gidx)
-  (do
-    (seq-clear-delete-target)
-    (seq-clear-selection)
-    (select-group gidx)
-    (eseq.seq-panels/seq-show-fx-lower-panel)))
+(def show-fx-for-group (g)
+  (seq-clear-delete-target)
+  (seq-clear-selection)
+  (select-group g)
+  (eseq.seq-panels/seq-show-fx-lower-panel))
 
-;; Selection visibility rides the *sel-sync* SEQV field, never a raw
-;; `selected-bus` read: this block wraps every member row, so a render-time
-;; read here re-rendered the whole group on each selection (eseq-4jv).
-(def group-selected-binding (gidx)
-  (eseq.seq-core-state/group-selected-vis-binding (eseq.drum-rack-v2/group-id gidx)))
-
-;; ── Group member chrome ─────────────────────────────────────────────────
 ;; Every group member gets the same indented prefix used by drum racks. It
 ;; visually connects the ordinary track row to the containing group header.
-
-(def rack-pad-badge (gidx pad)
-  (h-stack :gap 0.08 :align :center
-    (button "-"
-      :key (str "rack-pad-down-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :width 1.0 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent
-      :color :dim
-      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad -1))
-    (badge (get pad :label)
-      :key (str "rack-pad-note-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :font-size 9 :width 2.6 :height 0.9 :padding 0
-      :h-align :center
-      :background-color '(rgba 0.18 0.22 0.23 1.0)
-      :border-color :transparent
-      :highlight-color :transparent
-      :shadow-color :transparent
-      :color :white)
-    (button "+"
-      :key (str "rack-pad-up-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-      :width 1.0 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent
-      :color :dim
-      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
-
-(def group-member-chrome (gidx i)
-  (group-track-indicator
-    :key (str "group-track-indicator-" (eseq.drum-rack-v2/group-id gidx) "-" i))
-  )
-
-(def group-member-row (gidx i)
+(def group-member-row (g t)
   (h-stack :width :fill :gap 0.15 :align :start
-    (group-member-chrome gidx i)
-    (box :width 0 :flex 1 (track-row i false))))
+    (group-track-indicator
+      :key (str "group-track-indicator-" g.gid "-" t.tid))
+    (box :width 0 :flex 1 (track-row t false))))
 
-;; ── Pad grid performance view ───────────────────────────────────────────
-;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
-;; owns no sequencing state: a cell reads its pad from SEQ.groups and a hit
-;; goes straight down the live pad path. The grid renders in the *fx* buffer's
-;; rack panel (ui/effects/buffers.lisp); the sequencer header carries no pad
-;; toggle of its own.
-;;
-;; Cells are NOTE-POSITIONAL: a cell is a fixed MIDI note and draws whichever
-;; pad answers to it, so label and position can never contradict each other.
-;; The note geometry — octave-aligned pages, lowest note bottom-left — lives
-;; in eseq.drum-rack-v2; what lives here is which page is showing.
+(def group-type-icon (g)
+  ;; The browser lists Drum Rack and Instrument Rack under the same :sampler
+  ;; rack glyph, so both the drum-rack group and the slot-based rack use it.
+  (when g.rack :sampler))
 
-;; Which page of notes the grid shows, as (group id, page). One rack panel is
-;; on screen at a time, so a single slot scoped by group id IS per-rack state:
-;; a rack the page was never set for — or any rack other than the one last
-;; paged — re-derives its own default instead of inheriting a stale page.
-(defstate pad-grid-page-group -1)
-(defstate pad-grid-page 0)
-
-(def pad-page (gidx)
-  (if (= pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
-    (eseq.drum-rack-v2/clamp-pad-page pad-grid-page)
-    (eseq.drum-rack-v2/default-pad-page gidx)))
-
-(def set-pad-page (gidx page)
-  (do
-    (set! pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
-    (set! pad-grid-page (eseq.drum-rack-v2/clamp-pad-page page))))
-
-;; The note a grid position names on the visible page — the cell's identity,
-;; occupied or not.
-(def pad-cell-note (gidx cell)
-  (eseq.drum-rack-v2/cell-note (pad-page gidx) cell))
-
-;; Pad drawn at a grid position: the one whose pad note IS this cell's note,
-;; or nil. Pads on other pages simply do not render here; the grid is sparse
-;; by design and never compacts.
-(def pad-at (gidx cell)
-  (eseq.drum-rack-v2/pad-at-note gidx (pad-cell-note gidx cell)))
-
-(def pad-cell-name (pad)
-  (let ((track (get pad :track)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (nth SEQ.track-names track)
-      "")))
-
-;; The pad the rack's *fx* panel is focused on, as (group id, pad note) — the
-;; pad map's own key, so the focus survives track reindexing exactly as chokes
-;; and note nudges do. Per-pad fx are the member track's own chain by design
-;; (docs/drum-rack-v2-spec.md, "UI"), so all a pad selection has to do is name
-;; the member the panel offers to open.
-(defstate pad-selected-group -1)
-(defstate pad-selected-note -1)
-
-(def select-pad (gidx pad)
-  (do
-    (set! pad-selected-group (eseq.drum-rack-v2/group-id gidx))
-    (set! pad-selected-note (get pad :pad-note))))
-
-(def pad-selected? (gidx pad)
-  (and (not (= pad nil))
-    (= pad-selected-group (eseq.drum-rack-v2/group-id gidx))
-    (= pad-selected-note (get pad :pad-note))))
-
-;; The focused pad of a rack, or nil when the focus names another rack (or no
-;; pad answers to the focused note any more).
-(def selected-pad (gidx)
-  (if (= pad-selected-group (eseq.drum-rack-v2/group-id gidx))
-    (reduce |acc pad| (if (= (get pad :pad-note) pad-selected-note) pad acc)
-      nil
-      (eseq.drum-rack-v2/pads gidx))
-    nil))
-
-;; Lazy pads (docs/drum-rack-v2-spec.md, "Track budget"): dropping a sound on an
-;; EMPTY cell is what makes that pad claim a track. The new member is mapped to
-;; exactly this cell's pad note, so it is playable by pad click and armed key
-;; the moment it lands.
-(def drop-on-empty-pad (event gidx cell)
-  (let ((payload (get event :payload))
-      (group-id (eseq.drum-rack-v2/group-id gidx))
-      (note (pad-cell-note gidx cell)))
-    (let ((path (get payload :path))
-        (name (get payload :name)))
-      (if (= (get event :drag-type) "instrument")
-        ;; A pad needs a member track in this rack's group on a specific pad
-        ;; note; the builtin add-track host commands take neither, so builtins
-        ;; are refused instead of landing as a loose track (eseq-mj8).
-        (if (= (get payload :kind) "builtin-instrument")
-          (status "Drop a sample or saved instrument onto a pad")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument"
-                (dict :name name :group-id group-id :pad-note note)))
-            (status "Drop an instrument, not a folder")))
-        (if (= (get event :drag-type) "instrument-preset")
-          (let ((instrument (eseq.browser/preset-payload-instrument payload)))
-            (if instrument
-              (do
-                (set! sbrowser-loading-instrument-name instrument)
-                (host-command "add-track-instrument"
-                  (dict :name instrument :preset (get payload :preset)
-                    :group-id group-id :pad-note note)))
-              (status "Drop an instrument preset")))
-          (if path
-            (host-command "add-track-sample"
-              (dict :path path :group-id group-id :pad-note note
-                :preserve-browser-context true))
-            (status "Drop a sample file, not a folder")))))))
-
-;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
-;; same replacement a drop on the member's grid row does — so pad identity,
-;; pattern data, mixer settings and chokes all stay put.
-(def pad-cell-track (pad)
-  (if (= pad nil) -1 (get pad :track)))
-
-;; Every cell also takes a dragged pad ("rack-pad"): dropping one on an empty
-;; cell moves it to that note, dropping it on an occupied cell swaps the two.
-(def pad-cell-drop-types (pad)
-  (let ((track (pad-cell-track pad)))
-    (cons "rack-pad"
-      (if (and (>= track 0) (< track SEQ.num-tracks))
-        (sound-drop-types track)
-        (list "sample" "instrument" "instrument-preset")))))
-
-;; A pad dragged from the grid carries its rack and note; the drop target
-;; only needs to know which note it lands on. The drag stays within one rack:
-;; a pad from another group is ignored rather than adopted.
-(def pad-drag-payload (gidx pad)
-  (dict :group-id (eseq.drum-rack-v2/group-id gidx)
-        :pad-note (get pad :pad-note)))
-
-(def drop-pad-on-note (event gidx note)
-  (let ((payload (get event :payload)))
-    (if (= (get payload :group-id) (eseq.drum-rack-v2/group-id gidx))
-      (eseq.drum-rack-v2/move-pad-to-note gidx (get payload :pad-note) note)
-      (status "Drag pads within one rack"))))
-
-(def pad-cell-drop-meta (gidx cell pad)
-  (let ((track (pad-cell-track pad)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (dict :kind "track" :track track :from-pad true)
-      (dict :kind "rack-pad"
-        :group-id (eseq.drum-rack-v2/group-id gidx)
-        :cell cell
-        :pad-note (pad-cell-note gidx cell)))))
-
-(def drop-on-pad-cell (event gidx cell)
-  (let ((track (pad-cell-track (pad-at gidx cell))))
-    (if (= (get event :drag-type) "rack-pad")
-      (drop-pad-on-note event gidx (pad-cell-note gidx cell))
-      (if (and (>= track 0) (< track SEQ.num-tracks))
-        (drop-on-track event)
-        (drop-on-empty-pad event gidx cell)))))
-
-;; A pad's own fx ARE its member track's chain (docs/drum-rack-v2-spec.md,
-;; "UI"), so "open this pad" means: make its member the track under edit. That
-;; drops the bus selection, which is exactly what swaps the *fx* buffer from
-;; the rack panel to that member's instrument and effects — in place, without
-;; touching the workspace layout.
-(def open-pad-member-fx (gidx pad)
-  (let ((track (pad-cell-track pad)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (select-track-for-edit track)
-      nil)))
-
-;; Pad context menu (docs/rack-groove-spec.md, "Pad roles"): Role ▸ with
-;; "Standard (<inferred>)" first — the role the standard layout gives the
-;; pad's note — then every explicit role, the pad's current choice checked.
-;; Mounted once at the *fx* rack panel root (like the clip menu in the grid)
-;; so it overlays the pad grid instead of being clipped by its cell.
-(defstate pad-menu nil)
-
-(def open-pad-menu (event gidx pad)
-  (do
-    (select-pad gidx pad)
-    (set! pad-menu (dict :gidx gidx :pad pad
-      :col (get event :col) :row (get event :row)))))
-
-(def close-pad-menu ()
-  (set! pad-menu nil))
-
-(def choose-pad-role (gidx pad key)
-  (do
-    (close-pad-menu)
-    (eseq.drum-rack-v2/set-pad-role gidx pad key)))
-
-(def rack-pad-context-menu ()
-  (let ((menu pad-menu)
-      (gidx (get pad-menu :gidx))
-      (pad (get pad-menu :pad)))
-    (context-menu :is-open (not (= menu nil))
-      :anchor-col (or (get menu :col) 0)
-      :anchor-row (or (get menu :row) 0)
-      :on-close (lambda () (close-pad-menu))
-      (menu-item "Role" :key "rack-pad-menu-role"
-        (menu-item (eseq.drum-rack-v2/pad-role-standard-label pad)
-          :key "rack-pad-menu-role-standard"
-          :checked (not (eseq.drum-rack-v2/pad-role-explicit? pad))
-          :on-select (lambda (event) (choose-pad-role gidx pad "standard")))
-        (menu-separator)
-        (each (if (= menu nil) (list) (eseq.drum-rack-v2/pad-role-options)) |option|
-          (menu-item (get option :label)
-            :key (str "rack-pad-menu-role-" (get option :key))
-            :checked (= (or (get pad :role) "") (get option :key))
-            :on-select (lambda (event) (choose-pad-role gidx pad (get option :key)))))))))
-
-;; The role tag sits in the pad's top corner: bright when set on the pad,
-;; dim when it is only the standard layout's guess, absent when neither
-;; names a drum.
-(def pad-role-tag-label (pad)
-  (label (eseq.drum-rack-v2/pad-role-tag pad)
-    :width 1.4 :font-size 6.2 :bg :transparent :text-align :right
-    :color (if (eseq.drum-rack-v2/pad-role-explicit? pad) :white :dim)))
-
-;; Pad trigger light (eseq-4b5.16): the host publishes one flag per rack member
-;; track, lit for as long as that track is sounding whatever fired it — a hit on
-;; this cell, an armed rack's keys, or its own sequenced steps. It rides the
-;; box's BOUND `selected` state rather than a lisp-computed colour so a hit
-;; repaints the cell without re-rendering the grid, the way a mixer meter does;
-;; the persistent pad focus keeps its own border, computed below.
-(def pad-trigger-binding (pad)
-  (let ((track (pad-cell-track pad)))
-    (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)))
-
-(def pad-cell (gidx cell)
-  (let ((pad (pad-at gidx cell)))
-    (box
-      :key (str "rack-pad-cell-" (eseq.drum-rack-v2/group-id gidx) "-" cell)
-      :width 6.4 :height 2.3 :padding 0.15
-      :background-color (if (= pad nil)
-        :bg
-        :mixer-strip-bg
-        )
-      :selected (pad-trigger-binding pad)
-      :selected-background-color :accent 
-      :border-width 1
-      :border-color (if (pad-selected? gidx pad)
-        :mixer-strip-selected-border
-        '(rgba 0.30 0.31 0.32 1.0))
-      :drop-hover-border-color :mixer-strip-selected-border
-      :drop-hover-background-color :mixer-control-bg
-      :corner-radius (eseq.seq-core-state/radius 8)
-      :drop-types (pad-cell-drop-types pad)
-      :drop-meta (pad-cell-drop-meta gidx cell pad)
-      :on-drop (lambda (event) (drop-on-pad-cell event gidx cell))
-      ;; An occupied cell is a drag source: drag it onto another cell of this
-      ;; page, or onto a note in the octave map, to move the pad there.
-      :drag-type (if (= pad nil) nil "rack-pad")
-      :drag-modifier :none
-      :drag-payload (if (= pad nil) nil (pad-drag-payload gidx pad))
-      ;; A click focuses the pad; it no longer auditions it (the pad keys and
-      ;; the sequencer play it), so a click that turns into a drag is silent.
-      :on-click |x y r| (if (= pad nil) nil (select-pad gidx pad))
-      ;; A double-click opens the pad: its member track becomes the track under
-      ;; edit, which swaps the *fx* panel to that member's own chain.
-      :on-double-click |x y r| (if (= pad nil) nil (open-pad-member-fx gidx pad))
-      ;; Right-click: the pad menu (Role ▸ …).
-      :on-right-click (lambda (event) (if (= pad nil) nil (open-pad-menu event gidx pad)))
-      (v-stack :width :fill :height :fill :gap 0.05
-        ;; The note is the cell's own, so an empty cell still says which note
-        ;; a drop here would claim. The role tag balances a same-width spacer
-        ;; on the left so the note stays centred.
-        (h-stack :width :fill :gap 0 :align :center
-          (box :width 1.4 :height 0.1 :bg :transparent)
-          (label (if (= pad nil)
-              (eseq.drum-rack-v2/note-label (pad-cell-note gidx cell))
-              (get pad :label))
-            :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
-            :active (pad-trigger-binding pad)
-            :active-color :black
-            :bg :transparent
-            :flex 1 :width :fill :text-align :center)
-          (pad-role-tag-label pad))
-        (label (if (= pad nil) "" (substring (pad-cell-name pad) 0 12))
-          :active (pad-trigger-binding pad)
-          :active-color :black
-          :font-size 6.8 :color :white :bg :transparent
-          :width :fill :text-align :center)
-        (label (if (= pad nil)
-            ""
-            (if (< (get pad :choke) 0) "" (str "choke " (get pad :choke))))
-          :font-size 6.2 :color :dim :bg :transparent
-          :width :fill :text-align :center)))))
-
-;; Row 0 renders at the TOP and carries the page's HIGHEST four notes: the
-;; grid reads bottom-up, so the bottom-left cell is the page's C.
-(def pad-grid-row (gidx row)
-  (h-stack :gap 0.15 :align :center
-    (each (range 0 4) |col|
-      (pad-cell gidx (+ (* row 4) col)))))
-
-;; Paging walks the note range, not the pad list: every octave is reachable so
-;; a new pad can be placed anywhere, and the readout names the notes on screen
-;; rather than a meaningless "1/2".
-(def pad-grid-page-selector (gidx)
-  (h-stack :gap 0.15 :align :center
-    (button "◂"
-      :key (str "rack-pad-page-prev-" (eseq.drum-rack-v2/group-id gidx))
-      :width 1.4 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent :color :dim
-      :on-click |x y r| (set-pad-page gidx (- (pad-page gidx) 1)))
-    (label (eseq.drum-rack-v2/pad-page-label (pad-page gidx))
-      :key (str "rack-pad-page-label-" (eseq.drum-rack-v2/group-id gidx))
-      :font-size 8 :color :dim :bg :transparent)
-    (button "▸"
-      :key (str "rack-pad-page-next-" (eseq.drum-rack-v2/group-id gidx))
-      :width 1.4 :height 0.9 :padding 0 :font-size 8
-      :background-color '(rgba 0.1 0.1 0.1 1.0)
-      :border-color :transparent :color :dim
-      :on-click |x y r| (set-pad-page gidx (+ (pad-page gidx) 1)))))
-
-(def pad-grid-intrinsic-width 26.45)
-
-;; The pad grid as a component: the *fx* rack panel draws it at its intrinsic
-;; width beside the rack's own controls. It lives here, next to the pad cell it
-;; is made of, so pad badges, drops and audition stay one definition wherever a
-;; future surface draws them.
-(def rack-pad-grid (gidx)
-  (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
-    :width pad-grid-intrinsic-width :padding 0.2
-    :background-color :bg
-    :corner-radius (eseq.seq-core-state/radius 14)
-    (v-stack :gap 0.1 :align :start
-      (each (range 0 4) |row|
-        (pad-grid-row gidx row)))))
-
-;; ── Octave overview mini-map (eseq-4b5.15) ──────────────────────────────
-;; A slim full-range map to the LEFT of the pad grid: every note the grid can
-;; address as a tiny cell, four to a row, lowest at the bottom, with the
-;; sixteen notes currently enlarged drawn as a highlighted block. Occupied
-;; notes are filled, so a kit that lives three octaves up is visible without
-;; paging there — and a click on any row pages the grid to it, which is the
-;; affordance the arrows can only offer one octave at a time.
-;;
-;; It is a second VIEW of pad-grid-page, not a second page state: the
-;; highlight and the click both go through the same page functions the grid
-;; uses.
-;;
-;; The pad map is read ONCE at the root and flattened into a note-indexed
-;; track list there. A per-cell read of SEQ.groups would re-render all 88
-;; cells on any pad edit — whole-list reads are the expensive kind of
-;; reactivity here — and a per-cell scan of the pads would walk the map 88
-;; times over to draw it once.
-
-(def pad-map-cell-width 0.75)
-(def pad-map-cell-height 0.34)
-
-;; Where a note sits in that flattened list. Pad notes are transposes around C4
-;; and so go negative, which no list index does: the map is indexed from the
-;; lowest note the grid can name.
-(def pad-map-slot (note)
-  (- note (eseq.drum-rack-v2/min-grid-pad-note)))
-
-;; Slot -> the member track behind that note, -1 where no pad answers. The map
-;; needs the track, not just "occupied", because a cell's trigger light is that
-;; track's (eseq-4b5.16) — and "occupied" is just `track >= 0`, so one pass over
-;; the pads still answers both questions.
-(def pad-note-tracks (pads)
-  (reduce |acc pad|
-    (let ((note (get pad :pad-note)))
-      (if (and (>= note (eseq.drum-rack-v2/min-grid-pad-note))
-          (<= note (eseq.drum-rack-v2/max-grid-pad-note)))
-        (set-nth acc (pad-map-slot note) (get pad :track))
-        acc))
-    (map (lambda (n) -1)
-      (range 0 (+ (pad-map-slot (eseq.drum-rack-v2/max-grid-pad-note)) 1)))
-    pads))
-
-(def note-track (tracks note)
-  (nth tracks (pad-map-slot note)))
-
-(def note-occupied? (tracks note)
-  (>= (note-track tracks note) 0))
-
-;; The map lights on the same per-track binding the enlarged grid does, which
-;; is what makes a hit on a pad the grid is NOT showing still visible here.
-;;
-;; Each map cell is also a drop target for a dragged pad: that is how a pad
-;; reaches another octave in one gesture, without paging first.
-(def pad-map-cell (gidx gid tracks note)
-  (let ((track (note-track tracks note)))
-    (box :key (str "rack-pad-map-cell-" gid "-" note)
-      :width pad-map-cell-width :height pad-map-cell-height
-      :background-color (if (>= track 0)
-        '(rgba 0.60 0.72 0.75 1.0)
-        '(rgba 0.19 0.20 0.21 1.0))
-      :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
-      :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
-      :drop-types (list "rack-pad")
-      :drop-hover-background-color :mixer-strip-selected-border
-      :on-drop (lambda (event) (drop-pad-on-note event gidx note))
-      ;; Being a drop target makes the cell a pointer target too, so it must
-      ;; page the grid itself: the click no longer reaches the row.
-      :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note note))
-      :corner-radius (eseq.seq-core-state/radius 2))))
-
-;; A row is the click target, not its cells: four notes is already a finer jump
-;; than the octave-aligned pages the click snaps to, and one handler per row
-;; keeps the map cheap.
-(def pad-map-row (gidx gid tracks row page)
-  (let ((base (eseq.drum-rack-v2/pad-map-row-base row))
-      (on-page (eseq.drum-rack-v2/pad-map-row-on-page? row page)))
-    (box :key (str "rack-pad-map-row-" gid "-" base)
-      :background-color (if on-page
-        '(rgba 0.24 0.32 0.34 1.0)
-        :transparent)
-      :border-width 1
-      :border-color (if on-page :mixer-strip-selected-border :transparent)
-      :corner-radius (eseq.seq-core-state/radius 2)
-      :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
-      (h-stack :gap 0.08 :align :center
-        (each (range 0 4) |col|
-          (pad-map-cell gidx gid tracks (+ base col)))))))
-
-(def pad-map-intrinsic-width 3.6)
-
-(def rack-pad-map (gidx)
-  (let ((gid (eseq.drum-rack-v2/group-id gidx))
-      (tracks (pad-note-tracks (eseq.drum-rack-v2/pads gidx)))
-      (page (pad-page gidx)))
-    (box :debug-name "rack-pad-map"
-      :key (str "rack-pad-map-" gid)
-      :width pad-map-intrinsic-width :height :fill :padding 0.15
-      :background-color :bg
-      :corner-radius (eseq.seq-core-state/radius 8)
-      :v-align :center :h-align :center
-      (v-stack :gap 0.05 :align :center
-        (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
-          (pad-map-row gidx gid tracks row page))))))
-
-(def group-header-body (gidx)
-  (let ((c (eseq.drum-rack-v2/color gidx))
-      (bus-idx (eseq.drum-rack-v2/bus-index gidx))
-      (rack (eseq.drum-rack-v2/rack? gidx))
-      (armed (eseq.drum-rack-v2/armed? gidx))
-      (muted (if (>= bus-idx 0) (bind-seq-nth "bus-mutes" bus-idx) 0))
-      (soloed (if (>= bus-idx 0) (bind-seq-nth "bus-solos" bus-idx) 0)))
+(def group-header-body (g)
+  (let ((c g.color)
+        (b g.bus)
+        (on-select (lambda (event) (select-group g))))
     (box :background "seqv-track-container"
       :padding 0.1
-      :on-click |x y r| (select-group gidx)
+      :on-click on-select
       ;; A fill row: the clip grid at the end flexes into whatever width the
       ;; panel has left and wraps there, so a wide window shows more cells
       ;; per row and a long bank grows the header instead of running off it.
       (h-stack :width :fill :gap 0.4 :align :center
         (box
-          :key (group-element-key gidx "color-badge")
+          :key (group-element-key g "color-badge")
           :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
-          :track-r (nth c 0)
-          :track-g (nth c 1)
-          :track-b (nth c 2)
-          :on-click |x y r| (select-group gidx))
+          :track-r (rgb-part c 0)
+          :track-g (rgb-part c 1)
+          :track-b (rgb-part c 2)
+          :on-click on-select)
         (disclosure-button
-          :key (group-element-key gidx "collapse")
+          :key (group-element-key g "collapse")
           :width 1.55 :height 1.4
-          :collapsed (eseq.drum-rack-v2/collapsed? gidx)
+          :collapsed g.collapsed
+          :col 1
           :surface-alpha 1.0
           :focusable true
-          :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
+          :on-click (lambda (event) (toggle! g.collapsed)))
         ;; Arm = drum-rack pad-play mode. A regular group is not an input
         ;; target and therefore contributes no Arm control or placeholder.
-        (if rack
+        (if g.rack
           (box :width 2 :height 1.5
             :background "seqv-rec-arm-dot"
-            :key (group-element-key gidx "arm")
-            :active (if armed 1 0)
-            :on-click |x y r| (do
-              (select-group gidx)
-              (eseq.drum-rack-v2/toggle-armed gidx)))
+            :key (group-element-key g "arm")
+            :active #'g.armed
+            :on-click (lambda (event)
+              (select-group g)
+              (toggle! g.armed)))
           (box :width 2.0 :height 0.0 :bg :transparent))
-        (button "M"
-          :key (group-element-key gidx "mute")
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :border-color :transparent
-          :active muted
-          :background-color :control-on-bg
-          :active-background-color :sequencer-toggle-off-bg
-          :color :black
-          :active-color :gray
-          :on-click |x y r| (if (>= bus-idx 0)
-            (do (select-group gidx) (seq-toggle-bus-mute bus-idx))
-            nil))
-        (button "S"
-          :key (group-element-key gidx "solo")
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :active soloed
-          :background-color :sequencer-toggle-off-bg
-          :active-background-color :sequencer-solo-on-bg
-          :border-color :transparent
-          :color :gray
+        (header-toggle "M" (group-element-key g "mute") (if b #'b.muted false)
+          :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
+          :color :black :active-color :gray
+          :on-click (lambda (event)
+            (when b
+              (select-group g)
+              (toggle! b.muted))))
+        (header-toggle "S" (group-element-key g "solo") (if b #'b.soloed false)
           :active-color :white
-          :on-click |x y r| (if (>= bus-idx 0)
-            (do (select-group gidx) (seq-toggle-bus-solo bus-idx))
-            nil))
+          :on-click (lambda (event)
+            (when b
+              (select-group g)
+              (toggle! b.soloed))))
         (box :width 8.6 :height 1
-          :key (group-element-key gidx "select")
+          :key (group-element-key g "select")
           :background-color :transparent
-          :on-click |x y r| (select-group gidx)
-          :on-double-click (lambda (event) (show-fx-for-group gidx))
-          (badge (track-name-display (eseq.drum-rack-v2/group-name gidx))
-            :key (group-element-key gidx "name-label")
-            :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
+          :on-click on-select
+          :on-double-click (lambda (event) (show-fx-for-group g))
+          (badge (track-name-display g.name)
+            :key (group-element-key g "name-label")
+            :icon (group-type-icon g)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent
             :border-color :transparent
             :highlight-color :transparent
             :shadow-color :transparent
-            :muted muted
+            :muted (if b #'b.muted false)
             :color :dim
             :muted-color (rgba 0.4 0.4 0.4 0.6)
             :bg :transparent))
@@ -4122,26 +3368,19 @@
         ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
         ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
         ;; name/meter shape an ordinary track header has.
-        (group-volume-control gidx bus-idx)
+        (group-volume-control g b)
         ;; A clip-bearing rack's clip grid sits in the header's empty right half
         ;; (§6.1), starting where the member rows' step grids start.
-        (rack-clip-grid gidx c)))))
-
-(defstate clip-renaming -1)
-(defstate clip-rename-draft "")
-;; Right-click menu over a clip cell: nil while closed, else a dict with the
-;; rack id, the clip id and the pointer cell it opened at.
-(defstate clip-menu nil)
+        (rack-clip-grid g)))))
 
 ;; ── Rack clip grid (docs/rack-clips-and-break-kits-spec.md §6.1) ─────────
 ;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
-;; Max-style preset box grid. The cell the CURRENT scene points at is lit;
+;; Max-style preset box grid. The cell the CURRENT scene plays is lit;
 ;; clicking one launches it (quantized exactly like a scene launch),
 ;; right-clicking opens a menu (rename in place, launch, save what the rack
 ;; is playing now as a new clip, delete), and the trailing number picker
 ;; shows the lit clip's number and launches whatever number is typed in.
-;; Drag reorder is not wired yet (the grid is rendered from SEQ.rack-clip-banks,
-;; which carries no drop target); the bank order is the create order.
+;; Drag reorder is not wired yet; the bank order is the create order.
 
 ;; The cells are the mixer's `track-pattern-cell-bg` boxes (ui/mixer.lisp)
 ;; without the sound glyph on top: unnumbered, tinted with the rack color,
@@ -4152,151 +3391,168 @@
 (def rack-clip-cell-height 1.8)
 (def rack-clip-rename-width 4.6)
 
-(def begin-clip-rename (clip)
-  (do
-    (set! clip-menu nil)
-    (set! clip-renaming (get clip :id))
-    (set! clip-rename-draft (get clip :name))))
+;; Whether the held clip rc is still in its rack's bank (a delete, an undo or
+;; a project load drops it).
+(def clip-listed? (rc)
+  (and rc rc.group (listed? rc rc.group.clips)))
 
-(def finish-clip-rename (gid clip-id commit)
-  (do
-    (if commit (eseq.drum-rack-v2/rename-clip gid clip-id clip-rename-draft) nil)
-    (set! clip-renaming -1)
-    (set! clip-rename-draft "")))
+(def begin-clip-rename (rc)
+  (set! clip-menu.open false)
+  (set! clip-rename.draft rc.name)
+  (set! clip-rename.clip rc))
 
-(def open-clip-menu (event gid clip)
-  (set! clip-menu (dict :gid gid :clip clip
-    :col (get event :col) :row (get event :row))))
+(def finish-clip-rename (commit)
+  (let ((rc clip-rename.clip))
+    (when (and commit (clip-listed? rc))
+      (set! rc.name clip-rename.draft))
+    (set! clip-rename.clip nil)
+    (set! clip-rename.draft "")))
+
+(def open-clip-menu (event rc)
+  (set! clip-menu.clip rc)
+  (open-menu! clip-menu event))
+
+;; The menu's action on its clip, while that clip is still in the bank.
+(def clip-menu-action (action)
+  (lambda (event)
+    (let ((rc clip-menu.clip))
+      (set! clip-menu.open false)
+      (when (clip-listed? rc) (action rc)))))
 
 ;; Mounted once at the buffer root (like the mixer's track menu) so it
 ;; overlays the grid instead of being clipped by the header row.
 (def rack-clip-context-menu ()
-  (let ((menu clip-menu)
-      (gid (get clip-menu :gid))
-      (clip (get clip-menu :clip)))
-    (context-menu :is-open (not (= menu nil))
-      :anchor-col (or (get menu :col) 0)
-      :anchor-row (or (get menu :row) 0)
-      :on-close (lambda () (set! clip-menu nil))
-      (menu-item "Rename…" :key "rack-clip-menu-rename"
-        :on-select (lambda (event) (begin-clip-rename clip)))
-      (menu-item "Launch" :key "rack-clip-menu-launch"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/launch-clip gid (get clip :id)))))
-      (menu-separator)
-      (menu-item "New Clip from Playing" :key "rack-clip-menu-save-new"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/save-clip-as gid ""))))
-      (menu-item "Delete" :key "rack-clip-menu-delete"
-        :on-select (lambda (event)
-          (do (set! clip-menu nil)
-            (eseq.drum-rack-v2/delete-clip gid (get clip :id))))))))
+  (menu-of clip-menu
+    (menu-item "Rename…" :key "rack-clip-menu-rename"
+      :on-select (clip-menu-action begin-clip-rename))
+    (menu-item "Launch" :key "rack-clip-menu-launch"
+      :on-select (clip-menu-action launch-rack-clip!))
+    (menu-separator)
+    (menu-item "New Clip from Playing" :key "rack-clip-menu-save-new"
+      :on-select (clip-menu-action (lambda (rc) (save-rack-clip-as! rc.group ""))))
+    (menu-item "Delete" :key "rack-clip-menu-delete"
+      :on-select (clip-menu-action delete-rack-clip!))))
 
-(def rack-clip-cell (gid clip c)
-  (let ((id (get clip :id))
-      (renaming (= clip-renaming id)))
-    (box :key (str "rack-clip-" gid "-" id)
+;; The rack color c, scaled by `k`.
+(def tint (c k) (map (lambda (i) (* k (rgb-part c i))) (range 0 3)))
+
+;; Clip rc's launch cell, tinted `tinted` (its rack's color, dimmed). A
+;; subtree of its own: a rename's start, its keystrokes and its end re-run
+;; this cell alone.
+(def rack-clip-cell (g rc tinted)
+  (subtree :key (str "rack-clip-cell-" g.gid "-" rc.cid)
+    ;; An unkeyed root: the subtree's key would replace the cell's, which
+    ;; tests and captures find.
+    (h-stack (rack-clip-cell-body g rc tinted))))
+
+(def rack-clip-cell-body (g rc tinted)
+  (let ((renaming (= clip-rename.clip rc)))
+    (box :key (str "rack-clip-" g.gid "-" rc.cid)
       :debug-name "rack-clip-cell"
       :width (if renaming rack-clip-rename-width rack-clip-cell-width)
       :height rack-clip-cell-height
       :padding (if renaming 0.1 0.3)
       :bg :transparent
       :background "track-pattern-cell-bg"
-      :active (bind-seq (str "rack-clip-active-" gid "-" id))
+      :active #'rc.active
       :assigned 1
       :override 0
       :selected 0
-      :track-r (* 0.65 (nth c 0))
-      :track-g (* 0.65 (nth c 1))
-      :track-b (* 0.65 (nth c 2))
+      :track-r (nth tinted 0)
+      :track-g (nth tinted 1)
+      :track-b (nth tinted 2)
       :on-click (lambda (event)
-        (if (get event :shift)
-          (begin-clip-rename clip)
-          (eseq.drum-rack-v2/launch-clip gid id)))
-      :on-right-click (lambda (event) (open-clip-menu event gid clip))
+        (if event.shift
+          (begin-clip-rename rc)
+          (launch-rack-clip! rc)))
+      :on-right-click (lambda (event) (open-clip-menu event rc))
       (if renaming
         (text-input
-          :key (str "rack-clip-rename-" gid "-" id)
+          :key (str "rack-clip-rename-" g.gid "-" rc.cid)
           :width 4.3 :height 0.7 :font-size 10
-          :value clip-rename-draft
+          :value clip-rename.draft
           :auto-focus true
           :select-all-on-focus true
-          :on-change (lambda (name) (set! clip-rename-draft name))
-          :on-submit (lambda () (finish-clip-rename gid id true))
-          :on-cancel (lambda () (finish-clip-rename gid id false))
-          :on-blur (lambda () (finish-clip-rename gid id true)))
-        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 10 :bg :transparent :v-align :center :h-align :center)
-        )
-      
-      )))
+          :on-change (lambda (name) (set! clip-rename.draft name))
+          :on-submit (lambda () (finish-clip-rename true))
+          :on-cancel (lambda () (finish-clip-rename false))
+          :on-blur (lambda () (finish-clip-rename true)))
+        (label rc.cid
+          :color :dimmer :active #'rc.active :active-color :white
+          :font-size 10 :bg :transparent :v-align :center :h-align :center)))))
 
-;; The last cell is a number picker showing the lit clip's number: read it at
-;; a glance, or type/drag a number to launch that clip (quantized like a
-;; click on its cell). Save and delete live in the right-click menu.
-(def rack-clip-number-picker (gid clips c)
-  (number-picker :key (str "rack-clip-number-" gid)
-    :width 5.2 :height rack-clip-cell-height :font-size 10
-    ;; Same skin as the launch cells: rack-tinted rim, and the well is the
-    ;; cell shader's 70% dark layer composited over that tint.
-    :border-color (rgba (* 0.65 (nth c 0)) (* 0.65 (nth c 1)) (* 0.65 (nth c 2)) 1.0)
-    :border-width 2
-    :background-color (rgba
-      (+ (* 0.195 (nth c 0)) 0.014)
-      (+ (* 0.195 (nth c 1)) 0.0175)
-      (+ (* 0.195 (nth c 2)) 0.021)
-      1.0)
-    :corner-radius 4
-    :value (bind-seq (str "rack-clip-index-" gid))
-    :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
-    :on-change (lambda (v)
-      (let ((i (- (round v) 1)))
-        (if (and (>= i 0) (< i (len clips))
-              (not (= (get (nth clips i) :id) (eseq.drum-rack-v2/active-clip gid))))
-          (eseq.drum-rack-v2/launch-clip gid (get (nth clips i) :id))
-          nil)))))
+;; The last cell is a number picker showing the lit clip's number (0 while
+;; the rack is silent): read it at a glance, or type/drag a number to launch
+;; that clip (quantized like a click on its cell). Save and delete live in
+;; the right-click menu. A subtree of its own, which alone reads the bank and
+;; the playing clip: a launch re-renders it alone.
+(def rack-clip-number-picker (g tinted)
+  (subtree :key (str "rack-clip-number-run-" g.gid)
+    (rack-clip-number-run g tinted)))
 
-;; One dot per member, lit by the same per-track trigger binding the pad map
-;; uses — no new host feed for the activity strip.
-(def rack-activity-strip (gidx gid)
-  (h-stack :key (str "rack-activity-" gid) :gap 0.08 :align :center
-    (each (eseq.drum-rack-v2/members gidx) |m|
-      (box :key (str "rack-activity-dot-" gid "-" (nth SEQ.track-ids m))
+(def rack-clip-number-run (g tinted)
+  (let ((clips g.clips)
+        (playing g.rack-clip))
+    (h-stack
+      (number-picker :key (str "rack-clip-number-" g.gid)
+        :width 5.2 :height rack-clip-cell-height :font-size 10
+        ;; Same skin as the launch cells: rack-tinted rim, and the well is the
+        ;; cell shader's 70% dark layer composited over that tint.
+        :border-color (rgba (nth tinted 0) (nth tinted 1) (nth tinted 2) 1.0)
+        :border-width 2
+        :background-color (rgba
+          (+ (* 0.3 (nth tinted 0)) 0.014)
+          (+ (* 0.3 (nth tinted 1)) 0.0175)
+          (+ (* 0.3 (nth tinted 2)) 0.021)
+          1.0)
+        :corner-radius 4
+        :value (if playing (+ playing.index 1) 0)
+        :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
+        :on-change (lambda (v)
+          (let ((rc (nth clips (- (round v) 1))))
+            (when (and rc (not (= rc g.rack-clip)))
+              (launch-rack-clip! rc))))))))
+
+;; One dot per member, lit by its pad's trigger, like the pad map.
+(def rack-activity-strip (g)
+  (h-stack :key (str "rack-activity-" g.gid) :gap 0.08 :align :center
+    (each g.tracks |m|
+      (box :key (str "rack-activity-dot-" g.gid "-" m.tid)
         :width 0.42 :height 0.42
         :corner-radius (eseq.seq-core-state/radius 3)
         :background-color '(rgba 0.19 0.20 0.21 1.0)
-        :selected (bind-seq (str "rack-pad-trigger-" m))
+        :selected (if m.pad #'m.pad.triggered false)
         :selected-background-color '(rgba 0.95 0.98 1.0 1.0)))))
 
-(def rack-clip-grid (gidx c)
-  (let ((gid (eseq.drum-rack-v2/group-id gidx))
-      (rack (eseq.drum-rack-v2/rack? gidx)))
-    (if (and rack (eseq.drum-rack-v2/has-clips? gid))
-      (let ((clips (eseq.drum-rack-v2/clips gid)))
-        (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
-          ;; Lines the first cell up with the member rows' step grids.
-          (box :width 2.2 :height 0.0 :bg :transparent)
-          (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
-            (wrap :key (str "rack-clip-grid-" gid)
-              :width 48 :gap 0.12 :row-gap 0.12 :align :center
-              (each clips |clip i|
-                (rack-clip-cell gid clip c))
-              (rack-clip-number-picker gid clips c)))
-          (box :height 0.1 :width :fill :flex 1)
-          (rack-activity-strip gidx gid)
-          (box :width 1.0 :height 0.0 :bg :transparent)))
-      nil)))
+(def rack-clip-grid (g)
+  (let ((clips g.clips)
+        (tinted (tint g.color 0.65)))
+    (when (and g.rack (> (len clips) 0))
+      (h-stack :key (str "rack-clip-run-" g.gid) :gap 0.4 :align :center :width :fill :flex 1
+        ;; Lines the first cell up with the member rows' step grids.
+        (box :width 2.2 :height 0.0 :bg :transparent)
+        (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
+          (wrap :key (str "rack-clip-grid-" g.gid)
+            :width 48 :gap 0.12 :row-gap 0.12 :align :center
+            (each clips |rc|
+              (rack-clip-cell g rc tinted))
+            (rack-clip-number-picker g tinted)))
+        (box :height 0.1 :width :fill :flex 1)
+        (rack-activity-strip g)
+        (box :width 1.0 :height 0.0 :bg :transparent)))))
 
-(def group-header-row (gidx)
-  (subtree :key (str "seqv-" (group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
-    (group-header-body gidx)))
+(def group-header-row (g)
+  (subtree :key (str "seqv-" (group-ui-kind g) "-header-" g.gid)
+    (group-header-body g)))
 
-(def group-block (gidx)
-  (let ((c (eseq.drum-rack-v2/color gidx)))
+(def group-block (g)
+  (let ((c g.color))
     (box :width :fill
-      :key (group-element-key gidx "block")
-      :selected (group-selected-binding gidx)
+      :key (group-element-key g "block")
+      ;; Selection visibility binds the *sel-sync* `bus-highlight`, never a
+      ;; raw `selected-bus` read: this block wraps every member row, so a
+      ;; render-time read re-rendered the whole group on each selection.
+      :selected (eseq.seq-core-state/group-selected-ref g)
       :background-color (group-container-bg c)
       :selected-background-color (group-container-bg c)
       :border-width 2
@@ -4307,27 +3563,398 @@
       ;; Hit testing chooses the deepest clickable widget, so member-track
       ;; clicks keep selecting the track; only exposed container chrome reaches
       ;; this handler and selects the group's backing bus for the FX panel.
-      :on-click |x y r| (select-group gidx)
+      :on-click (lambda (event) (select-group g))
       (v-stack :width :fill :gap 0.1
-        (group-header-row gidx)
-        (if (eseq.drum-rack-v2/collapsed? gidx)
-          (box :width 0.0 :height 0.0 :bg :transparent)
+        (group-header-row g)
+        (if g.collapsed
+          (nothing)
           (v-stack :width :fill :gap 0.0
-            (each (eseq.drum-rack-v2/visible-members gidx) |m|
-              (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
-                (group-member-row gidx m)))
-            (each (eseq.drum-rack-v2/child-racks gidx) |child|
-              (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id child))
+            (each (eseq.drum-rack-v2/shown-members g) |m|
+              (subtree :key (str "sequencer-track-" m.tid)
+                (group-member-row g m)))
+            (each g.racks |child|
+              (subtree :key (str "sequencer-rack-" child.gid)
                 (group-block child)))))))))
+
+;; ── Grid render order ───────────────────────────────────────────────────
+;; The grid's rows (eseq.drum-rack-v2's group topology): `(dict :kind "track"
+;; :track t)` for a loose track the grid shows (not collapsed), `(dict :kind
+;; "group" :group g)` for a top-level group.
+(def grid-items () (eseq.drum-rack-v2/render-items false))
 
 (def grid-render-item (item)
   (if (= (get item :kind) "group")
-    (let ((gidx (get item :gidx)))
-      (subtree :key (str "sequencer-" (group-ui-kind gidx) "-" (eseq.drum-rack-v2/group-id gidx))
-        (group-block gidx)))
-    (let ((i (get item :track)))
-      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        (track-row i true)))))
+    (let ((g (get item :group)))
+      (subtree :key (str "sequencer-" (group-ui-kind g) "-" g.gid)
+        (group-block g)))
+    (let ((t (get item :track)))
+      (subtree :key (str "sequencer-track-" t.tid)
+        (track-row t true)))))
+
+;; ── Pad grid performance view ───────────────────────────────────────────
+;; A 4x4 VIEW over a drum rack's pads (`g.pads`) — finger drumming and slot
+;; browsing only. It owns no sequencing state: a cell draws the pad on its
+;; note and a hit goes straight down the live pad path. The grid renders in
+;; the *fx* buffer's rack panel (ui/effects/buffers.lisp); the sequencer
+;; header carries no pad toggle of its own.
+;;
+;; Cells are NOTE-POSITIONAL: a cell is a fixed MIDI note and draws whichever
+;; pad answers to it, so label and position can never contradict each other.
+;; The note geometry — octave-aligned pages, lowest note bottom-left — lives
+;; in eseq.drum-rack-v2; what lives here is which page is showing.
+
+;; Which page of notes rack g's grid shows. One rack panel is on screen at a
+;; time, so the page `pad-view` holds is the last paged rack's: any other
+;; rack opens on its own default page instead of inheriting a stale one.
+(def pad-page (g)
+  (if (= pad-view.group g)
+    (eseq.drum-rack-v2/clamp-pad-page pad-view.page)
+    (default-pad-page g)))
+
+(def set-pad-page (g page)
+  (set! pad-view.group g)
+  (set! pad-view.page (eseq.drum-rack-v2/clamp-pad-page page)))
+
+;; Where a rack's grid opens: the page holding its lowest pad, so a kit that
+;; lives at C7 does not open onto empty octaves; an empty rack's home is C1,
+;; where a rack's first pad lands.
+(def default-pad-page (g)
+  (let ((pads g.pads))
+    (eseq.drum-rack-v2/page-of-note
+      (if (empty? pads)
+        (eseq.drum-rack-v2/min-grid-pad-note)
+        (reduce |acc p| (min acc p.note) (eseq.drum-rack-v2/max-grid-pad-note) pads)))))
+
+;; The note a grid position names on the visible page — the cell's identity,
+;; occupied or not.
+(def pad-cell-note (g cell)
+  (eseq.drum-rack-v2/cell-note (pad-page g) cell))
+
+;; The pad of rack g answering to `note`, or nil.
+(def pad-on-note (g note)
+  (first (filter (lambda (p) (= p.note note)) g.pads)))
+
+;; Pad drawn at a grid position: the one whose note IS this cell's note, or
+;; nil. Pads on other pages simply do not render here; the grid is sparse by
+;; design and never compacts.
+(def pad-at (g cell)
+  (pad-on-note g (pad-cell-note g cell)))
+
+;; The pad the rack's *fx* panel is focused on, while it is rack g's. Per-pad
+;; fx are the member track's own chain by design (docs/drum-rack-v2-spec.md,
+;; "UI"), so all a pad focus has to do is name the member the panel offers
+;; to open.
+(def focused-pad (g)
+  (let ((p pad-view.focus))
+    (when (and p (listed? p g.pads)) p)))
+
+(def focus-pad! (p) (set! pad-view.focus p))
+
+(def pad-selected? (p)
+  (and p (= pad-view.focus p)))
+
+;; Lazy pads (docs/drum-rack-v2-spec.md, "Track budget"): dropping a sound on an
+;; EMPTY cell is what makes that pad claim a track. The new member is mapped to
+;; exactly this cell's pad note, so it is playable by pad click and armed key
+;; the moment it lands.
+(def drop-on-empty-pad (event g cell)
+  (let ((payload (get event :payload))
+        (note (pad-cell-note g cell))
+        (path (get payload :path))
+        (name (get payload :name)))
+    (match (get event :drag-type)
+      ;; A pad needs a member track in this rack's group on a specific pad
+      ;; note; the builtin add-track host commands take neither, so builtins
+      ;; are refused instead of landing as a loose track (eseq-mj8).
+      "instrument"
+      (if (= (get payload :kind) "builtin-instrument")
+        (status "Drop a sample or saved instrument onto a pad")
+        (if name
+          (do
+            (eseq.browser/show-loading! name)
+            (host-command "add-track-instrument"
+              (dict :name name :group-id g.gid :pad-note note)))
+          (status "Drop an instrument, not a folder")))
+      "instrument-preset"
+      (let ((instrument (eseq.browser/preset-payload-instrument payload)))
+        (if instrument
+          (do
+            (eseq.browser/show-loading! instrument)
+            (host-command "add-track-instrument"
+              (dict :name instrument :preset (get payload :preset)
+                :group-id g.gid :pad-note note)))
+          (status "Drop an instrument preset")))
+      _
+      (if path
+        (host-command "add-track-sample"
+          (dict :path path :group-id g.gid :pad-note note
+            :preserve-browser-context true))
+        (status "Drop a sample file, not a folder")))))
+
+;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
+;; same replacement a drop on the member's grid row does — so pad identity,
+;; pattern data, mixer settings and chokes all stay put.
+
+;; Every cell also takes a dragged pad ("rack-pad"): dropping one on an empty
+;; cell moves it to that note, dropping it on an occupied cell swaps the two.
+(def pad-cell-drop-types (p)
+  (cons "rack-pad"
+    (if p
+      (sound-drop-types p.track)
+      (list "sample" "instrument" "instrument-preset"))))
+
+;; A pad dragged from the grid carries its rack and note; the drop target
+;; only needs to know which note it lands on. The drag stays within one rack:
+;; a pad from another group is ignored rather than adopted.
+(def pad-drag-payload (g p)
+  (dict :group-id g.gid :pad-note p.note))
+
+;; Move the dragged pad to `note` (an occupied note swaps the two pads).
+(def drop-pad-on-note (event g note)
+  (let ((payload (get event :payload)))
+    (if (= (get payload :group-id) g.gid)
+      (let ((p (pad-on-note g (get payload :pad-note))))
+        (when (and p (not (= p.note note)))
+          (set! p.note note)))
+      (status "Drag pads within one rack"))))
+
+(def pad-cell-drop-meta (g cell p)
+  (pad-drop-meta g cell (pad-cell-note g cell) p))
+
+;; Cell `cell`'s drop meta, on `note` with pad p (nil when empty).
+(def pad-drop-meta (g cell note p)
+  (if p
+    (dict :kind "track" :track p.track.index :from-pad true)
+    (dict :kind "rack-pad" :group-id g.gid :cell cell :pad-note note)))
+
+(def drop-on-pad-cell (event g cell)
+  (let ((p (pad-at g cell)))
+    (if (= (get event :drag-type) "rack-pad")
+      (drop-pad-on-note event g (pad-cell-note g cell))
+      (if p
+        (drop-on-track event)
+        (drop-on-empty-pad event g cell)))))
+
+;; A pad's own fx ARE its member track's chain (docs/drum-rack-v2-spec.md,
+;; "UI"), so "open this pad" means: make its member the track under edit. That
+;; drops the bus selection, which is exactly what swaps the *fx* buffer from
+;; the rack panel to that member's instrument and effects — in place, without
+;; touching the workspace layout.
+(def open-pad! (p)
+  (when p (select-track-for-edit p.track)))
+
+;; Pad context menu (docs/rack-groove-spec.md, "Pad roles"): Role ▸ with
+;; "Standard (<inferred>)" first — the role the standard layout gives the
+;; pad's note — then every explicit role, the pad's current choice checked.
+;; Mounted once at the *fx* rack panel root (like the clip menu in the grid)
+;; so it overlays the pad grid instead of being clipped by its cell.
+(def open-pad-menu (event p)
+  (focus-pad! p)
+  (set! pad-menu.pad p)
+  (open-menu! pad-menu event))
+
+;; Set the menu's pad's role to `key` ("" for the standard layout's), while
+;; the pad is still its rack's.
+(def choose-pad-role (key)
+  (let ((p pad-menu.pad))
+    (set! pad-menu.open false)
+    (when (and p (listed? p p.group.pads))
+      (set! p.role key))))
+
+(def rack-pad-context-menu ()
+  (let ((p pad-menu.pad))
+    (menu-of pad-menu
+      (menu-item "Role" :key "rack-pad-menu-role"
+        (menu-item (str "Standard ("
+                        (if (or (not p) (= p.standard-role-label "")) "none" p.standard-role-label)
+                        ")")
+          :key "rack-pad-menu-role-standard"
+          :checked (or (not p) (= p.role ""))
+          :on-select (lambda (event) (choose-pad-role "")))
+        (menu-separator)
+        (each (if pad-menu.open (eseq.drum-rack-v2/pad-role-options) (list)) |option|
+          (menu-item (get option :label)
+            :key (str "rack-pad-menu-role-" (get option :key))
+            :checked (and p (= p.role (get option :key)))
+            :on-select (lambda (event) (choose-pad-role (get option :key)))))))))
+
+;; The role tag sits in the pad's top corner: bright when set on the pad,
+;; dim when it is only the standard layout's guess, absent when neither
+;; names a drum.
+(def pad-role-tag-label (p)
+  (label (if p p.role-tag "")
+    :width 1.4 :font-size 6.2 :bg :transparent :text-align :right
+    :color (if (and p (not (= p.role ""))) :white :dim)))
+
+;; Pad trigger light (eseq-4b5.16): a pad is lit for as long as its member
+;; track is sounding whatever fired it — a hit on this cell, an armed rack's
+;; keys, or its own sequenced steps. It rides the box's bound `selected` state
+;; (`#'p.triggered`) rather than a lisp-computed colour, so a hit repaints the
+;; cell without re-rendering the grid, the way a mixer meter does; the
+;; persistent pad focus keeps its own border. Cell `cell` of the page `page`
+;; shows, `pads` the rack's pads by map slot (`pads-by-note`).
+(def pad-cell (g pads page cell)
+  (let ((note (eseq.drum-rack-v2/cell-note page cell))
+        (p (nth pads (pad-map-slot note))))
+    (box
+      :key (str "rack-pad-cell-" g.gid "-" cell)
+      :width 6.4 :height 2.3 :padding 0.15
+      :background-color (if p :mixer-strip-bg :bg)
+      :selected (if p #'p.triggered false)
+      :selected-background-color :accent
+      :border-width 1
+      :border-color (if (pad-selected? p)
+        :mixer-strip-selected-border
+        '(rgba 0.30 0.31 0.32 1.0))
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-hover-background-color :mixer-control-bg
+      :corner-radius (eseq.seq-core-state/radius 8)
+      :drop-types (pad-cell-drop-types p)
+      :drop-meta (pad-drop-meta g cell note p)
+      :on-drop (lambda (event) (drop-on-pad-cell event g cell))
+      ;; An occupied cell is a drag source: drag it onto another cell of this
+      ;; page, or onto a note in the octave map, to move the pad there.
+      :drag-type (when p "rack-pad")
+      :drag-modifier :none
+      :drag-payload (when p (pad-drag-payload g p))
+      ;; A click focuses the pad; it no longer auditions it (the pad keys and
+      ;; the sequencer play it), so a click that turns into a drag is silent.
+      :on-click (lambda (event) (when p (focus-pad! p)))
+      ;; A double-click opens the pad: its member track becomes the track under
+      ;; edit, which swaps the *fx* panel to that member's own chain.
+      :on-double-click (lambda (event) (open-pad! p))
+      ;; Right-click: the pad menu (Role ▸ …).
+      :on-right-click (lambda (event) (when p (open-pad-menu event p)))
+      (v-stack :width :fill :height :fill :gap 0.05
+        ;; The note is the cell's own, so an empty cell still says which note
+        ;; a drop here would claim. The role tag balances a same-width spacer
+        ;; on the left so the note stays centred.
+        (h-stack :width :fill :gap 0 :align :center
+          (box :width 1.4 :height 0.1 :bg :transparent)
+          (label (if p p.label (eseq.drum-rack-v2/note-label note))
+            :font-size 8 :color (if p :dim '(rgba 0.42 0.44 0.46 1.0))
+            :active (if p #'p.triggered false)
+            :active-color :black
+            :bg :transparent
+            :flex 1 :width :fill :text-align :center)
+          (pad-role-tag-label p))
+        (label (if p (substring p.track.name 0 12) "")
+          :active (if p #'p.triggered false)
+          :active-color :black
+          :font-size 6.8 :color :white :bg :transparent
+          :width :fill :text-align :center)
+        (label (if (and p (> p.choke 0)) (str "choke " p.choke) "")
+          :font-size 6.2 :color :dim :bg :transparent
+          :width :fill :text-align :center)))))
+
+;; Row 0 renders at the TOP and carries the page's HIGHEST four notes: the
+;; grid reads bottom-up, so the bottom-left cell is the page's C.
+(def pad-grid-row (g pads page row)
+  (h-stack :gap 0.15 :align :center
+    (each (range 0 4) |col|
+      (pad-cell g pads page (+ (* row 4) col)))))
+
+(def pad-grid-intrinsic-width 26.45)
+
+;; Rack g's pad grid as a component: the *fx* rack panel draws it at its
+;; intrinsic width beside the rack's own controls. It lives here, next to
+;; the pad cell it is made of, so pad badges, drops and audition stay one
+;; definition wherever a future surface draws them. The page and the pads by
+;; note are read once here, like the octave map's.
+(def pad-grid (g)
+  (let ((page (pad-page g))
+        (pads (pads-by-note g)))
+    (box :key (str "rack-pad-grid-" g.gid)
+      :width pad-grid-intrinsic-width :padding 0.2
+      :background-color :bg
+      :corner-radius (eseq.seq-core-state/radius 14)
+      (v-stack :gap 0.1 :align :start
+        (each (range 0 4) |row|
+          (pad-grid-row g pads page row))))))
+
+;; ── Octave overview mini-map (eseq-4b5.15) ──────────────────────────────
+;; A slim full-range map to the LEFT of the pad grid: every note the grid can
+;; address as a tiny cell, four to a row, lowest at the bottom, with the
+;; sixteen notes currently enlarged drawn as a highlighted block. Occupied
+;; notes are filled, so a kit that lives three octaves up is visible without
+;; paging there — and a click on any row pages the grid to it, which is the
+;; affordance the arrows can only offer one octave at a time.
+;;
+;; It is a second VIEW of the grid's page, not a second page state: the
+;; highlight and the click both go through the same page functions the grid
+;; uses. Each occupied cell lights on its pad's trigger, the same binding the
+;; enlarged grid uses, which is what makes a hit on a pad the grid is NOT
+;; showing still visible here.
+;;
+;; The pads are read ONCE at the root and laid out by note there: a per-cell
+;; scan of the pads would walk them 88 times over to draw the map once.
+
+(def pad-map-cell-width 0.75)
+(def pad-map-cell-height 0.34)
+
+;; Where a note sits in the map's note-indexed pad list. Pad notes are
+;; transposes around C4 and so go negative, which no list index does: the
+;; list is indexed from the lowest note the grid can name.
+(def pad-map-slot (note)
+  (- note (eseq.drum-rack-v2/min-grid-pad-note)))
+
+;; Rack g's pads by map slot, nil where no pad answers.
+(def pads-by-note (g)
+  (let ((top (eseq.drum-rack-v2/max-grid-pad-note)))
+    (reduce |acc p|
+      (if (and (>= p.note (eseq.drum-rack-v2/min-grid-pad-note)) (<= p.note top))
+        (set-nth acc (pad-map-slot p.note) p)
+        acc)
+      (map (lambda (n) nil) (range 0 (+ (pad-map-slot top) 1)))
+      g.pads)))
+
+;; Each map cell is also a drop target for a dragged pad: that is how a pad
+;; reaches another octave in one gesture, without paging first.
+(def pad-map-cell (g pads note)
+  (let ((p (nth pads (pad-map-slot note))))
+    (box :key (str "rack-pad-map-cell-" g.gid "-" note)
+      :width pad-map-cell-width :height pad-map-cell-height
+      :background-color (if p '(rgba 0.60 0.72 0.75 1.0) :buffer-bg)
+      :selected (if p #'p.triggered false)
+      :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
+      :drop-types (list "rack-pad")
+      :drop-hover-background-color :mixer-strip-selected-border
+      :on-drop (lambda (event) (drop-pad-on-note event g note))
+      ;; Being a drop target makes the cell a pointer target too, so it must
+      ;; page the grid itself: the click no longer reaches the row.
+      :on-click (lambda (event) (set-pad-page g (eseq.drum-rack-v2/page-of-note note)))
+      :corner-radius (eseq.seq-core-state/radius 2))))
+
+;; A row is the click target, not its cells: four notes is already a finer jump
+;; than the octave-aligned pages the click snaps to, and one handler per row
+;; keeps the map cheap.
+(def pad-map-row (g pads row page)
+  (let ((base (eseq.drum-rack-v2/pad-map-row-base row))
+        (on-page (eseq.drum-rack-v2/pad-map-row-on-page? row page)))
+    (box :key (str "rack-pad-map-row-" g.gid "-" base)
+      :background-color (if on-page '(rgba 0.24 0.32 0.34 1.0) :transparent)
+      :border-width 1
+      :border-color (if on-page :mixer-strip-selected-border :transparent)
+      :corner-radius (eseq.seq-core-state/radius 2)
+      :on-click (lambda (event) (set-pad-page g (eseq.drum-rack-v2/page-of-note base)))
+      (h-stack :gap 0.08 :align :center
+        (each (range 0 4) |col|
+          (pad-map-cell g pads (+ base col)))))))
+
+(def pad-map-intrinsic-width 3.6)
+
+(def pad-map (g)
+  (let ((page (pad-page g))
+        (pads (pads-by-note g)))
+    (box :debug-name "rack-pad-map"
+      :key (str "rack-pad-map-" g.gid)
+      :width pad-map-intrinsic-width :height :fill :padding 0.15
+      :background-color :bg
+      :corner-radius (eseq.seq-core-state/radius 8)
+      :v-align :center :h-align :center
+      (v-stack :gap 0.05 :align :center
+        (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
+          (pad-map-row g pads row page))))))
 
 (effect-buffer "*sequencer*"
   (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0
@@ -4348,7 +3975,7 @@
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0
-      (each (eseq.drum-rack-v2/grid-render-items) |item|
+      (each (grid-items) |item|
         (grid-render-item item)))
 
      (box :key "new-track-drop-zone"
@@ -4371,4 +3998,5 @@
 
 (set-buffer-mode-for "*sequencer*" "eseq.seq-grid-mode/seq-grid-mode")
 
-(cursor-step-changed SEQ.current-track (eseq.seq-core-state/cursor-step-value))
+;; The grid starts on the shared step cursor.
+(set! grid-cursor.step (eseq.seq-core-state/cursor-step-value))

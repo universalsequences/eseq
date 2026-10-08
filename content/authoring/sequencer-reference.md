@@ -15,8 +15,8 @@ involved: the module is loaded from disk.
 - Split the kind into two modules:
   - `NAME.core` (or similar): pure data and the tick. The scheduler runs the
     tick in a separate, headless Lisp VM that imports ONLY the modules named
-    in `:requires`. Keep UI forms (`defwidget`, widgets, `bind-seq`, `SEQ.…`)
-    out of it.
+    in `:requires`. Keep UI forms (`defwidget`, widgets, `eseq.kinds` reads
+    and `#'` bindings) out of it.
   - `NAME.view` / `NAME.rings`: imports the core, draws the panel, declares
     the `def-kind`. The user attaches this one.
 - A distributable package is a folder with `manifest.json` and `src/`; every
@@ -63,6 +63,11 @@ Slots (all optional except that a sequencer needs `:generator` or
   functions, no reactive refs.
 - `:state ((field default) …)`: per-instance view state (selection, open
   menus). Not saved, not seen by the tick.
+- Field types: `(field default)` infers the type from the default (a number,
+  `true`/`false`, a string, a list, else any); `(field :number :default nil)`
+  declares it (`:number :int :bool :rgb :point :string :any`, a kind name,
+  `(list-of type)`), and is required for a nil default. Writing a value of
+  another type is an error.
 - `:view FN`: `(FN self)` returns the panel widget tree for the instance's
   tab.
 - `:on-create FN`, `:keymap MODE`: optional.
@@ -70,6 +75,12 @@ Slots (all optional except that a sequencer needs `:generator` or
 In the view, `self.field` reads and `(set! self.field value)` writes (one
 undoable edit per write). `self.id` is the instance id, `self.owner` is
 `:project` or the owning rack's group id.
+
+`#'self.field` is a binding to a `:state` field of type `:number`, `:int`,
+`:bool` or `:rgb`: pass it to a bindable widget prop (`(label "x" :active
+#'self.open)`) and a write repaints that widget without re-running the view.
+Used as a value (`if`, `=`, arithmetic, `str`, most natives) a binding reads
+the field, like `self.field`: `(str "Vol " #'self.vol)` is `"Vol 0.8"`.
 
 ## The tick
 
@@ -102,13 +113,25 @@ Rules:
 
 ## Showing the playhead
 
-In the tick, `(gen-mark (+ (gen-tick) 1))`. In the view,
-`(bind-seq (str "generator-mark-" self.id))` is a binding that reads the
-latest sounded mark (0 when stopped). Pass the binding straight into a
-widget property (a `defwidget` `:bindable` field, a sexp-slot `:lit`): it
+In the tick, `(gen-mark (+ (gen-tick) 1))`. In the view, the instance's
+generator holds its marks (`eseq.kinds`, imported with `(import eseq.kinds
+:refer (generator-mark-of))`): `(generator-mark-of self "")` is its unkeyed
+mark, nil until the first stamp. A mark's `value` is the latest sounded mark
+(0 when stopped); `#'m.value` binds it. Pass the binding straight into a
+widget property (a `defwidget` scalar `:state`, a sexp-slot `:lit`): it
 repaints on every step without re-running your view function. Do not do
 arithmetic on it in Lisp; do the arithmetic in the shader. Keyed marks,
-`(gen-mark v "k3")`, read as `generator-mark-<id>-k3`.
+`(gen-mark v "k3")`, are `(generator-mark-of self "k3")`. Reading many
+marks at once, take the generator once (`(generator-of self)`) and its
+marks with `(generator-mark-named g key)`.
+
+```lisp
+;; The mark as a binding, 0 before its first stamp (reading the generator's
+;; marks re-renders the view when the mark appears).
+(def mark-binding (self key)
+  (let ((m (generator-mark-of self key)))
+    (if m #'m.value 0)))
+```
 
 ## Panels
 
@@ -123,9 +146,10 @@ arithmetic on it in Lisp; do the arithmetic in the shader. Keyed marks,
   `(str "pulse-cell-" i)`.
 - Sizes are layout cells. A cell is about 2.2 times taller than it is wide,
   so a visually square widget is about twice as many columns as rows (33 x 15).
-- Track names: `SEQ.track-names`, colours `SEQ.track-colors`. When
-  `self.owner` is a number the instance belongs to a rack; its pads are
-  `(eseq.drum-rack-v2/members (eseq.drum-rack-v2/group-index-by-id self.owner))`.
+- Tracks come from `eseq.kinds`: `(tracks)`, each with `t.index`, `t.name`
+  and `t.color` (an `(rgb r g b)`). When `self.owner` is a number the
+  instance belongs to a rack: the group whose `gid` it is, among `(groups)`;
+  that group's `tracks` are its pads, in pad order.
 - Offer "Off" in track pickers (store -1, skip the emit), so a voice can be
   silenced without losing its settings.
 
@@ -140,7 +164,7 @@ the user can type `0 12 4 5 9` or nest `(3 5)`:
   :schema (list "forms" (list "num" :min -48 :max 48 :step 1 :decimals 0 :default 0))
   :value (get ring :note)            ; a list
   :height 1.3 :font-size 11 :wrap false
-  :lit (bind-seq (str "generator-mark-" self.id "-n" i))   ; bitmask of the item playing
+  :lit (mark-binding self (str "n" i))   ; bitmask of the item playing
   :on-change (lambda (v) (set-ring-field self i :note v)))
 ```
 
@@ -156,7 +180,6 @@ to grow last in the row.
 (defwidget pulse-strip
   :width 32 :height 1
   :state (cells mark)
-  :bindable (cells mark)
   :shader
   (let ((c (clamp (floor (* (+ (/ x aspect) 1.0) 8.0)) 0.0 15.0))
         (on (mod (floor (/ cells (pow 2.0 c))) 2.0))
@@ -165,9 +188,9 @@ to grow last in the row.
                (rgba 1.0 (- 1.0 (* 0.5 here)) 0.4 (+ 0.25 (* 0.75 (max on here)))))))
 ```
 
-- `:state` is capped at **16 scalar uniforms**; extra names are dropped
-  silently. Pack integers into one float (`a + 64 b + 4096 c`, keep it below
-  2^24) and unpack with `floor`/`mod`. Lists cannot be passed.
+- `:state` is capped at **16 scalar uniforms**; more is an error. Pack
+  integers into one float (`a + 64 b + 4096 c`, keep it below 2^24) and
+  unpack with `floor`/`mod`. Lists cannot be passed.
 - Coordinates: the SHORT axis spans [-1, 1], the long axis
   [-aspect, aspect] (or [-1/aspect, 1/aspect] when taller than wide); `y`
   points DOWN. `aspect` is width/height in pixels.
@@ -188,7 +211,9 @@ to grow last in the row.
 ## eseqlisp gotchas
 
 - `0` is falsy. Test with `(= x 0)` / `(= x nil)`, never `(if count …)`.
-- Functions have fixed arity (`&rest` only in `defmacro`).
+- Plain argument lists are fixed-arity; `def`/`lambda` also take
+  `&optional`, `&rest` and `&key` (`(def f (a &key (b 1) c) …)`,
+  called `(f 0 :c 2)`). Macros take `&rest` only.
 - `(merge dict :k v :k2 v2)` returns an updated dict; `(get dict :k)` reads.
   `(dict :a 1)` builds one. `(nth list i)`, `(len list)`, `(range a b)`,
   `(append list (list x))`, `(reduce f init list)`, `(map f list)`,
@@ -248,9 +273,10 @@ instance exists, to fill the document with an example or pin a preview:
 eseq sequencer check my.pulse --eval '(let ((e (instance-ref 1))) (set! e.cells (list 1 1 0 1)))'
 ```
 
-To see the playing state in the PNG, give the view a preview hook, such as
-`(defstate pulse-preview-mark 0)` used in place of the `bind-seq` mark when
-above 0, and set it with `--eval '(set! my.pulse/pulse-preview-mark 37)'`.
+To see the playing state in the PNG, give the view a preview hook, such as a
+`(def-kind pulse-preview :key () :state ((mark 0)))` field used in place of
+the mark binding when above 0, set by an exported `(def preview-mark! (v)
+(set! pulse-preview.mark v))`: `--eval '(my.pulse/preview-mark! 37)'`.
 
 The check does not run the tick. When the panel is right, ask the user to
 press Play and listen, and to report any error in the status line. A tick

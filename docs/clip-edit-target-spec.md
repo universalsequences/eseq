@@ -1,5 +1,7 @@
 # Clip Edit Target — Unified Focus, Double-Click-to-Piano-Roll, Clip Panel
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 4, 2026-07-29 — **all four slices shipped** on branch
 `clip-edit-target` (unmerged), each through a multi-agent review gate with
 fixes applied. Slice A: `app/focus.rs` (EditFocus over the sound binding),
@@ -15,6 +17,9 @@ merge-key coalesced), `arr_clip_slide_offset` band slide, window overlay
 (`:window-marker`/`:window-span`/`:window-repeat`). Slice D: clip panel
 column inside the `*piano-roll*` buffer (`focus_clip_fields`,
 `arr_clip_set_offset`, `focus-clip-resize`/`focus-set-offset`).
+Since the kind-bindings port of the piano roll (eseq-0l17.16) the
+`SEQ.focus-*` and `SEQ.piano-roll-*` fields named below are the `piano-roll`
+and `note` kinds' fields (`docs/kind-bindings-spec.md` §14.2j).
 
 Rev 3 adds the arrangement authoring follow-up: double-clicking empty space
 in a track lane mints a silent take-backed clip over the widget's default
@@ -138,7 +143,8 @@ source: BoundSource }>` (`app/mod.rs:949`, `sound_binding.rs:94-99`), set
 by `seq-song-select-clip` on clip click (`arrangement.lisp:834-839` →
 host command `song-select-clip`). Consumers today: device panel state,
 monitor sound, record-clone template (`sound_binding.rs` rules 1-3,
-`bound_read_pattern` `:220`). Published as `SEQ.song-bound-clip`.
+`bound_read_pattern` `:220`). Published as `song.bound-clip` (the host
+kinds, kind-bindings spec §14.2d; formerly `SEQ.song-bound-clip`).
 
 **Double-click plumbing exists end to end.** Editor synthesizes it (350ms
 / 1.5-cell slop, `editor/widget_interaction.rs:1124-1222`), dispatched

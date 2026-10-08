@@ -460,4 +460,11 @@
 (def banked
   (bank-stage shaped trigger bank_s bank_env_s bank_freq_s bank_res_s bank-note-in))
 
-(out (* banked (clip velocity 0 1) (clip (mod level) 0 1.5)) 1 @name audio)
+(def voice_out (* banked (clip velocity 0 1) (clip (mod level) 0 1.5)))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)

@@ -7,30 +7,35 @@
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
 
-;; Migration aliases (module spec §10 step 2) for the names unconverted callers
-;; still spell flat.  Six are lisp-side — mixer.lisp / sequencer.lisp route
-;; track drops here, effects/instrument-panel.lisp and effects/sampler-panel.lisp
-;; drop sounds and open the preset-save sidebar, transport.lisp's File menu
-;; opens the project browser — and `sample-browser-here` keeps its spelling for the
-;; "C-x s" binding and src/ui/input.rs.  The rest are entry points src/ui/input.rs
-;; and the Rust state_values tests drive by name.  Deleted as each consumer
-;; converts.
-;;
-;; NOT aliased, deliberately: the six names in the `eseq.vanilla/` block below
-;; (hazard i — production Rust *writes* them by bare spelling, so they stay flat
-;; and are a host→script protocol, not this module's API).
+;; Host state comes from the kinds (kind-bindings spec §13 stage 8): the
+;; sidebar's track, instrument and presets (`browser`), the editor
+;; (`editor`), the current track (`selection.track`). The view's own state
+;; is the `:key ()` singletons below; the host reaches them through a local
+;; (`(let ((v eseq.browser/browser-view)) (set! v.tab "samples"))`) or the
+;; exported helpers (`show-loading!`, `clear-editor-name!`,
+;; `show-browser-tab!`, `mark-auditioned!`).
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+(import eseq.view-kit :refer (open-menu! menu-of listed?))
+(import eseq.preview-strip :refer (sync-preview! toggle-preview! preview-strip))
+(import eseq.kinds :refer (track tracks scenes groups project selection browser editor))
 
-(export search-filter
-        selected-sample
-        selected-tags
-        sbrowser-auditioned-sample
-        selected-instrument-name
-        selected-audio-effect-name
-        sbrowser-editor-name
-        preset-filter
+(export browser-view
+        sample-pick
+        sample-preview
+        instrument-pick
+        editor-draft
+        kit-save
+        preset-save
+        package-menu
+        instrument-menu
+        package-draft
+        instance-rename
+        show-loading!
+        clear-editor-name!
+        show-browser-tab!
+        mark-auditioned!
         editor-status-row
         open-project-save
         open-project-browser
@@ -83,66 +88,138 @@
         select-package-menu-action)
 
 ;; ── State ──
-;; The `eseq.vanilla/` names below are the §3 cross-module def escape hatch
-;; (spec §10 hazard i): production Rust emits `(set! <name> …)` lisp for each of
-;; them — src/ui/event_loop.rs, src/ui/edit_sessions.rs and
-;; src/ui/host_commands/{scripts,tracks,instrument_authoring}.rs — and the
-;; late-binding heal is read-side only, so a pre-conversion *writer* is never
-;; rescued.  Pinned flat, and given no compat alias.  Five of the six are
-;; `defstate`s, so hazard (b) compounds: the registration key has to stay flat
-;; too, which `Compiler::qualify_registration_name` now guarantees by stripping
-;; an explicit `eseq.vanilla/` prefix (vanilla's registry keyspace *is* the flat
-;; keyspace).  Inside this module a bare read/write still compiles to
-;; Load/StoreState on that flat key, so both sides hit one node.
-(def search-filter (state ""))
-;; Packages tab context menu + inline "New Package" name field.
-(def package-menu-open (state false))
-(def package-menu-col (state 0))
-(def package-menu-row (state 0))
-(def package-menu-item (state nil))
-(def package-new-mode (state false))
-(def package-new-name (state ""))
-;; Inline rename field for a kind instance row (instance-kinds spec §8.3).
-(def instance-rename-id (state -1))
-(def instance-rename-draft (state ""))
-(def source-buffer "")
-(defstate mode "audition")
-(defstate eseq.vanilla/sbrowser-tab "samples")
-(defstate last-track-index -1)
-(defstate last-sidebar-sample "")
-(defstate selected-sample "")
-(defstate selected-tags (list))
-(defstate selected-origins (list))
-;; Preview strip below the samples tree (Ableton-style): the sample the tree
-;; cursor last landed on, plus its waveform-buffer map from
-;; `seq-sample-waveform` (false while nothing decodable is focused). Cached
-;; here so the strip's build path never decodes. While the headphone toggle is
-;; on, landing on a sample also auto-plays it once.
-(defstate preview-path "")
-(defstate preview-buffer false)
-(defstate auto-preview false)
-(defstate sbrowser-auditioned-sample "")
-(defstate eseq.vanilla/sbrowser-loading-instrument-name "")
-;; Last instrument / custom effect highlighted in the browser tree. Fork acts on
-;; it — the tree widget has no context menu, so the action lives in the panel
-;; toolbar instead (docs/instrument-fork-spec.md §3.5).
-(defstate selected-instrument-name "")
-(defstate selected-audio-effect-name "")
 
-;; Editor state for inline instrument/effect creation
-(def sbrowser-editor-name (state ""))
-;; Preset save state
-(defstate preset-name "")
-(defstate preset-save-mode "")  ;; "" or "save-preset"
+;; The sidebar: the tab it shows, its mode ("audition", or "create-sampler"
+;; while a sample picks a new track), and the search boxes (the tab's, and
+;; the preset list's).
+(def-kind browser-view
+  :key ()
+  :state ((tab "samples")
+          (mode "audition")
+          (search "")
+          (preset-search "")))
+
+;; The Samples tab: the tag and origin filters, the sample the tree selected
+;; and the one last auditioned, and the shown track and sample the filters
+;; were last reset for (`sync-track-search`).
+(def-kind sample-pick
+  :key ()
+  :state ((tags '())
+          (origins '())
+          (sample "")
+          (auditioned "")
+          (shown-track track :default nil)
+          (shown-sample "")))
+
+;; The preview strip below the samples tree (Ableton-style): the sample the
+;; tree cursor last landed on and its waveform-buffer map from
+;; `seq-sample-waveform` (false while nothing decodable is focused), cached
+;; so the strip's build path never decodes. While `auto` (the headphone
+;; toggle) is on, landing on a sample also plays it once.
+(def-kind sample-preview
+  :key ()
+  :state ((path "")
+          (buffer :any :default false)
+          (auto false)))
+
+;; The Instruments and Audio FX tabs: the saved-instrument tier filter, the
+;; favorites chip, the instrument and custom effect last highlighted (Fork
+;; acts on them: the tree has no context menu, so the action lives in the
+;; toolbar, docs/instrument-fork-spec.md §3.5), and the saved instrument
+;; being loaded (its row spins).
+(def-kind instrument-pick
+  :key ()
+  :state ((origin "")
+          (favorites-only false)
+          (favorites-epoch 0)
+          (instrument "")
+          (audio-effect "")
+          (loading "")))
+
+;; The instrument / effect editor's Save-as name.
+(def-kind editor-draft
+  :key ()
+  :state ((name "")))
+
 ;; Kit saves are initiated by the drum rack's FX-panel header, but completed
-;; here so naming and browser placement are explicit before anything is written.
-(defstate kit-save-name "")
-(defstate kit-save-group-id -1)
-(defstate kit-save-mode false)
-;; "Export as kit..." scene checklist (rack-clips spec 7.2): the project scenes
-;; whose rack clip travels in the kit, as scene indices.
-(defstate kit-save-scenes (list))
-(defstate preset-filter "")
+;; here so naming and browser placement are explicit before anything is
+;; written. `scenes`: the project scenes whose rack clip travels in the kit,
+;; as scene indices (rack-clips spec 7.2; the command's address).
+(def-kind kit-save
+  :key ()
+  :state ((open false)
+          (name "")
+          (group-id -1)
+          (scenes '())))
+
+(def-kind preset-save
+  :key ()
+  :state ((open false)
+          (name "")))
+
+;; The Packages tree's context menu and the Instruments tree's (the row each
+;; was opened on), the inline New Package field, and the inline rename of a
+;; kind instance row (instance-kinds spec §8.3; `target` is its instance id,
+;; the rename command's address, -1 while none).
+(def-kind package-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (item :any :default nil)))
+
+(def-kind instrument-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (item :any :default nil)))
+
+(def-kind package-draft
+  :key ()
+  :state ((open false)
+          (name "")))
+
+(def-kind instance-rename
+  :key ()
+  :state ((target -1)
+          (draft "")))
+
+(def source-buffer "")
+
+;; The saved instrument being loaded: its tree row spins until the host
+;; clears it (`(show-loading! "")`).
+(def show-loading! (name)
+  (set! instrument-pick.loading name))
+
+(def clear-editor-name! ()
+  (set! editor-draft.name ""))
+
+;; Shows tab `name`, keeping the searches (`select-tab` clears them).
+(def show-browser-tab! (name)
+  (set! browser-view.tab name))
+
+;; Marks `path` as the sample the browser itself loaded, so the sidebar's
+;; next sync keeps its filters (`sync-track-search`).
+(def mark-auditioned! (path)
+  (set! sample-pick.auditioned path))
+
+;; The track at position i (a drop target's address), or nil.
+(def track-at (i)
+  (if (= i nil) nil (if (>= i 0) (track i) nil)))
+
+;; Whether track t plays an instrument of `type` (track.instrument-type).
+(def instrument-type? (t type)
+  (and t (= t.instrument-type type)))
+
+(def replaceable? (t)
+  (and t (eseq.track-collapse/replaceable-type? t.instrument-type)))
+
+(def no-tracks? ()
+  (= (len (tracks)) 0))
+
+;; Track t's position (the current track by default), the host commands'
+;; address (0 with none).
+(def current-index (&optional (t selection.track))
+  (if t t.index 0))
 
 (defwidget editor-spinner
   ;; Sized to sit inside `editor-status-row`'s 1.35-row height — the
@@ -186,24 +263,24 @@
       :bg :transparent)))
 
 (def editor-busy? ()
-  (or SEQ.editor-canceling
-    (= SEQ.editor-error "Preview compiling...")))
+  (or editor.canceling
+    (= editor.error "Preview compiling...")))
 
 (def audition-mode? ()
-  (= mode "audition"))
+  (= browser-view.mode "audition"))
 
 (def track-type-mode? ()
-  (or (= mode "track-type")
-    (and (= SEQ.num-tracks 0) (= mode "audition"))))
+  (or (= browser-view.mode "track-type")
+    (and (no-tracks?) (= browser-view.mode "audition"))))
 
 (def create-sampler-mode? ()
-  (= mode "create-sampler"))
+  (= browser-view.mode "create-sampler"))
 
 (def project-browser-mode? ()
-  (= mode "project-browser"))
+  (= browser-view.mode "project-browser"))
 
 (def editor-mode? ()
-  (not (= SEQ.editor-mode "")))
+  (not (= editor.mode "")))
 
 (def create-mode? ()
   (or (track-type-mode?) (create-sampler-mode?)))
@@ -212,63 +289,63 @@
   (if (audition-mode?) "audition" "create"))
 
 (def sync-track-search ()
-  (let ((track-changed (not (= last-track-index SEQ.sidebar-track-index)))
-        (sample-changed (not (= last-sidebar-sample SEQ.sidebar-selected-sample))))
+  (let ((track-changed (not (= sample-pick.shown-track browser.track)))
+        (sample-changed (not (= sample-pick.shown-sample browser.sample))))
   (if (or track-changed sample-changed)
     (do
-      (set! last-track-index SEQ.sidebar-track-index)
-      (set! last-sidebar-sample SEQ.sidebar-selected-sample)
-      (if (and (audition-mode?) (= SEQ.sidebar-kind "sampler"))
+      (set! sample-pick.shown-track browser.track)
+      (set! sample-pick.shown-sample browser.sample)
+      (if (and (audition-mode?) (= browser.instrument-kind "sampler"))
         (do
-          (set! selected-sample SEQ.sidebar-selected-sample)
-          (if (and (or sample-changed track-changed) (= sbrowser-auditioned-sample SEQ.sidebar-selected-sample))
-            (set! sbrowser-auditioned-sample "")
+          (set! sample-pick.sample browser.sample)
+          (if (and (or sample-changed track-changed) (= sample-pick.auditioned browser.sample))
+            (set! sample-pick.auditioned "")
             (do
-              (set! sbrowser-auditioned-sample "")
-              (if (= sbrowser-tab "samples")
-                (set! search-filter ""))
-              (set! selected-tags
-                (if (= SEQ.sidebar-selected-sample "")
+              (set! sample-pick.auditioned "")
+              (if (= browser-view.tab "samples")
+                (set! browser-view.search ""))
+              (set! sample-pick.tags
+                (if (= browser.sample "")
                   (list)
-                  (seq-sample-tags-for-path SEQ.sidebar-selected-sample)))))))))))
+                  (seq-sample-tags-for-path browser.sample)))))))))))
 
 (def reset-to-audition ()
-  (set! mode "audition")
-  (set! search-filter "")
-  (set! selected-tags (list)))
+  (set! browser-view.mode "audition")
+  (set! browser-view.search "")
+  (set! sample-pick.tags (list)))
 
 (def leave-create-mode ()
-  (set! mode "audition")
-  (set! search-filter "")
-  (set! selected-tags (list)))
+  (set! browser-view.mode "audition")
+  (set! browser-view.search "")
+  (set! sample-pick.tags (list)))
 
 (def open-device-picker ()
-  (set! search-filter "")
-  (set! mode "audition")
-  (set! sbrowser-tab "instruments")
+  (set! browser-view.search "")
+  (set! browser-view.mode "audition")
+  (set! browser-view.tab "instruments")
   (if eseq.seq-core-state/samples-sidebar-visible
     nil
     (eseq.seq-panels/seq-toggle-samples-sidebar)))
 
 (def enter-create-track-mode ()
-  (set! search-filter "")
-  (set! mode "audition")
-  (set! sbrowser-tab "instruments"))
+  (set! browser-view.search "")
+  (set! browser-view.mode "audition")
+  (set! browser-view.tab "instruments"))
 
 (def toggle-create-track-mode ()
   (enter-create-track-mode))
 
 (def enter-create-sampler-mode ()
-  (set! search-filter "")
-  (set! selected-tags (list))
-  (set! mode "create-sampler")
-  (set! sbrowser-tab "samples")
+  (set! browser-view.search "")
+  (set! sample-pick.tags (list))
+  (set! browser-view.mode "create-sampler")
+  (set! browser-view.tab "samples")
   (status "Create sampler track: choose a sample"))
 
 (def open-project-browser ()
-  (set! search-filter "")
-  (set! mode "audition")
-  (set! sbrowser-tab "projects"))
+  (set! browser-view.search "")
+  (set! browser-view.mode "audition")
+  (set! browser-view.tab "projects"))
 
 ;; Saving a named project writes it directly; an unnamed project opens the
 ;; File-menu name modal (eseq.file-dialogs) instead of a sidebar mode.
@@ -277,41 +354,42 @@
 
 (def new-project ()
   (host-command "new-project" (dict))
-  (set! search-filter "")
-  (set! sbrowser-tab "projects")
+  (set! browser-view.search "")
+  (set! browser-view.tab "projects")
   (status "New project"))
 
 (def add-instrument-track (name)
-  (set! sbrowser-loading-instrument-name name)
+  (show-loading! name)
   (host-command "add-track-instrument" (dict :name name))
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Loading instrument: " name)))
 
-(def swap-track-instrument (track name preserve-track-selection)
+;; i: the track's position (a drop target's address).
+(def swap-track-instrument (i name preserve-track-selection)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
-    (if (eseq.track-collapse/replaceable-instrument? track)
+    (if (replaceable? (track-at i))
       (do
-        (set! sbrowser-loading-instrument-name name)
+        (show-loading! name)
         (host-command "swap-track-instrument"
-          (dict :track track :name name
+          (dict :track i :name name
             :preserve-track-selection preserve-track-selection))
         (eseq.seq-panels/seq-show-fx-lower-panel)
         (status (str "Loading instrument swap: " name)))
       (status "This track cannot load an instrument"))))
 
-(def swap-track-builtin-instrument (track name preserve-track-selection)
+(def swap-track-builtin-instrument (i name preserve-track-selection)
   ;; Only the sampler has an in-place conversion. A modulator rewrite would be a
   ;; different engine on a track that may already carry pattern data, and the
   ;; racks are group/slot entities with no single track to become — so a drop
   ;; that visually landed adds the builtin as a new track instead of dead-ending
   ;; (eseq-mj8).
-  (if (and (= name "sampler") (eseq.track-collapse/replaceable-instrument? track))
+  (if (and (= name "sampler") (replaceable? (track-at i)))
     (do
       (host-command "swap-track-builtin-instrument"
-        (dict :track track :name name
+        (dict :track i :name name
           :preserve-track-selection preserve-track-selection))
-      (set! sbrowser-tab "samples")
+      (set! browser-view.tab "samples")
       (eseq.seq-panels/seq-show-fx-lower-panel)
       (status "Loading sampler"))
     (add-builtin-instrument-track name)))
@@ -347,14 +425,14 @@
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path))
-          (track (get target :track)))
+          (i (get target :track)))
       (if path
-        (if (eseq.track-collapse/custom-instrument? track)
+        (if (instrument-type? (track-at i) "custom")
           (host-command "convert-track-to-sampler"
-            (dict :track track :path path :preserve-browser-context true
+            (dict :track i :path path :preserve-browser-context true
               :preserve-track-selection (get target :from-pad)))
           (host-command "load-sample-into-track"
-            (dict :track track :path path :preserve-browser-context true
+            (dict :track i :path path :preserve-browser-context true
               :preserve-track-selection (get target :from-pad))))
         (status "Drop a sample file, not a folder")))))
 
@@ -390,7 +468,7 @@
   (let ((instrument (preset-payload-instrument payload)))
     (if instrument
       (do
-        (set! sbrowser-loading-instrument-name instrument)
+        (show-loading! instrument)
         (host-command "add-track-instrument"
           (dict :name instrument :preset (get payload :preset) :group-id group-id))
         (eseq.seq-panels/seq-show-fx-lower-panel)
@@ -401,13 +479,13 @@
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((instrument (preset-payload-instrument payload))
-          (track (get target :track)))
+          (i (get target :track)))
       (if instrument
-        (if (eseq.track-collapse/replaceable-instrument? track)
+        (if (replaceable? (track-at i))
           (do
-            (set! sbrowser-loading-instrument-name instrument)
+            (show-loading! instrument)
             (host-command "swap-track-instrument"
-              (dict :track track :name instrument :preset (get payload :preset)
+              (dict :track i :name instrument :preset (get payload :preset)
                 :preserve-track-selection (get target :from-pad)))
             (eseq.seq-panels/seq-show-fx-lower-panel)
             (status (str "Loading preset: " (get payload :preset))))
@@ -417,20 +495,20 @@
 (def activate-instrument (name)
   (if (>= (selected-drum-rack-id) 0)
     (status "Saved instruments cannot replace a selected drum rack")
-    (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
-      (swap-track-instrument SEQ.current-track name false)
+    (if (replaceable? selection.track)
+      (swap-track-instrument (current-index) name false)
       (do
         (add-instrument-track name)
         (status (str "Adding instrument track: " name))))))
 
 (def add-sampler-track ()
   (host-command "add-track-sampler" (dict))
-  (set! sbrowser-tab "samples")
+  (set! browser-view.tab "samples")
   (status "Add sampler track"))
 
 (def add-modulator-track ()
   (host-command "add-track-modulator" (dict))
-  (set! sbrowser-tab "instruments")
+  (set! browser-view.tab "instruments")
   (status "Add modulator track"))
 
 (def add-rack-track ()
@@ -438,38 +516,41 @@
     (if (= path "")
       (host-command "add-track-rack" (dict))
       (do
-        (set! sbrowser-auditioned-sample path)
+        (set! sample-pick.auditioned path)
         (host-command "add-track-rack" (dict :path path)))))
-  (set! sbrowser-tab "samples")
+  (set! browser-view.tab "samples")
   (status "Add drum rack"))
 
 ;; True when a rack panel is actually open in the sidebar — the only thing the
 ;; old `:routing` string ever distinguished now that Broadcast is the sole
 ;; routing (docs/drum-rack-v2-spec.md).
+;; (The sidebar's track is a rack track: browser.instrument-kind reads
+;; "instrument" for it, never "rack".)
 (def rack-panel-open? ()
-  (if (= SEQ.sidebar-kind "rack")
-    (if (> (len SEQ.instrument-panel) 0)
-      (= (get (nth SEQ.instrument-panel 0) :is-rack) true)
-      false)
-    false))
+  (let ((t browser.track)) (and t t.rack)))
 
+;; A new instrument-rack track, holding the selected sample when there is one.
+(def add-new-layer-rack-track ()
+  (let ((path (sample-selected-path)))
+    (if (= path "")
+      (host-command "add-track-layer-rack" (dict))
+      (do
+        (set! sample-pick.auditioned path)
+        (host-command "add-track-layer-rack" (dict :path path)))))
+  (set! browser-view.tab "samples")
+  (status "Add instrument rack"))
+
+;; The selected sample as a layer of the open rack, else a new rack track.
 (def add-layer-rack-track ()
   (let ((path (sample-selected-path)))
     (if (and (rack-panel-open?)
              (not (= path "")))
       (do
-        (set! sbrowser-auditioned-sample path)
+        (set! sample-pick.auditioned path)
         (host-command "add-rack-sample-slot"
-          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+          (dict :track (current-index) :path path :preserve-browser-context true))
         (status "Add layer"))
-      (do
-        (if (= path "")
-          (host-command "add-track-layer-rack" (dict))
-          (do
-            (set! sbrowser-auditioned-sample path)
-            (host-command "add-track-layer-rack" (dict :path path))))
-        (set! sbrowser-tab "samples")
-        (status "Add instrument rack")))))
+      (add-new-layer-rack-track))))
 
 ;; ── SDF widgets ──
 
@@ -510,90 +591,44 @@
         (material
           :color :search-icon)))))
 
-;; Headphone toggle for the preview strip (Ableton-style auto-preview): a
-;; circular badge with the headphone glyph inside — headband arc (ring clipped
-;; to the top half) meeting two ear-cup capsules. Badge fills blue while
-;; auto-preview is armed.
-(defwidget preview-headphone-icon
-  :width 2.8 :height 1.8
-  :paint-margin 0.3
-  :state (active)
-  :shader
-  (let ((badge-col (if (= active 1) :accent (rgba 0.33 0.34 0.36 1.0)))
-        (glyph-col (if (= active 1) :bg (rgba 0.66 0.68 0.72 1.0)))
-        (band (max (- (abs (- (sqrt (+ (* x x) (* y y))) 0.36)) 0.06) y)))
-    (sdf/layer
-      (sdf/fill (sdf/circle 0.72) (material :color badge-col))
-      (sdf/fill band (material :color glyph-col))
-      (sdf/fill (sdf/translate -0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
-        (material :color glyph-col))
-      (sdf/fill (sdf/translate 0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
-        (material :color glyph-col)))))
-
 ;; ── Actions ──
 
 (def audition (item)
   (let ((path (get item :path)))
     (if path
       (do
-        (set! sbrowser-auditioned-sample path)
+        (set! sample-pick.auditioned path)
         (host-command "audition-sample" (dict :path path))
         (status (str "Audition: " (get item :label))))
       (status (str (get item :label))))))
 
 (def sync-sample-preview (path)
-  (if (not (= path preview-path))
-    (do
-      (set! preview-path path)
-      (set! preview-buffer (seq-sample-waveform path))
-      ;; With the headphone on, landing on a sample plays it once — the host
-      ;; player replaces any preview still in flight, so no explicit stop is
-      ;; needed. With it off, just silence whatever was still sounding.
-      (if (and auto-preview preview-buffer)
-        (host-command "preview-sample" (dict :path path))
-        (if SEQ.browser-preview-playing
-          (host-command "stop-sample-preview" (dict)))))))
+  (sync-preview! sample-preview path))
 
 (def select-sample (item)
   (let ((path (get item :path)))
     (if path
       (do
-        (set! selected-sample path)
+        (set! sample-pick.sample path)
         (sync-sample-preview path))
       (status (str (get item :label))))))
 
 (def toggle-auto-preview ()
-  (if auto-preview
-    (do
-      (set! auto-preview false)
-      (if SEQ.browser-preview-playing
-        (host-command "stop-sample-preview" (dict)))
-      (status "Sample preview off"))
-    (do
-      (set! auto-preview true)
-      ;; Turning the headphone on immediately auditions the focused sample.
-      (if preview-buffer
-        (host-command "preview-sample" (dict :path preview-path)))
-      (status "Sample preview on"))))
-
-(def selected-drum-rack ()
-  (if (eseq.seq-core-state/seq-has-selected-bus?)
-    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
-    -1))
+  (status (if (toggle-preview! sample-preview) "Sample preview on" "Sample preview off")))
 
 (def selected-drum-rack-id ()
-  (let ((gidx (selected-drum-rack)))
-    (if (>= gidx 0) (eseq.drum-rack-v2/group-id gidx) -1)))
+  (let ((g (eseq.drum-rack-v2/selected-bus-rack)))
+    (if g g.gid -1)))
 
 (def activate-sample (item)
   (let ((path (get item :path)))
     (if path
-      (if (or (create-sampler-mode?) (= SEQ.num-tracks 0))
+      (if (or (create-sampler-mode?) (no-tracks?))
         (add-track item)
-        (if (eseq.track-collapse/empty-instrument? SEQ.current-track)
+        (if (instrument-type? selection.track "empty")
           (host-command "load-sample-into-track"
-            (dict :track SEQ.current-track :path path :preserve-browser-context true))
-          (if (= SEQ.sidebar-kind "sampler")
+            (dict :track (current-index) :path path :preserve-browser-context true))
+          (if (= browser.instrument-kind "sampler")
             (audition item)
             (status "Drop samples onto a sampler track or the new-track drop zone"))))
       (status "Choose a sample file, not a folder"))))
@@ -602,7 +637,7 @@
   (let ((path (get item :path)))
     (if path
       (do
-        (set! selected-sample path)
+        (set! sample-pick.sample path)
         (sync-sample-preview path)
         (host-command "set-learn-target"
           (dict :path path :name (get item :label))))
@@ -612,15 +647,15 @@
   (host-command "set-learn-target" (dict :path "")))
 
 (def sample-selected-path ()
-  (if (= selected-sample "")
-    SEQ.sidebar-selected-sample
-    selected-sample))
+  (if (= sample-pick.sample "")
+    browser.sample
+    sample-pick.sample))
 
 (def add-track (item)
   (let ((path (get item :path)))
     (if path
       (do
-        (set! sbrowser-auditioned-sample path)
+        (set! sample-pick.auditioned path)
         (host-command "add-track-sample" (dict :path path))
         (leave-create-mode)
         (status (str "Add track: " (get item :label))))
@@ -630,9 +665,9 @@
   (let ((path (get item :path)))
     (if path
       (do
-        (set! sbrowser-auditioned-sample path)
+        (set! sample-pick.auditioned path)
         (host-command "add-rack-sample-slot"
-          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+          (dict :track (current-index) :path path :preserve-browser-context true))
         (status (str "Add layer: " (get item :label))))
       (status "Select a sample file, not a folder"))))
 
@@ -640,33 +675,33 @@
   (add-layer-rack-track))
 
 (def modified-activate-sample (item)
-  (if (= SEQ.sidebar-kind "rack")
+  (if (rack-panel-open?)
     (add-rack-layer item)
     (add-track item)))
 
 (def select-item (item)
-  (if (or (create-sampler-mode?) (= SEQ.num-tracks 0) (= SEQ.sidebar-kind "instrument"))
+  (if (or (create-sampler-mode?) (no-tracks?) (= browser.instrument-kind "instrument"))
     (add-track item)
     (audition item)))
 
 (def select-tab (name)
-  (let ((changed (not (= sbrowser-tab name))))
-    (set! sbrowser-tab name)
+  (let ((changed (not (= browser-view.tab name))))
+    (set! browser-view.tab name)
     (if changed
       (do
-        (set! search-filter "")
-        (set! preset-filter "")))
+        (set! browser-view.search "")
+        (set! browser-view.preset-search "")))
     (if (not (= name "samples"))
-      (set! selected-tags (list)))))
+      (set! sample-pick.tags (list)))))
 
 (def next-tab-name ()
-  (if (= sbrowser-tab "samples") "sounds"
-    (if (= sbrowser-tab "sounds") "instruments"
-    (if (= sbrowser-tab "instruments") "audio-fx"
-      (if (= sbrowser-tab "audio-fx") "midi-fx"
-        (if (= sbrowser-tab "midi-fx") "presets"
-          (if (= sbrowser-tab "presets") "packages"
-            (if (= sbrowser-tab "packages") "projects"
+  (if (= browser-view.tab "samples") "sounds"
+    (if (= browser-view.tab "sounds") "instruments"
+    (if (= browser-view.tab "instruments") "audio-fx"
+      (if (= browser-view.tab "audio-fx") "midi-fx"
+        (if (= browser-view.tab "midi-fx") "presets"
+          (if (= browser-view.tab "presets") "packages"
+            (if (= browser-view.tab "packages") "projects"
               "samples"))))))))
 
 (def next-tab ()
@@ -681,43 +716,44 @@
   (str "eseq.browser/" base))
 
 (def active-tree-key ()
-  (if (= sbrowser-tab "samples") (tree-key "samples-tab-tree")
-    (if (= sbrowser-tab "sounds") (tree-key "sounds-tab-tree")
-    (if (= sbrowser-tab "kits") (tree-key "kits-tab-tree")
-    (if (= sbrowser-tab "instruments") (tree-key "instruments-tab-tree")
-      (if (= sbrowser-tab "audio-fx") (tree-key "audio-fx-tab-tree")
-        (if (= sbrowser-tab "midi-fx") (tree-key "midi-fx-tab-tree")
-          (if (= sbrowser-tab "presets") (tree-key "presets-tab-tree")
-            (if (= sbrowser-tab "packages") (tree-key "packages-tab-tree")
+  (if (= browser-view.tab "samples") (tree-key "samples-tab-tree")
+    (if (= browser-view.tab "sounds") (tree-key "sounds-tab-tree")
+    (if (= browser-view.tab "kits") (tree-key "kits-tab-tree")
+    (if (= browser-view.tab "instruments") (tree-key "instruments-tab-tree")
+      (if (= browser-view.tab "audio-fx") (tree-key "audio-fx-tab-tree")
+        (if (= browser-view.tab "midi-fx") (tree-key "midi-fx-tab-tree")
+          (if (= browser-view.tab "presets") (tree-key "presets-tab-tree")
+            (if (= browser-view.tab "packages") (tree-key "packages-tab-tree")
               (tree-key "projects-tab-tree"))))))))))
 
-(def list-contains? (items value)
-  (> (len (filter (lambda (item) (= item value)) items)) 0))
+;; COMPAT(eseq-0l17): eseq.view-kit/listed? with its arguments swapped,
+;; the target of the alias table's `sbrowser-list-contains?`.
+(def list-contains? (items value) (listed? value items))
 
 (def list-remove (items value)
   (filter (lambda (item) (not (= item value))) items))
 
 (def toggle-tag (tag)
-  (if (list-contains? selected-tags tag)
-    (set! selected-tags (list-remove selected-tags tag))
-    (set! selected-tags (append selected-tags (list tag)))))
+  (if (listed? tag sample-pick.tags)
+    (set! sample-pick.tags (list-remove sample-pick.tags tag))
+    (set! sample-pick.tags (append sample-pick.tags (list tag)))))
 
 (def clear-tags ()
-  (set! selected-tags (list)))
+  (set! sample-pick.tags (list)))
 
 (def toggle-origin (origin)
-  (if (list-contains? selected-origins origin)
-    (set! selected-origins (list-remove selected-origins origin))
-    (set! selected-origins (append selected-origins (list origin)))))
+  (if (listed? origin sample-pick.origins)
+    (set! sample-pick.origins (list-remove sample-pick.origins origin))
+    (set! sample-pick.origins (append sample-pick.origins (list origin)))))
 
 (def clear-sample-filters ()
-  (set! selected-tags (list))
-  (set! selected-origins (list)))
+  (set! sample-pick.tags (list))
+  (set! sample-pick.origins (list)))
 
 (def set-search-filter (value)
-  (if (and (= sbrowser-tab "samples") (not (= value search-filter)))
+  (if (and (= browser-view.tab "samples") (not (= value browser-view.search)))
     (clear-tags))
-  (set! search-filter value))
+  (set! browser-view.search value))
 
 (def tag-chip (tag)
   (let ((name (get tag :name))
@@ -735,7 +771,7 @@
       :font-size 12.0
       :corner-radius 13
       :on-click |x y r| (do 
-        (set! search-filter "") 
+        (set! browser-view.search "") 
         (toggle-tag name)
         ))))
 
@@ -757,27 +793,27 @@
       :on-click |x y r| (toggle-origin name))))
 
 (def search-placeholder ()
-  (if (= sbrowser-tab "samples") "Search samples..."
-    (if (= sbrowser-tab "sounds") "Search sounds..."
-    (if (= sbrowser-tab "instruments") "Search instruments..."
-      (if (= sbrowser-tab "audio-fx") "Search audio effects..."
-        (if (= sbrowser-tab "midi-fx") "Search MIDI effects..."
-          (if (= sbrowser-tab "presets") "Search presets..."
-            (if (= sbrowser-tab "packages") "Search packages..."
+  (if (= browser-view.tab "samples") "Search samples..."
+    (if (= browser-view.tab "sounds") "Search sounds..."
+    (if (= browser-view.tab "instruments") "Search instruments..."
+      (if (= browser-view.tab "audio-fx") "Search audio effects..."
+        (if (= browser-view.tab "midi-fx") "Search MIDI effects..."
+          (if (= browser-view.tab "presets") "Search presets..."
+            (if (= browser-view.tab "packages") "Search packages..."
               "Search projects..."))))))))
 
 (def empty-message (message)
   (box :width :fill :height :fill :padding 1
     (label message
       :font-size 10
-      :color :gray
+      :color :dimmer
       :bg :transparent)))
 
 (def select-audio-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
     (do
       ;; Only custom (dsp.lisp-backed) effects can be forked; builtins are Rust.
-      (set! selected-audio-effect-name
+      (set! instrument-pick.audio-effect
         (if (= kind "custom-audio-effect") (get item :name) ""))
       (if (= kind "header")
         false
@@ -786,15 +822,15 @@
           (status "Choose an effect"))))))
 
 (def fork-selected-audio-effect ()
-  (if (= selected-audio-effect-name "")
+  (if (= instrument-pick.audio-effect "")
     (status "Select a custom effect to fork")
     (do
-      (set! sbrowser-editor-name "")
+      (clear-editor-name!)
       (host-command "enter-fork-effect-editor"
-        (dict :source selected-audio-effect-name)))))
+        (dict :source instrument-pick.audio-effect)))))
 
 (def enter-new-effect-editor ()
-  (set! sbrowser-editor-name "")
+  (clear-editor-name!)
   (host-command "enter-new-effect-editor" (dict)))
 
 (def activate-audio-effect (item)
@@ -832,42 +868,44 @@
         (status (str "Add MIDI FX: " name)))
       (status "Choose a MIDI effect"))))
 
+;; The drum rack slot whose presets the Presets tab shows instead of the
+;; track's: the slot selected as the delete target (only that explicit
+;; selection opts the browser into a slot's presets), or nil.
 (def selected-rack-preset-context ()
-  (let ((version SEQ.delete-target-version))
-    (nth (filter |slot| (seq-delete-target? :rack-slot
-             (dict :track (get slot :track) :slot (get slot :slot)))
-           SEQ.sidebar-rack-slot-presets) 0)))
+  (nth (filter |s| (let ((d s.device)) (and d d.delete-target))
+         browser.rack-slots)
+       0))
 
 (def browser-preset-items ()
-  (let ((slot (selected-rack-preset-context)))
-    (if slot (get slot :presets) SEQ.sidebar-presets)))
+  (let ((s (selected-rack-preset-context)))
+    (if s s.presets browser.presets)))
 
 ;; The presets the user saved themselves, listed under Library (the rest are
 ;; Factory).
 (def browser-user-preset-items ()
-  (let ((slot (selected-rack-preset-context)))
-    (if slot (get slot :user-presets) SEQ.sidebar-user-presets)))
+  (let ((s (selected-rack-preset-context)))
+    (if s s.user-presets browser.user-presets)))
 
 (def browser-loaded-preset ()
-  (let ((slot (selected-rack-preset-context)))
-    (if slot (get slot :loaded-preset) SEQ.sidebar-loaded-preset)))
+  (let ((s (selected-rack-preset-context)))
+    (if s s.preset browser.preset)))
 
 ;; The instrument whose presets the list shows, stamped on each row so a dragged
 ;; preset knows what to load; "" for a rack track's rack presets.
 (def browser-preset-instrument ()
-  (let ((slot (selected-rack-preset-context)))
-    (if slot
-      (get slot :instrument)
-      (if (eseq.track-collapse/custom-instrument? SEQ.sidebar-track-index)
-        SEQ.sidebar-instrument-name
+  (let ((s (selected-rack-preset-context)))
+    (if s
+      s.instrument
+      (if (instrument-type? browser.track "custom")
+        browser.instrument
         ""))))
 
 (def load-preset (name)
-  (let ((slot (selected-rack-preset-context)))
+  (let ((s (selected-rack-preset-context)))
     (host-command "load-instrument-preset"
-      (if slot
-        (dict :name name :track (get slot :track) :rack-slot (get slot :slot)
-          :instrument (get slot :instrument))
+      (if s
+        (dict :name name :track s.device.track.index :rack-slot s.index
+          :instrument s.instrument)
         (dict :name name))))
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Load preset: " name)))
@@ -885,7 +923,7 @@
       (text-input
         :key "search-input"
         :width :fill
-        :value search-filter
+        :value browser-view.search
         :placeholder (search-placeholder)
         :on-change (lambda (v) (set-search-filter v))
         :height 1.5
@@ -894,11 +932,11 @@
 
 (def instrument-header ()
   (box :key "instrument-header" :width :fill :height 1.1 :padding 0.15
-    (label (let ((slot (selected-rack-preset-context)))
-      (if slot (get slot :display-name)
-        (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)))
+    (label (let ((s (selected-rack-preset-context)))
+      (if s s.instrument-label
+        (if (= browser.instrument-label "") "Instrument" browser.instrument-label)))
       :font-size 12
-      :color :white
+      :color :fg
       :bg :transparent)))
 
 (def create-header ()
@@ -914,7 +952,7 @@
       (h-stack :width :fill :gap 0.5 :align :center
         (text-input
           :flex 1
-          :value search-filter
+          :value browser-view.search
           :placeholder "Search projects..."
           :on-change (lambda (v) (set-search-filter v))
           :height 1.5
@@ -927,7 +965,7 @@
             :bg :transparent)))
       (label
         (str "Current project: "
-          (if (= SEQ.current-project-name "") "none" SEQ.current-project-name))
+          (if (= project.name "") "none" project.name))
         :font-size 9
         :color :gray
         :bg :transparent))))
@@ -935,15 +973,14 @@
 ;; Saved-instrument tier filter: "" shows the shipped Factory tree, the
 ;; user's Library and every installed package; "factory", "user" or "pkg"
 ;; narrows to one. Single-select so a second click on the active chip clears
-;; it.
-(defstate instrument-origin-filter "")
+;; it (instrument-pick.origin).
 
 (def toggle-instrument-origin (origin)
-  (set! instrument-origin-filter
-    (if (= instrument-origin-filter origin) "" origin)))
+  (set! instrument-pick.origin
+    (if (= instrument-pick.origin origin) "" origin)))
 
 (def instrument-origin-chip (origin label)
-  (let ((selected (= instrument-origin-filter origin)))
+  (let ((selected (= instrument-pick.origin origin)))
     (button label
       :variant :ghost
       :background-color (if selected
@@ -960,17 +997,12 @@
 ;; Favorites: right-click an instrument row to heart it; the heart chip
 ;; narrows every section to hearted rows (it combines with the tier chips and
 ;; the search). The set lives in favorites.json, owned by the host
-;; (src/ui/instrument_favorites.rs); `instrument-favorites-epoch` only exists
-;; so a toggle re-renders the tree, which reads the file-backed set natively.
-(defstate instrument-favorites-only false)
-(defstate instrument-favorites-epoch 0)
-(def instrument-menu-open (state false))
-(def instrument-menu-col (state 0))
-(def instrument-menu-row (state 0))
-(def instrument-menu-item (state nil))
+;; (src/ui/instrument_favorites.rs); `instrument-pick.favorites-epoch` only
+;; exists so a toggle re-renders the tree, which reads the file-backed set
+;; natively.
 
 (def instrument-favorites-chip ()
-  (let ((selected instrument-favorites-only))
+  (let ((selected instrument-pick.favorites-only))
     (button "Favorites"
       :key "instrument-favorites-chip"
       :icon :heart
@@ -985,7 +1017,7 @@
       :height 1.0
       :font-size 12.0
       :corner-radius 24
-      :on-click |x y r| (set! instrument-favorites-only (not instrument-favorites-only)))))
+      :on-click |x y r| (set! instrument-pick.favorites-only (not instrument-pick.favorites-only)))))
 
 (def instrument-origin-filter-row ()
   (box :key "instrument-origin-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
@@ -996,17 +1028,17 @@
 
 (def create-items ()
   (do
-    instrument-favorites-epoch
+    instrument-pick.favorites-epoch
     ;; Bumped by the host when an instrument/effect folder changes on disk, so
     ;; a folder a coding agent just wrote lists without a restart.
-    SEQ.content-library-epoch
-    (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines
-      instrument-origin-filter instrument-favorites-only)))
+    browser.library-epoch
+    (seq-saved-instrument-tree browser-view.search browser.engines
+      instrument-pick.origin instrument-pick.favorites-only)))
 
 (def toggle-instrument-favorite (item)
   (let ((now (seq-toggle-favorite-instrument (get item :favorite-id))))
     (do
-      (set! instrument-favorites-epoch (+ instrument-favorites-epoch 1))
+      (set! instrument-pick.favorites-epoch (+ instrument-pick.favorites-epoch 1))
       (status (str (if now "Added to favorites: " "Removed from favorites: ")
                    (get item :label))))))
 
@@ -1016,30 +1048,25 @@
   (let ((item (get event :item)))
     (if (and (not (= item nil)) (= (get item :kind) "instrument") (get item :favorite-id))
       (do
-        (set! instrument-menu-item item)
-        (set! instrument-menu-col (get event :col))
-        (set! instrument-menu-row (get event :row))
-        (set! instrument-menu-open true))
+        (set! instrument-menu.item item)
+        (open-menu! instrument-menu event))
       nil)))
 
 (def instrument-context-menu ()
-  (context-menu :is-open instrument-menu-open
-    :anchor-col instrument-menu-col
-    :anchor-row instrument-menu-row
-    :on-close (lambda () (set! instrument-menu-open false))
+  (menu-of instrument-menu
     (menu-item
-      (if (and instrument-menu-item
-               (seq-favorite-instrument? (get instrument-menu-item :favorite-id)))
+      (if (and instrument-menu.item
+               (seq-favorite-instrument? (get instrument-menu.item :favorite-id)))
         "Remove from Favorites"
         "Add to Favorites")
       :key "instrument-menu-favorite"
       :on-select (lambda (event)
         (do
-          (set! instrument-menu-open false)
-          (toggle-instrument-favorite instrument-menu-item))))))
+          (set! instrument-menu.open false)
+          (toggle-instrument-favorite instrument-menu.item))))))
 
 (def enter-new-instrument-editor ()
-  (set! sbrowser-editor-name "")
+  (clear-editor-name!)
   (host-command "enter-new-instrument-editor" (dict)))
 
 (def add-builtin-instrument-track (name)
@@ -1053,17 +1080,17 @@
       (if (= name "rack")
         (add-rack-track)
         (if (= name "layer-rack")
-          (add-layer-rack-track)
+          (add-new-layer-rack-track)
           (status "Choose an instrument"))))))
 
 (def activate-builtin-instrument (name)
-  ;; With a drum rack selected SEQ.current-track is whatever was selected
+  ;; With a drum rack selected selection.track is whatever was selected
   ;; before the rack, so converting it in place would rewrite an unrelated
   ;; track behind the visible selection: add a new track instead.
   (if (and (= name "sampler")
            (< (selected-drum-rack-id) 0)
-           (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
-    (swap-track-builtin-instrument SEQ.current-track name false)
+           (replaceable? selection.track))
+    (swap-track-builtin-instrument (current-index) name false)
     (add-builtin-instrument-track name)))
 
 (def select-create-item (item)
@@ -1083,7 +1110,7 @@
 (def focus-create-item (item)
   (let ((kind (get item :kind)))
     (do
-      (set! selected-instrument-name
+      (set! instrument-pick.instrument
         (if (= kind "instrument") (get item :name) ""))
       (if (= kind "header")
         false
@@ -1094,12 +1121,12 @@
             (status "Choose an instrument")))))))
 
 (def fork-selected-instrument ()
-  (if (= selected-instrument-name "")
+  (if (= instrument-pick.instrument "")
     (status "Select a saved instrument to fork")
     (do
-      (set! sbrowser-editor-name "")
+      (clear-editor-name!)
       (host-command "enter-fork-instrument-editor"
-        (dict :source selected-instrument-name)))))
+        (dict :source instrument-pick.instrument)))))
 
 (def drop-instrument-on-folder (event)
   (let ((payload (get event :payload))
@@ -1120,10 +1147,8 @@
 ;; mean "Enter loads this". The load itself is announced by the app toast;
 ;; the row being compiled carries a spinner (:loading-value).
 (def current-track-instrument-id ()
-  (let ((ids SEQ.track-instrument-ids))
-    (if (and ids (< SEQ.current-track (len ids)))
-      (nth ids SEQ.current-track)
-      "")))
+  (let ((t selection.track))
+    (if t t.instrument-id "")))
 
 (def create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
@@ -1135,7 +1160,7 @@
           :width :fill
           :background-color :buffer-bg
           :items (create-items)
-          :expand-all (not (= search-filter ""))
+          :expand-all (not (= browser-view.search ""))
           :drag-type "instrument"
           :drop-types (list "instrument")
           :on-drop (lambda (event) (drop-instrument-on-folder event))
@@ -1143,7 +1168,7 @@
           :on-activate (lambda (item) (select-create-item item))
           :current-key "instrument-id"
           :current-value (current-track-instrument-id)
-          :loading-value sbrowser-loading-instrument-name)))))
+          :loading-value instrument-pick.loading)))))
 
 (def tab-items ()
   (list
@@ -1157,21 +1182,32 @@
     (dict :name "packages" :label "Packages" :icon :project)
     (dict :name "projects" :label "Projects" :icon :project)))
 
+;; A saved Sound or kit (preset-file) as a tree row; a dragged row carries
+;; its :path.
+(def preset-row (p)
+  (dict :kind p.type :icon p.icon :label p.name :name p.name :path p.path
+        :pads p.pads :author p.author :tags p.tags))
+
+;; The saved Sounds or kits whose name has the search text, as tree rows.
+(def preset-rows (files)
+  (let ((search (string-downcase browser-view.search)))
+    (map preset-row
+      (if (= search "")
+        files
+        (filter |p| (string-contains? (string-downcase p.name) search) files)))))
+
 (def visible-sounds ()
-  (if (= search-filter "") SEQ.sound-presets
-    (filter (lambda (item)
-      (string-contains? (string-downcase (get item :label)) (string-downcase search-filter)))
-      SEQ.sound-presets)))
+  (preset-rows browser.sound-presets))
 
 (def load-sound (item)
   (let ((rack-id (selected-drum-rack-id)))
     (if (>= rack-id 0)
       (host-command "audition-sound-on-rack"
         (dict :group-id rack-id :path (get item :path)))
-      (if (= SEQ.num-tracks 0)
+      (if (no-tracks?)
         (status "Create a track before loading a Sound")
         (host-command "load-sound-onto-track"
-          (dict :track SEQ.current-track :path (get item :path)))))))
+          (dict :track (current-index) :path (get item :path)))))))
 
 (def sounds-panel ()
   (let ((items (visible-sounds)))
@@ -1194,10 +1230,7 @@
 ;; with no rack selected it builds a new rack beside the existing tracks.
 
 (def visible-kits ()
-  (if (= search-filter "") SEQ.kit-presets
-    (filter (lambda (item)
-      (string-contains? (string-downcase (get item :label)) (string-downcase search-filter)))
-      SEQ.kit-presets)))
+  (preset-rows browser.kit-presets))
 
 (def load-kit (item)
   (let ((rack-id (selected-drum-rack-id)))
@@ -1205,57 +1238,56 @@
       (host-command "load-kit" (dict :path (get item :path) :group-id rack-id))
       (host-command "load-kit" (dict :path (get item :path))))))
 
-(def enter-kit-save (group-id name)
-  (set! search-filter "")
-  (set! mode "audition")
-  (set! preset-save-mode "")
-  (set! kit-save-group-id group-id)
-  (set! kit-save-name name)
+(def enter-kit-save (g)
+  (set! browser-view.search "")
+  (set! browser-view.mode "audition")
+  (set! preset-save.open false)
+  (set! kit-save.group-id g.gid)
+  (set! kit-save.name g.name)
   ;; Default: every scene this rack actually plays. A LEGACY rack (no bank)
   ;; answers true for every scene and the export drops the empty ones itself.
-  (set! kit-save-scenes
-    (filter (lambda (i) (eseq.drum-rack-v2/scene-plays-clip? group-id i))
-      (range 0 (len SEQ.scene-names))))
-  (set! kit-save-mode true)
+  (set! kit-save.scenes
+    (map (lambda (s) s.index)
+      (filter (lambda (s) (eseq.drum-rack-v2/scene-plays-clip? g s)) (scenes))))
+  (set! kit-save.open true)
   (select-tab "kits"))
 
 (def kit-scene-selected? (i)
-  (> (len (filter (lambda (s) (= s i)) kit-save-scenes)) 0))
+  (listed? i kit-save.scenes))
 
 (def kit-toggle-scene (i)
   (let ((now (if (kit-scene-selected? i)
-               (filter (lambda (s) (not (= s i))) kit-save-scenes)
-               (append kit-save-scenes (list i)))))
+               (list-remove kit-save.scenes i)
+               (append kit-save.scenes (list i)))))
     ;; Keep the selection in scene order: clip 1..n follow the project's scene
     ;; order, not the order the boxes were ticked.
-    (set! kit-save-scenes
-      (filter (lambda (i) (> (len (filter (lambda (s) (= s i)) now)) 0))
-        (range 0 (len SEQ.scene-names))))))
+    (set! kit-save.scenes
+      (filter (lambda (s) (listed? s now)) (range 0 (len (scenes)))))))
 
 (def exit-kit-save ()
-  (set! kit-save-mode false)
-  (set! kit-save-scenes (list))
-  (set! kit-save-group-id -1))
+  (set! kit-save.open false)
+  (set! kit-save.scenes (list))
+  (set! kit-save.group-id -1))
 
 (def save-kit ()
-  (if (= (len kit-save-name) 0)
+  (if (= (len kit-save.name) 0)
     (status "Enter a kit name")
     (do
       (host-command "save-rack-as-kit"
-        (dict :group-id kit-save-group-id
-              :name kit-save-name
-              :scenes kit-save-scenes
+        (dict :group-id kit-save.group-id
+              :name kit-save.name
+              :scenes kit-save.scenes
               :overwrite false))
       (exit-kit-save))))
 
 ;; One row per project scene. A ticked scene becomes a clip in the kit, named
 ;; after the scene; untick every scene to save the old kind of kit (pads and
 ;; bus chain only).
-(def kit-scene-row (i)
-  (h-stack :key (str "kit-save-scene-" i) :width :fill :gap 0.5 :align :center
-    (toggle :value (kit-scene-selected? i)
-      :on-change (lambda (value) (kit-toggle-scene i)))
-    (label (nth SEQ.scene-names i)
+(def kit-scene-row (sc)
+  (h-stack :key (str "kit-save-scene-" sc.index) :width :fill :gap 0.5 :align :center
+    (toggle :value (kit-scene-selected? sc.index)
+      :on-change (lambda (value) (kit-toggle-scene sc.index)))
+    (label sc.name
       :font-size 11 :color :white :bg :transparent :flex 1)))
 
 (def kit-scene-checklist ()
@@ -1265,7 +1297,7 @@
       :font-size 10 :color :dim :bg :transparent)
     (scroll :key "kit-save-scenes-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.15
-        (each (range 0 (len SEQ.scene-names)) |i| (kit-scene-row i))))))
+        (each (scenes) |sc| (kit-scene-row sc))))))
 
 (def kit-save-panel ()
   (box :key "kit-save-panel" :width :fill :padding 0.5 :flex 1
@@ -1282,9 +1314,9 @@
       (text-input
         :key "kit-save-name"
         :width :fill
-        :value kit-save-name
+        :value kit-save.name
         :placeholder "kit name..."
-        :on-change (lambda (value) (set! kit-save-name value))
+        :on-change (lambda (value) (set! kit-save.name value))
         :height 1.5
         :font-size 12)
       (kit-scene-checklist)
@@ -1296,7 +1328,7 @@
         :color :white))))
 
 (def kits-panel ()
-  (if kit-save-mode
+  (if kit-save.open
     (kit-save-panel)
     (let ((items (visible-kits)))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -1317,7 +1349,7 @@
     (let ((name (get (get event :payload) :label)))
       (if name
         (host-command "promote-preset-to-sound"
-          (dict :track SEQ.sidebar-track-index :name name))
+          (dict :track (current-index browser.track) :name name))
         (status "Drop a preset item onto Sounds")))
     false))
 
@@ -1326,7 +1358,7 @@
     :key (str "tab-" name)
     :variant :ghost
     :icon icon
-    :active (= sbrowser-tab name)
+    :active (= browser-view.tab name)
     :width :fill
     :height 1.45
     :font-size 11.5
@@ -1363,43 +1395,21 @@
                 (get tab :icon)))))))))
 
 (def sample-preview-strip ()
-  (if preview-buffer
-    (box :key "sample-preview-strip" :width :fill :height 1.5
-      :background-color :buffer-bg :corner-radius 8 :padding 0.03
-      (h-stack :width :fill :gap 0.35 :align :baseline
-        (box :key "sample-preview-headphone" :width 2.3 :height 2.2 :align :center
-          :on-click |x y r| (toggle-auto-preview)
-          (preview-headphone-icon :active (if auto-preview 1 0)))
-        (box :width 0 :flex 1 :height 2.3
-          (subtree :key (str "sample-preview-wave-" preview-path)
-            (waveform
-              :height 2
-              :header-height 0
-              :bg :buffer-bg
-              :waveform-color :dim
-              :grid-major-color :transparent
-              :grid-minor-color :transparent
-              :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-              :view-start 0
-              :view-duration (get preview-buffer :duration)
-              :selection-start 0
-              :selection-end (get preview-buffer :duration)
-              :playhead-time (bind-seq "browser-preview-playhead")
-              :buffer preview-buffer)))))
-    (box :height 0)))
+  (preview-strip sample-preview "sample-" :buffer-bg (box :height 0)
+    (lambda () (toggle-auto-preview))))
 
 (def samples-panel-with-activation (tree-key activation)
-  (let ((browser (seq-sample-browser search-filter selected-tags selected-origins)))
-    (let ((tags (get browser :tags))
-        (origins (get browser :origins))
-        (items (get browser :items)))
+  (let ((listing (seq-sample-browser browser-view.search sample-pick.tags sample-pick.origins)))
+    (let ((tags (get listing :tags))
+        (origins (get listing :origins))
+        (items (get listing :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
         ;; The filter chips size to their content but shrink (scrolling) once
         ;; the results list would drop below its :min-height.
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35 :shrink 1 :min-height 4
           (scroll :key "sample-tag-filter-scroll" :width :fill :fit-content true
             (v-stack :width :fill :gap 0.35
-              (if (or (> (len selected-tags) 0) (> (len selected-origins) 0))
+              (if (or (> (len sample-pick.tags) 0) (> (len sample-pick.origins) 0))
                 (button "Clear"
                   :variant :ghost
                   :width :fill
@@ -1421,7 +1431,7 @@
           :min-height (if (= (len items) 0) 3 10)
           (if (= (len items) 0)
             (empty-message
-              (if (and (= search-filter "") (= (len selected-tags) 0) (= (len selected-origins) 0))
+              (if (and (= browser-view.search "") (= (len sample-pick.tags) 0) (= (len sample-pick.origins) 0))
                 "Choose a tag or search samples."
                 "No samples found."))
             (scroll :key "samples-tab-scroll" :width :fill :flex 1
@@ -1473,7 +1483,7 @@
             (label "LEARN TARGET" :font-size 8 :color :gray :bg :transparent)
             (label (learn-target-display-name target-path target-name)
               :width :fill :font-size 11 :color :white :bg :transparent)
-            (if preview-buffer
+            (if sample-preview.buffer
               (waveform
                 :height 1.25
                 :header-height 0
@@ -1482,10 +1492,10 @@
                 :grid-major-color :transparent
                 :grid-minor-color :transparent
                 :view-start 0
-                :view-duration (get preview-buffer :duration)
+                :view-duration (get sample-preview.buffer :duration)
                 :selection-start 0
-                :selection-end (get preview-buffer :duration)
-                :buffer preview-buffer)
+                :selection-end (get sample-preview.buffer :duration)
+                :buffer sample-preview.buffer)
               (box :height 1.25)))
           (button "Change"
             :key "learn-target-change"
@@ -1506,7 +1516,7 @@
    (v-stack :key "instrument-tab-panel" :width :fill :gap 0.1 :flex 1
     (instruments-filter-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-     (if (and instrument-favorites-only (= (len items) 0))
+     (if (and instrument-pick.favorites-only (= (len items) 0))
       (empty-message "No favorites yet. Right-click an instrument to add it.")
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
         (tree
@@ -1515,7 +1525,7 @@
           :background-color :buffer-bg
           :items items
           :font-size 12
-          :expand-all (if instrument-favorites-only true (not (= search-filter "")))
+          :expand-all (if instrument-pick.favorites-only true (not (= browser-view.search "")))
           :focusable true
           :drag-type "instrument"
           :drop-types (list "instrument")
@@ -1526,7 +1536,7 @@
           :on-right-click (lambda (event) (open-instrument-menu event))
           :current-key "instrument-id"
           :current-value (current-track-instrument-id)
-          :loading-value sbrowser-loading-instrument-name)))))))
+          :loading-value instrument-pick.loading)))))))
 
 (def audio-fx-toolbar ()
   (box :width :fill :padding 0.25
@@ -1539,9 +1549,9 @@
         :on-click |x y r| (enter-new-effect-editor)
         :color :white)
       (button
-        (if (= selected-audio-effect-name "")
+        (if (= instrument-pick.audio-effect "")
           "Fork…"
-          (str "Fork " selected-audio-effect-name))
+          (str "Fork " instrument-pick.audio-effect))
         :variant :secondary
         :flex 1
         :height 1.3
@@ -1550,7 +1560,7 @@
         :color :white))))
 
 (def audio-fx-panel ()
-  (let ((items (do SEQ.content-library-epoch (seq-audio-effect-tree search-filter))))
+  (let ((items (do browser.library-epoch (seq-audio-effect-tree browser-view.search))))
     (v-stack :key "audio-fx-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
@@ -1561,7 +1571,7 @@
               :width :fill
               :background-color :buffer-bg
               :items items
-              :expand-all (not (= search-filter ""))
+              :expand-all (not (= browser-view.search ""))
               :font-size 12
               :focusable true
               :drag-type "audio-effect"
@@ -1571,7 +1581,7 @@
               :on-modified-activate (lambda (item) (activate-audio-effect item)))))))))
 
 (def midi-fx-panel ()
-  (let ((items (seq-midi-effect-tree search-filter)))
+  (let ((items (seq-midi-effect-tree browser-view.search)))
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (if (= (len items) 0)
         (empty-message "No MIDI effects found.")
@@ -1582,7 +1592,7 @@
             :background-color :buffer-bg
             :items items
             :font-size 12
-            :expand-all (not (= search-filter ""))
+            :expand-all (not (= browser-view.search ""))
             :focusable true
             :drag-type "midi-effect"
             :on-select (lambda (item) (select-midi-effect item))
@@ -1593,8 +1603,8 @@
 (def presets-tab-panel ()
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1
     (instrument-header)
-    (if (= SEQ.sidebar-kind "instrument")
-      (let ((items (seq-preset-tree (browser-preset-items) search-filter
+    (if (= browser.instrument-kind "instrument")
+      (let ((items (seq-preset-tree (browser-preset-items) browser-view.search
                      (browser-preset-instrument) (browser-user-preset-items))))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
           (if (= (len items) 0)
@@ -1703,10 +1713,8 @@
              (not (= (get item :kind) "header"))
              (not (= (get item :kind) "folder")))
       (do
-        (set! package-menu-item item)
-        (set! package-menu-col (get event :col))
-        (set! package-menu-row (get event :row))
-        (set! package-menu-open true))
+        (set! package-menu.item item)
+        (open-menu! package-menu event))
       nil)))
 
 ;; `icon` is a `button-icon` name or nil; `group` sections the menu, and
@@ -1715,7 +1723,7 @@
   (dict :id id :key key :label label :icon icon :group group))
 
 (def rack-groups ()
-  (filter (lambda (group) (get group :rack)) (or SEQ.groups (list))))
+  (filter |g| g.rack (groups)))
 
 ;; Instance row: Open, Rename, Duplicate, Move to <rack> per other rack /
 ;; Give back to project, Delete. A placeholder (kind not loaded) has no view
@@ -1731,14 +1739,14 @@
                 (package-action :duplicate "duplicate" "Duplicate" nil :edit))
           (list (package-action :rename "rename" "Rename" :pencil :edit)))
         (append
-          (map (lambda (group)
+          (map (lambda (g)
                  (dict :id :move-to-rack
-                       :key (str "move-" (get group :id))
-                       :group-id (get group :id)
-                       :label (str "Move to " (get group :name))
+                       :key (str "move-" g.gid)
+                       :group-id g.gid
+                       :label (str "Move to " g.name)
                        :icon nil
                        :group :move))
-            (filter (lambda (group) (not (= (get group :id) owner-rack))) (rack-groups)))
+            (filter |g| (not (= g.gid owner-rack)) (rack-groups)))
           (if (= owner-rack nil)
             (list)
             (list (package-action :give-back "give-back" "Give back to project" nil :move)))))
@@ -1778,7 +1786,7 @@
       (list))))
 
 (def package-menu-actions ()
-  (let ((item package-menu-item))
+  (let ((item package-menu.item))
     (if (= item nil)
       (list)
       (if (instance-item? item)
@@ -1787,21 +1795,21 @@
 
 (def begin-instance-rename (item)
   (do
-    (set! instance-rename-draft (get item :label))
-    (set! instance-rename-id (get item :instance-id))))
+    (set! instance-rename.draft (get item :label))
+    (set! instance-rename.target (get item :instance-id))))
 
 (def cancel-instance-rename ()
-  (set! instance-rename-id -1))
+  (set! instance-rename.target -1))
 
 (def commit-instance-rename ()
-  (if (< instance-rename-id 0)
+  (if (< instance-rename.target 0)
     nil
     (do
-      (if (> (len instance-rename-draft) 0)
+      (if (> (len instance-rename.draft) 0)
         (host-command "instance-rename"
-          (dict :id instance-rename-id :label instance-rename-draft))
+          (dict :id instance-rename.target :label instance-rename.draft))
         nil)
-      (set! instance-rename-id -1))))
+      (set! instance-rename.target -1))))
 
 (def instance-rename-panel ()
   (box :key "instance-rename-panel" :width :fill :padding 0.25
@@ -1809,11 +1817,11 @@
       (text-input
         :key "instance-rename-name"
         :width :fill
-        :value instance-rename-draft
+        :value instance-rename.draft
         :placeholder "instance name..."
         :auto-focus true
         :select-all-on-focus true
-        :on-change (lambda (value) (set! instance-rename-draft value))
+        :on-change (lambda (value) (set! instance-rename.draft value))
         :on-submit (lambda () (commit-instance-rename))
         :on-cancel (lambda () (cancel-instance-rename))
         :height 1.5
@@ -1870,9 +1878,9 @@
                   nil)))))))))
 
 (def select-package-menu-action (action)
-  (let ((item package-menu-item))
+  (let ((item package-menu.item))
     (do
-      (set! package-menu-open false)
+      (set! package-menu.open false)
       (if (instance-item? item)
         (select-instance-menu-action item action)
         (select-module-menu-action item action)))))
@@ -1890,11 +1898,8 @@
     actions))
 
 (def package-context-menu ()
-  (context-menu :is-open package-menu-open
-    :anchor-col package-menu-col
-    :anchor-row package-menu-row
-    :on-close (lambda () (set! package-menu-open false))
-    (each (package-menu-rows (package-menu-actions)) |action|
+  (apply menu-of package-menu
+    (each (package-menu-rows (if package-menu.open (package-menu-actions) (list))) |action|
       (if (get action :separator?)
         (menu-separator :key (str "package-menu-sep-" (get action :key)))
         (menu-item (get action :label)
@@ -1904,18 +1909,18 @@
 
 (def begin-new-package ()
   (do
-    (set! package-new-name "")
-    (set! package-new-mode true)))
+    (set! package-draft.name "")
+    (set! package-draft.open true)))
 
 (def cancel-new-package ()
-  (set! package-new-mode false))
+  (set! package-draft.open false))
 
 (def create-new-package ()
-  (if (= (len package-new-name) 0)
+  (if (= (len package-draft.name) 0)
     (status "Type a package name, for example euclid or my.euclid.sparse")
     (do
-      (host-command "packages-create" (dict :name package-new-name))
-      (set! package-new-mode false))))
+      (host-command "packages-create" (dict :name package-draft.name))
+      (set! package-draft.open false))))
 
 (def package-new-panel ()
   (box :key "package-new-panel" :width :fill :padding 0.25
@@ -1923,10 +1928,10 @@
       (text-input
         :key "package-new-name"
         :width :fill
-        :value package-new-name
+        :value package-draft.name
         :placeholder "name (euclid or my.euclid.sparse)..."
         :auto-focus true
-        :on-change (lambda (value) (set! package-new-name value))
+        :on-change (lambda (value) (set! package-draft.name value))
         :on-submit (lambda () (create-new-package))
         :on-cancel (lambda () (cancel-new-package))
         :height 1.5
@@ -1952,12 +1957,12 @@
 ;; check / bookmark glyphs read those files back. The C-x p text view
 ;; drives the same host commands.
 (def packages-tab-panel ()
-  (let ((items (seq-package-tree search-filter (or SEQ.instances (list)))))
+  (let ((items (seq-package-tree browser-view.search project.instances)))
     (v-stack :key "packages-tab-panel" :width :fill :gap 0.5 :flex 1
-      (if package-new-mode
+      (if package-draft.open
         (package-new-panel)
         (box :width :fill :height 0))
-      (if (>= instance-rename-id 0)
+      (if (>= instance-rename.target 0)
         (instance-rename-panel)
         (box :width :fill :height 0))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -1970,7 +1975,7 @@
               :background-color :buffer-bg
               :items items
               :font-size 12
-              :expand-all (not (= search-filter ""))
+              :expand-all (not (= browser-view.search ""))
               :focusable true
               ;; A module row with instances is a parent; its double-click
               ;; still reaches `activate-package-item` (spec §8.3).
@@ -1981,7 +1986,7 @@
               :on-right-click (lambda (event) (open-package-menu event)))))))))
 
 (def projects-tab-panel ()
-  (let ((items (seq-project-tree search-filter)))
+  (let ((items (seq-project-tree browser-view.search)))
     (v-stack :key "projects-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :padding 0.25
         (h-stack :width :fill :gap 0.5 :align :center
@@ -1996,7 +2001,7 @@
       (box :width :fill :padding 0.25
         (label "Projects"
           :font-size 10
-          :color :gray
+          :color :dimmer
           :bg :transparent))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
@@ -2008,21 +2013,21 @@
               :background-color :buffer-bg
               :items items
               :font-size 12
-              :selected-label SEQ.current-p0roject-name
+              :selected-label project.name
               :expand-all false
               :focusable true
               :on-select (lambda (item) (load-project (get item :label)))
               :on-activate (lambda (item) (load-project (get item :label))))))))))
 
 (def active-tab-panel ()
-  (if (= sbrowser-tab "samples") (samples-panel)
-    (if (= sbrowser-tab "sounds") (sounds-panel)
-    (if (= sbrowser-tab "kits") (kits-panel)
-    (if (= sbrowser-tab "instruments") (instruments-panel)
-      (if (= sbrowser-tab "audio-fx") (audio-fx-panel)
-        (if (= sbrowser-tab "midi-fx") (midi-fx-panel)
-          (if (= sbrowser-tab "presets") (presets-tab-panel)
-            (if (= sbrowser-tab "packages") (packages-tab-panel)
+  (if (= browser-view.tab "samples") (samples-panel)
+    (if (= browser-view.tab "sounds") (sounds-panel)
+    (if (= browser-view.tab "kits") (kits-panel)
+    (if (= browser-view.tab "instruments") (instruments-panel)
+      (if (= browser-view.tab "audio-fx") (audio-fx-panel)
+        (if (= browser-view.tab "midi-fx") (midi-fx-panel)
+          (if (= browser-view.tab "presets") (presets-tab-panel)
+            (if (= browser-view.tab "packages") (packages-tab-panel)
               (projects-tab-panel))))))))))
 
 (def tabbed-content ()
@@ -2049,9 +2054,9 @@
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
         :flex 1
-        :value preset-filter
+        :value browser-view.preset-search
         :placeholder "Search presets..."
-        :on-change (lambda (v) (set! preset-filter v))
+        :on-change (lambda (v) (set! browser-view.preset-search v))
         :height 1.5
         :font-size 12
         (mag-glass)))))
@@ -2066,7 +2071,7 @@
           :key "preset-list-tree"
           :width :fill
           :background-color :buffer-bg
-          :items (seq-preset-tree (browser-preset-items) preset-filter
+          :items (seq-preset-tree (browser-preset-items) browser-view.preset-search
                    (browser-preset-instrument))
           :current-key "label"
           :current-value (browser-loaded-preset)
@@ -2076,7 +2081,7 @@
           :on-activate (lambda (item) (load-preset (get item :label))))))))
 
 (def projects-panel ()
-  (let ((items (seq-project-tree search-filter)))
+  (let ((items (seq-project-tree browser-view.search)))
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (if (= (len items) 0)
         (box :padding 1
@@ -2090,7 +2095,7 @@
             :width :fill
             :background-color :buffer-bg
             :items items
-            :selected-label SEQ.current-project-name
+            :selected-label project.name
             :expand-all false
             :on-select (lambda (item) (load-project (get item :label)))
             :on-activate (lambda (item) (load-project (get item :label)))))))))
@@ -2098,14 +2103,14 @@
 ;; ── Preset save sidebar ──
 
 (def preset-save-mode? ()
-  (= preset-save-mode "save-preset"))
+  preset-save.open)
 
 (def enter-preset-save ()
-  (set! preset-name "")
-  (set! preset-save-mode "save-preset"))
+  (set! preset-save.name "")
+  (set! preset-save.open true))
 
 (def exit-preset-save ()
-  (set! preset-save-mode ""))
+  (set! preset-save.open false))
 
 (def preset-save-header ()
   (box :width :fill :padding 0.55
@@ -2123,9 +2128,9 @@
             :bg :transparent)))
       (text-input
         :width :fill
-        :value preset-name
+        :value preset-save.name
         :placeholder "preset name..."
-        :on-change (lambda (v) (set! preset-name v))
+        :on-change (lambda (v) (set! preset-save.name v))
         :height 1.5
         :font-size 12)
       ;; Save as New button
@@ -2136,12 +2141,12 @@
         :font-size 11
         :on-click |x y r|
           (do
-            (host-command "save-preset" (dict :name preset-name :overwrite false))
+            (host-command "save-preset" (dict :name preset-save.name :overwrite false))
             (exit-preset-save))
         :color :white)
       ;; Overwrite button (only if a preset is currently loaded)
-      (if (not (= SEQ.sidebar-loaded-preset ""))
-        (button (str "Overwrite: " SEQ.sidebar-loaded-preset)
+      (if (not (= browser.preset ""))
+        (button (str "Overwrite: " browser.preset)
           :variant :secondary
           :width 16
           :height 1.2
@@ -2159,11 +2164,11 @@
 ;; ── Editor sidebar panels ──
 
 (def editor-macro-action? ()
-  (or (= SEQ.editor-active-macro-action "save-to-library")
-      (= SEQ.editor-active-macro-action "fork")))
+  (or (= editor.active-macro-action "save-to-library")
+      (= editor.active-macro-action "fork")))
 
 (def editor-macro-action-label ()
-  (if (= SEQ.editor-active-macro-action "fork")
+  (if (= editor.active-macro-action "fork")
     "Fork Macro"
     "Save Macro to Library"))
 
@@ -2173,8 +2178,8 @@
 ;; else in that stack.
 (def editor-fork-available? ()
   (and (not (editor-macro-action?))
-       (or (= SEQ.editor-mode "edit-instrument")
-           (= SEQ.editor-mode "edit-effect"))))
+       (or (= editor.mode "edit-instrument")
+           (= editor.mode "edit-effect"))))
 
 (def editor-header ()
   (box :width :fill :padding 0.25 :height :fill
@@ -2182,12 +2187,12 @@
       ;(h-stack :width :fill :gap 0.5 :align :center
       ;(label
       ;  (if (editor-macro-action?) "Defmacro"
-      ;    (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-      ;      (if (= SEQ.editor-mode "edit-instrument")
-      ;        (if (= SEQ.editor-surface "code") "Edit Instrument (code)" "Edit Instrument")
-      ;        (if (= SEQ.editor-mode "new-effect") "New Effect"
-      ;          (if (= SEQ.editor-mode "edit-effect")
-      ;            (if (= SEQ.editor-surface "code") "Edit Effect (code)" "Edit Effect")
+      ;    (if (= editor.mode "new-instrument") "New Instrument"
+      ;      (if (= editor.mode "edit-instrument")
+      ;        (if (= editor.surface "code") "Edit Instrument (code)" "Edit Instrument")
+      ;        (if (= editor.mode "new-effect") "New Effect"
+      ;          (if (= editor.mode "edit-effect")
+      ;            (if (= editor.surface "code") "Edit Effect (code)" "Edit Effect")
       ;            "Editor")))))
       ;  :font-size 12
       ;  :color :white
@@ -2199,7 +2204,7 @@
             :font-size 9
             :color :gray
             :bg :transparent)
-          (label SEQ.editor-active-macro-name
+          (label editor.active-macro
             :font-size 11
             :color :white
             :bg :transparent)
@@ -2211,47 +2216,47 @@
             :font-size 11
             :color :white
             :bg :transparent))
-        (if (= SEQ.editor-mode "new-instrument")
+        (if (= editor.mode "new-instrument")
           (v-stack :width :fill :height :fill :gap 0.35
             
             (h-stack :width :fill :gap 0.35
               (button "Instrument"
-                :background-color (if (= SEQ.editor-instrument-run-mode "instrument") :mixer-strip-bg :transparent)
+                :background-color (if (= editor.run-mode "instrument") :mixer-strip-bg :transparent)
                 :border-color :black
                 :width 8.5
                 :height 1.2
                 :font-size 11
                 :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-                :color (if (= SEQ.editor-instrument-run-mode "instrument") :white :dimmer))
+                (set! editor.run-mode "instrument")
+                :color (if (= editor.run-mode "instrument") :white :dimmer))
               (button "Free Patch"
-                :background-color (if (= SEQ.editor-instrument-run-mode "free_patch") :mixer-strip-bg :transparent)
+                :background-color (if (= editor.run-mode "free_patch") :mixer-strip-bg :transparent)
                 :border-color :black
                 :border-width 1
                 :width 8.5
                 :height 1.2
                 :font-size 11
                 :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-                :color (if (= SEQ.editor-instrument-run-mode "free_patch") :white :dim)))
+                (set! editor.run-mode "free_patch")
+                :color (if (= editor.run-mode "free_patch") :white :dim)))
             (label "Save as"
               :font-size 12
               :color :gray
               :bg :transparent)
             (text-input
               :width :fill
-              :value sbrowser-editor-name
+              :value editor-draft.name
               :placeholder "instrument-name"
-              :on-change (lambda (v) (set! sbrowser-editor-name v))
+              :on-change (lambda (v) (set! editor-draft.name v))
               :height 1.5
               :font-size 12))
-          (if (= SEQ.editor-mode "new-effect")
+          (if (= editor.mode "new-effect")
             (v-stack :width :fill :gap 0.35
               (label "Draft patch"
                 :font-size 9
                 :color :gray
                 :bg :transparent)
-              (label (str "track " (+ SEQ.current-track 1))
+              (label (str "track " (+ (current-index) 1))
                 :font-size 11
                 :color :white
                 :bg :transparent)
@@ -2261,29 +2266,29 @@
                 :bg :transparent)
               (text-input
                 :width :fill
-                :value sbrowser-editor-name
+                :value editor-draft.name
                 :placeholder "effect-name"
-                :on-change (lambda (v) (set! sbrowser-editor-name v))
+                :on-change (lambda (v) (set! editor-draft.name v))
                 :height 1.5
                 :font-size 12))
             ;; For edit modes, show the file name
-            (label SEQ.editor-buffer-name
+            (label editor.buffer
               :font-size 10
               :color :gray
               :bg :transparent))))
       ;; Status display
-      (if SEQ.editor-canceling
+      (if editor.canceling
         (editor-status-row "Canceling..." :gray)
-        (if (= SEQ.editor-error "Preview compiling...")
-          (editor-status-row SEQ.editor-error :gray)
-          (if (not (= SEQ.editor-error ""))
-            (label SEQ.editor-error
+        (if (= editor.error "Preview compiling...")
+          (editor-status-row editor.error :gray)
+          (if (not (= editor.error ""))
+            (label editor.error
               :font-size 9
               :color :red
               :bg :transparent)
             (box))))
       ;; Eval button (code editor only): compile + hot-swap the buffer
-      (if (= SEQ.editor-surface "code")
+      (if (= editor.surface "code")
         (button "Eval (C-c C-c)"
           :variant :secondary
           :width 13
@@ -2294,8 +2299,8 @@
           :color :white)
         (box))
       ;; Open as patch (code editor, edit-existing): promote to the patch editor
-      (if (and (= SEQ.editor-surface "code")
-          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+      (if (and (= editor.surface "code")
+          (or (= editor.mode "edit-instrument") (= editor.mode "edit-effect")))
         (button "Open as patch"
           :variant :secondary
           :width 13
@@ -2306,8 +2311,8 @@
           :color :white)
         (box))
       ;; Eject to code (patch editor, edit-existing only)
-      (if (and (= SEQ.editor-surface "patch")
-          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+      (if (and (= editor.surface "patch")
+          (or (= editor.mode "edit-instrument") (= editor.mode "edit-effect")))
           (button "View code"
             :variant :ghost
             :corner-radius 16
@@ -2325,20 +2330,20 @@
           (box :flex 1 :height 1)
           (box :bg :dark-gray :width 6 :height 1.5 :align :center
             :on-click |x y r|
-            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
+            (if editor.canceling nil (host-command "cancel-editor" (dict)))
             (button "Cancel"
               :variant :secondary
               :font-size 13
               :width 8
-              :color (if SEQ.editor-canceling :white :white)
+              :color (if editor.canceling :white :white)
               ))          
           (box :width 0.7 :height 1)
           (button
             (if (editor-macro-action?)
               (editor-macro-action-label)
-              (if (= SEQ.editor-mode "new-instrument")
+              (if (= editor.mode "new-instrument")
                 "Finalize"
-                (if (= SEQ.editor-mode "new-effect")
+                (if (= editor.mode "new-effect")
                   "Save & Add"
                   "Save")))
             :variant :primary
@@ -2347,12 +2352,12 @@
             :on-click |x y r|
             (if (editor-macro-action?)
               (host-command "save-active-editor-macro" (dict))
-              (if (= SEQ.editor-mode "new-instrument")
-                (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
-                (if (= SEQ.editor-mode "edit-instrument")
-                  (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
-                  (if (= SEQ.editor-mode "new-effect")
-                    (host-command "save-new-effect" (dict :name sbrowser-editor-name))
+              (if (= editor.mode "new-instrument")
+                (host-command "save-new-instrument" (dict :name editor-draft.name))
+                (if (= editor.mode "edit-instrument")
+                  (host-command "update-instrument" (dict :name browser.instrument))
+                  (if (= editor.mode "new-effect")
+                    (host-command "save-new-effect" (dict :name editor-draft.name))
                     (host-command "update-effect" (dict))))))
             :color :browser-primary-fg)
           ;; Fork sits next to the clobbering path on purpose: in edit modes the
@@ -2408,9 +2413,9 @@
 
 (def sample-browser-here ()
   (set! source-buffer (current-buffer-name))
-  (set! search-filter "")
-  (set! mode "audition")
-  (set! sbrowser-tab (if (= SEQ.sidebar-kind "instrument") "presets" "samples"))
+  (set! browser-view.search "")
+  (set! browser-view.mode "audition")
+  (set! browser-view.tab (if (= browser.instrument-kind "instrument") "presets" "samples"))
   (switch-to-buffer "*samples*"))
 
 (bind-key "C-x s" "sample-browser-here")

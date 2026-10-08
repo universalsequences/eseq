@@ -284,7 +284,7 @@ pub(super) fn attribute_value_items<'a>(
 
 /// Joins tokens with spaces, except before a closing bracket: `]` lexes as its own token
 /// (a number stops at the first non-digit), and a naive join renders `[3 3 ]`.
-fn join_formatted(values: &[Expression], format: fn(&Expression) -> String) -> String {
+pub(super) fn join_formatted(values: &[Expression], format: fn(&Expression) -> String) -> String {
     let mut out = String::new();
     for value in values {
         let text = format(value);
@@ -596,11 +596,20 @@ pub(super) fn label_attributes_suffix(label: &str) -> String {
 
 /// The ` @key value...` runs of `items`, rendered back to source text.
 pub(super) fn attributes_suffix(items: &[Expression]) -> String {
+    attributes_suffix_except(items, &[])
+}
+
+/// [`attributes_suffix`] without the runs whose key is in `skip`.
+pub(super) fn attributes_suffix_except(items: &[Expression], skip: &[&str]) -> String {
     let mut suffix = String::new();
     let mut idx = 1;
     while idx < items.len() {
         if is_attribute_key(&items[idx]) {
             let span = attribute_span_len(items, idx);
+            if matches!(&items[idx], Expression::Symbol(key) if skip.contains(&key.as_str())) {
+                idx += span;
+                continue;
+            }
             suffix.push(' ');
             suffix.push_str(&join_formatted(
                 &items[idx..items.len().min(idx + span)],

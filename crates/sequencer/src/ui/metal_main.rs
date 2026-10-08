@@ -6,6 +6,7 @@ mod constants;
 mod custom_ui;
 mod editor_setup;
 mod host_commands;
+mod host_kinds;
 mod input;
 mod instrument_favorites;
 mod lisp_hot_reload;
@@ -13,8 +14,10 @@ mod live_audio_analyzer;
 mod natives;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod noui;
 mod param_words;
 mod piano_roll;
+mod presented;
 mod patch_learn;
 mod profile;
 mod ui_benchmark;
@@ -38,6 +41,11 @@ use lisp_hot_reload::*;
 use live_audio_analyzer::*;
 use natives::*;
 use piano_roll::*;
+use presented::{
+    editor_error, present_agent, present_editor, present_editor_closed, present_editor_open,
+    present_editor_sidebar, present_export, present_learn, present_learn_error, present_retro,
+    present_settings,
+};
 use patch_learn::*;
 use profile::*;
 use roll_record::*;
@@ -80,7 +88,7 @@ use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
     MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
-    TrackId, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    TrackId, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::app;
 use std::sync::atomic::AtomicBool;
@@ -117,6 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return sequencer::bounce::command::run(std::env::args().skip(2));
     }
     let capture_args = capture::CaptureArgs::parse_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // Read before `enter_sequencer_dir` replaces the shell's cwd.
+    let noui_args = noui::NoUiArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;
     // Checkout-only startup work: the chdir into the crate directory and the
@@ -208,11 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // FX/instrument panel refresh counter for changes that affect *fx* but
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
-    // Value-only fx refresh counter for scene/clip launches: rides the tick's
-    // in-place value-patch path instead of a full *fx* re-eval.
-    let fx_value_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     // When set, pagination stays on the user-selected page until the cooldown expires.
@@ -243,7 +250,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = init_runtime(
         &app,
         state.clone(),
-        &track_names,
         track_pan_ids.clone(),
         track_collapsed.clone(),
         bus_state.clone(),
@@ -263,7 +269,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_epoch.clone(),
         fx_epoch.clone(),
         ui_invalidations.clone(),
-        expanded_step_projection.clone(),
         selected_neural_neurons.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
@@ -275,7 +280,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (bead eseq-jo7.21).
     app.editor.ui_process_authoring = Some(process_authoring);
 
-    let (editor, backend) = create_editor_and_backend(runtime, &app)?;
+    let ui_root = if noui_args.is_some() { UiRoot::Bare } else { UiRoot::Distro };
+    let (mut editor, backend) = create_editor_and_backend(runtime, &app, ui_root)?;
+    if let Some(args) = &noui_args {
+        noui::enter_session(&mut editor, args)?;
+    }
 
     // Cheaply clonable mirrors of the handles init_runtime captured, bundled
     // for the extracted host-command dispatcher.
@@ -292,9 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         step_clipboard: step_clipboard.clone(),
         ui_epoch: ui_epoch.clone(),
         fx_epoch: fx_epoch.clone(),
-        fx_value_epoch: fx_value_epoch.clone(),
         ui_invalidations: ui_invalidations.clone(),
-        expanded_step_projection: expanded_step_projection.clone(),
         active_delete_target: active_delete_target.clone(),
         active_delete_target_version: active_delete_target_version.clone(),
         auto_follow_override_until: auto_follow_override_until.clone(),

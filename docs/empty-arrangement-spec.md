@@ -1,5 +1,7 @@
 # Empty Arrangements by Default — No "No Song" State
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: BUILT (rev 2, 2026-08-02; decisions in §5 confirmed; implementation
 notes in §12 record where the build refined rev 1)
 Builds on: docs/arrangement-lane-model-spec.md (lane model, clips-are-explicit
@@ -230,7 +232,7 @@ staging), but:
   lane renders blank there. Row/status readouts show no scene name for
   `scene: None` rows.
 - `arrangement-content-length-min` (ui/arrangement.lisp:346) currently
-  floors on `SEQ.scene-spans`; make it also consider clip extents and the
+  floors on `SEQ.scene-spans` (now `song.spans`); make it also consider clip extents and the
   stored `end_beat` so an empty arrangement still draws its default length.
 - def-song is unchanged (`lower_rows_to_arrangement` still requires ≥ 1
   row — a def-song with no rows stays an error; "empty" is reached by

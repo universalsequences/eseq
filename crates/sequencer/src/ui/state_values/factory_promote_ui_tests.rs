@@ -31,13 +31,17 @@ fn commit_payload(editor: &mut Editor) -> std::collections::HashMap<String, Valu
     map.iter().map(|(key, cell)| (key.clone(), cell.borrow().clone())).collect()
 }
 
+/// A field of the modal's own state (`eseq.factory-promote/promote-form`).
+fn form(field: &str) -> String {
+    format!("(let ((f eseq.factory-promote/promote-form)) f.{field})")
+}
+
 /// The M-x commands open through Rust; the modal lists the skipped
 /// dependencies, commits the typed name, and turns Promote into Replace once
 /// Rust reports the name as taken.
 #[test]
 fn promote_modal_lists_skips_and_commits_the_name() {
     let mut editor = full_grid_editor_for_scroll_tests();
-    crate::host_commands::factory_promote::register_state(editor.runtime_mut());
     eval(&mut editor, "(set-layout (list :buf \"*sequencer*\" :hide-status true))");
     let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
     editor.set_active_buffer(id);
@@ -55,17 +59,17 @@ fn promote_modal_lists_skips_and_commits_the_name() {
         assert!(sent, "{command} sends factory-promote-open :kind {kind}");
     }
 
-    // What the host publishes on open.
-    let rt = editor.runtime_mut();
-    rt.set_reactive("FACTORY_PROMOTE", "kind", Value::String("kit".into()));
-    rt.set_reactive("FACTORY_PROMOTE", "destination", Value::String("content/kits/".into()));
-    rt.set_reactive(
-        "FACTORY_PROMOTE",
+    // What the host kinds push on open (the presented promotion).
+    set_kind_field(&mut editor, "factory-promote", "target", Value::String("kit".into()));
+    set_kind_field(&mut editor, "factory-promote", "destination", Value::String("content/kits/".into()));
+    set_kind_field(
+        &mut editor,
+        "factory-promote",
         "skipped",
         build_string_list(&["pad 'Kick': skipped slot 1 (instrument 'user:DOOM Kick' is not factory)".into()]),
     );
     eval(&mut editor, "(eseq.factory-promote/open \"Chicken Kit\")");
-    assert_eq!(eval(&mut editor, "eseq.factory-promote/open?"), Value::Bool(true));
+    assert_eq!(eval(&mut editor, &form("open")), Value::Bool(true));
 
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -76,26 +80,22 @@ fn promote_modal_lists_skips_and_commits_the_name() {
         assert_finite_nonzero_rect(node, key);
     }
 
-    eval(&mut editor, "(set! eseq.factory-promote/name \"Chicken Kit 2\")");
+    eval(&mut editor, "(let ((f eseq.factory-promote/promote-form)) (set! f.name \"Chicken Kit 2\"))");
     let payload = commit_payload(&mut editor);
     assert_eq!(payload["name"], Value::String("Chicken Kit 2".into()));
     assert_eq!(payload["overwrite"], Value::Bool(false));
 
     // Rust reported the name taken: the next Promote replaces.
-    editor
-        .runtime_mut()
-        .set_reactive("FACTORY_PROMOTE", "taken", Value::String("chicken kit 2".into()));
+    set_kind_field(&mut editor, "factory-promote", "taken", Value::String("chicken kit 2".into()));
     assert_eq!(commit_payload(&mut editor)["overwrite"], Value::Bool(true));
 
     // A blocked promotion sends nothing.
-    editor
-        .runtime_mut()
-        .set_reactive("FACTORY_PROMOTE", "blocking", Value::String("not factory".into()));
+    set_kind_field(&mut editor, "factory-promote", "blocking", Value::String("not factory".into()));
     editor.drain_host_commands();
     eval(&mut editor, "(eseq.factory-promote/commit)");
     assert!(editor.drain_host_commands().is_empty());
 
     eval(&mut editor, "(eseq.factory-promote/close)");
-    assert_eq!(eval(&mut editor, "eseq.factory-promote/open?"), Value::Bool(false));
+    assert_eq!(eval(&mut editor, &form("open")), Value::Bool(false));
     eseqlisp::widget_render::clear_overlay();
 }

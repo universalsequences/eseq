@@ -325,6 +325,7 @@ mod tests {
         unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
         engine.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
             snapshot: (*engine.state.latest_scheduler_snapshot()).clone(), steps: 16,
+            span: (0.0, 2.0),
         });
         let generation = engine.state.note_audition.generation();
         for (pool, node, scope) in [(0, &preview, generation), (1, &live, 0)] {

@@ -1019,6 +1019,7 @@ impl WidgetDefinition for MatrixWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if get_bool_prop(&node.props, "toggle", false) {
             return None;
@@ -1623,7 +1624,8 @@ mod tests {
             matrix_value(vec![vec![0.3, 1.7], vec![0.0, 2.0]]),
         );
         let node = matrix_node(props);
-        let Some(WidgetEvent::Custom(value)) = MATRIX_WIDGET.double_click_event(&node, 7.0, 7.0)
+        let Some(WidgetEvent::Custom(value)) =
+            MATRIX_WIDGET.double_click_event(&node, 7.0, 7.0, KeyModifiers::empty())
         else {
             panic!("double-click dispatches a cell change");
         };
@@ -1638,7 +1640,8 @@ mod tests {
         props.insert("on-cell-change".to_string(), Value::Bool(true));
         props.insert("value".to_string(), matrix_value(vec![vec![1.5]]));
         let node = matrix_node(props);
-        let Some(WidgetEvent::Custom(value)) = MATRIX_WIDGET.double_click_event(&node, 1.0, 1.0)
+        let Some(WidgetEvent::Custom(value)) =
+            MATRIX_WIDGET.double_click_event(&node, 1.0, 1.0, KeyModifiers::empty())
         else {
             panic!("double-click dispatches a cell change");
         };
@@ -1650,7 +1653,11 @@ mod tests {
         props.insert("cols".to_string(), Value::Number(1.0));
         props.insert("value".to_string(), matrix_value(vec![vec![0.5]]));
         let node = matrix_node(props);
-        assert!(MATRIX_WIDGET.double_click_event(&node, 1.0, 1.0).is_none());
+        assert!(
+            MATRIX_WIDGET
+                .double_click_event(&node, 1.0, 1.0, KeyModifiers::empty())
+                .is_none()
+        );
     }
 
     #[test]

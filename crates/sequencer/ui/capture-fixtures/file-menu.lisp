@@ -3,4 +3,4 @@
   (track :sampler :name "Sampler"))
 
 (def capture-after-sync ()
-  (eseq.transport/open-file-menu (dict :col 14 :row 2)))
+  (eseq.transport/open-file-menu (dict :at (dict :col 14 :row 2))))

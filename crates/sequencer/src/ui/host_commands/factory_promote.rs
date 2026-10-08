@@ -2,8 +2,10 @@
 //! commands send `factory-promote-open` with a kind; Rust captures the target
 //! and vets its dependencies, and the modal shows the name field plus every
 //! dependency that will be skipped. `factory-promote-commit` writes the
-//! object into the checkout's `content/` tree.
+//! object into the checkout's `content/` tree. What the modal shows is the
+//! presented `promote` area (the `factory-promote` kind).
 
+use crate::presented::{present_promote, PromoteView};
 use crate::*;
 use sequencer::app::PromoteTarget;
 
@@ -13,18 +15,6 @@ thread_local! {
     /// The target the open modal describes, so Promote writes what the
     /// modal showed even if the cursor moved while it was open.
     static TARGET: std::cell::Cell<Option<PromoteTarget>> = const { std::cell::Cell::new(None) };
-}
-
-pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
-    runtime.register_reactive("FACTORY_PROMOTE", vec![
-        ("kind", Value::String(String::new())),
-        ("destination", Value::String(String::new())),
-        ("skipped", Value::List(Vec::new())),
-        ("blocking", Value::String(String::new())),
-        ("error", Value::String(String::new())),
-        // The name a commit found already taken; Promote then replaces it.
-        ("taken", Value::String(String::new())),
-    ], true);
 }
 
 fn open(
@@ -43,17 +33,20 @@ fn open(
         editor.switch_active_tile_to_buffer_named("*sequencer*");
     }
     let rt = editor.runtime_mut();
-    let kind_label = if preview.kind_label.is_empty() { kind.to_string() } else { preview.kind_label };
-    rt.set_reactive("FACTORY_PROMOTE", "kind", Value::String(kind_label));
-    rt.set_reactive("FACTORY_PROMOTE", "destination", Value::String(preview.destination));
-    rt.set_reactive("FACTORY_PROMOTE", "skipped", build_string_list(&preview.skipped));
-    rt.set_reactive(
-        "FACTORY_PROMOTE",
-        "blocking",
-        Value::String(preview.blocking.unwrap_or_default()),
-    );
-    rt.set_reactive("FACTORY_PROMOTE", "error", Value::String(String::new()));
-    rt.set_reactive("FACTORY_PROMOTE", "taken", Value::String(String::new()));
+    let target = if preview.kind_label.is_empty() {
+        kind.to_string()
+    } else {
+        preview.kind_label
+    };
+    present_promote(|view| {
+        *view = PromoteView {
+            target,
+            destination: preview.destination,
+            skipped: preview.skipped,
+            blocking: preview.blocking.unwrap_or_default(),
+            ..PromoteView::default()
+        }
+    });
     let open = rt
         .global_value("eseq.factory-promote/open")
         .ok_or("Promote UI is unavailable")?;
@@ -71,8 +64,8 @@ fn commit(payload: &Value, app: &mut app::App, editor: &mut Editor) -> Result<()
             TARGET.with(|cell| cell.set(None));
             let rt = editor.runtime_mut();
             rt.eval_str("(eseq.factory-promote/close)").map_err(|error| format!("{error:?}"))?;
-            sync_project_state(rt, app);
-            sync_sidebar_browser(rt, app, app.ui.cursor_track);
+            record_preset_listings();
+            sync_sidebar_browser(app, app.ui.cursor_track);
             let file = path
                 .file_name()
                 .map(|file| file.to_string_lossy().to_string())
@@ -91,9 +84,7 @@ fn commit(payload: &Value, app: &mut app::App, editor: &mut Editor) -> Result<()
         }
         Err(error) => {
             if error.contains("already exists") {
-                editor
-                    .runtime_mut()
-                    .set_reactive("FACTORY_PROMOTE", "taken", Value::String(name.trim().to_string()));
+                present_promote(|view| view.taken = name.trim().to_string());
             }
             Err(error)
         }
@@ -116,9 +107,7 @@ pub(super) fn handle(
         _ => Ok(()),
     };
     if let Err(error) = result {
-        editor
-            .runtime_mut()
-            .set_reactive("FACTORY_PROMOTE", "error", Value::String(error.clone()));
+        present_promote(|view| view.error = error.clone());
         editor.show_transient_message(error);
     }
     editor.runtime_mut().run_reactive_cycle();

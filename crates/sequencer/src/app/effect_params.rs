@@ -561,22 +561,11 @@ impl App {
         slot_idx: usize,
         param_idx: usize,
     ) -> Option<f32> {
-        let slot = self.state.pattern.effect_chains.get(track)?.get(slot_idx)?;
-        if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
-            return None;
-        }
-        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id.load(Ordering::Relaxed),
-            slot.modulator_node_id.load(Ordering::Relaxed),
-            raw_idx,
-        );
-        let key =
-            crate::macro_engine::MacroParamKey::for_effect(track, slot_idx, param_idx, param_id);
-        Some(
-            self.macro_engine
-                .effective_value(&key, slot.defaults.get(param_idx)),
-        )
+        let key = effect_param_macro_key(&self.state, track, slot_idx, param_idx)?;
+        let base = self.state.pattern.effect_chains[track][slot_idx]
+            .defaults
+            .get(param_idx);
+        Some(self.macro_engine.effective_value(&key, base))
     }
 
     /// Sends the current base value unless an engaged macro owns this param.
@@ -795,11 +784,7 @@ impl App {
         }
         let mut mappings = Vec::new();
         for track in 0..self.tracks.len() {
-            if config
-                .track_mask
-                .as_ref()
-                .is_some_and(|mask| !mask.get(track).copied().unwrap_or(false))
-            {
+            if !config.covers_track(track) {
                 continue;
             }
             self.state
@@ -1369,4 +1354,29 @@ impl App {
         Some(param_desc.stored_to_user(slot.defaults.get(param_idx)))
     }
 
+}
+
+/// The macro engine's key for effect param `param_idx` in `track`'s chain
+/// slot `slot_idx`; `None` when the slot or the param (past the slot's live
+/// params) does not exist. Shared by [`App::effective_slot_param_value`] and
+/// the host kinds, which look the key up in a copy of the override layer.
+pub fn effect_param_macro_key(
+    state: &crate::sequencer::SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Option<crate::macro_engine::MacroParamKey> {
+    let slot = state.pattern.effect_chains.get(track)?.get(slot_idx)?;
+    if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+        return None;
+    }
+    let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+    let param_id = crate::neural::ParamNodeId::from_slot_param(
+        slot.node_id.load(Ordering::Relaxed),
+        slot.modulator_node_id.load(Ordering::Relaxed),
+        raw_idx,
+    );
+    Some(crate::macro_engine::MacroParamKey::for_effect(
+        track, slot_idx, param_idx, param_id,
+    ))
 }

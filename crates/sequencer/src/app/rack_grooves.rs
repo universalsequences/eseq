@@ -462,6 +462,45 @@ impl App {
         })
     }
 
+    /// The groove clip `clip` of rack `group_id` plays, with `mutate`
+    /// applied and sanitized; `None` when that leaves it as it is. Shared by
+    /// the amount edits ([`Self::set_rack_groove_amounts_recorded`] and the
+    /// drag, [`super::edit::apply_rack_groove_amount_drag`]).
+    pub(crate) fn next_rack_groove(
+        &self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+        mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
+    ) -> Result<Option<crate::groove::RackGrooveSettings>, String> {
+        let current = self.rack_groove(group_id, clip)?;
+        let mut next = current.clone();
+        mutate(&mut next);
+        next.sanitize();
+        Ok((next != *current).then_some(next))
+    }
+
+    /// One amount edit (`mutate` sets the timing, velocity or random amount,
+    /// or a pad's share, of the groove clip `clip` plays) as an undo step of
+    /// its own: the one-shot form of [`super::edit::apply_rack_groove_amount_drag`]
+    /// (which coalesces a drag), for edits made while no drag is held. A clip
+    /// that follows the rack gets its own groove first, as with the drag.
+    /// Returns whether anything changed; an edit that leaves the settings as
+    /// they are records nothing.
+    pub fn set_rack_groove_amounts_recorded(
+        &mut self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+        mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
+    ) -> Result<bool, String> {
+        let Some(next) = self.next_rack_groove(group_id, clip, mutate)? else {
+            return Ok(false);
+        };
+        self.apply_recorded_bus_group_structure_mutation("Set groove amount", move |app| {
+            *app.rack_config_mut(group_id)?.groove_target_mut(clip) = next;
+            Ok(true)
+        })
+    }
+
     /// The rack groove buffer's on/off switch: bypasses the rack's groove
     /// (every member plays straight) without forgetting the selection, the
     /// amounts or the pad shares. One undo step.

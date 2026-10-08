@@ -437,6 +437,9 @@ pub(super) fn fire_resolved(
                     );
                 } else {
                     data.legato_holds.clear_lid(lid);
+                    if !free_patch {
+                        data.custom_engine_pools[engine_id].mark_one_shot(voice_idx);
+                    }
                 }
             } else {
                 let selector_transpose = transpose;
@@ -680,6 +683,9 @@ pub(super) fn fire_resolved(
                 );
             } else {
                 data.legato_holds.clear_lid(lid);
+                if !free_patch {
+                    data.custom_engine_pools[engine_id].mark_one_shot(voice_idx);
+                }
             }
         } else {
             let selector_transpose = transpose;
@@ -944,15 +950,11 @@ pub(super) fn dispatch_retrig_event(
             if voice.logical_id == 0 {
                 continue;
             }
-            // A repeat after a short gate reopens the voice; keep allocation
-            // and release-tail bookkeeping in sync with that new gate.
+            // A repeat after a short gate (or an `@amp` retirement) reopens
+            // the voice; keep allocation, release-tail and one-shot
+            // bookkeeping in sync with that new gate.
             if let Some(pool) = data.custom_engine_pools.get_mut(engine_id) {
-                if let Some(slot) = pool.voices[..pool.num_voices].iter_mut()
-                    .find(|slot| slot.logical_id == voice.logical_id)
-                {
-                    slot.active = true;
-                    slot.release_started_sample = None;
-                }
+                pool.retrigger_voice_in_place(engine_id, voice.logical_id, !gated && !free_patch);
             }
             let seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {

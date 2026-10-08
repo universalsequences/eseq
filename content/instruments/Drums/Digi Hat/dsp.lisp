@@ -179,4 +179,11 @@
 (def pi_tone (+ (* (svf pi_hh 9500 0.7 4) (mod ag)) (* (svf pi_hh 12000 0.7 2) (- 1 (mod au))) (* (svf pi_hh 3000 0.7 1) (mod br))))
 
 (def voice (selector eng trx_hh efm_hh pi_tone))
-(out (* (md-out voice) vel (clip (mod level) 0 1)) 1 @name audio)
+(def voice_out (* (md-out voice) vel (clip (mod level) 0 1)))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)

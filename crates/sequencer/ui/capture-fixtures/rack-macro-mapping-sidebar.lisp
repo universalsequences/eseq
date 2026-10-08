@@ -3,11 +3,10 @@
 (capture-project
   (track :layer-rack
     :name "Macro Rack"
-    :samples ("../../assets/ir/lexicon-300-rich-plate.wav")))
+    :samples ("../../../../content/impulses/lexicon-300-rich-plate.wav")))
 
 (def capture-after-sync ()
   (do
     (eseq.effects.state/rack-panel-set-view
-      (get (nth SEQ.instrument-panel 0) :track-id) false true false)
-    (eseq.effects.instrument-panel/rack-macro-arm
-      (nth (get (nth SEQ.instrument-panel 0) :macros) 0))))
+      (get (eseq.effects.panel-data/current-instrument-panel) :track-id) false true false)
+    (eseq.effects.instrument-panel/rack-macro-arm 0)))

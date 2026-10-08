@@ -15,6 +15,8 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
+(import eseq.kinds :refer (buses selection transport))
+
 (export track-range-in-order
         selected-bus
         selected-bus-name
@@ -29,18 +31,16 @@
         cursor-step-value
         set-cursor-step-value
         cursor-num-steps
+        current-track-index
         current-step
         page-count
         visible-page
         playhead-page
         page-offset
         cool-off-follow
-        sel-track-vis-field
-        sel-group-vis-field
-        sel-bus-vis-field
-        track-selected-vis-binding
-        group-selected-vis-binding
-        bus-selected-vis-binding
+        bus-highlight
+        bus-selected-ref
+        group-selected-ref
         mixer-clip-area-height
         mixer-panel-height
         corner-radius-scale
@@ -67,12 +67,12 @@
 (defstate selected-bus -1)
 
 (def selected-bus-name ()
-  (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
-    (nth SEQ.bus-names selected-bus)
+  (if (seq-has-selected-bus?)
+    (let ((b (nth (buses) selected-bus))) b.name)
     "Bus"))
 
 (def seq-has-selected-bus? ()
-  (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names))))
+  (and (>= selected-bus 0) (< selected-bus (len (buses)))))
 
 (defstate samples-sidebar-visible true)
 (defstate mixer-panel-visible true)
@@ -116,31 +116,25 @@
 (def cursor-step-value () eseq.vanilla/cursor-step)
 
 (def set-cursor-step-value (step)
-  (let ((parameter-step
-          (if (> (or SEQ.fx-step-selection-count 0) 0)
-            (or SEQ.fx-step-parameter-step step)
-            step)))
-    (do
-      (set! eseq.vanilla/cursor-step step)
-      (reactive-set "SEQ" "fx-step-cursor-number" (+ step 1))
-      (reactive-set "SEQ" "fx-step-parameter-step" parameter-step)
-      (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
-      (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
-      (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step))
-      (reactive-set "SEQ" "fx-step-value-pan" (nth SEQ.pans parameter-step))
-      (reactive-set "SEQ" "fx-step-value-retrig" (nth SEQ.retrigs parameter-step))
-      (reactive-set "SEQ" "fx-step-value-retrig-rate" (nth SEQ.retrig-rates parameter-step)))))
+  (set! eseq.vanilla/cursor-step step))
 
 ;; The step cursor always tracks the current track's pattern length.  The old
 ;; bus-gate step sequencer (and its `SEQ.bus-num-steps` reactive list) is gone,
 ;; so a selected bus/group no longer implies a separate step count.
-(def cursor-num-steps () SEQ.tp-num-steps)
+(def cursor-num-steps ()
+  (let ((t selection.track))
+    (if t t.num-steps 16)))
+
+;; The current track's position (0 while there is none).
+(def current-track-index ()
+  (let ((t selection.track))
+    (if t t.index 0)))
 
 (def current-step ()
   (mod eseq.vanilla/cursor-step (max 1 (cursor-num-steps))))
 
 (def page-count ()
-  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
+  (max 1 (floor (/ (+ (cursor-num-steps) (- page-size 1)) page-size))))
 
 ;; Private: the app-wide sweep found no caller outside this file, and
 ;; `current-page` is one of the three names hazard (k) calls out by name as
@@ -149,13 +143,14 @@
   (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
 
 (def visible-page ()
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+  (if (and transport.playing selection.auto-follow (not (seq-has-selection?)))
     (playhead-page)
     (current-page)))
 
 (def playhead-page ()
-  (min SEQ.playhead-page
-    (- (page-count) 1)))
+  (let ((t selection.track))
+    (min (if t (max 0 t.playhead-page) 0)
+      (- (page-count) 1))))
 
 (def page-offset ()
   (* (visible-page) page-size))
@@ -165,64 +160,46 @@
 
 ;; ── Selection-visibility projection (eseq-4jv) ──────────────────────────
 ;; `selected-bus` is the fx-panel owner discriminant, and it used to be read
-;; directly from render bodies all over the UI: every sequencer track row,
-;; every arrangement lane, the group blocks, and the mixer bus strips. A
-;; single group/track selection therefore re-rendered every one of those
-;; subtrees before the *fx* panel had even started its (legitimate) owner
-;; switch. This one effect is now the only selection-visibility reader of the
-;; defstate: it projects the combined "does this row draw selected?" answer
-;; into per-row SEQV float fields, and rows bind those fields, so a selection
-;; change dirties only the affected retained widgets — no subtree re-renders.
-;; The *fx* buffer root is the intended remaining reader (it must
-;; restructure); nothing else should read `selected-bus` in render.
-(def sel-track-vis-field (i) (str "sel-track-vis-" i))
-(def sel-group-vis-field (gid) (str "sel-group-vis-" gid))
-(def sel-bus-vis-field (i) (str "sel-bus-vis-" i))
+;; directly from render bodies all over the UI: the group blocks and the
+;; mixer bus strips. A single group selection therefore re-rendered every one
+;; of those subtrees before the *fx* panel had even started its (legitimate)
+;; owner switch. This one effect is now the only selection-visibility reader
+;; of the defstate: it projects "does this bus draw selected?" into a
+;; view-local `bus-highlight` per bus (eseq-0l17.77; it was a SEQV float
+;; field), and the bus strips and group blocks bind its `selected` (a group
+;; through its bus), so a selection change repaints only the affected
+;; retained widgets: no subtree re-renders. Track rows bind
+;; `track.in-selection` (eseq.kinds). The *fx* buffer root is the intended
+;; remaining reader (it must restructure); nothing else should read
+;; `selected-bus` in render.
+(def-kind bus-highlight
+  :key (bus)
+  :state ((selected false)))
 
-(def track-selected-vis-binding (i)
-  (bind "SEQV" (sel-track-vis-field i)))
+;; The highlight a bus strip binds: `:selected (bus-selected-ref b)`. A bus
+;; dropped under a render (its constructor answers nil) draws unselected.
+(def bus-selected-ref (b)
+  (let ((h (bus-highlight b)))
+    (if h #'h.selected false)))
 
-(def group-selected-vis-binding (gid)
-  (bind "SEQV" (sel-group-vis-field gid)))
-
-(def bus-selected-vis-binding (i)
-  (bind "SEQV" (sel-bus-vis-field i)))
-
-(def sel-bus-index-of (bus-id)
-  (let ((matches (filter (lambda (i) (= (nth SEQ.bus-ids i) bus-id))
-          (range 0 (len SEQ.bus-ids)))))
-    (if (> (len matches) 0) (nth matches 0) -1)))
+;; A group draws selected while its bus does; a group without a bus never.
+(def group-selected-ref (g)
+  (let ((b g.bus))
+    (if b (bus-selected-ref b) false)))
 
 ;; A named effect-buffer returning nil is inert (the *plock-sync* precedent):
 ;; it owns the churn-prone reads so no visible surface has to.
 (effect-buffer "*sel-sync*"
   (let ((bus-active (seq-has-selected-bus?)))
-    (do
-      ;; Track highlight: the Rust-owned per-track selection, gated off while
-      ;; a bus/group owns the fx panel (`reactive-value` records the reads,
-      ;; so Rust-side selection changes re-run this projection too).
-      (for-each
-        (lambda (i)
-          (reactive-set "SEQV" (sel-track-vis-field i)
-            (if bus-active
-              0
-              (reactive-value (bind-seq (str "track-selected-" i))))))
-        (range 0 SEQ.num-tracks))
-      (for-each
-        (lambda (i)
-          (reactive-set "SEQV" (sel-bus-vis-field i)
-            (if (and bus-active (= selected-bus i)) 1 0)))
-        (range 0 (len SEQ.bus-names)))
-      (for-each
-        (lambda (gi)
-          (let ((group (nth SEQ.groups gi)))
-            (reactive-set "SEQV" (sel-group-vis-field (get group :id))
-              (if (and bus-active
-                    (= selected-bus (sel-bus-index-of (get group :bus-id))))
-                1
-                0))))
-        (range 0 (len SEQ.groups)))
-      nil)))
+    (for-each
+      (lambda (b)
+        (let ((h (bus-highlight b))
+              (lit (and bus-active (= selected-bus b.index))))
+          ;; Reading h.selected makes the write rerun this effect once more;
+          ;; that rerun finds every field current and writes nothing.
+          (when (and h (not (= h.selected lit))) (set! h.selected lit))))
+      (buses))
+    nil))
 
 ;; Mixer sizing knob (content-tiers spec: customize tier). Every strip in
 ;; *mixer* — track, grouped track, collapsed track, bus, group bus — and the

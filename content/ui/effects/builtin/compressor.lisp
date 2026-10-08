@@ -17,12 +17,10 @@
    instrument-param-base-value
    param-control-max
    param-control-min
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-set-control-value))
 (import eseq.effects.builtin.filter-core :refer
   (builtin-fx-param
@@ -46,8 +44,8 @@
     :mod-scale (eseq.effects.param-controls/param-mod-scale p)
     :unit (eseq.effects.param-controls/param-control-unit fx p)
     :font-size 9.5 :label-font-size 9.5
-    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :text-color :dim :label-color :dim
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-default (eseq.effects.param-controls/param-plock-default fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -59,10 +57,10 @@
 (def percent-knob (fx label-text p)
   (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value-for fx p)
-    :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
+    :min (get p :min) :max (get p :max) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
     :font-size 9.5 :label-font-size 9.5
-    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :text-color :dim :label-color :dim
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-default (eseq.effects.param-controls/param-plock-default fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -76,8 +74,8 @@
     (label label-text :font-size 8.5 :color :dim :bg :transparent)
     (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
       :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
-      :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :noui true :font-size 9.5 :text-color :dim
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -90,7 +88,7 @@
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -98,7 +96,7 @@
 
 ;; Latched enum button: highlights when the param's current option matches.
 (def choice (fx p idx label-text w)
-  (let ((active (= (get p :text-value) (nth (get p :options) idx))))
+  (let ((active (= (eseq.effects.param-controls/fx-param-text-value-for fx p) (nth (get p :options) idx))))
     (button label-text
       :width w :height 1.05 :padding 0 :font-size 8.5
       :background-color (if active (mode-on-color) :mixer-control-bg)
@@ -107,13 +105,14 @@
       :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p idx))))
 
 (def option (fx p w)
-  (dropdown :value (get p :text-value)
+  (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
     :options (get p :options)
     :bg-color :mixer-strip-selected-bg
     :border-color :mixer-strip-border
     :badge-color :transparent
     :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

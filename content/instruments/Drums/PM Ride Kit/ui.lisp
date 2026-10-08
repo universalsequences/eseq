@@ -17,7 +17,7 @@
 
 ;; Normalized two-pole stick force over 0-1.5 ms, as the DSP computes it.
 (defwidget pm-ride-kit-stick
-  :width 35.3 :height 3.1 :state (hardness dynamics) :bindable (hardness dynamics)
+  :width 35.3 :height 3.1 :state (hardness dynamics)
   :shader
   (let ((time (* 0.0015 0.5 (+ 1 (/ x aspect))))
         (hard (* 0.00025 (pow 2 (* 3 (- 0.5 hardness)))))
@@ -38,7 +38,7 @@
 ;; Ring of the plate's typical mode (measured 11.9/s at 1 kHz) with
 ;; decay and muffle loss; faint = the same mode once choked.
 (defwidget pm-ride-kit-ring
-  :width 35.3 :height 3.1 :state (decay muffle choke) :bindable (decay muffle choke)
+  :width 35.3 :height 3.1 :state (decay muffle choke)
   :shader
   (let ((time (* 3 0.5 (+ 1 (/ x aspect))))
         (rate (+ (/ 11.9 decay) (* 40 muffle muffle)))
@@ -57,7 +57,7 @@
 
 ;; Stereo scatter: every mode keeps a fixed pan; Width opens the fan.
 (defwidget pm-ride-kit-width
-  :width 35.3 :height 3.1 :state (amount) :bindable (amount)
+  :width 35.3 :height 3.1 :state (amount)
   :shader
   (let ((spread (* aspect 0.9 amount))
         (fan (- (abs x) (+ 0.02 (* spread (- 0.8 (* 0.5 (+ y 0.8))))))))

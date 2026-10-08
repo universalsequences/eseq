@@ -21,12 +21,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.builtin.filter-core :refer
@@ -60,8 +58,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -76,7 +74,7 @@
     :width 1.95 :height 1.55 :padding 0 :font-size 9.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (cream) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -114,7 +112,7 @@
     :width 4.4 :height 0.95 :padding 0 :font-size 8.0
     :background-color (if (= current label-text) (cream) :mixer-control-bg)
     :color (if (= current label-text) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

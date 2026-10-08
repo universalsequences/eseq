@@ -105,16 +105,6 @@ pub(in crate::lisp_host) fn neural_network_index(
     }
 }
 
-pub(in crate::lisp_host) fn next_neural_network_id(networks: &[ProjectNeuralNetwork]) -> u64 {
-    networks
-        .iter()
-        .map(|network| network.id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
-        .max(1)
-}
-
 pub(in crate::lisp_host) fn parse_nonnegative_usize(value: &EValue, label: &str) -> Result<usize, String> {
     match value {
         EValue::Number(value)
@@ -412,7 +402,7 @@ pub(in crate::lisp_host) fn parse_neural_reset_step_args(args: &[EValue]) -> Res
     })
 }
 
-pub(in crate::lisp_host) fn parse_neural_weight_matrix(
+pub fn parse_neural_weight_matrix(
     value: &EValue,
     expected_size: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
@@ -465,24 +455,7 @@ pub(in crate::lisp_host) fn normalize_project_neural_network_shape(
     if network.num_neurons == 0 || network.num_neurons > NUM_NEURONS {
         return Err(format!("neural network size must be 1..={NUM_NEURONS}"));
     }
-    network
-        .neurons
-        .resize_with(network.num_neurons, ProjectNeuron::default);
-    network.neurons.truncate(network.num_neurons);
-    if network.weights.len() != network.num_neurons
-        || network
-            .weights
-            .iter()
-            .any(|row| row.len() != network.num_neurons)
-    {
-        let mut normalized = vec![vec![0.0; network.num_neurons]; network.num_neurons];
-        for (row_idx, row) in network.weights.iter().enumerate().take(network.num_neurons) {
-            for (col_idx, value) in row.iter().enumerate().take(network.num_neurons) {
-                normalized[row_idx][col_idx] = *value;
-            }
-        }
-        network.weights = normalized;
-    }
+    network.normalize_shape();
     Ok(())
 }
 

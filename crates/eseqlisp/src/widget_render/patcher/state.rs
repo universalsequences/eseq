@@ -24,7 +24,7 @@ use super::metrics::{
 };
 use super::model::{
     ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, ExprPath,
-    InputPortRef, InputPresentation, MacroPatch, MacroSignature, NodeKind, NodeSource,
+    InputPortRef, InputPresentation, MacroOrigin, MacroPatch, MacroSignature, NodeKind, NodeSource,
     OutputPortRef, ParamNodeInfo, Patch, PatchConnection, PatchNode, PatcherIntent, SourceExprId,
     SourceFormId, SourceOwner, SourceScopeId, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
     refresh_patch_inline_inputs,
@@ -506,6 +506,11 @@ pub(super) struct PatchEditState {
     pub(super) deleted_connections: HashSet<String>,
     pub(super) input_presentations: HashMap<String, PatcherInputPresentationEdit>,
     pub(super) created_macros: HashMap<String, PatcherMacroEdit>,
+    /// Source-backed local macros renamed this session, keyed by the name the
+    /// file defines them under, valued by the current name. Applied to the
+    /// parsed patch (the defmacro and every call to it) before any other edit,
+    /// so view keys and node edits use the current name throughout.
+    pub(super) renamed_macros: HashMap<String, String>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
 }
@@ -525,6 +530,7 @@ pub(super) struct PatcherNodeEdit {
     pub(super) text: String,
     pub(super) position: (f32, f32),
     pub(super) width: Option<f32>,
+    pub(super) height: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -544,6 +550,10 @@ pub(super) enum NodeResizeCorner {
 impl NodeResizeCorner {
     pub(super) fn resizes_left_edge(self) -> bool {
         matches!(self, Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub(super) fn resizes_top_edge(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopRight)
     }
 }
 
@@ -594,7 +604,11 @@ pub(super) enum PatcherDragState {
         node_id: String,
         corner: NodeResizeCorner,
         start_col: f32,
+        start_row: f32,
         start_width: f32,
+        /// Model height at grab time; only a probe scope's height follows
+        /// the drag, every other node resizes horizontally only.
+        start_height: f32,
         start_position: (f32, f32),
     },
     Marquee {
@@ -869,6 +883,7 @@ pub(super) struct PatcherClipboardNode {
     pub(super) text: String,
     pub(super) position: (f32, f32),
     pub(super) width: Option<f32>,
+    pub(super) height: Option<f32>,
 }
 
 /// A wire internal to the copied selection, endpoints as indices into
@@ -1239,6 +1254,7 @@ pub(super) fn allocate_created_node_avoiding(
             text: String::new(),
             position,
             width: None,
+            height: None,
         },
     );
     debug_log_edit_event(
@@ -1585,6 +1601,7 @@ pub(super) fn ensure_source_node_edit(
             text,
             position: node.position,
             width: node.width,
+            height: node.height,
         });
 }
 
@@ -1605,12 +1622,15 @@ pub(super) fn set_node_edit_position(
     }
 }
 
-pub(super) fn set_node_edit_width(
+/// Move a node and set its size overrides (a resize). Only a probe scope
+/// reads `height`.
+pub(super) fn set_node_edit_size(
     state: &mut PatcherInteractionState,
     view_key: &str,
     node: &PatchNode,
     position: (f32, f32),
     width: Option<f32>,
+    height: Option<f32>,
     text: String,
 ) {
     ensure_source_node_edit(state, view_key, node, text);
@@ -1621,6 +1641,7 @@ pub(super) fn set_node_edit_width(
     {
         edit.position = position;
         edit.width = width.filter(|width| width.is_finite());
+        edit.height = height.filter(|height| height.is_finite());
     }
 }
 
@@ -1729,6 +1750,7 @@ pub(super) fn patch_scope_with_interaction_state(
         if let Some(edit) = interaction_state.edit_state.nodes.get(&edit_key) {
             node.position = edit.position;
             node.width = edit.width;
+            node.height = edit.height;
             apply_node_text_override(node, &edit.text, macro_signatures);
         }
         if let Some(edit) = interaction_state
@@ -1785,6 +1807,7 @@ pub(super) fn patch_scope_with_interaction_state(
         ));
         if let Some(node) = patch.nodes.last_mut() {
             node.width = edit.width;
+            node.height = edit.height;
             if let Some(text_edit) = interaction_state
                 .text_edit
                 .as_ref()
@@ -2171,6 +2194,7 @@ fn inline_mod_accessor_node(id: &str, position: (f32, f32)) -> PatchNode {
         outputs: vec!["out".to_string()],
         position,
         width: None,
+        height: None,
         param: None,
         inline_inputs: vec![None],
         synthesized: true,
@@ -2263,6 +2287,7 @@ pub(super) fn patch_with_created_macros(
     mut patch: Patch,
     interaction_state: &PatcherInteractionState,
 ) -> Patch {
+    apply_macro_renames(&mut patch, &interaction_state.edit_state.renamed_macros);
     for macro_edit in interaction_state.edit_state.created_macros.values() {
         if patch
             .macros
@@ -2542,12 +2567,92 @@ pub(super) fn empty_created_macro_source(name: &str) -> String {
     format!("(defmacro {name} ())")
 }
 
+/// Rename local defmacros and every call to them, in the root and in every
+/// macro body. Idempotent: a rename never targets a name the file defines
+/// (`rename_source_macro` refuses those), so running it again on an already
+/// renamed patch — `active_patcher_patch` hands a renamed body back through
+/// here — changes nothing.
+fn apply_macro_renames(patch: &mut Patch, renames: &HashMap<String, String>) {
+    if renames.is_empty() {
+        return;
+    }
+    rename_macro_calls(patch, renames);
+    for macro_patch in &mut patch.macros {
+        if macro_patch.origin == MacroOrigin::Local
+            && let Some(new) = renames.get(&macro_patch.name)
+        {
+            macro_patch.name = new.clone();
+        }
+        rename_macro_calls(&mut macro_patch.patch, renames);
+    }
+}
+
+fn rename_macro_calls(patch: &mut Patch, renames: &HashMap<String, String>) {
+    for node in &mut patch.nodes {
+        if node.kind != NodeKind::MacroInstance {
+            continue;
+        }
+        let Some(new) = renames.get(&node.op) else {
+            continue;
+        };
+        node.label = replace_first_token(&node.label, &node.op, new).unwrap_or(node.label.clone());
+        node.op = new.clone();
+    }
+}
+
+/// `text` with its leading token swapped from `old` to `new`, or None when
+/// the text does not start with `old` as a whole token.
+pub(super) fn replace_first_token(text: &str, old: &str, new: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix(old)?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    Some(format!("{new}{rest}"))
+}
+
+/// Rename a local defmacro the file defines. The rename is recorded against
+/// the name on disk, so the generated source writes the defmacro and every
+/// call under the new name; the macro's own view and any pending call edits
+/// move with it.
+pub(super) fn rename_source_macro(
+    state: &mut PatcherInteractionState,
+    old: &str,
+    new: &str,
+    taken_names: &HashSet<String>,
+) -> bool {
+    let renames = &mut state.edit_state.renamed_macros;
+    if old == new || taken_names.contains(new) {
+        return false;
+    }
+    let original = renames
+        .iter()
+        .find(|(_, current)| current.as_str() == old)
+        .map(|(original, _)| original.clone());
+    match original {
+        Some(original) if original == new => {
+            renames.remove(&original);
+        }
+        Some(original) => {
+            renames.insert(original, new.to_string());
+        }
+        None => {
+            // Renaming onto a name the file defines (even one already renamed
+            // away) would make `apply_macro_renames` chain.
+            if renames.contains_key(new) {
+                return false;
+            }
+            renames.insert(old.to_string(), new.to_string());
+        }
+    }
+    rekey_macro_view(state, old, new);
+    debug_log_edit_event(&format!("rename-source-macro {old} -> {new}"), state);
+    true
+}
+
 /// Rename a macro that exists only in the interaction state. Every edit-state
 /// key is `"{view_key}::{id}"`, so the macro's whole body has to be re-keyed
 /// from `macro:{old}` to `macro:{new}` alongside the registration itself.
-///
-/// Only created macros can be renamed — a source-backed macro's name is its
-/// identity on disk and may be referenced from elsewhere.
 pub(super) fn rename_created_macro(
     state: &mut PatcherInteractionState,
     old: &str,
@@ -2560,7 +2665,6 @@ pub(super) fn rename_created_macro(
     let Some(mut macro_edit) = state.edit_state.created_macros.remove(old) else {
         return false;
     };
-    let instance_node_id = macro_edit.instance_node_id.clone();
     macro_edit.name = new.to_string();
     macro_edit.source = macro_edit.source.as_deref().map(|source| {
         if source == empty_created_macro_source(old) {
@@ -2575,7 +2679,14 @@ pub(super) fn rename_created_macro(
         .edit_state
         .created_macros
         .insert(new.to_string(), macro_edit);
+    rekey_macro_view(state, old, new);
+    debug_log_edit_event(&format!("rename-created-macro {old} -> {new}"), state);
+    true
+}
 
+/// Move macro `old`'s view edits, z-order and navigation to `new`, and point
+/// every pending call edit (`old …` node text, in any view) at `new`.
+fn rekey_macro_view(state: &mut PatcherInteractionState, old: &str, new: &str) {
     let old_view = format!("macro:{old}");
     let new_view = format!("macro:{new}");
     let rekey = |key: &str| -> Option<String> {
@@ -2638,16 +2749,11 @@ pub(super) fn rename_created_macro(
     if state.active_macro.as_deref() == Some(old) {
         state.active_macro = Some(new.to_string());
     }
-    if let Some(edit) = state
-        .edit_state
-        .nodes
-        .values_mut()
-        .find(|edit| edit.id == instance_node_id && edit.view_key != new_view)
-    {
-        edit.text = new.to_string();
+    for edit in state.edit_state.nodes.values_mut() {
+        if let Some(text) = replace_first_token(&edit.text, old, new) {
+            edit.text = text;
+        }
     }
-    debug_log_edit_event(&format!("rename-created-macro {old} -> {new}"), state);
-    true
 }
 
 fn apply_node_text_override(
@@ -2684,6 +2790,7 @@ pub(super) fn node_from_editor_text(
             outputs: Vec::new(),
             position,
             width: None,
+            height: None,
             param: None,
             inline_inputs: Vec::new(),
             synthesized: false,
@@ -2692,6 +2799,12 @@ pub(super) fn node_from_editor_text(
         };
     }
 
+    // `number~` / `scope~` are patcher spellings of a probe; a commit
+    // canonicalizes them (with an id), this keeps any text that skipped the
+    // commit — an agent edit, a fixture — a working probe rather than an
+    // unknown operator.
+    let expanded_alias = super::probe::expand_probe_alias(trimmed);
+    let trimmed = expanded_alias.as_deref().unwrap_or(trimmed);
     let parsed = parse_editor_node_text(trimmed);
     let (op, inline_args, parse_diagnostic) = match parsed {
         Ok((op, inline_args)) => (op, inline_args, None),
@@ -2748,6 +2861,7 @@ pub(super) fn node_from_editor_text(
             }),
         position,
         width: None,
+        height: None,
         param,
         inline_inputs: Vec::new(),
         synthesized: false,

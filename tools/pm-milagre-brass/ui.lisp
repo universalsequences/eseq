@@ -8,7 +8,7 @@
 ;; Lip opening over two buzz cycles at full breath, as the DSP computes it:
 ;; max(0, lips + buzz sin). Faint = half breath (excursion scales by 0.5^curve).
 (defwidget pm-brass-lips
-  :width 35.3 :height 3.1 :state (lips buzz curve) :bindable (lips buzz curve)
+  :width 35.3 :height 3.1 :state (lips buzz curve)
   :shader
   (let ((wave (sin (* 6.2831853 (+ 1 (/ x aspect)))))
         (scale (+ (abs lips) buzz 0.01))

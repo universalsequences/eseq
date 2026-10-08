@@ -705,7 +705,7 @@ pub(crate) fn should_toggle_play_on_space(
     }
 
     let buffer = editor.active_buffer();
-    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly) || buffer.name == "*metal*"
+    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly)
 }
 
 pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent) -> bool {
@@ -717,13 +717,6 @@ pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent
 
 pub(crate) fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str("(eseq.seq-core-state/current-step)") {
-        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
-        _ => None,
-    }
-}
-
-pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
-    match editor.runtime_mut().eval_str("eseq.seq-core-state/param-mode") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
     }
@@ -778,7 +771,7 @@ pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
 
 fn metal_selected_drum_rack_bus(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str(
-        "(if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0) \
+        "(if (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) \
            eseq.seq-core-state/selected-bus -1)",
     ) {
         Ok(Some(Value::Number(bus))) if bus >= 0.0 => Some(bus as usize),
@@ -797,21 +790,6 @@ fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
         7 => Some(StepParam::Retrig),
         8 => Some(StepParam::RetrigRate),
         // Sync is rendered as a label in the step footer, not a numeric picker.
-        _ => None,
-    }
-}
-
-fn metal_mode_for_step_param(param: StepParam) -> Option<usize> {
-    match param {
-        StepParam::Velocity => Some(0),
-        StepParam::Duration => Some(1),
-        StepParam::AuxA => Some(2),
-        StepParam::Transpose => Some(3),
-        StepParam::Pan => Some(4),
-        StepParam::Sync => Some(5),
-        StepParam::Delay => Some(6),
-        StepParam::Retrig => Some(7),
-        StepParam::RetrigRate => Some(8),
         _ => None,
     }
 }
@@ -894,33 +872,10 @@ fn soft_step_param_edit_spec(
     }
 }
 
-fn sync_soft_step_param_commit(
-    editor: &mut Editor,
-    state: &Arc<SequencerState>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
-    target: &SoftStepParamEditTarget,
-    steps: &[usize],
-    param: StepParam,
-) {
-    let runtime = editor.runtime_mut();
-    sync_step_param_lists(runtime, state, target.track);
-    if let Some(mode) = metal_mode_for_step_param(param) {
-        for viewport in expanded_step_projection.viewports_for_track(target.track) {
-            for step in steps {
-                if let Some(slot) = visible_slot_for_step(viewport, *step) {
-                    let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
-                }
-            }
-        }
-    }
-}
-
 fn commit_soft_step_param_edit(
-    editor: &mut Editor,
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
     value: f64,
 ) -> bool {
@@ -943,9 +898,6 @@ fn commit_soft_step_param_edit(
             ).is_err() {
                 return false;
             }
-            sync_soft_step_param_commit(
-                editor, &app.state, expanded_step_projection, target, &steps, *param,
-            );
             true
         }
         SoftStepParamEditKind::ProcessLane { instance_id, inlet_name } => {
@@ -955,11 +907,6 @@ fn commit_soft_step_param_edit(
             );
             app::edit::finish_active_gesture(app);
             if result.is_err() { return false; }
-            sync_process_lane_track_state(
-                editor.runtime_mut(), &app.state, target.track,
-                current_track.load(Ordering::Relaxed),
-                &expanded_step_projection.viewports_for_track(target.track),
-            );
             true
         }
     }
@@ -975,10 +922,6 @@ fn current_soft_step_param_target(
     }
     let buffer_name = editor.active_buffer().name.clone();
     let (step, mode) = match buffer_name.as_str() {
-        "*metal*" => (
-            current_metal_cursor_step(editor)?,
-            current_metal_param_mode(editor)?,
-        ),
         "*sequencer*" => (
             current_sequencer_cursor_step(editor)?,
             current_sequencer_param_mode(editor)?,
@@ -1010,11 +953,6 @@ fn current_soft_step_param_target(
 fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
     let buffer_name = editor.active_buffer().name.clone();
     match buffer_name.as_str() {
-        // ui/step-grid.lisp is `eseq.step-grid` since S3b wave 8, so its
-        // widget `:key` auto-qualifies (spec §10 hazard a/l). The *metal*
-        // buffer is not created by the live UI any more (editor_setup.rs),
-        // but the spelling has to track the lisp side regardless.
-        "*metal*" => Some("eseq.step-grid/step-param-number-picker".to_string()),
         "*sequencer*" => match editor
             .runtime_mut()
             .eval_str("(eseq.sequencer/current-number-picker-key)")
@@ -1083,7 +1021,6 @@ pub(crate) fn handle_metal_soft_step_param_key(
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
 ) -> bool {
     use crossterm::event::KeyEventKind;
@@ -1185,11 +1122,9 @@ pub(crate) fn handle_metal_soft_step_param_key(
         }
         Some(NumberPickerEditOutcome::Commit(value)) => {
             if !commit_soft_step_param_edit(
-                editor,
                 app,
                 current_track,
                 selected_steps,
-                expanded_step_projection,
                 &target,
                 value,
             ) {
@@ -1276,17 +1211,18 @@ fn handle_arrangement_region_delete_shortcut(
     {
         return false;
     }
-    let value_is_set = |editor: &mut Editor, expr: &str| {
-        editor
-            .runtime_mut()
-            .eval_str(expr)
-            .ok()
-            .flatten()
-            .is_some_and(|value| !matches!(value, Value::Nil))
+    // The host kinds' song selection (`song.region`, `song.bound-clip`),
+    // read from the singleton's cells.
+    let runtime = editor.runtime();
+    let Some(song) = runtime.singleton_instance("eseq.kinds:song") else {
+        return false;
     };
-    if !value_is_set(editor, "SEQ.song-region")
-        || value_is_set(editor, "SEQ.song-bound-clip")
-    {
+    let is_set = |field: &str| {
+        runtime
+            .instance_field(song, field)
+            .is_ok_and(|value| !matches!(value, Value::Nil))
+    };
+    if !is_set("region") || is_set("bound-clip") {
         return false;
     }
     editor
@@ -1386,12 +1322,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && editor.prompt_text().is_none()
         && !focused_widget_captures_text_input(editor)
         && is_shift_tab_shortcut(key)
-        && editor
-            .runtime_mut()
-            .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
-            .ok()
-            .flatten()
-            .is_some_and(|value| matches!(value, eseqlisp::vm::Value::Bool(true)))
+        && crate::presented::instrument_editor_open()
     {
         let _ = editor
             .runtime_mut()
@@ -2413,7 +2344,7 @@ mod live_keyboard_tests {
 
     use super::{
         apply_live_trigger_stamps,
-        armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
+        armed_rack_pad_track, current_step_param_number_picker_id,
         handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         handle_number_picker_edit_key_for_widget,
         handle_midi_note, handle_recording_key, held_note_for_key, held_note_for_source,
@@ -2423,10 +2354,9 @@ mod live_keyboard_tests {
         number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
         sequencer_history_shortcut, sequencer_tab_shortcut_index_for,
         should_route_to_live_keyboard, should_toggle_play_on_space,
-        ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
-        UiInvalidationQueue, PROCESS_LANE_MODE_OFFSET, step_clipboard_shortcut_for,
+        UiInvalidationQueue, step_clipboard_shortcut_for,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -3407,12 +3337,12 @@ mod live_keyboard_tests {
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
                 (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
-                (def eseq.drum-rack-v2/track-relative (track delta) nil)
-                (def eseq.sequencer/select-track-for-edit (track)
+                (def eseq.drum-rack-v2/track-relative (t delta) nil)
+                (def eseq.sequencer/select-track-for-edit (t)
                   (do
                     (set! eseq.seq-core-state/selected-bus -1)
-                    (set! selected-track-via-seqv track)
-                    (seq-set-track track)))
+                    (set! selected-track-via-seqv t.index)
+                    (seq-set-track t.index)))
                 "#,
             )
             .expect("install sequencer key hooks");
@@ -3427,6 +3357,24 @@ mod live_keyboard_tests {
         editor.refresh_runtime_side_effects();
     }
 
+    /// Track `index` as the current track (`selection.track`), as the host
+    /// kinds publish it.
+    fn select_kind_track(editor: &mut Editor, index: usize) {
+        let rt = editor.runtime_mut();
+        let track = rt
+            .keyed_instance("eseq.kinds:track", &[index as u64])
+            .expect("track");
+        let selection = rt
+            .singleton_instance("eseq.kinds:selection")
+            .expect("selection");
+        rt.set_instance_field(selection, "track", Value::Instance(track))
+            .unwrap();
+        rt.run_reactive_cycle();
+    }
+
+    /// `track_count` tracks (`project.tracks`, each with its `index`) with
+    /// track `current` selected, and `seq-set-track` recording the current
+    /// track it is handed.
     fn install_track_selection(editor: &mut Editor, track_count: usize, current: usize) -> Arc<AtomicUsize> {
         let current_track = Arc::new(AtomicUsize::new(current));
         let native_track = Arc::clone(&current_track);
@@ -3442,12 +3390,23 @@ mod live_keyboard_tests {
         editor
             .runtime_mut()
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(current as f64));
+        let rt = editor.runtime_mut();
+        let tracks: Vec<_> = (0..track_count)
+            .map(|index| {
+                let track = rt
+                    .register_keyed_instance("eseq.kinds:track", &[index as u64])
+                    .unwrap();
+                rt.set_instance_field(track, "index", Value::Number(index as f64))
+                    .unwrap();
+                Rc::new(RefCell::new(Value::Instance(track)))
+            })
+            .collect();
+        let project = rt
+            .singleton_instance("eseq.kinds:project")
+            .expect("project");
+        rt.set_instance_field(project, "tracks", Value::List(tracks))
+            .unwrap();
+        select_kind_track(editor, current);
         current_track
     }
 
@@ -3569,10 +3528,10 @@ mod live_keyboard_tests {
 
         editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 1);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        select_kind_track(&mut editor, 1);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
+        select_kind_track(&mut editor, 0);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 2, "UP wraps from the first track");
     }
@@ -3585,11 +3544,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (def eseq.drum-rack-v2/track-relative (track delta)
-                  (if (= track 7)
-                    (if (> delta 0) 10 1)
-                    (if (= track 10)
-                      (if (< delta 0) 7 11)
+                (def eseq.drum-rack-v2/track-relative (t delta)
+                  (if (= t.index 7)
+                    (eseq.kinds/track (if (> delta 0) 10 1))
+                    (if (= t.index 10)
+                      (eseq.kinds/track (if (< delta 0) 7 11))
                       nil)))
                 "#,
             )
@@ -3597,7 +3556,7 @@ mod live_keyboard_tests {
         let current_track = install_track_selection(&mut editor, 12, 7);
         editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 10);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(10.0));
+        select_kind_track(&mut editor, 10);
         editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 7);
     }
@@ -4671,8 +4630,8 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.sequencer/expanded-track-ids '(0 1))
-                (def eseq.sequencer/collapse-all-tracks () (set! eseq.sequencer/expanded-track-ids '()))
+                (defstate collapse-count 0)
+                (def eseq.sequencer/collapse-all-tracks () (set! collapse-count (+ collapse-count 1)))
                 "#,
             )
             .expect("install collapse handler");
@@ -4691,11 +4650,8 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.sequencer/expanded-track-ids")
-                .unwrap(),
-            Some(eseqlisp::vm::Value::List(vec![]))
+            editor.runtime_mut().eval_str("collapse-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(1.0))
         );
     }
 
@@ -4705,11 +4661,6 @@ mod live_keyboard_tests {
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![("selected-steps", build_selection_value(&selected_steps))],
-            true,
-        );
         {
             let selected_steps = Arc::clone(&selected_steps);
             editor
@@ -5142,13 +5093,14 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.effects.state/instrument-panel-tab 2)
-                (defstate eseq.effects.state/instrument-mods-open false)
+                (def-kind instrument-view :key () :state ((tab 2) (mods-open false)))
+                (def eseq.effects.state/instrument-view instrument-view)
                 (defstate eseq.seq-core-state/selected-bus 1)
                 (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
-                  (do
-                    (set! eseq.effects.state/instrument-panel-tab 0)
-                    (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
+                  (let ((v eseq.effects.state/instrument-view))
+                    (do
+                      (set! v.tab 0)
+                      (set! v.mods-open (not v.mods-open)))))
                 (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
                   (do
                     (set! eseq.seq-core-state/selected-bus -1)
@@ -5173,14 +5125,14 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-panel-tab")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.tab)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Number(0.0))
         );
@@ -5202,7 +5154,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(false))
         );
@@ -5217,9 +5169,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate eseq.effects.state/instrument-mods-open false)
+                (def-kind instrument-view :key () :state ((tab 0) (mods-open false)))
+                (def eseq.effects.state/instrument-view instrument-view)
                 (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
-                  (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open)))
+                  (let ((v eseq.effects.state/instrument-view))
+                    (set! v.mods-open (not v.mods-open))))
                 (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
                   (eseq.effects.effect-panels/instrument-toggle-mods-view))
                 "#,
@@ -5243,7 +5197,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
+                .eval_str("(let ((v eseq.effects.state/instrument-view)) v.mods-open)")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );
@@ -5393,37 +5347,9 @@ mod live_keyboard_tests {
 
     #[test]
     fn sequencer_soft_number_entry_edits_current_expanded_track_step() {
-        fn number_list(values: &[f64]) -> Value {
-            Value::List(
-                values
-                    .iter()
-                    .copied()
-                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
-                    .collect(),
-            )
-        }
-
-        fn list(values: Vec<Value>) -> Value {
-            Value::List(
-                values
-                    .into_iter()
-                    .map(|value| Rc::new(RefCell::new(value)))
-                    .collect(),
-            )
-        }
-
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
-        let initial_values = number_list(&[1.0; 16]);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("velocities", initial_values.clone()),
-                ("track-velocities", list(vec![initial_values])),
-            ],
-            true,
-        );
         editor
             .runtime_mut()
             .eval_str(
@@ -5432,11 +5358,8 @@ mod live_keyboard_tests {
                 (def eseq.sequencer/current-selected-step () 2)
                 (def eseq.sequencer/current-param-mode () 0)
                 (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
-                (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (effect
-                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,
             )
             .expect("install sequencer soft edit fixture");
@@ -5461,14 +5384,6 @@ mod live_keyboard_tests {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: 0,
-            cursor_step: 2,
-        });
         let mut edit = SoftStepParamEdit::default();
 
         for key in [
@@ -5484,7 +5399,6 @@ mod live_keyboard_tests {
                     &mut app,
                     &current_track,
                     &Arc::new(Mutex::new(HashSet::new())),
-                    &expanded_step_projection,
                     &mut edit,
                 ),
                 "sequencer soft edit should consume {key:?}"
@@ -5496,38 +5410,6 @@ mod live_keyboard_tests {
             0.5,
             "sequencer numeric entry should commit through the same soft number-picker path"
         );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(nth SEQ.velocities 2)")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit should keep the current-track parameter mirror in sync"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(nth (nth SEQ.track-velocities 0) 2)")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit should keep the all-track sequencer parameter mirror in sync"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("seqv-soft-edit-flushed")
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit commit should flush the reactive cycle immediately"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
-                .unwrap(),
-            Some(Value::Number(0.5)),
-            "soft edit commit should update the visible expanded slider slot immediately"
-        );
     }
 
     fn check_process_lane_soft_entry(selection: &[usize]) {
@@ -5538,18 +5420,6 @@ mod live_keyboard_tests {
         editor.set_layout_viewport(80, 20);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("process-lanes", Value::List(vec![])),
-                ("track-process-lanes", Value::List(vec![])),
-                ("process-slots", Value::List(vec![])),
-                ("track-process-slots", Value::List(vec![])),
-                ("track-lane-patch", Value::List(vec![])),
-                ("process-library", Value::List(vec![])),
-            ],
-            true,
-        );
         sequencer::lisp_host::register_published_process_authoring_natives(
             editor.runtime_mut(),
             Arc::clone(&state),
@@ -5595,14 +5465,6 @@ mod live_keyboard_tests {
             .widget_layout()
             .expect("process lane number picker should lay out");
 
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: PROCESS_LANE_MODE_OFFSET,
-            cursor_step: 2,
-        });
         let mut edit = SoftStepParamEdit::default();
 
         for key in [
@@ -5616,7 +5478,6 @@ mod live_keyboard_tests {
                     &mut app,
                     &current_track,
                     &Arc::new(Mutex::new(selection.iter().copied().collect())),
-                    &expanded_step_projection,
                     &mut edit,
                 ),
                 "process lane soft edit should consume {key:?}"
@@ -5637,23 +5498,12 @@ mod live_keyboard_tests {
         );
         for step in selection {
             assert_eq!(amount_lane.values[*step], 2.0, "every selected lane step is edited");
-            assert_eq!(editor.runtime_mut().eval_str(&format!(
-                "(reactive-get \"SEQ\" \"seqv-slot-param-slider-0-9-{step}\")"
-            )).unwrap(), Some(Value::Number(2.0)));
         }
         assert_eq!(app.history.undo_len(), 1, "one typed commit is one undo entry");
         assert_eq!(
             state.pattern.step_data[0].get(2, StepParam::Transpose),
             0.0,
             "process lane soft edits must not mutate built-in step data"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-9-2")"#)
-                .unwrap(),
-            Some(Value::Number(if selection.is_empty() { 2.0 } else { 0.0 })),
-            "soft edit commit should update the visible process lane slider slot immediately"
         );
         assert_eq!(
             editor
@@ -5684,37 +5534,9 @@ mod live_keyboard_tests {
 
     #[test]
     fn sequencer_soft_enter_commits_existing_number_picker_edit() {
-        fn number_list(values: &[f64]) -> Value {
-            Value::List(
-                values
-                    .iter()
-                    .copied()
-                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
-                    .collect(),
-            )
-        }
-
-        fn list(values: Vec<Value>) -> Value {
-            Value::List(
-                values
-                    .into_iter()
-                    .map(|value| Rc::new(RefCell::new(value)))
-                    .collect(),
-            )
-        }
-
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
-        let initial_values = number_list(&[1.0; 16]);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("velocities", initial_values.clone()),
-                ("track-velocities", list(vec![initial_values])),
-            ],
-            true,
-        );
         editor
             .runtime_mut()
             .eval_str(
@@ -5723,11 +5545,8 @@ mod live_keyboard_tests {
                 (def eseq.sequencer/current-selected-step () 2)
                 (def eseq.sequencer/current-param-mode () 0)
                 (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
-                (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (effect
-                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,
             )
             .expect("install sequencer soft edit fixture");
@@ -5777,14 +5596,6 @@ mod live_keyboard_tests {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
-        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
-        expanded_step_projection.set_viewport(ExpandedStepViewport {
-            track: 0,
-            track_id: 0,
-            page: 0,
-            mode: 0,
-            cursor_step: 2,
-        });
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
             Arc::new(Mutex::new(None));
@@ -5817,7 +5628,6 @@ mod live_keyboard_tests {
                 &mut app,
                 &current_track,
                 &Arc::new(Mutex::new(HashSet::new())),
-                &expanded_step_projection,
                 &mut edit,
             ),
             "Enter should commit an already-editing sequencer number picker instead of falling through to cursor-toggle"
@@ -5827,22 +5637,6 @@ mod live_keyboard_tests {
             state.pattern.step_data[0].get(2, StepParam::Velocity),
             0.25,
             "Enter should commit the pending number-picker edit through the soft step path"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("seqv-soft-edit-flushed")
-                .unwrap(),
-            Some(Value::Number(0.25)),
-            "commit should flush the reactive mirror immediately"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-0-2")"#)
-                .unwrap(),
-            Some(Value::Number(0.25)),
-            "Enter commit should update the visible expanded slider slot immediately"
         );
     }
 }

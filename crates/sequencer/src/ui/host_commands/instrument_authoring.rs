@@ -36,8 +36,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
-    let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -143,10 +141,7 @@ pub(super) fn handle(
                 &mut *ctx.track_names,
                 &track_pan_ids,
                 &record_armed,
-                &selected_steps,
                 &accumulator_names,
-                &ctx.meters.cached_track_peak_levels,
-                &ctx.meters.cached_bus_peak_levels,
                 &ui_epoch,
                 lg_raw,
             );
@@ -204,28 +199,13 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-            rt.set_reactive(
-                "SEQ",
-                "editor-mode",
-                Value::String("new-instrument".to_string()),
-            );
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive(
-                "SEQ",
-                "editor-buffer-name",
-                Value::String(buf_name.clone()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-instrument-run-mode",
-                Value::String("instrument".to_string()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-surface",
-                Value::String("patch".to_string()),
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+            present_editor_open(
+                rt,
+                "new-instrument",
+                &buf_name,
+                Some(CustomInstrumentRunMode::Instrument),
+                EditorSurface::Patch,
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -326,10 +306,7 @@ pub(super) fn handle(
                 &mut *ctx.track_names,
                 &track_pan_ids,
                 &record_armed,
-                &selected_steps,
                 &accumulator_names,
-                &ctx.meters.cached_track_peak_levels,
-                &ctx.meters.cached_bus_peak_levels,
                 &ui_epoch,
                 lg_raw,
             );
@@ -415,29 +392,8 @@ pub(super) fn handle(
             // The name field starts empty on purpose (spec 3.4): a prefilled
             // `<source>-2` is a default you Enter through, and naming the fork
             // is the moment you decide what it is.
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-            rt.set_reactive(
-                "SEQ",
-                "editor-mode",
-                Value::String("new-instrument".to_string()),
-            );
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive(
-                "SEQ",
-                "editor-buffer-name",
-                Value::String(buf_name.clone()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-instrument-run-mode",
-                Value::String(instrument_run_mode_label(run_mode).to_string()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-surface",
-                Value::String(editor_surface_label(surface).to_string()),
-            );
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+            present_editor_open(rt, "new-instrument", &buf_name, Some(run_mode), surface);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.handle_host_event(HostEvent::Status(format!(
@@ -447,6 +403,24 @@ pub(super) fn handle(
         }
 
         "set-draft-instrument-run-mode" => {
+            let requested = extract_string_from_payload(&payload, "run-mode")
+                .unwrap_or_else(|| "instrument".to_string());
+            let Some(run_mode) = instrument_run_mode_from_label(&requested) else {
+                editor_error(editor, format!("Unknown instrument run mode '{requested}'"));
+                return;
+            };
+            // Absolute (`editor.run-mode`'s setter): the current mode is a
+            // no-op, with or without a draft session.
+            let current = match ctx.sessions.instrument_edit_session.as_ref() {
+                Some(session) => session.run_mode,
+                None => crate::presented::presented(|p| {
+                    instrument_run_mode_from_label(&p.editor.get().run_mode)
+                })
+                .unwrap_or(CustomInstrumentRunMode::Instrument),
+            };
+            if current == run_mode {
+                return;
+            }
             let Some(session) = ctx.sessions.instrument_edit_session.as_mut() else {
                 editor.handle_host_event(HostEvent::Status(
                     "No instrument edit session is active".to_string(),
@@ -454,32 +428,9 @@ pub(super) fn handle(
                 return;
             };
             if !matches!(&session.mode, InstrumentEditMode::CreateDraft { .. }) {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(
-                        "Run mode can only be changed for draft instruments"
-                            .to_string(),
-                    ),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, "Run mode can only be changed for draft instruments");
                 return;
             }
-            let requested = extract_string_from_payload(&payload, "run-mode")
-                .unwrap_or_else(|| "instrument".to_string());
-            let Some(run_mode) = instrument_run_mode_from_label(&requested) else {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(format!("Unknown instrument run mode '{requested}'")),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-                return;
-            };
             match app
                 .graph_controller()
                 .set_track_instrument_run_mode(session.track, run_mode)
@@ -490,16 +441,10 @@ pub(super) fn handle(
                         session.engine_id = engine_id;
                     }
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-instrument-run-mode",
-                        Value::String(instrument_run_mode_label(run_mode).to_string()),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(String::new()),
-                    );
+                    present_editor(rt, |e| {
+                        e.run_mode = instrument_run_mode_label(run_mode).to_string();
+                        e.error.clear();
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -510,12 +455,7 @@ pub(super) fn handle(
                         }
                     )));
                 }
-                Err(error) => {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                }
+                Err(error) => editor_error(editor, error),
             }
         }
 
@@ -541,21 +481,11 @@ pub(super) fn handle(
                     let editor_macro_action =
                         editor_macro_action_strings(editor_macro_action.as_ref());
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-active-macro-name",
-                        Value::String(editor_macro_action.0.clone()),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-active-macro-action",
-                        Value::String(editor_macro_action.1.clone()),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(String::new()),
-                    );
+                    present_editor(rt, |e| {
+                        e.active_macro = editor_macro_action.0.clone();
+                        e.active_macro_action = editor_macro_action.1.clone();
+                        e.error.clear();
+                    });
                     ctx.frame.prev_editor_macro_action = editor_macro_action;
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
@@ -563,21 +493,11 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(action_status));
                 }
                 Ok(None) => {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String("No active macro is selected".to_string()),
-                    );
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, "No active macro is selected");
                     editor.refresh_visible_layouts_for_buffer_named("*samples*");
                 }
                 Err(error) => {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, error);
                     editor.refresh_visible_layouts_for_buffer_named("*samples*");
                 }
             }
@@ -589,44 +509,18 @@ pub(super) fn handle(
                     if let Value::String(inst_name) = &*cell.borrow() {
                         let inst_name = inst_name.trim().to_string();
                         if inst_name.is_empty() {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String("Name cannot be empty".to_string()),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "Name cannot be empty");
                             return;
                         }
                         let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "No draft instrument session is active".to_string(),
-                                ),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "No draft instrument session is active");
                             return;
                         };
-                        if !matches!(
-                            &session.mode,
-                            InstrumentEditMode::CreateDraft { .. }
-                        ) {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "Current editor session is not a draft instrument"
-                                        .to_string(),
-                                ),
+                        if !matches!(&session.mode, InstrumentEditMode::CreateDraft { .. }) {
+                            editor_error(
+                                editor,
+                                "Current editor session is not a draft instrument",
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         // A draft can sit on the code surface — `fork-editor-session`
@@ -635,17 +529,7 @@ pub(super) fn handle(
                         // edits, exactly like `update-instrument` treats them.
                         let code_surface = session.surface == EditorSurface::Code;
                         if !code_surface && !session.visible_revision_valid {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "Cannot finalize: the current patch has errors"
-                                        .to_string(),
-                                ),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "Cannot finalize: the current patch has errors");
                             return;
                         }
 
@@ -655,16 +539,10 @@ pub(super) fn handle(
                             match flush_staged_instrument_library_macro_edits(session) {
                                 Ok(macros) => macros,
                                 Err(error) => {
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "editor-error",
-                                        Value::String(format!(
-                                            "Failed to save library macro edits: {error}"
-                                        )),
+                                    editor_error(
+                                        editor,
+                                        format!("Failed to save library macro edits: {error}"),
                                     );
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
                                     return;
                                 }
                             }
@@ -679,16 +557,10 @@ pub(super) fn handle(
                         let (final_dir, legacy_file) =
                             finalized_instrument_storage_paths(&final_slug);
                         if final_dir.exists() || legacy_file.exists() {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Instrument '{final_slug}' already exists"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Instrument '{final_slug}' already exists"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
 
@@ -723,16 +595,10 @@ pub(super) fn handle(
                             sequencer::lisp_host::save_instrument(&final_name, &source)
                         {
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to save finalized instrument: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to save finalized instrument: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         if let Err(error) =
@@ -742,16 +608,10 @@ pub(super) fn handle(
                             )
                         {
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to save finalized instrument mode: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to save finalized instrument mode: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         let target_dsp = final_dir.join("dsp.lisp");
@@ -760,16 +620,10 @@ pub(super) fn handle(
                                 write_patcher_layout_sidecar(&target_dsp, layout)
                             {
                                 let _ = std::fs::remove_dir_all(&final_dir);
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!(
-                                        "Failed to save finalized instrument layout: {error}"
-                                    )),
+                                editor_error(
+                                    editor,
+                                    format!("Failed to save finalized instrument layout: {error}"),
                                 );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
                                 return;
                             }
                         } else if let InstrumentEditMode::CreateDraft {
@@ -781,16 +635,10 @@ pub(super) fn handle(
                                 copy_patcher_layout_sidecar(&source_dsp, &target_dsp)
                             {
                                 let _ = std::fs::remove_dir_all(&final_dir);
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!(
-                                        "Failed to save finalized instrument layout: {error}"
-                                    )),
+                                editor_error(
+                                    editor,
+                                    format!("Failed to save finalized instrument layout: {error}"),
                                 );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
                                 return;
                             }
                         }
@@ -805,16 +653,10 @@ pub(super) fn handle(
                             &final_name,
                         ) {
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to save finalized instrument assets: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to save finalized instrument assets: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         if let Err(error) = app.replace_custom_instrument_track_sync(
@@ -826,16 +668,10 @@ pub(super) fn handle(
                             // (that is where the loader resolves "<slug>/"), so
                             // removing the directory takes it with it.
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to load finalized instrument: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to load finalized instrument: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         if let Err(error) =
@@ -844,16 +680,10 @@ pub(super) fn handle(
                                 session.run_mode,
                             )
                         {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to apply finalized instrument mode: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to apply finalized instrument mode: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
 
@@ -889,42 +719,9 @@ pub(super) fn handle(
                         sync_shared_track_collapsed(&track_collapsed, &app);
 
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-mode",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-instrument-run-mode",
-                            Value::String("instrument".to_string()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-buffer-name",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "track-names",
-                            build_track_names(&app.tracks),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(
-                                &app,
-                                draft_track,
-                                &selected_steps,
-                            ),
-                        );
-                        sync_sidebar_browser(rt, &app, draft_track);
+                        present_editor_closed(rt);
+                        crate::param_words::set_track_word_names(&app.tracks);
+                        sync_sidebar_browser(&app, draft_track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*fx*");
@@ -1007,10 +804,7 @@ pub(super) fn handle(
                             &mut *ctx.track_names,
                             &track_pan_ids,
                             &record_armed,
-                            &selected_steps,
                             &accumulator_names,
-                            &ctx.meters.cached_track_peak_levels,
-                            &ctx.meters.cached_bus_peak_levels,
                             &ui_epoch,
                             lg_raw,
                         );
@@ -1083,35 +877,12 @@ pub(super) fn handle(
                                 surface,
                             ));
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-mode",
-                            Value::String("edit-instrument".to_string()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-buffer-name",
-                            Value::String(buf_name),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-instrument-run-mode",
-                            Value::String(
-                                instrument_run_mode_label(run_mode).to_string(),
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-surface",
-                            Value::String(
-                                editor_surface_label(surface).to_string(),
-                            ),
+                        present_editor_open(
+                            rt,
+                            "edit-instrument",
+                            &buf_name,
+                            Some(run_mode),
+                            surface,
                         );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
@@ -1130,17 +901,7 @@ pub(super) fn handle(
                             let code_surface =
                                 session.surface == EditorSurface::Code;
                             if !code_surface && !session.visible_revision_valid {
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(
-                                        "Cannot save: the current patch has errors"
-                                            .to_string(),
-                                    ),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
+                                editor_error(editor, "Cannot save: the current patch has errors");
                                 return;
                             }
                             let flushed_macros = if code_surface {
@@ -1151,16 +912,10 @@ pub(super) fn handle(
                                 ) {
                                     Ok(macros) => macros,
                                     Err(error) => {
-                                        let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "editor-error",
-                                            Value::String(format!(
-                                                "Failed to save library macro edits: {error}"
-                                            )),
+                                        editor_error(
+                                            editor,
+                                            format!("Failed to save library macro edits: {error}"),
                                         );
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
                                         return;
                                     }
                                 }
@@ -1191,14 +946,7 @@ pub(super) fn handle(
                                 &session.path,
                                 &source_to_save,
                             ) {
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!("Failed to save: {e}")),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
+                                editor_error(editor, format!("Failed to save: {e}"));
                                 return;
                             }
                             // Only the patch surface owns the sidecar: every
@@ -1213,16 +961,7 @@ pub(super) fn handle(
                                 if let Err(e) =
                                     write_patcher_layout_sidecar(&session.path, layout)
                                 {
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "editor-error",
-                                        Value::String(format!(
-                                            "Failed to save layout: {e}"
-                                        )),
-                                    );
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                                    editor_error(editor, format!("Failed to save layout: {e}"));
                                     return;
                                 }
                             }
@@ -1251,33 +990,9 @@ pub(super) fn handle(
 
                             let ct = current_track.load(Ordering::Relaxed);
                             ctx.track_names[ct] = inst_name.clone();
+                            crate::param_words::set_track_word_names(ctx.track_names);
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-mode",
-                                Value::String(String::new()),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(String::new()),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-buffer-name",
-                                Value::String(String::new()),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-instrument-run-mode",
-                                Value::String("instrument".to_string()),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "track-names",
-                                build_track_names(&ctx.track_names),
-                            );
+                            present_editor_closed(rt);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1299,14 +1014,7 @@ pub(super) fn handle(
                         if let Err(e) =
                             sequencer::lisp_host::save_instrument(&inst_name, &source)
                         {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!("Failed to save: {e}")),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, format!("Failed to save: {e}"));
                             return;
                         }
 
@@ -1325,65 +1033,9 @@ pub(super) fn handle(
 
                                 let ct = current_track.load(Ordering::Relaxed);
                                 ctx.track_names[ct] = inst_name.clone();
+                                crate::param_words::set_track_word_names(ctx.track_names);
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-active",
-                                    Value::Bool(false),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-mode",
-                                    Value::String(String::new()),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(String::new()),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-buffer-name",
-                                    Value::String(String::new()),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-instrument-run-mode",
-                                    Value::String("instrument".to_string()),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "track-names",
-                                    build_track_names(&ctx.track_names),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "instrument-panel",
-                                    build_instrument_panel_value(
-                                        &app,
-                                        ct,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "effects",
-                                    build_effects_value(
-                                        &state,
-                                        ct,
-                                        &app.graph.effect_descriptors,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "midi-effects",
-                                    build_midi_effects_value(
-                                        &state,
-                                        ct,
-                                        &selected_steps,
-                                    ),
-                                );
+                                present_editor_closed(rt);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1393,14 +1045,7 @@ pub(super) fn handle(
                             }
                             Err(e) => {
                                 // Compile failed — stay in editor, show error
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!("{e}")),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
+                                editor_error(editor, format!("{e}"));
                             }
                         }
                     }
@@ -1535,10 +1180,7 @@ pub(super) fn handle(
                 ctx.sessions.pending_instrument_preview = None;
                 let diagnostic = extract_string_from_payload(&payload, "diagnostic")
                     .unwrap_or_else(|| "Patch writeback failed".to_string());
-                let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-error", Value::String(diagnostic));
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, diagnostic);
                 return;
             }
             let input = match preview_source_from_payload(editor, &payload, &session.path) {
@@ -1547,10 +1189,7 @@ pub(super) fn handle(
                     session.preview_generation = session.preview_generation.wrapping_add(1);
                     session.visible_revision_valid = false;
                     ctx.sessions.pending_instrument_preview = None;
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, error);
                     return;
                 }
             };
@@ -1564,14 +1203,7 @@ pub(super) fn handle(
                     eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
                 ),
             });
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "editor-error",
-                Value::String("Preview compiling...".to_string()),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
+            editor_error(editor, "Preview compiling...");
         }
 
         "preview-effect-patch" => {
@@ -1689,10 +1321,7 @@ pub(super) fn handle(
                 ctx.sessions.pending_effect_preview = None;
                 let diagnostic = extract_string_from_payload(&payload, "diagnostic")
                     .unwrap_or_else(|| "Patch writeback failed".to_string());
-                let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-error", Value::String(diagnostic));
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, diagnostic);
                 return;
             }
             let input = match preview_source_from_payload(editor, &payload, &session.path) {
@@ -1701,10 +1330,7 @@ pub(super) fn handle(
                     session.preview_generation = session.preview_generation.wrapping_add(1);
                     session.visible_revision_valid = false;
                     ctx.sessions.pending_effect_preview = None;
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, error);
                     return;
                 }
             };
@@ -1718,14 +1344,7 @@ pub(super) fn handle(
                     eseqlisp::widget_render::patcher::PatcherIntent::Effect,
                 ),
             });
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "editor-error",
-                Value::String("Preview compiling...".to_string()),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
+            editor_error(editor, "Preview compiling...");
         }
 
         "evaluate-editor-source" => {
@@ -1747,14 +1366,7 @@ pub(super) fn handle(
                 queue_instrument_preview_compile(
                     session, &mut ctx.sessions.pending_instrument_preview, source, app.graph.sample_rate,
                 );
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String("Preview compiling...".to_string()),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, "Preview compiling...");
             } else if let Some(session) = ctx.sessions.effect_edit_session.as_mut() {
                 if session.surface != EditorSurface::Code {
                     return;
@@ -1770,14 +1382,7 @@ pub(super) fn handle(
                 queue_effect_preview_compile(
                     session, &mut ctx.sessions.pending_effect_preview, source, app.graph.sample_rate,
                 );
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String("Preview compiling...".to_string()),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, "Preview compiling...");
             }
         }
 
@@ -1809,10 +1414,7 @@ pub(super) fn handle(
                         eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
                     )
                 {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, error);
                     return;
                 }
                 let old_buf = session.buffer_name.clone();
@@ -1845,13 +1447,11 @@ pub(super) fn handle(
                 session.visible_revision_valid = true;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-surface",
-                    Value::String("patch".to_string()),
-                );
-                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                present_editor(rt, |e| {
+                    e.buffer = buf_name;
+                    e.surface = "patch".to_string();
+                    e.error.clear();
+                });
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.handle_host_event(HostEvent::Status(
@@ -1881,10 +1481,7 @@ pub(super) fn handle(
                         eseqlisp::widget_render::patcher::PatcherIntent::Effect,
                     )
                 {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, error);
                     return;
                 }
                 let old_buf = session.buffer_name.clone();
@@ -1917,13 +1514,11 @@ pub(super) fn handle(
                 session.visible_revision_valid = true;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-surface",
-                    Value::String("patch".to_string()),
-                );
-                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                present_editor(rt, |e| {
+                    e.buffer = buf_name;
+                    e.surface = "patch".to_string();
+                    e.error.clear();
+                });
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.handle_host_event(HostEvent::Status(
@@ -1997,13 +1592,11 @@ pub(super) fn handle(
                 session.last_valid_layout = None;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-surface",
-                    Value::String("code".to_string()),
-                );
-                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                present_editor(rt, |e| {
+                    e.buffer = buf_name;
+                    e.surface = "code".to_string();
+                    e.error.clear();
+                });
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.handle_host_event(HostEvent::Status(
@@ -2067,13 +1660,11 @@ pub(super) fn handle(
                 session.last_valid_layout = None;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-surface",
-                    Value::String("code".to_string()),
-                );
-                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                present_editor(rt, |e| {
+                    e.buffer = buf_name;
+                    e.surface = "code".to_string();
+                    e.error.clear();
+                });
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.handle_host_event(HostEvent::Status(
@@ -2291,34 +1882,8 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-            rt.set_reactive(
-                "SEQ",
-                "editor-mode",
-                Value::String("new-effect".to_string()),
-            );
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive(
-                "SEQ",
-                "editor-buffer-name",
-                Value::String(buf_name.clone()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-surface",
-                Value::String("patch".to_string()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(
-                    &state,
-                    track,
-                    &app.graph.effect_descriptors,
-                    &selected_steps,
-                ),
-            );
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+            present_editor_open(rt, "new-effect", &buf_name, None, EditorSurface::Patch);
             rt.run_reactive_cycle();
             if let Err(error) = rt.eval_str("(eseq.browser/refresh-buffer)") {
                 let _ = app
@@ -2335,14 +1900,7 @@ pub(super) fn handle(
                 ctx.sessions.editor_buffer_name = None;
                 ctx.sessions.editor_mode = None;
                 let rt = editor.runtime_mut();
-                rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-buffer-name",
-                    Value::String(String::new()),
-                );
+                present_editor_closed(rt);
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.handle_host_event(HostEvent::Error(format!(
@@ -2518,30 +2076,8 @@ pub(super) fn handle(
                 surface,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-            rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive(
-                "SEQ",
-                "editor-buffer-name",
-                Value::String(buf_name.clone()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-surface",
-                Value::String(editor_surface_label(surface).to_string()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(
-                    &state,
-                    track,
-                    &app.graph.effect_descriptors,
-                    &selected_steps,
-                ),
-            );
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+            present_editor_open(rt, "new-effect", &buf_name, None, surface);
             rt.run_reactive_cycle();
             let _ = rt.eval_str("(eseq.browser/refresh-buffer)");
             editor.refresh_runtime_side_effects();
@@ -2558,59 +2094,23 @@ pub(super) fn handle(
                     if let Value::String(effect_name) = &*cell.borrow() {
                         let effect_name = effect_name.trim().to_string();
                         if effect_name.is_empty() {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String("Name cannot be empty".to_string()),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "Name cannot be empty");
                             return;
                         }
                         let Some(session) = ctx.sessions.effect_edit_session.as_ref() else {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "No draft effect session is active".to_string(),
-                                ),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "No draft effect session is active");
                             return;
                         };
                         if !matches!(&session.mode, EffectEditMode::CreateDraft { .. })
                         {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "Current editor session is not a draft effect"
-                                        .to_string(),
-                                ),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "Current editor session is not a draft effect");
                             return;
                         }
                         // See `save-new-instrument`: draft effects can sit on
                         // the code surface too.
                         let code_surface = session.surface == EditorSurface::Code;
                         if !code_surface && !session.visible_revision_valid {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(
-                                    "Cannot finalize: the current patch has errors"
-                                        .to_string(),
-                                ),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, "Cannot finalize: the current patch has errors");
                             return;
                         }
 
@@ -2620,16 +2120,10 @@ pub(super) fn handle(
                             match flush_staged_effect_library_macro_edits(session) {
                                 Ok(macros) => macros,
                                 Err(error) => {
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "editor-error",
-                                        Value::String(format!(
-                                            "Failed to save library macro edits: {error}"
-                                        )),
+                                    editor_error(
+                                        editor,
+                                        format!("Failed to save library macro edits: {error}"),
                                     );
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
                                     return;
                                 }
                             }
@@ -2644,16 +2138,7 @@ pub(super) fn handle(
                         let (final_dir, legacy_file) =
                             finalized_effect_storage_paths(&final_slug);
                         if final_dir.exists() || legacy_file.exists() {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Effect '{final_slug}' already exists"
-                                )),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, format!("Effect '{final_slug}' already exists"));
                             return;
                         }
 
@@ -2677,14 +2162,7 @@ pub(super) fn handle(
                         if let Err(e) =
                             sequencer::lisp_host::save_effect(&final_name, &source)
                         {
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!("Failed to save: {e}")),
-                            );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
+                            editor_error(editor, format!("Failed to save: {e}"));
                             return;
                         }
                         let final_dsp =
@@ -2694,16 +2172,7 @@ pub(super) fn handle(
                                 write_patcher_layout_sidecar(&final_dsp, layout)
                             {
                                 let _ = std::fs::remove_dir_all(&final_dir);
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!(
-                                        "Failed to save layout: {e}"
-                                    )),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
+                                editor_error(editor, format!("Failed to save layout: {e}"));
                                 return;
                             }
                         } else if let EffectEditMode::CreateDraft { temp_dir } =
@@ -2714,16 +2183,7 @@ pub(super) fn handle(
                                 copy_patcher_layout_sidecar(&source_dsp, &final_dsp)
                             {
                                 let _ = std::fs::remove_dir_all(&final_dir);
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!(
-                                        "Failed to save layout: {e}"
-                                    )),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
+                                editor_error(editor, format!("Failed to save layout: {e}"));
                                 return;
                             }
                         }
@@ -2734,16 +2194,10 @@ pub(super) fn handle(
                                 temp_dir, &final_dir, &final_name,
                             ) {
                                 let _ = std::fs::remove_dir_all(&final_dir);
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!(
-                                        "Failed to save finalized effect assets: {error}"
-                                    )),
+                                editor_error(
+                                    editor,
+                                    format!("Failed to save finalized effect assets: {error}"),
                                 );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
                                 return;
                             }
                         }
@@ -2762,16 +2216,10 @@ pub(super) fn handle(
                             app.load_saved_effect_to_slot_sync(track, slot, &final_name)
                         {
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(format!(
-                                    "Failed to load finalized effect: {error}"
-                                )),
+                            editor_error(
+                                editor,
+                                format!("Failed to load finalized effect: {error}"),
                             );
-                            rt.run_reactive_cycle();
-                            editor.refresh_runtime_side_effects();
                             return;
                         }
                         let session =
@@ -2800,42 +2248,7 @@ pub(super) fn handle(
                         ctx.sessions.editor_mode = None;
 
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-mode",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-buffer-name",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "available-builtin-effects",
-                            build_available_builtin_effects(),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "available-effects",
-                            build_available_effects(),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
+                        present_editor_closed(rt);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*fx*");
@@ -2968,29 +2381,7 @@ pub(super) fn handle(
                                 surface,
                             ));
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-mode",
-                            Value::String("edit-effect".to_string()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-buffer-name",
-                            Value::String(buf_name),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-surface",
-                            Value::String(
-                                editor_surface_label(surface).to_string(),
-                            ),
-                        );
+                        present_editor_open(rt, "edit-effect", &buf_name, None, surface);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                     }
@@ -3007,16 +2398,7 @@ pub(super) fn handle(
             };
             let code_surface = session.surface == EditorSurface::Code;
             if !code_surface && !session.visible_revision_valid {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(
-                        "Cannot save: the current patch has errors".to_string(),
-                    ),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, "Cannot save: the current patch has errors");
                 return;
             }
             let flushed_macros = if code_surface {
@@ -3025,16 +2407,10 @@ pub(super) fn handle(
                 match flush_staged_effect_library_macro_edits(session) {
                     Ok(macros) => macros,
                     Err(error) => {
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(format!(
-                                "Failed to save library macro edits: {error}"
-                            )),
+                        editor_error(
+                            editor,
+                            format!("Failed to save library macro edits: {error}"),
                         );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
                         return;
                     }
                 }
@@ -3058,14 +2434,7 @@ pub(super) fn handle(
             let unevaluated_changes =
                 code_surface && source_to_save != session.last_valid_source;
             if let Err(e) = std::fs::write(&session.path, &source_to_save) {
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(format!("Failed to save: {e}")),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
+                editor_error(editor, format!("Failed to save: {e}"));
                 return;
             }
             // Patch surface only — see the instrument twin in `update-instrument`.
@@ -3075,14 +2444,7 @@ pub(super) fn handle(
                 .filter(|_| !code_surface)
             {
                 if let Err(e) = write_patcher_layout_sidecar(&session.path, layout) {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!("Failed to save layout: {e}")),
-                    );
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    editor_error(editor, format!("Failed to save layout: {e}"));
                     return;
                 }
             }
@@ -3107,34 +2469,11 @@ pub(super) fn handle(
             ctx.sessions.editor_mode = None;
 
             let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+            present_editor_closed(rt);
             match session.target {
-                EffectEditTarget::Track { track, .. } => {
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                }
+                EffectEditTarget::Track { .. } => {}
                 EffectEditTarget::Bus { .. } => {
                     *bus_state.lock().unwrap() = app.buses.clone();
-                    sync_bus_mixer_state(rt, &app);
-                    rt.set_reactive(
-                        "SEQ",
-                        "bus-effects",
-                        build_bus_effects_value_for_selection(
-                            &app,
-                            Some(&selected_steps),
-                        ),
-                    );
                 }
             }
             rt.run_reactive_cycle();
@@ -3155,7 +2494,7 @@ pub(super) fn handle(
         // In-editor Fork (spec §3.5): you started editing in place and now want
         // out without discarding your work. Copies the *in-editor* source — not
         // the on-disk source — into a fresh draft dir, converts the session from
-        // EditExisting to CreateDraft, and flips SEQ.editor-mode so the create
+        // EditExisting to CreateDraft, and flips `editor.mode` so the create
         // flow's (empty) name field appears and the primary button becomes
         // Finalize. The original on disk is never written.
         "fork-editor-session" => {
@@ -3324,14 +2663,12 @@ pub(super) fn handle(
                     ctx.sessions.editor_mode = Some("new-instrument".to_string());
                     let rt = editor.runtime_mut();
                     // Empty on purpose — see spec §3.4.
-                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-mode",
-                        Value::String("new-instrument".to_string()),
-                    );
-                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                    let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+                    present_editor(rt, |e| {
+                        e.mode = "new-instrument".to_string();
+                        e.error.clear();
+                        e.buffer = buf_name;
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -3471,10 +2808,12 @@ pub(super) fn handle(
                     ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                     ctx.sessions.editor_mode = Some("new-effect".to_string());
                     let rt = editor.runtime_mut();
-                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
-                    rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
-                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                    let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
+                    present_editor(rt, |e| {
+                        e.mode = "new-effect".to_string();
+                        e.error.clear();
+                        e.buffer = buf_name;
+                    });
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -3518,12 +2857,10 @@ pub(super) fn handle(
                                 receiver: rx,
                             });
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
+                        present_editor(rt, |e| {
+                            e.canceling = true;
+                            e.error.clear();
+                        });
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -3565,12 +2902,10 @@ pub(super) fn handle(
                                     receiver: rx,
                                 });
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(String::new()),
-                            );
+                            present_editor(rt, |e| {
+                                e.canceling = true;
+                                e.error.clear();
+                            });
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
@@ -3609,11 +2944,7 @@ pub(super) fn handle(
                                     &state,
                                     &mut *ctx.track_names,
                                     restored_track,
-                                    &selected_steps,
-                                    &piano_roll_selection,
                                     &accumulator_names,
-                                    &record_armed,
-                                    &ctx.meters.cached_track_peak_levels,
                                 );
                                 rt.clear_subtree_effects_for_named_target(
                                     "*sequencer*",
@@ -3659,12 +2990,10 @@ pub(super) fn handle(
                                 receiver: rx,
                             });
                         let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
-                        rt.set_reactive(
-                            "SEQ",
-                            "editor-error",
-                            Value::String(String::new()),
-                        );
+                        present_editor(rt, |e| {
+                            e.canceling = true;
+                            e.error.clear();
+                        });
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -3700,12 +3029,10 @@ pub(super) fn handle(
                                     receiver: rx,
                                 });
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
-                            rt.set_reactive(
-                                "SEQ",
-                                "editor-error",
-                                Value::String(String::new()),
-                            );
+                            present_editor(rt, |e| {
+                                e.canceling = true;
+                                e.error.clear();
+                            });
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
@@ -3719,16 +3046,6 @@ pub(super) fn handle(
                             {
                                 Ok(()) => {
                                     let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "effects",
-                                        build_effects_value(
-                                            &state,
-                                            track,
-                                            &app.graph.effect_descriptors,
-                                            &selected_steps,
-                                        ),
-                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     editor.refresh_visible_layouts_for_buffer_named(
@@ -3769,16 +3086,7 @@ pub(super) fn handle(
 
             ctx.sessions.editor_mode = None;
             let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
-            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
-            rt.set_reactive(
-                "SEQ",
-                "editor-instrument-run-mode",
-                Value::String("instrument".to_string()),
-            );
+            present_editor_closed(rt);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.handle_host_event(HostEvent::Status("Editor cancelled".to_string()));

@@ -7,12 +7,13 @@
 ;; effect-buffer, registers it with the factory step-tab registry
 ;; (eseq.seq-step-tabs) and selects it, so a "Tracker" tab appears next to
 ;; "Seq" the moment the form is evaluated. Nothing in the factory UI is
-;; overridden; the package only uses exported registry verbs and the SEQ
-;; reactive namespace, which is the extension surface any user package has.
+;; overridden; the package reads and edits the project through eseq.kinds
+;; (docs/kind-bindings-spec.md §14.2j), the extension surface any user
+;; package has.
 ;;
 ;; Layout: one column per track, one row per step. Every cell reads
 ;;   NOTE VV     note name from the step's transpose (C-4 = transpose 0),
-;;               velocity as two hex digits
+;;               velocity as two hex digits (00-7F)
 ;;   --- ..      an inactive step
 ;; The playhead row of each track is tinted, the cursor cell is highlighted.
 ;;
@@ -29,7 +30,7 @@
 ;;   , / .             nudge the step's velocity by 0.1
 ;;   0-9 a-f           on Vol or a lock column: type the value — one digit for
 ;;                     integer columns (retrig, duration), two hex digits
-;;                     otherwise; a-f are hex there, not notes
+;;                     otherwise (Vol 00-7F); a-f are hex there, not notes
 ;;
 ;; While a track is record-armed the host's live keyboard owns the note
 ;; keys (it records what you play), so note entry here needs no armed track.
@@ -37,43 +38,66 @@
 ;; M-x alez.tracker.ui/show and /hide select or drop the tab; C-c t shows it.
 
 (module alez.tracker.ui)
-(import eseq.bindings)
+(import eseq.view-kit :refer (listed? index-of color-rgba open-menu! menu-of))
+(import eseq.kinds :refer (track tracks selection transport focus-step-params
+                           focus-step-value set-step-param! lock-param! unlock-param!
+                           lock-rack-macro! unlock-rack-macro! set-lane-steps!))
 
 (export show
         hide
         handle-key
         note-name
         hex2
+        compact-label
         pattern-rows
-        cursor-row
-        cursor-track
-        cursor-col
         select-track
         select-cell
-        entry
         toggle-column
+        toggle-collapse
         track-columns
+        column-value
+        lane-key
         open-column-menu
-        octave
-        step-advance)
+        tracker-cursor
+        tracker-view
+        tracker-menu)
 
-(defstate cursor-row 0)
-(defstate cursor-track 0)
-(defstate cursor-col 0)
-;; Columns the user added or hid per track, keyed by track id so the choice
-;; survives track reorders: a list of (dict :track <id> :keys (key …)).
-(defstate added-columns (list))
-(defstate hidden-columns (list))
-;; The open "+" picker: (dict :track t :col c :row r) or nil.
-(defstate column-menu nil)
-;; Pending first hex digit typed into a two-digit column ("" when none).
-(defstate entry "")
-(defstate octave 4)
-(defstate step-advance 1)
+;; ── view state ──────────────────────────────────────────────────────────────
+
+;; The cursor: the cell the keys edit, as the track's position, the grid row
+;; and the sub-column (0 Note, 1 Vol, 2.. the track's columns). Cells bind
+;; these and compare them in their shader (tracker-cursor-lamp), so a move
+;; only repaints.
+(def-kind tracker-cursor
+  :key ()
+  :state ((track 0)
+          (row 0)
+          (col 0)))
+
+;; Columns the user added or hid per track, keyed by the track's id so the
+;; choice survives track reorders: lists of (dict :track <tid> :keys (key …)),
+;; nil for none. `collapsed`: the ids of the tracks whose columns are folded
+;; away. `entry`: a pending first hex digit (0-15) typed into a two-digit
+;; column, "" when none.
+(def-kind tracker-view
+  :key ()
+  :state ((added :any :default nil)
+          (hidden :any :default nil)
+          (collapsed :any :default nil)
+          (entry :any :default "")
+          (octave 4)
+          (step-advance 1)))
+
+;; The "+" column picker: open, where (a pointer event's grid point) and
+;; for which track.
+(def-kind tracker-menu
+  :key ()
+  :state ((open false)
+          (at :any :default nil)
+          (track track :default nil)))
 
 (def buffer-name "*tracker*")
 (def tab-label "Tracker")
-(def max-rows 64)
 
 ;; ── formatting ──────────────────────────────────────────────────────────────
 
@@ -91,190 +115,271 @@
 (def hex-digits
   (list "0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "A" "B" "C" "D" "E" "F"))
 
+;; The keys that type them (downcased).
+(def hex-keys
+  (list "0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "a" "b" "c" "d" "e" "f"))
+
 (def hex2 (n)
   (let ((v (max 0 (min 255 (floor n))))
          (hi (floor (/ v 16)))
          (lo (- v (* 16 hi))))
     (str (nth hex-digits hi) (nth hex-digits lo))))
 
+;; Velocity 0-1 as 00-7F, the MIDI range (typing Vol stores n/127, which
+;; the host's f32 holds a hair under: the nudge reads it back as n).
 (def velocity-hex (velocity)
-  (hex2 (* 127 velocity)))
+  (hex2 (+ (* 127 velocity) 0.001)))
+
+;; A tracker-width spelling of a parameter label, built rather than curated:
+;; tokens (split on _ . - / and spaces) lose their vowels after the first
+;; letter and are cut to three characters, and only the last two tokens
+;; survive, joined with a dot. Two dgen spellings are read first: the
+;; __dgen_mod_active__<param> flag becomes ~<param>, and
+;; "mod <param> slot N amt" becomes <param>~N.
+;;
+;;   voicing.character → vcn.chr     body.damping → bdy.dmp
+;;   lp_freq           → lp.frq      cutoff       → ctf
+(def mod-active-prefix "__dgen_mod_active__")
+(def label-separators (list "_" "." "-" " " "/"))
+(def vowels (list "a" "e" "i" "o" "u"))
+
+(def char-at (s i) (substring s i (+ i 1)))
+
+(def label-tokens (s)
+  (filter |token| (not (empty? token))
+    (string-split
+      (apply str (map |i| (if (listed? (char-at s i) label-separators) "_" (char-at s i))
+                      (range 0 (len s))))
+      "_")))
+
+(def compact-token (token)
+  (if (<= (len token) 3)
+    token
+    (reduce |kept i|
+      (if (or (>= (len kept) 3)
+              (and (> i 0) (listed? (string-downcase (char-at token i)) vowels)))
+        kept
+        (str kept (char-at token i)))
+      ""
+      (range 0 (len token)))))
+
+(def digits? (s)
+  (and (not (empty? s))
+       (reduce |all i| (and all (listed? (char-at s i) (list "0" "1" "2" "3" "4" "5" "6" "7" "8" "9")))
+               true (range 0 (len s)))))
+
+;; ("<param>" "N") of a "mod <param> slot N amt" label, else nil.
+(def mod-slot-label (label)
+  (when (string-starts-with? label "mod ")
+    (let ((rest (substring label 4))
+          (parts (string-split rest " slot "))
+          (tail (nth parts (- (len parts) 1)))
+          (slot (string-trim (if (string-ends-with? tail " amt")
+                               (substring tail 0 (- (len tail) 4))
+                               tail))))
+      (when (and (> (len parts) 1) (digits? slot))
+        (list (substring rest 0 (- (len rest) (len tail) 6)) slot)))))
+
+(def compact-label (label)
+  (if (string-starts-with? label mod-active-prefix)
+    (str "~" (compact-label (substring label (len mod-active-prefix))))
+    (let ((slot (mod-slot-label label))
+          (tokens (map compact-token (label-tokens label)))
+          (count (len tokens)))
+      (if slot
+        (str (compact-label (first slot)) "~" (nth slot 1))
+        (if (empty? tokens)
+          label
+          (if (= count 1)
+            (first tokens)
+            (str (nth tokens (- count 2)) "." (nth tokens (- count 1)))))))))
 
 ;; ── reads ───────────────────────────────────────────────────────────────────
 
-(def track-count ()
-  (len SEQ.track-ids))
+(def track-at (i) (nth (tracks) i))
 
-;; Longest pattern across tracks, so every track has a row for each step.
+(def track-count () (len (tracks)))
+
+(def track-len (t) (max 1 t.num-steps))
+
+;; Longest pattern across tracks, so every track has a row for each step
+;; (the grid track.playhead-row lights; a pattern is at most 256 steps).
 (def pattern-rows ()
-  (min max-rows
-    (max 1 (reduce |acc n| (max acc n) 1 SEQ.track-num-steps))))
+  (reduce |acc t| (max acc (track-len t)) 1 (tracks)))
 
 ;; The grid is as tall as the longest pattern. A shorter track repeats down
 ;; its column as ghosts: row r of a track of length n shows real step
 ;; (r mod n), drawn muted, and editing a ghost edits that real step.
-(def track-len (track)
-  (let ((n (nth SEQ.track-num-steps track)))
-    (if (or (= n nil) (< n 1)) 1 n)))
+(def real-row (t row)
+  (wrap-index row (track-len t)))
 
-(def real-row (track row)
-  (wrap-index row (track-len track)))
-
-(def ghost-row? (track row)
-  (>= row (track-len track)))
+(def ghost-row? (t row)
+  (>= row (track-len t)))
 
 ;; First row of each repeat: where the track's loop restarts.
-(def loop-start-row? (track row)
-  (and (ghost-row? track row) (= (real-row track row) 0)))
+(def loop-start-row? (t row)
+  (and (ghost-row? t row) (= (real-row t row) 0)))
 
-;; Cells come from SEQ.tracker-rows, the host's step-major matrix:
-;; (nth (nth rows step) track) is (active transpose velocity col-values…),
-;; nil past the track's length. Step-major means a row subtree depends on
-;; its own step index only, so a step edit re-renders one row.
-(def cell (track row)
-  (nth (nth SEQ.tracker-rows (real-row track row)) track))
+;; The step a row of t's column shows (its real step).
+(def row-step (t row)
+  (nth t.steps (real-row t row)))
 
-(def step-active? (track row)
-  (= (nth (cell track row) 0) true))
-
-(def step-transpose (track row)
-  (let ((v (nth (cell track row) 1)))
-    (if (= v nil) 0 v)))
-
-(def step-velocity (track row)
-  (let ((v (nth (cell track row) 2)))
-    (if (= v nil) 1 v)))
-
-(def track-color (track)
-  (let ((c (nth SEQ.track-colors track)))
-    (if (= c nil) (list 0.4 0.4 0.4) c)))
+(def step-active? (s)
+  (and s s.active))
 
 ;; ── columns ────────────────────────────────────────────────────────────────
 ;;
 ;; Renoise's effect columns, on Elektron terms: a track's columns after Note
-;; and Vol are its parameter locks and process lanes. Three sources feed the
-;; list, all merged by :key:
+;; and Vol are its step params, parameter locks and process lanes. A column
+;; is a dict: :key (stable across renders), :kind, :src, :label, :min, :max,
+;; :increment, :default where it is fixed and, once shown, :short (the
+;; header's compact spelling; a lane brings its own). By kind:
 ;;
-;;   SEQ.track-automation     rows for every parameter that already carries a
-;;                            lock (see build_track_automation_value); shown
-;;                            unless the user hid them
-;;   SEQ.track-lock-targets   every bindable parameter per track, grouped by
-;;                            device — the "+" picker; a chosen target with no
-;;                            lock yet is an empty column until typed into
-;;   SEQ.track-process-lanes  process lane metadata (prob, rand, count, …);
-;;                            added through the picker's Lanes group
-;;   SEQ.track-process-lane-values  per-track, per-lane step values
+;;   :step   a step param, :src its name (a step field, focus-step-params)
+;;   :param  a device param, :src the param (its values: p.step-locks)
+;;   :macro  a drum rack macro, :src the rack macro (rm.step-locks)
+;;   :lane   a process lane, :src the lane (l.values)
 ;;
-;; A column is a dict with :key :label :target :min :max :default :increment
-;; and :values (one entry per step, nil = nothing on that step), plus the
-;; addressing its writer needs (:slot-idx :param-idx or :instance-id :inlet).
+;; A track shows the step params an active step holds off their default
+;; (t.step-params-in-use) and the device params and rack macros with a lock
+;; (has-locks), unless the user hid them, then the columns the user added
+;; (the "+" picker).
 
-(def track-key (track)
-  (nth SEQ.track-ids track))
+(def step-column (d)
+  (dict :key (str "step:" (get d :name)) :kind :step :src (get d :name)
+        :label (get d :label) :min (get d :min) :max (get d :max) :default (get d :default)
+        :increment (get d :increment)))
 
-(def keys-for (entries track)
-  (let ((hits (filter |e| (= (get e :track) (track-key track)) entries)))
-    (if (= (len hits) 0) (list) (get (nth hits 0) :keys))))
+;; Velocity and transpose are every row's Vol and Note cells.
+(def step-columns ()
+  (map step-column
+       (filter |d| (not (listed? (get d :name) (list "velocity" "transpose")))
+               (focus-step-params))))
 
-(def with-keys (entries track keys)
+(def param-column (d p)
+  (dict :key (str "param:" d.role ":" d.did ":" p.index) :kind :param :src p
+        :label p.name :min p.min :max p.max
+        :increment (if (= p.type "continuous") 0 1)))
+
+(def macro-column (rm)
+  (dict :key (str "macro:" rm.index) :kind :macro :src rm
+        :label rm.name :min 0 :max 1 :increment 0))
+
+(def lane-key (l)
+  (str "lane:" l.process.proc-id ":" l.inlet))
+
+(def lane-column (l)
+  (dict :key (lane-key l) :kind :lane :src l
+        :label l.label :short l.short-label :min l.min :max l.max :default l.default
+        :increment (if (= l.decimals 0) 1 0)))
+
+(def device-columns (devices keep?)
+  (reduce |acc d| (append acc (map |p| (param-column d p) (filter keep? d.params)))
+          (list) devices))
+
+(def rack-macros (t)
+  (reduce |acc d| (append acc d.macros) (list) t.devices))
+
+;; The columns t has values in: step params off their default (the host's
+;; t.step-params-in-use, so this reads no step), then the locked instrument
+;; and effect params, rack macros and MIDI effect params.
+(def locked-columns (t)
   (append
-    (filter |e| (not (= (get e :track) (track-key track))) entries)
-    (list (dict :track (track-key track) :keys keys))))
+    (let ((in-use t.step-params-in-use))
+      (filter |col| (listed? (get col :src) in-use) (step-columns)))
+    (device-columns t.devices |p| p.has-locks)
+    (map macro-column (filter |rm| rm.has-locks (rack-macros t)))
+    (device-columns t.midi-devices |p| p.has-locks)))
 
-(def contains? (items key)
-  (> (len (filter |k| (= k key) items)) 0))
+;; Every column t can show, grouped as the picker lists them (lanes apart).
+(def device-group-label (d)
+  (if (= d.role "instrument") d.name (str "FX " (+ d.slot 1) " · " d.name)))
 
-(def find-by-key (items key)
-  (let ((hits (filter |item| (= (get item :key) key) items)))
-    (if (= (len hits) 0) nil (nth hits 0))))
+(def target-groups (t)
+  (filter |g| (not (empty? (get g :items)))
+    (append
+      (list (dict :group "Step" :items (step-columns)))
+      (map |d| (dict :group (device-group-label d) :items (device-columns (list d) |p| true))
+           t.devices)
+      (map |d| (dict :group (str "MIDI FX " (+ d.slot 1) " · " d.name)
+                     :items (device-columns (list d) |p| true))
+           t.midi-devices)
+      (list (dict :group "Macros" :items (map macro-column (rack-macros t)))))))
 
-(def track-automation (track)
-  (or (nth SEQ.track-automation track) (list)))
-
-(def track-targets (track)
-  (or (nth SEQ.track-lock-targets track) (list)))
-
-(def track-lanes (track)
-  (or (nth SEQ.track-process-lanes track) (list)))
-
-(def track-added (track)
-  (keys-for added-columns track))
-
-(def track-hidden (track)
-  (keys-for hidden-columns track))
-
-(def lane-key (lane)
-  (str "lane:" (get lane :instance-id) ":" (get lane :inlet)))
-
-(def lane-column (lane)
-  (dict :key (lane-key lane)
-        :label (get lane :label)
-        :short (get lane :short-label)
-        :target "process-lane"
-        :instance-id (get lane :instance-id)
-        :inlet (get lane :inlet)
-        :min (get lane :min)
-        :max (get lane :max)
-        :default (get lane :default)
-        :decimals (get lane :decimals)
-        :increment (if (= (get lane :decimals) 0) 1 0)
-        :lane-index (get lane :lane-index)))
-
-;; Every pickable target on a track, flat, with lanes folded in.
-(def target-columns (track)
+(def target-columns (t)
   (append
-    (reduce |acc g| (append acc (get g :items)) (list) (track-targets track))
-    (map |lane| (lane-column lane) (track-lanes track))))
+    (reduce |acc g| (append acc (get g :items)) (list) (target-groups t))
+    (map lane-column t.lanes)))
 
-;; The columns a track shows, in order: locked rows the user has not hidden,
-;; then the user's added columns that are not already locked rows.
-(def track-columns (track)
-  (let ((hidden (track-hidden track))
-        (auto (filter |r| (not (contains? hidden (get r :key))) (track-automation track)))
-        (targets (target-columns track))
-        (extra (filter |c| (not (= c nil))
-                 (map |key| (if (find-by-key auto key) nil (find-by-key targets key))
-                      (track-added track)))))
-    (append auto extra)))
+(def keys-for (entries t)
+  (let ((hit (first (filter |e| (= (get e :track) t.tid) (or entries (list))))))
+    (if hit (get hit :keys) (list))))
 
-(def column-shown? (track key)
-  (not (= (find-by-key (track-columns track) key) nil)))
+(def with-keys (entries t keys)
+  (append
+    (filter |e| (not (= (get e :track) t.tid)) (or entries (list)))
+    (list (dict :track t.tid :keys keys))))
 
-(def set-track-keys (state-name track keys)
-  (if (= state-name :added)
-    (set! added-columns (with-keys added-columns track keys))
-    (set! hidden-columns (with-keys hidden-columns track keys))))
+(def find-by-key (cols key)
+  (first (filter |col| (= (get col :key) key) cols)))
 
-(def without (items key)
-  (filter |k| (not (= k key)) items))
+;; The columns t shows, in order: its locked columns the user has not
+;; hidden, then the user's added columns that are not already among them.
+(def track-columns (t)
+  (let ((hidden (keys-for tracker-view.hidden t))
+        (added (keys-for tracker-view.added t))
+        (auto (filter |col| (not (listed? (get col :key) hidden)) (locked-columns t)))
+        (targets (if (empty? added) (list) (target-columns t))))
+    (append auto
+      (filter |col| col
+        (map |key| (if (find-by-key auto key) false (find-by-key targets key)) added)))))
+
+(def column-shown? (t key)
+  (if (find-by-key (track-columns t) key) true false))
+
+(def without (items x)
+  (filter |y| (not (= y x)) (or items (list))))
 
 ;; Picker toggle: a shown column hides (and drops from the added list); a
 ;; hidden or new one shows.
-(def toggle-column (track key)
-  (if (column-shown? track key)
-    (do
-      (set-track-keys :added track (without (track-added track) key))
-      (set-track-keys :hidden track (append (without (track-hidden track) key) (list key))))
-    (do
-      (set-track-keys :hidden track (without (track-hidden track) key))
-      (set-track-keys :added track (append (without (track-added track) key) (list key))))))
+(def toggle-column (t key)
+  (let ((added (keys-for tracker-view.added t))
+        (hidden (keys-for tracker-view.hidden t))
+        (shown (column-shown? t key)))
+    (set! tracker-view.added
+      (with-keys tracker-view.added t
+        (if shown (without added key) (append (without added key) (list key)))))
+    (set! tracker-view.hidden
+      (with-keys tracker-view.hidden t
+        (if shown (append (without hidden key) (list key)) (without hidden key))))))
 
-;; Column idx (position in the track's column list) → its value on a row.
-;; Locked/automation columns read the cell matrix; user-added targets with
-;; no lock yet have no values; lanes read their separate per-step projection.
-(def column-value (track idx row)
-  (let ((col (nth (track-columns track) idx))
-        (auto-count (len (track-automation track))))
-    (if (lane-col? col) (nth (nth (nth SEQ.track-process-lane-values track)
-                              (get col :lane-index)) (real-row track row))
-    (if (< idx auto-count) (nth (cell track row) (+ 3 idx))
-      nil))))
+;; Column col's value on row `row` of t's column: a step param's while its
+;; step is active (focus-step-value reads a step's params too: a step has a
+;; focus step's fields), a lock where its step holds one, a lane's always;
+;; nil for nothing there.
+(def lock-at (locks step)
+  (let ((hit (first (filter |l| (= (first l) step) locks))))
+    (when hit (nth hit 1))))
 
-(def step-param-col? (col)
-  (= (get col :target) "step-param"))
+(def column-value (t col row)
+  (let ((step (real-row t row))
+        (src (get col :src)))
+    (match (get col :kind)
+      :step (let ((s (nth t.steps step)))
+              (when (step-active? s) (focus-step-value s src)))
+      :lane (nth src.values step)
+      _ (lock-at src.step-locks step))))
 
-(def lane-col? (col)
-  (= (get col :target) "process-lane"))
+;; A device param's or rack macro's default is its base (its own value).
+(def column-default (col)
+  (let ((src (get col :src)))
+    (match (get col :kind)
+      :param src.base
+      :macro src.base
+      _ (get col :default))))
+
+(def dense-col? (col)
+  (or (= (get col :kind) :step) (= (get col :kind) :lane)))
 
 ;; Device locks print as two hex digits over the parameter's range, the
 ;; tracker convention. Step params (duration in steps, retrig count, …) and
@@ -285,135 +390,134 @@
 
 (def format-column (col v)
   (if (= v nil) ".."
-    (if (or (step-param-col? col) (lane-col? col)) (format-number v)
+    (if (dense-col? col) (format-number v)
       (let ((lo (get col :min)) (hi (get col :max)))
         (if (<= hi lo) (format-number v)
           (hex2 (* 255 (/ (- v lo) (- hi lo)))))))))
 
-;; ── writes (all through the factory natives; undo comes for free) ──────────
+;; ── writes (each one undo entry) ───────────────────────────────────────────
 
-(def focus-track (track)
-  (if (= SEQ.current-track track) nil (seq-set-track track)))
+;; The host's current track follows the cursor (like Renoise).
+(def focus-track (t)
+  (unless (= selection.track t) (set! selection.track t)))
+
+;; The cursor's track position, kept on the tracks (it outlives a deleted
+;; track).
+(def clamped-index (index)
+  (clamp index 0 (max 0 (- (track-count) 1))))
+
+(def cursor-index ()
+  (clamped-index tracker-cursor.track))
+
+(def cursor-track () (track-at (cursor-index)))
 
 ;; The real step under the cursor (a ghost row writes to the step it mirrors).
-(def edit-row ()
-  (real-row cursor-track cursor-row))
+(def cursor-step ()
+  (row-step (cursor-track) tracker-cursor.row))
 
 (def toggle-cursor-step ()
-  (seq-toggle-track-step cursor-track (edit-row)))
+  (let ((s (cursor-step)))
+    (toggle! s.active)))
 
 (def clear-cursor-step ()
-  (if (step-active? cursor-track cursor-row)
-    (seq-toggle-track-step cursor-track (edit-row))
-    nil))
+  (let ((s (cursor-step)))
+    (when s.active (set! s.active false))))
 
-(def set-cursor-param (param value)
-  (do
-    (focus-track cursor-track)
-    (seq-set-step-param (edit-row) param value)))
+;; A step param's description (focus-step-params), by its name.
+(def step-param (name)
+  (first (filter |d| (= (get d :name) name) (focus-step-params))))
 
+;; A note sets the step's transpose (within its range) and turns an empty
+;; step on in the same undo entry.
 (def enter-note (semi)
-  (do
-    (if (step-active? cursor-track cursor-row)
-      nil
-      (seq-toggle-track-step cursor-track (edit-row)))
-    (set-cursor-param :transpose (+ (* 12 (- octave 4)) semi))
-    (move-row step-advance)))
+  (let ((s (cursor-step))
+        (bounds (step-param "transpose"))
+        (transpose (+ (* 12 (- tracker-view.octave 4)) semi)))
+    (set-step-param! s "transpose" (clamp transpose (get bounds :min) (get bounds :max))
+                     :activate true)
+    (move-row tracker-view.step-advance)))
 
 (def nudge-transpose (delta)
-  (set-cursor-param :transpose (+ (step-transpose cursor-track cursor-row) delta)))
+  (let ((s (cursor-step)))
+    (set! s.transpose (+ s.transpose delta))))
 
 (def nudge-velocity (delta)
-  (set-cursor-param :velocity (+ (step-velocity cursor-track cursor-row) delta)))
+  (let ((s (cursor-step)))
+    (set! s.velocity (+ s.velocity delta))))
 
-;; A column writes through the same commands as the automation lane: step
-;; params by index through the piano roll's history action, device params by
-;; the set-track-plock-entry payload the column already carries, lanes by the
-;; process-lane native.
-(def set-step-param-by-index (col value)
-  (host-command "piano-roll-history-action"
-    (dict :track cursor-track
-      :action (dict :type :set-automation-step-param
-        :step (edit-row) :param-idx (get col :param-idx) :value value))))
-
-(def plock-payload (col)
-  (dict :target (get col :target)
-        :step-idx (edit-row)
-        :slot-idx (get col :slot-idx)
-        :param-idx (get col :param-idx)))
-
+;; The column the cursor is on, or nil (on Note or Vol, or past the track's
+;; columns: a column went away under the cursor).
 (def cursor-column ()
-  (nth (track-columns cursor-track) (- cursor-col 2)))
+  (when (automation-col?)
+    (nth (track-columns (cursor-track)) (- tracker-cursor.col 2))))
 
+;; A step param writes the live step the cell shows (set-step-param!, never
+;; the piano roll's edit focus, which may be a pinned take).
 (def set-column (col value)
-  (let ((v (max (get col :min) (min (get col :max) value))))
-    (do
-      (focus-track cursor-track)
-      (if (step-param-col? col) (set-step-param-by-index col v)
-      (if (lane-col? col)
-        (seq-set-process-lane-step cursor-track (get col :instance-id) (get col :inlet) (edit-row) v)
-        (host-command "set-track-plock-entry" (merge (plock-payload col) :value v)))))))
+  (let ((v (clamp value (get col :min) (get col :max)))
+        (s (cursor-step))
+        (src (get col :src)))
+    (match (get col :kind)
+      :step (set-step-param! s src v)
+      :lane (set-lane-steps! src (list s) v)
+      :param (lock-param! src (list s) v)
+      _ (lock-rack-macro! src (list s) v))))
 
 (def clear-column (col)
-  (do
-    (focus-track cursor-track)
-    (if (or (step-param-col? col) (lane-col? col))
-      (set-column col (get col :default))
-      (host-command "clear-track-plock-entry" (plock-payload col)))))
+  (let ((s (cursor-step))
+        (src (get col :src)))
+    (match (get col :kind)
+      :param (unlock-param! src (list s))
+      :macro (unlock-rack-macro! src (list s))
+      _ (set-column col (get col :default)))))
 
 ;; Typing into a column, tracker style. Integer-stepped columns (retrig
 ;; count, duration in steps, enum params) take one digit and commit. Everything
-;; else is two hex digits over the column's range, like Vol: the first digit
-;; waits in `entry`, the second commits. a–f are hex here, not piano keys.
-(def hex-digit (key)
-  (let ((i (reduce |acc j| (if (= (nth hex-digits j) (upper-key key)) j acc) -1 (range 0 16))))
-    i))
+;; else is two hex digits, like Vol: the first digit waits in `entry`, the
+;; second commits. a–f are hex here, not piano keys.
 
-(def upper-key (key)
-  (if (= key "a") "A" (if (= key "b") "B" (if (= key "c") "C"
-  (if (= key "d") "D" (if (= key "e") "E" (if (= key "f") "F" key)))))))
+;; The hex digit a key types (0-15), or -1.
+(def hex-digit (key)
+  (index-of hex-keys (string-downcase key)))
 
 (def two-digit-col? (col)
   (< (get col :increment) 1))
 
-(def commit-hex (col hi lo)
-  (let ((n (+ (* 16 hi) lo))
-        (lo-v (get col :min))
-        (hi-v (get col :max)))
-    (set-column col (+ lo-v (* (- hi-v lo-v) (/ n 255))))))
+;; Two hex digits: the first waits in `entry`, the second calls commit with
+;; the byte they spell.
+(def type-hex (digit commit)
+  (if (= tracker-view.entry "")
+    (set! tracker-view.entry digit)
+    (let ((n (+ (* 16 tracker-view.entry) digit)))
+      (set! tracker-view.entry "")
+      (commit n))))
 
-(def type-column (col digit key)
-  (if (not (two-digit-col? col))
+;; A column's byte (00-FF) spans its range.
+(def commit-hex (col n)
+  (let ((lo (get col :min))
+        (hi (get col :max)))
+    (set-column col (+ lo (* (- hi lo) (/ n 255))))))
+
+(def type-column (col digit)
+  (if (two-digit-col? col)
+    (type-hex digit |n| (commit-hex col n))
     ;; The digit is the value itself (clamped to the column's range).
-    (if (< digit 10) (set-column col digit) nil)
-    (if (= entry "")
-      (set! entry (upper-key key))
-      (do
-        (commit-hex col (hex-digit entry) digit)
-        (set! entry "")))))
+    (when (< digit 10) (set-column col digit))))
 
-;; Vol behaves as a two-digit hex column over 0..1.
-(def vol-column ()
-  (dict :key "vol" :target "velocity" :min 0 :max 1 :default 1 :increment 0))
-
+;; Vol is the MIDI range, 00-7F (more saturates at full velocity).
 (def type-cursor (key)
-  (let ((digit (hex-digit key)))
+  (let ((digit (hex-digit key))
+        (col (cursor-column)))
     (if (< digit 0) false
-    (if (= cursor-col 1)
-      (do
-        (if (= entry "")
-          (set! entry (upper-key key))
-          (do
-            (set-cursor-param :velocity (/ (+ (* 16 (hex-digit entry)) digit) 255))
-            (set! entry "")))
-        true)
-    (if (automation-col?)
-      (do (type-column (cursor-column) digit key) true)
-      false)))))
+      (if (= tracker-cursor.col 1)
+        (let ((s (cursor-step)))
+          (type-hex digit |n| (set! s.velocity (min 1 (/ n 127))))
+          true)
+        (if col (do (type-column col digit) true) false)))))
 
 (def nudge-column (col delta)
-  (let ((cur (column-value cursor-track (- cursor-col 2) cursor-row))
-        (base (if (= cur nil) (get col :default) cur))
+  (let ((cur (column-value (cursor-track) col tracker-cursor.row))
+        (base (if (= cur nil) (column-default col) cur))
         (inc (get col :increment))
         (step (if (>= inc 1) inc (/ (- (get col :max) (get col :min)) 32))))
     (set-column col (+ base (* delta step)))))
@@ -421,123 +525,116 @@
 ;; ── cursor ──────────────────────────────────────────────────────────────────
 
 (def wrap-index (value count)
-  (let ((m (- value (* count (floor (/ value count))))))
-    m))
+  (- value (* count (floor (/ value count)))))
 
-;; The cursor is Lisp state for the key handler, but the grid never reads
-;; it: cells bind their highlight to channels written here (eseq.bindings),
-;; so a cursor move touches two rows' slots and re-renders nothing.
-;;   cur-<t>-<r>    one per grid cell row: 1 at the cursor sub-column
-;;   cursor-rows    one per grid row: 1 at the cursor row (the gutter)
-;;   center-row     cells, the follow target while stopped
-(def B (eseq.bindings/scope "alez.tracker"))
+;; Sub-columns of a track: 0 = Note, 1 = Vol, 2.. = its columns.
+(def column-count (index)
+  (let ((t (track-at index)))
+    (if t (+ 2 (len (track-columns t))) 2)))
 
-(def cursor-ch (track row)
-  (eseq.bindings/channel B (str "cur-" track "-" row)))
+(def clamped-row (row)
+  (clamp row 0 (- (pattern-rows) 1)))
 
-(def cursor-rows-ch (eseq.bindings/channel B "cursor-rows"))
-(def center-row-ch (eseq.bindings/channel B "center-row"))
+(def clamped-col (index col)
+  (clamp col 0 (- (column-count index) 1)))
 
-(def set-cursor (track row col)
-  (do
-    (eseq.bindings/clear! (cursor-ch cursor-track cursor-row))
-    ;; The host's current track follows the cursor (like Renoise), which is
-    ;; what the gutter, headers and follow scroll key off.
-    (focus-track track)
-    (set! cursor-track track)
-    (set! cursor-row row)
-    (set! cursor-col col)
-    (eseq.bindings/one-hot! (cursor-ch track row) (column-count track) col)
-    (eseq.bindings/one-hot! cursor-rows-ch (pattern-rows) row)
-    (eseq.bindings/write! center-row-ch (* row-h row))))
+;; Puts the cursor on a cell of the grid (clamped to the tracks, the rows and
+;; the track's sub-columns), the host's current track on its track, and
+;; drops a pending hex digit.
+(def set-cursor (index row col)
+  (let ((i (clamped-index index))
+        (t (track-at i)))
+    (when t (focus-track t))
+    (unless (= tracker-view.entry "") (set! tracker-view.entry ""))
+    (set! tracker-cursor.track i)
+    (set! tracker-cursor.row (clamped-row row))
+    (set! tracker-cursor.col (clamped-col i col))))
+
+;; Keeps the cursor on the grid when a track, a row or a column went away
+;; under it, so its lamp always shows the cell a key edits.
+(def clamp-cursor! ()
+  (let ((i (cursor-index))
+        (row (clamped-row tracker-cursor.row))
+        (col (clamped-col i tracker-cursor.col)))
+    (unless (= i tracker-cursor.track) (set! tracker-cursor.track i))
+    (unless (= row tracker-cursor.row) (set! tracker-cursor.row row))
+    (unless (= col tracker-cursor.col) (set! tracker-cursor.col col))))
+
+(def automation-col? ()
+  (>= tracker-cursor.col 2))
 
 (def move-row (delta)
-  (set-cursor cursor-track (wrap-index (+ cursor-row delta) (pattern-rows)) cursor-col))
+  (set-cursor (cursor-index) (wrap-index (+ tracker-cursor.row delta) (pattern-rows))
+              tracker-cursor.col))
 
-(def move-track (delta)
-  (set-cursor (wrap-index (+ cursor-track delta) (max 1 (track-count))) cursor-row
-              (min cursor-col (- (column-count (wrap-index (+ cursor-track delta) (max 1 (track-count)))) 1))))
-
-(def select-track (track)
-  (set-cursor track cursor-row (min cursor-col (- (column-count track) 1))))
+(def select-track (index)
+  (set-cursor index tracker-cursor.row tracker-cursor.col))
 
 ;; Mouse: a click puts the cursor on that sub-cell; a double-click on a Note
 ;; cell toggles the step (writing through a ghost row to its real step).
-(def select-cell (track row col)
-  (set-cursor track row col))
+(def select-cell (index row col)
+  (set-cursor index row col))
 
-(def double-click-cell (track row col)
-  (do
-    (select-cell track row col)
-    (if (= col 0) (toggle-cursor-step) nil)))
-
-;; Sub-columns of a track: 0 = Note, 1 = Vol, 2.. = its p-lock columns.
-(def column-count (track)
-  (+ 2 (len (track-columns track))))
-
-(def automation-col? ()
-  (>= cursor-col 2))
+(def double-click-cell (index row col)
+  (select-cell index row col)
+  (when (= col 0) (toggle-cursor-step)))
 
 ;; LEFT/RIGHT walk the sub-columns and spill into the neighbouring track at
 ;; either edge, like Renoise.
 (def move-col (delta)
-  (let ((next (+ cursor-col delta))
-        (tracks (max 1 (track-count))))
+  (let ((next (+ tracker-cursor.col delta))
+        (count (max 1 (track-count)))
+        (index (cursor-index)))
     (if (< next 0)
-      (let ((t (wrap-index (- cursor-track 1) tracks)))
-        (set-cursor t cursor-row (- (column-count t) 1)))
-    (if (>= next (column-count cursor-track))
-      (set-cursor (wrap-index (+ cursor-track 1) tracks) cursor-row 0)
-      (set-cursor cursor-track cursor-row next)))))
+      (let ((prev (wrap-index (- index 1) count)))
+        (set-cursor prev tracker-cursor.row (- (column-count prev) 1)))
+    (if (>= next (column-count index))
+      (set-cursor (wrap-index (+ index 1) count) tracker-cursor.row 0)
+      (set-cursor index tracker-cursor.row next)))))
 
-;; -/= nudge whatever the cursor sits on: transpose, velocity or a lock.
+;; -/= nudge whatever the cursor sits on: transpose, velocity or a column.
 (def nudge-cursor (delta)
-  (if (= cursor-col 0) (nudge-transpose delta)
-  (if (= cursor-col 1) (nudge-velocity (* 0.1 delta))
-    (nudge-column (cursor-column) delta))))
+  (if (= tracker-cursor.col 0) (nudge-transpose delta)
+  (if (= tracker-cursor.col 1) (nudge-velocity (* 0.1 delta))
+    (let ((col (cursor-column)))
+      (when col (nudge-column col delta))))))
 
 (def clear-cursor ()
   (if (automation-col?)
-    (clear-column (cursor-column))
+    (let ((col (cursor-column)))
+      (when col (clear-column col)))
     (clear-cursor-step)))
 
-;; Same piano layout as the host's musical typing (input.rs note_from_key).
-(def note-for-key (key)
-  (if (= key "a") 0
-  (if (= key "w") 1
-  (if (= key "s") 2
-  (if (= key "e") 3
-  (if (= key "d") 4
-  (if (= key "f") 5
-  (if (= key "t") 6
-  (if (= key "g") 7
-  (if (= key "y") 8
-  (if (= key "h") 9
-  (if (= key "u") 10
-  (if (= key "j") 11
-  (if (= key "k") 12
-  (if (= key "o") 13
-  (if (= key "l") 14
-  (if (= key "p") 15
-    -1)))))))))))))))))
+;; Same piano layout as the host's musical typing (input.rs note_from_key):
+;; a key's position is its semitone above the octave's C.
+(def piano-keys
+  (list "a" "w" "s" "e" "d" "f" "t" "g" "y" "h" "u" "j" "k" "o" "l" "p"))
 
+(def note-for-key (key)
+  (index-of piano-keys key))
+
+;; The cursor is clamped first: a key edits the cell its lamp shows.
 (def handle-key (key text)
-  (if (and (not (= entry "")) (not (>= (hex-digit key) 0)))
-    (set! entry "")
-    nil)
+  (when (> (track-count) 0)
+    (clamp-cursor!)
+    (when (and (not (= tracker-view.entry "")) (< (hex-digit key) 0))
+      (set! tracker-view.entry ""))
+    (dispatch-key key)))
+
+(def dispatch-key (key)
   (if (= key "UP") (do (move-row -1) true)
   (if (= key "DOWN") (do (move-row 1) true)
   (if (= key "LEFT") (do (move-col -1) true)
   (if (= key "RIGHT") (do (move-col 1) true)
   (if (= key "RET") (do (toggle-cursor-step) true)
   (if (or (= key "BS") (= key "Delete")) (do (clear-cursor) true)
-  (if (= key "z") (do (set! octave (max 0 (- octave 1))) true)
-  (if (= key "x") (do (set! octave (min 8 (+ octave 1))) true)
+  (if (= key "z") (do (set! tracker-view.octave (max 0 (- tracker-view.octave 1))) true)
+  (if (= key "x") (do (set! tracker-view.octave (min 8 (+ tracker-view.octave 1))) true)
   (if (= key "-") (do (nudge-cursor -1) true)
   (if (= key "=") (do (nudge-cursor 1) true)
   (if (= key ",") (do (nudge-velocity -0.1) true)
   (if (= key ".") (do (nudge-velocity 0.1) true)
-  (if (and (>= cursor-col 1) (type-cursor key)) true
+  (if (and (>= tracker-cursor.col 1) (type-cursor key)) true
   (let ((semi (note-for-key key)))
     (if (>= semi 0)
       (do (enter-note semi) true)
@@ -555,11 +652,17 @@
 ;; ── rendering ───────────────────────────────────────────────────────────────
 ;;
 ;; Renoise-style pattern editor. The layout is one pinned header row and one
-;; scrolling body; every track's cells live in the same body rows, so all
-;; columns share the scroll. Each row is its own subtree, so a step edit
-;; re-renders one row; scrolling and follow never relayout. The playhead never re-renders anything: rows bind
-;; their highlight to SEQ.track-grid-playhead-<t> by index (host-published,
-;; ghost copies included), which moves two floats per tick.
+;; scrolling body: the row numbers, then the rows, every track's cells in
+;; the same body rows, so all columns share the scroll. The view computes
+;; each track's columns once (from has-locks and t.step-params-in-use, never
+;; the steps) and hands them down. Each row is a subtree holding one subtree
+;; per track, so a step edit re-renders that track's cells on the rows
+;; showing the step, and a lock or lane edit that track's cells. The
+;; playhead and a cursor move within a track re-render nothing: a row's
+;; lamp lights where track.playhead-row is the row, a cell's where the
+;; cursor (tracker-cursor) is the cell, compared in their shaders. A move
+;; to another track re-renders the two track headers (t.selected); the row
+;; numbers and the scroll follow the current track through a binding.
 ;;
 ;; Wide projects pan sideways through the tile's smooth horizontal scroll;
 ;; a track's header chevron collapses it to Note/Vol.
@@ -576,23 +679,18 @@
 (def head-extra 2.0)
 (def track-gap 0.4)
 
-;; A column is at least auto-w wide and grows to fit its full label, so
-;; headers are never truncated.
-;; Headers use the host's compact spelling (:short, e.g. voicing.character →
-;; vcn.chr); lanes bring their own short-label. The picker keeps full names.
+;; A column is at least auto-w wide and grows to fit its header, so headers
+;; are never truncated. Headers use the compact spelling (:short, e.g.
+;; voicing.character → vcn.chr); lanes bring their own short label. The
+;; picker keeps full names.
 (def column-title (col)
-  (let ((name (if (get col :short-field) (reactive-get "SEQ" (get col :short-field)) nil)))
-    (if (= name nil) (or (get col :short) (get col :label)) name)))
-
-(def column-label (col)
-  (let ((name (if (get col :label-field) (reactive-get "SEQ" (get col :label-field)) nil)))
-    (if (= name nil) (get col :label) name)))
+  (or (get col :short) (get col :label)))
 
 (def column-w (col)
   (max auto-w (+ 0.6 (* 0.62 (len (column-title col))))))
 
 (def columns-w (cols)
-  (reduce |acc c| (+ acc (column-w c) sub-gap) 0 cols))
+  (reduce |acc col| (+ acc (column-w col) sub-gap) 0 cols))
 
 ;; Width of a track's cells; the header adds head-extra for its buttons and
 ;; rows match it so the two stay aligned.
@@ -602,10 +700,6 @@
   (+ (col-w cols) head-extra))
 
 (def col-panel-border (rgba 1.0 1.0 1.0 0.08))
-(def row-beat-bg (rgba 1.0 1.0 1.0 0.045))
-(def row-bar-bg (rgba 1.0 1.0 1.0 0.10))
-(def row-playhead-bg (rgba 1.0 1.0 1.0 0.20))
-(def cursor-bg :primary)
 (def vol-color (rgba 0.95 0.78 0.35 1.0))
 (def auto-color (rgba 0.55 0.80 1.0 1.0))
 (def empty-color :dimmer)
@@ -613,130 +707,185 @@
 (def beat-row? (row) (= (wrap-index row 4) 0))
 (def bar-row? (row) (= (wrap-index row 16) 0))
 
+;; A cell's fill while the cursor is on it (sub-column cell-col of row
+;; cell-row of track position cell-track; the cursor-* states bind the
+;; tracker-cursor fields). The lamps draw inside a pixel
+;; with a one-pixel corner, as a box's 2-pixel corner background does
+;; inside its border.
+(defwidget tracker-cursor-lamp
+  :width 1 :height 1
+  :state (cell-track cell-row cell-col cursor-track cursor-row cursor-col)
+  :shader
+  (if (< (+ (abs (- cursor-track cell-track))
+            (abs (- cursor-row cell-row))
+            (abs (- cursor-col cell-col)))
+         0.5)
+    (let ((px (fwidth y)))
+      (sdf/layer (sdf/fill (sdf/rounded-rect (- width px) (- height px) px) :primary)))
+    (rgba 0 0 0 0)))
+
+;; A track's row lit while the playhead plays it (which repeat of a shorter
+;; track: track.playhead-row). `base` is the alpha of the row's own tint
+;; under it, which the lamp tops up to the playhead's. The lamps return
+;; their white wash as is, its rounded corners as coverage: an sdf/fill's
+;; output is premultiplied, and the widget blend multiplies a translucent
+;; fill by its alpha again (a 0.16 wash would show as 0.03).
+(defwidget tracker-row-lamp
+  :width 1 :height 1
+  :state (track row base)
+  :shader
+  (let ((lit (if (= track.playhead-row row) 0.2 0.0))
+        (px (fwidth y))
+        (d (sdf/rounded-rect (- width px) (- height px) px))
+        (cover (clamp (- 0.5 (/ d (max (fwidth d) 0.001))) 0.0 1.0)))
+    (rgba 1 1 1 (* cover (max 0.0 (/ (- lit base) (- 1 base)))))))
+
+;; A row number lit on the cursor's row and, a little brighter, on the row
+;; the current track plays (`playhead-row` binds selection.playhead-row, -1
+;; while stopped or without a current track).
+(defwidget tracker-gutter-lamp
+  :width 1 :height 1
+  :state (row base playhead-row cursor-row)
+  :shader
+  (let ((lit (max (if (= cursor-row row) 0.16 0.0)
+                  (if (= playhead-row row) 0.2 0.0)))
+        (px (fwidth y))
+        (d (sdf/rounded-rect (- width px) (- height px) px))
+        (cover (clamp (- 0.5 (/ d (max (fwidth d) 0.001))) 0.0 1.0)))
+    (rgba 1 1 1 (* cover (max 0.0 (/ (- lit base) (- 1 base)))))))
+
 ;; ── collapsing ─────────────────────────────────────────────────────────────
 ;;
 ;; Wide projects scroll sideways through the tile's own smooth horizontal
 ;; widget scroll (the body's vertical `scroll` declines sideways swipes), so
 ;; nothing here re-renders on a pan. A track's « header button folds its
-;; lock columns away when it is not the one being edited.
+;; columns away when it is not the one being edited.
 
-(defstate collapsed (list))
+(def collapsed? (t)
+  (listed? t.tid (or tracker-view.collapsed (list))))
 
-(def visible-tracks ()
-  (range 0 (track-count)))
+(def toggle-collapse (t)
+  (set! tracker-view.collapsed
+    (if (collapsed? t)
+      (without tracker-view.collapsed t.tid)
+      (append (or tracker-view.collapsed (list)) (list t.tid)))))
 
-(def collapsed? (track)
-  (contains? collapsed (track-key track)))
+;; A shown column's header spelling (only those: the picker lists every
+;; param a track has).
+(def with-short (col)
+  (if (get col :short) col (merge col :short (compact-label (get col :label)))))
 
-(def toggle-collapse (track)
-  (set! collapsed
-    (if (collapsed? track)
-      (without collapsed (track-key track))
-      (append collapsed (list (track-key track))))))
-
-;; The columns a track draws: none while collapsed.
-(def shown-columns (track)
-  (if (collapsed? track) (list) (track-columns track)))
+;; What the view draws of a track: the track, the columns it draws (none
+;; while collapsed, each with its header spelling) and how many a collapse
+;; folds away.
+(def track-layout (t)
+  (let ((cols (track-columns t))
+        (folded (collapsed? t)))
+    (dict :track t
+          :cols (if folded (list) (map with-short cols))
+          :folded (if folded (len cols) 0))))
 
 ;; ── cells ───────────────────────────────────────────────────────────────────
 
-(def ghost-tint (track alpha)
-  (let ((c (track-color track)))
-    (rgba (nth c 0) (nth c 1) (nth c 2) alpha)))
+;; The alpha of a row's own tint: ghost rows sit on a wash of the track's own
+;; color, a little stronger on the row where the loop restarts, so each
+;; track's period reads at a glance; bars and beats are white.
+(def row-alpha (t row)
+  (if (loop-start-row? t row) 0.16
+  (if (ghost-row? t row) 0.06
+  (if (bar-row? row) 0.10
+  (if (beat-row? row) 0.045
+    0)))))
 
-;; Ghost rows sit on a wash of the track's own color, a little stronger on
-;; the row where the loop restarts, so each track's period reads at a glance.
-(def row-bg (track row)
-  (if (loop-start-row? track row) (ghost-tint track 0.16)
-  (if (ghost-row? track row) (ghost-tint track 0.06)
-  (if (bar-row? row) row-bar-bg
-  (if (beat-row? row) row-beat-bg
-    :transparent)))))
+(def row-bg (t row)
+  (let ((alpha (row-alpha t row)))
+    (if (ghost-row? t row) (color-rgba t.color alpha)
+      (if (> alpha 0) (rgba 1.0 1.0 1.0 alpha) :transparent))))
 
-(def note-text (track row)
-  (if (step-active? track row) (note-name (step-transpose track row)) "---"))
+(def note-text (s)
+  (if (step-active? s) (note-name s.transpose) "---"))
 
-(def vol-text (track row)
-  (if (step-active? track row) (velocity-hex (step-velocity track row)) ".."))
+(def vol-text (s)
+  (if (step-active? s) (velocity-hex s.velocity) ".."))
 
-(def sub-cell (text track row col width color active?)
-  (let ((ghost? (ghost-row? track row)))
-    (box
-      :key (str "tracker-cell-" track "-" row "-" col)
-      :width width
-      :height row-h
-      :corner-radius 2
-      :background-color :transparent
-      :selected (eseq.bindings/bound-nth (cursor-ch track row) col)
-      :selected-background-color cursor-bg
-      :on-click (lambda (event) (select-cell track row col))
-      :on-double-click (lambda (event) (double-click-cell track row col))
-      (label text
-        :width width
-        :height row-h
-        :font-size cell-font
-        :mono true
-        :h-align :center
-        :color (if active? (if ghost? :dim color) empty-color)
-        :bg :transparent))))
-
-(def column-cell (track row cols idx)
-  (let ((col (nth cols idx))
-        (v (column-value track idx row))
-        ;; Lanes and step params are dense, so a value still at its default
-        ;; draws dim rather than bright.
-        (lit? (and (not (= v nil))
-                   (not (and (or (lane-col? col) (step-param-col? col))
-                             (= v (get col :default)))))))
-    (sub-cell (format-column col v) track row (+ 2 idx) (column-w col) auto-color lit?)))
-
-;; One track's cells on one grid row. The playhead highlight is a bound
-;; `selected`, not a rendered prop.
-(def track-row (track row)
-  (let ((cols (shown-columns track))
-        (active? (step-active? track row)))
-    (box
-      :key (str "tracker-row-" track "-" row)
-      :width (track-w cols)
-      :height row-h
-      :corner-radius 2
-      :background-color (row-bg track row)
-      :selected (bind-seq-nth (str "track-grid-playhead-" track) row)
-      :selected-background-color row-playhead-bg
-      (h-stack :gap sub-gap
-        (sub-cell (note-text track row) track row 0 note-w :fg active?)
-        (sub-cell (vol-text track row) track row 1 vol-w vol-color active?)
-        (each (range 0 (len cols)) |idx|
-          (column-cell track row cols idx))))))
-
-(def row-number (row)
+(def sub-cell (text t row col width color active?)
   (box
-    :key (str "tracker-gutter-" row)
-    :width gutter-w
+    :key (str "tracker-cell-" t.index "-" row "-" col)
+    :width width
     :height row-h
     :corner-radius 2
-    :background-color (if (bar-row? row) row-bar-bg :transparent)
-    :selected (eseq.bindings/bound-nth cursor-rows-ch row)
-    :selected-background-color (rgba 1.0 1.0 1.0 0.16)
-    ;; The shared gutter follows the cursor's track's playhead.
-    (label (if (< row 10) (str "0" row) (str row))
-      :key (str "tracker-row-" row)
-      :width gutter-w
+    :background-color :transparent
+    :background "tracker-cursor-lamp" :cell-track t.index :cell-row row :cell-col col
+    :cursor-track #'tracker-cursor.track :cursor-row #'tracker-cursor.row
+    :cursor-col #'tracker-cursor.col
+    :on-click (lambda (event) (select-cell t.index row col))
+    :on-double-click (lambda (event) (double-click-cell t.index row col))
+    (label text
+      :width width
       :height row-h
       :font-size cell-font
       :mono true
-      :h-align :right
-      :active (bind-seq-nth "track-grid-playhead-current" row)
-      :active-color :white
-      :color (if (beat-row? row) :fg :dim)
+      :h-align :center
+      :color (if active? (if (ghost-row? t row) :dim color) empty-color)
       :bg :transparent)))
 
-;; One grid row across every visible track.
-(def grid-row (row)
+(def column-cell (t row col idx)
+  (let ((v (column-value t col row))
+        ;; Lanes and step params are dense, so a value still at its default
+        ;; draws dim rather than bright.
+        (lit? (and (not (= v nil))
+                   (not (and (dense-col? col) (= v (get col :default)))))))
+    (sub-cell (format-column col v) t row (+ 2 idx) (column-w col) auto-color lit?)))
+
+;; One track's cells on one grid row.
+(def track-row (layout row)
+  (let ((t (get layout :track))
+        (cols (get layout :cols))
+        (s (row-step t row))
+        (active? (step-active? s)))
+    (box
+      :key (str "tracker-row-" t.index "-" row)
+      :width (track-w cols)
+      :height row-h
+      :corner-radius 2
+      :background-color (row-bg t row)
+      :background "tracker-row-lamp" :track t :row row :base (row-alpha t row)
+      (h-stack :gap sub-gap
+        (sub-cell (note-text s) t row 0 note-w :fg active?)
+        (sub-cell (vol-text s) t row 1 vol-w vol-color active?)
+        (each (range 0 (len cols)) |idx|
+          (column-cell t row (nth cols idx) idx))))))
+
+;; A row number; its lamp follows the cursor and the current track's
+;; playhead, both bound (a cross-track move re-renders no row number).
+(def row-number (row)
+  (let ((base (if (bar-row? row) 0.10 0)))
+    (box
+      :key (str "tracker-gutter-" row)
+      :width gutter-w
+      :height row-h
+      :corner-radius 2
+      :background-color (if (bar-row? row) (rgba 1.0 1.0 1.0 0.10) :transparent)
+      :background "tracker-gutter-lamp" :row row :base base
+      :playhead-row #'selection.playhead-row :cursor-row #'tracker-cursor.row
+      (label (if (< row 10) (str "0" row) (str row))
+        :key (str "tracker-row-" row)
+        :width gutter-w
+        :height row-h
+        :font-size cell-font
+        :mono true
+        :h-align :right
+        :color (if (beat-row? row) :fg :dim)
+        :bg :transparent))))
+
+;; One grid row across every track, each track's cells a subtree of their
+;; own (keyed as the row's box: a subtree's key replaces its root's).
+(def grid-row (layouts row)
   (h-stack :gap track-gap
-    (row-number row)
-    (each (visible-tracks) |track|
-      (track-row track row))))
+    (each layouts |layout|
+      (let ((t (get layout :track)))
+        (subtree :key (str "tracker-row-" t.index "-" row)
+          (track-row layout row))))))
 
 ;; ── headers ─────────────────────────────────────────────────────────────────
 
@@ -746,8 +895,9 @@
     :width width :height 0.8 :font-size sub-font :mono true :h-align :center
     :color :dim :bg :transparent))
 
-(def open-column-menu (track event)
-  (set! column-menu (dict :track track :col (get event :col) :row (get event :row))))
+(def open-column-menu (t event)
+  (set! tracker-menu.track t)
+  (open-menu! tracker-menu event))
 
 (def header-button (text key on-click)
   (box
@@ -765,60 +915,62 @@
     (if (<= (len name) fit) name
       (str (substring name 0 (max 1 (- fit 1))) "…"))))
 
-(def column-header (track)
-  (let ((cols (shown-columns track))
-        (hidden-count (if (collapsed? track) (len (track-columns track)) 0))
-        (c (track-color track)))
+(def column-header (layout)
+  (let ((t (get layout :track))
+        (cols (get layout :cols))
+        (width (track-w cols))
+        (current? t.selected))
     (box
-      :key (str "tracker-panel-" track)
-      :width (track-w cols)
+      :key (str "tracker-panel-" t.index)
+      :width width
       :corner-radius 4
       :border-width 1
-      :border-color (if (= SEQ.current-track track) (rgba 1.0 1.0 1.0 0.22) col-panel-border)
+      :border-color (if current? (rgba 1.0 1.0 1.0 0.22) col-panel-border)
       (v-stack :gap 0.15
         (box
-          :key (str "tracker-strip-" track)
-          :width (track-w cols)
+          :key (str "tracker-strip-" t.index)
+          :width width
           :height 0.4
           :corner-radius 2
-          :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 1.0))
-        (label (fit-name (str (nth SEQ.track-names track)) (track-w cols))
-          :key (str "tracker-head-" track)
-          :width (track-w cols)
+          :background-color (color-rgba t.color 1.0))
+        (label (fit-name t.name width)
+          :key (str "tracker-head-" t.index)
+          :width width
           :height 1.1
           :font-size head-font
           :h-align :center
-          :color (if (= SEQ.current-track track) :white :fg)
-          :on-click (list "alez.tracker.ui/select-track" track)
+          :color (if current? :white :fg)
+          :on-click (lambda (event) (select-track t.index))
           :bg :transparent)
         (h-stack :gap sub-gap
-          (sub-header "Note" note-w (str "tracker-sub-note-" track))
-          (sub-header "Vol" vol-w (str "tracker-sub-vol-" track))
+          (sub-header "Note" note-w (str "tracker-sub-note-" t.index))
+          (sub-header "Vol" vol-w (str "tracker-sub-vol-" t.index))
           (each (range 0 (len cols)) |idx|
             (sub-header (column-title (nth cols idx))
-                        (column-w (nth cols idx)) (str "tracker-sub-col-" track "-" idx)))
-          ;; « collapses the lock columns (badge shows how many are folded);
-          ;; + opens the column picker.
-          (header-button (if (collapsed? track) (str hidden-count) "«")
-                         (str "tracker-collapse-" track)
-                         (lambda (event) (toggle-collapse track)))
-          (header-button "+" (str "tracker-add-col-" track)
-                         (lambda (event) (open-column-menu track event))))))))
+                        (column-w (nth cols idx)) (str "tracker-sub-col-" t.index "-" idx)))
+          ;; « collapses the columns (badge shows how many are folded); +
+          ;; opens the column picker.
+          (header-button (if (collapsed? t) (str (get layout :folded)) "«")
+                         (str "tracker-collapse-" t.index)
+                         (lambda (event) (toggle-collapse t)))
+          (header-button "+" (str "tracker-add-col-" t.index)
+                         (lambda (event) (open-column-menu t event))))))))
 
 ;; Full width of the gutter and every track panel; the body scroll is sized
 ;; to this rather than the viewport so rows past the right edge still lay
 ;; out and the tile's horizontal scroll can reach them.
-(def grid-width ()
-  (reduce |acc track| (+ acc (track-w (shown-columns track)) track-gap)
+(def grid-width (layouts)
+  (reduce |acc layout| (+ acc (track-w (get layout :cols)) track-gap)
           (+ gutter-w track-gap)
-          (visible-tracks)))
+          layouts))
 
-(def header-row ()
+(def header-row (layouts)
   (h-stack :gap track-gap :key "tracker-headers"
     (box :key "tracker-head-rows" :width gutter-w :height 1)
-    (each (visible-tracks) |track|
-      (subtree :key (str "tracker-h-" track)
-        (column-header track)))))
+    (each layouts |layout|
+      (let ((t (get layout :track)))
+        (subtree :key (str "tracker-h-" t.index)
+          (column-header layout))))))
 
 (def chip (text key)
   (box :key key :height 1.1 :padding-left 0.4 :padding-right 0.4 :corner-radius 3
@@ -828,17 +980,40 @@
 ;; A pending first hex digit shows here rather than in the cell, so typing
 ;; re-renders this one chip and not the grid.
 (def entry-chip ()
-  (if (= entry "") (box :key "tracker-chip-entry" :width 0 :height 1.1)
-    (chip (str entry "_") "tracker-chip-entry")))
+  (if (= tracker-view.entry "") (box :key "tracker-chip-entry" :width 0 :height 1.1)
+    (chip (str (nth hex-digits tracker-view.entry) "_") "tracker-chip-entry")))
 
-(def toolbar ()
+(def toolbar (rows)
   (h-stack :gap 0.5 :v-align :center
     (subtree :key "tracker-entry" (entry-chip))
-    (chip (str "OCT " octave) "tracker-chip-oct")
-    (chip (str "STEP " step-advance) "tracker-chip-step")
-    (chip (str "ROWS " (pattern-rows)) "tracker-chip-rows")
+    (chip (str "OCT " tracker-view.octave) "tracker-chip-oct")
+    (chip (str "STEP " tracker-view.step-advance) "tracker-chip-step")
+    (chip (str "ROWS " rows) "tracker-chip-rows")
     (label "a-p notes · z/x octave · RET toggle · BS clear · -/= nudge · ,/. vol"
       :key "tracker-status" :font-size 9 :color :dim :bg :transparent)))
+
+;; The scrolling body. Follow: the view keeps the cursor row centered while
+;; editing and the current track's playhead row while playing, except that
+;; the first half-screen of rows stays put (the scroll clamps at the top).
+;; Both are bound (the current track's through selection.playhead-row, so
+;; the body never reads selection.track), so the cursor, ticks and a move
+;; to another track move the view without a re-render; only play and stop
+;; re-run it. The rows are a plain stack, not a virtualizing one: a pattern
+;; is at most 256 rows, and a fixed row set means scrolling and follow are
+;; pure render-time offsets with no relayout.
+(def body (layouts rows)
+  (let ((width (grid-width layouts)))
+    (v-stack :flex 1 :width :fill
+      (scroll :key "tracker-scroll" :width width :flex 1
+        :center-row (if transport.playing #'selection.playhead-row #'tracker-cursor.row)
+        :center-span row-h
+        (h-stack :gap track-gap
+          (v-stack :key "tracker-gutter" :width gutter-w :gap 0
+            (each (range 0 rows) |row| (row-number row)))
+          (v-stack :key "tracker-rows" :width (- width gutter-w track-gap) :gap 0
+            (each (range 0 rows) |row|
+              (subtree :key (str "tracker-r-" row)
+                (grid-row layouts row)))))))))
 
 ;; ── column picker ───────────────────────────────────────────────────────────
 ;;
@@ -846,83 +1021,61 @@
 ;; FX and MIDI FX slot, Macros) plus Lanes for the track's process lanes.
 ;; Shown columns are checked; selecting toggles them.
 
-(def picker-item (track col prefix)
+(def picker-item (t col prefix shown)
   (let ((key (get col :key)))
-    (menu-item (column-label col)
+    (menu-item (get col :label)
       :key (str prefix key)
-      :checked (column-shown? track key)
-      :on-select (lambda (event) (toggle-column track key)))))
+      :checked (listed? key shown)
+      :on-select (lambda (event) (toggle-column t key)))))
 
-(def picker-group (track label items prefix)
+(def picker-group (t label items prefix shown)
   (menu-item label :key (str prefix "group")
-    (each items |col| (picker-item track col prefix))))
+    (each items |col| (picker-item t col prefix shown))))
 
+(def picker-groups (t)
+  (let ((prefix (str "tracker-pick-" t.index "-"))
+        (shown (map |col| (get col :key) (track-columns t))))
+    (append
+      (map |g| (picker-group t (get g :group) (get g :items) (str prefix (get g :group) "-") shown)
+           (target-groups t))
+      (if (empty? t.lanes) (list)
+        (list (picker-group t "Lanes" (map lane-column t.lanes) (str prefix "lanes-") shown))))))
+
+;; Its items are built only while it is open. The picker's track may have
+;; gone (a project load, an undo) while it was open: it then lists nothing.
 (def column-picker ()
-  (let ((track (get column-menu :track)))
-    (context-menu :is-open (not (= column-menu nil))
-      :anchor-col (or (get column-menu :col) 0)
-      :anchor-row (or (get column-menu :row) 0)
-      :on-close (lambda () (set! column-menu nil))
-      (if (= column-menu nil) nil
-        (append
-          (map |g|
-            (picker-group track (get g :group) (get g :items)
-                          (str "tracker-pick-" track "-" (get g :group) "-"))
-            (track-targets track))
-          (if (= (len (track-lanes track)) 0) (list)
-            (list
-              (picker-group track "Lanes" (map |lane| (lane-column lane) (track-lanes track))
-                            (str "tracker-pick-" track "-lanes-")))))))))
+  (let ((t tracker-menu.track))
+    (apply menu-of tracker-menu
+      (if (and tracker-menu.open t (listed? t (tracks))) (picker-groups t) (list)))))
+
+(def tracker-root ()
+  (let ((layouts (map track-layout (tracks)))
+        (rows (pattern-rows)))
+    (v-stack :padding 0.6 :gap 0.5 :width :fill :height :fill
+      (subtree :key "tracker-toolbar" (toolbar rows))
+      (subtree :key "tracker-header-row" (header-row layouts))
+      (subtree :key "tracker-body" (body layouts rows))
+      (subtree :key "tracker-picker" (column-picker)))))
 
 (effect-buffer "*tracker*"
-  (v-stack :padding 0.6 :gap 0.5 :width :fill :height :fill
-    (toolbar)
-    (subtree :key "tracker-header-row" (header-row))
-    ;; Follow: the view keeps the cursor row centered while editing and the
-    ;; cursor track's playhead row while playing, except that the first
-    ;; half-screen of rows stays put (the scroll clamps at the top). The
-    ;; playing target is a bound float, so ticks move the view without a
-    ;; re-render.
-    (scroll :key "tracker-scroll" :width (grid-width) :flex 1
-      :center-row (if (= SEQ.playing true)
-                    (bind-seq "track-grid-playhead-row-current")
-                    (eseq.bindings/bound center-row-ch))
-      :center-span row-h
-      ;; A plain stack, not a virtualizing one: patterns are at most 64
-      ;; rows, and a fixed row set means scrolling and follow are pure
-      ;; render-time offsets with no relayout. Rows are subtrees, so a
-      ;; step edit re-renders one of them.
-      (v-stack :key "tracker-rows" :width (grid-width) :gap 0
-        (each (range 0 (pattern-rows)) |row|
-          (subtree :key (str "tracker-r-" row)
-            (grid-row row)))))
-    (column-picker)))
+  (tracker-root))
 
 (set-buffer-mode-for "*tracker*" "alez.tracker.ui/tracker-mode")
 
 ;; ── install ─────────────────────────────────────────────────────────────────
 
+;; The tab's position after Seq (0 when it is not registered).
 (def tab-index ()
-  (let ((tabs (eseq.seq-step-tabs/seq-main-step-tabs)))
-    (reduce |acc i|
-      (if (= (nth (nth tabs i) 1) buffer-name) (+ i 1) acc)
-      0
-      (range 0 (len tabs)))))
+  (let ((buffers (map |tab| (nth tab 1) (eseq.seq-step-tabs/seq-main-step-tabs))))
+    (+ (index-of buffers buffer-name) 1)))
 
 (def show ()
-  (do
-    ;; Ask the host for SEQ.track-automation (the p-lock columns) and pull
-    ;; the first copy now rather than on the next edit.
-    (set! eseq.vanilla/track-automation-wanted true)
-    (host-command "piano-roll-automation-refresh" (dict))
-    (eseq.seq-step-tabs/seq-register-step-sequencer-tab tab-label buffer-name)
-    (eseq.seq-step-tabs/seq-select-main-step-tab-by-index (tab-index))
-    (set-cursor cursor-track cursor-row cursor-col)))
+  (eseq.seq-step-tabs/seq-register-step-sequencer-tab tab-label buffer-name)
+  (eseq.seq-step-tabs/seq-select-main-step-tab-by-index (tab-index))
+  (set-cursor tracker-cursor.track tracker-cursor.row tracker-cursor.col))
 
 (def hide ()
-  (do
-    (set! eseq.vanilla/track-automation-wanted false)
-    (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab buffer-name)))
+  (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab buffer-name))
 
 (bind-key "C-c t" "alez.tracker.ui/show")
 

@@ -8,4 +8,5 @@
   (track :instrument "factory:Drums/808 Clap")
   (track :instrument "factory:Drums/808 Kick"))
 (def capture-after-sync ()
-  (set! eseq.effects.state/instrument-mods-open true))
+  (let ((iv eseq.effects.state/instrument-view))
+    (set! iv.mods-open true)))

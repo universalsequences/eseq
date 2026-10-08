@@ -111,8 +111,14 @@ def source(name, tables, voicing, extra_params=None, hat=False, defaults=None):
 (def mode_signal (* resolved (latch mode_gains tick)))
 (def bell_left (sum (* mode_signal (+ 1 (* width_v modal_pan)))))
 (def bell_right (sum (* mode_signal (- 1 (* width_v modal_pan)))))
-(out (* 0.65 gain_v (+ (* wash_v body_left) (* bell_v bell_left))) 1 @name left)
-(out (* 0.65 gain_v (+ (* wash_v body_right) (* bell_v bell_right))) 2 @name right)"""
+(def voice_left (* 0.65 gain_v (+ (* wash_v body_left) (* bell_v bell_left))))
+(def voice_right (* 0.65 gain_v (+ (* wash_v body_right) (* bell_v bell_right))))
+(out voice_left 1 @name left)
+(out voice_right 2 @name right)
+;; Key-up leaves the metal ringing and a hit may never see note-off, so the
+;; amp flag ignores the gate: the voice is done once its output is silent.
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_left voice_right) 3 @name amp @amp true)"""
     params = [(n, group, (defaults or {}).get(n, value), lo, hi, mod)
               for n, group, value, lo, hi, mod in PARAMS+(extra_params or [])]
     return Template((HERE/'engine.lisp.in').read_text()).substitute(name=name, inputs=INPUTS,

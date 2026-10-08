@@ -4,7 +4,7 @@
   (track :sampler :name "Sampler"))
 
 (def capture-after-sync ()
-  (eseq.transport/open-scene-bank-menu (dict :col 12 :row 1.6) 0))
+  (eseq.transport/open-scene-bank-menu (dict :at (dict :col 12 :row 1.6)) (first (eseq.kinds/scenes))))
 
 (effect-buffer "*transport-bank-preview*"
   (h-stack :padding 1

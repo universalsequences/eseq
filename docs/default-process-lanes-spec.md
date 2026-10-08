@@ -1,5 +1,7 @@
 # Default Process Lanes: Cirklon parity out of the box
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 6, 2026-09-15 (rev 8, 2026-09-23: length lane). Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7); rev 7, 2026-09-15, per-bar transpose and the `+B` family (epic eseq-m14x). Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (normative process model) and
 `docs/cirklon-endgame-trajectory.md`. Design canvas (approved):
@@ -142,7 +144,7 @@ Where the build differs from the rev 1 plan, and why.
   of every numeric state cell, the lookahead publishes it once per chunk
   that fired (`publish_process_scope_values`), the reactive tick mirrors it
   into `SEQ.track-process-scopes` (per track, per slot, first declared state
-  cell), and the strip draws it with `linegraph` bounded by the slot's
+  cell; since eseq-0l17.66 the kinds' `process.cells`), and the strip draws it with `linegraph` bounded by the slot's
   `lo`/`hi` inlets when present. Project slots scope per track because their
   runtime state is per track.
 - **Per-track configuration (rev 2 addendum).** The per-track override
@@ -315,7 +317,9 @@ left to right then top to bottom in fire order. Each box shows the lane's
 connectable out ports on one row and its wireable in ports on the next.
 
 - **Data**: `SEQ.track-lane-patch` (`build_track_lane_patch_value`,
-  `ui/state_values/process_and_macros.rs`). Per slot: `out-ports` with
+  `ui/state_values/process_and_macros.rs`; removed in eseq-0l17.66: the
+  view builds the same entries from the kinds' processes, ports and
+  fan-outs). Per slot: `out-ports` with
   `port-id = (track * 4096 + slot-index) * 16 + ordinal`
   (`lane_patch_port_id`; the track is folded in because every expanded
   track's patchbay shares one layout and the cable renderer keys sources by
@@ -406,11 +410,11 @@ like every other target, writes on the process's own track.
 - **Effective-value dot.** The write is recorded as `ProcessEffectiveSend`
   (bus, base, value, clamped) in the overlay and published per `(track, bus)`
   through `publish_process_effective_sends`, sharing the instrument feed's
-  version counter. The UI tick republishes it as
-  `track-{t}-bus-{b}-send-proc-value`; process-chain edits republish
-  `…-send-proc-mapped` (1 while an enabled slot binds or fans out to that
-  bus). The mixer send knob gates its `process-value` amber dot on the
-  mapped flag, so an unbound send drops the dot without waiting for a write.
+  version counter. The host kinds show it as `send.process-value`, and
+  `send.process-mapped` is true while an enabled slot binds or fans out to
+  that bus (kind-bindings spec §13 stage 8, eseq-0l17.13). The mixer send
+  knob gates its `process-value` amber dot on the mapped flag, so an
+  unbound send drops the dot without waiting for a write.
 
 ## User-added track lanes (rev 6, epic eseq-53y7, 2026-09-15)
 
@@ -577,8 +581,7 @@ track, one new subdivision per bar.
   displaced the pending one.
 - **Length marker** (eseq-ks8x.1): an amber underline beneath the step the
   lane last set the length to, in the grid (drawn inside
-  `seqv-playhead-row-bar` via its `len-col` binding, field
-  `track-length-row-{track}-{row}`) and the expanded view
+  `seqv-playhead-row-bar` from `track.length-step`) and the expanded view
   (`seqv-slot-length-mark`, field `seqv-slot-length-active-{id}-{slot}`).
   The clock keeps `length_marker` even when the request equals the authored
   length (no override then); the lookahead publishes it to

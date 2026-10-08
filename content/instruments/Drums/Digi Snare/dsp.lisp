@@ -121,4 +121,11 @@
 (def efm_rs (* (sin (+ (* (retrig-phasor (* base 3.2) trigger) twopi) (* fm_m 7.0 fm_menv))) (drum-envelope gate trigger (clip (* (mod dec) 0.18) 8 300) (mod sustain) (mod release))))
 
 (def voice (selector eng trx_sd efm_sd efm_rs))
-(out (* (md-out voice) vel (clip (mod level) 0 1)) 1 @name audio)
+(def voice_out (* (md-out voice) vel (clip (mod level) 0 1)))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)

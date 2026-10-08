@@ -131,29 +131,58 @@ fn number_value(value: &Value) -> Option<f32> {
     }
 }
 
-fn map_number(
-    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
-    key: &str,
-) -> Option<f32> {
-    map.get(key).and_then(|value| number_value(&value.borrow()))
+/// The columns of a positional event row, in order: `(node track beat
+/// transpose velocity)` (the host kinds' `graph.events`,
+/// `graph.node-events` and `transport.track-events`). A negative `node` or
+/// `track` is none (a track's output event has no node, a graph event may
+/// have no track), as a nil does in a map event.
+pub const ROW_FIELDS: [&str; 5] = ["node", "track", "beat", "transpose", "velocity"];
+
+/// One event: a map (`{:node :track :sample :beat :transpose :velocity}`,
+/// any key a field may name) or a positional row ([`ROW_FIELDS`]).
+#[derive(Clone, Copy)]
+enum EventItem<'a> {
+    Map(&'a HashMap<String, Rc<RefCell<Value>>>),
+    Row(&'a [Rc<RefCell<Value>>]),
 }
 
-fn event_field(
-    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
-    field: &str,
-    phase_beats: f32,
-) -> Option<f32> {
+impl<'a> EventItem<'a> {
+    fn of(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::Map(map) => Some(Self::Map(map)),
+            Value::List(row) => Some(Self::Row(row)),
+            _ => None,
+        }
+    }
+
+    /// The number `name` holds (`None`: absent, not a number, or a row's
+    /// negative node or track).
+    fn number(self, name: &str) -> Option<f32> {
+        match self {
+            Self::Map(map) => map
+                .get(name)
+                .and_then(|value| number_value(&value.borrow())),
+            Self::Row(row) => {
+                let column = ROW_FIELDS.iter().position(|field| *field == name)?;
+                let value = number_value(&row.get(column)?.borrow())?;
+                let optional = matches!(name, "node" | "track");
+                (!optional || value >= 0.0).then_some(value)
+            }
+        }
+    }
+}
+
+fn event_field(event: EventItem<'_>, field: &str, phase_beats: f32) -> Option<f32> {
     match field {
         "beat-phase" | "phase" => {
-            let beat = map_number(map, "beat")?;
+            let beat = event.number("beat")?;
             if phase_beats > 0.0 && phase_beats.is_finite() {
                 Some(beat.rem_euclid(phase_beats))
             } else {
                 Some(beat)
             }
         }
-        "node" | "track" | "sample" | "beat" | "transpose" | "velocity" => map_number(map, field),
-        _ => map_number(map, field),
+        _ => event.number(field),
     }
 }
 
@@ -188,19 +217,19 @@ fn parsed_events(props: &HashMap<String, Value>) -> Vec<EventPoint> {
     let color_min = get_f32_prop(props, "color-min", x_min);
     let color_max = get_f32_prop(props, "color-max", x_max);
 
-    let mut raw = Vec::with_capacity(items.len());
+    // Two passes over the items (the latest beat, then the points), so no
+    // event is copied.
+    let mut cells = Vec::with_capacity(items.len());
     let mut latest_beat = None::<f32>;
     for item in items {
-        let Value::Map(map) = &*item.borrow() else {
-            continue;
-        };
-        let Some(beat) = map_number(map, "beat") else {
+        let beat = EventItem::of(&item.borrow()).and_then(|event| event.number("beat"));
+        let Some(beat) = beat else {
             continue;
         };
         if beat.is_finite() {
             latest_beat = Some(latest_beat.map_or(beat, |latest| latest.max(beat)));
         }
-        raw.push((beat, map.clone()));
+        cells.push((beat, item));
     }
 
     let explicit_current_beat = props.get("current-beat").and_then(number_value);
@@ -210,22 +239,25 @@ fn parsed_events(props: &HashMap<String, Value>) -> Vec<EventPoint> {
         .map(|latest| latest - window_beats);
     let max_beat = explicit_current_beat.map(|current| current + 0.0001);
 
-    raw.into_iter()
-        .filter_map(|(beat, map)| {
+    cells
+        .into_iter()
+        .filter_map(|(beat, item)| {
             if min_beat.is_some_and(|min| beat < min) {
                 return None;
             }
             if max_beat.is_some_and(|max| beat > max) {
                 return None;
             }
-            let x = event_field(&map, &x_field, phase_beats)?;
-            let y = event_field(&map, &y_field, phase_beats)?;
-            let z = event_field(&map, &z_field, phase_beats)?;
-            let brightness = event_field(&map, &brightness_field, phase_beats).unwrap_or(1.0);
+            let cell = item.borrow();
+            let event = EventItem::of(&cell)?;
+            let x = event_field(event, &x_field, phase_beats)?;
+            let y = event_field(event, &y_field, phase_beats)?;
+            let z = event_field(event, &z_field, phase_beats)?;
+            let brightness = event_field(event, &brightness_field, phase_beats).unwrap_or(1.0);
             let color_t = if color_field.is_empty() {
                 None
             } else {
-                event_field(&map, &color_field, phase_beats)
+                event_field(event, &color_field, phase_beats)
                     .map(|value| normalize(value, color_min, color_max))
             };
             Some(EventPoint {
@@ -920,6 +952,49 @@ mod tests {
         props.insert("window-beats".to_string(), Value::Number(16.0));
 
         assert!(parsed_events(&props).is_empty());
+    }
+
+    fn row(node: f64, track: f64, beat: f64, transpose: f64, velocity: f64) -> Value {
+        Value::List(
+            [node, track, beat, transpose, velocity]
+                .into_iter()
+                .map(|cell| value_cell(Value::Number(cell)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn positional_rows_read_like_map_events() {
+        let mut maps = props_with_events(vec![
+            event(2.0, 1.0, -12.0, 0.5),
+            event(1.0, 3.0, 12.0, 0.75),
+        ]);
+        let mut rows = props_with_events(vec![
+            row(2.0, -1.0, 1.0, -12.0, 0.5),
+            row(1.0, -1.0, 3.0, 12.0, 0.75),
+        ]);
+        for props in [&mut maps, &mut rows] {
+            props.insert("y-max".to_string(), Value::Number(3.0));
+        }
+        assert_eq!(parsed_events(&rows), parsed_events(&maps));
+        assert_eq!(parsed_events(&rows).len(), 2);
+    }
+
+    #[test]
+    fn a_rows_negative_node_or_track_is_none() {
+        // A track output event (node -1) has no node to place it by.
+        let props = props_with_events(vec![row(-1.0, 2.0, 1.0, 0.0, 1.0)]);
+        assert!(parsed_events(&props).is_empty());
+        // A graph event with no track takes no track color, as a nil does.
+        let mut props = props_with_events(vec![row(0.0, -1.0, 1.0, 0.0, 1.0)]);
+        props.insert("color-by".to_string(), Value::Keyword("track".to_string()));
+        assert_eq!(parsed_events(&props)[0].color_t, None);
+        props.insert(
+            "events".to_string(),
+            Value::List(vec![value_cell(row(0.0, 3.0, 1.0, 0.0, 1.0))]),
+        );
+        props.insert("color-max".to_string(), Value::Number(3.0));
+        assert_eq!(parsed_events(&props)[0].color_t, Some(1.0));
     }
 
     #[test]

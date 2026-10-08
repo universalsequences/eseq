@@ -6,6 +6,8 @@
 (def heat-ink () :control-on-fg)
 (def heat-bound (name fallback)
   (eseq.effects.custom-ui-controls/ui-param-bound-value name fallback))
+(def heat-value (name fallback)
+  (eseq.effects.custom-ui-controls/ui-param-value name fallback))
 (def heat-knob (section name title)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.15 2.58 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :right))
 (def heat-short-knob (section name title)
@@ -36,7 +38,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
@@ -56,7 +58,7 @@
             :value-index-offset (get p :min) :options options
             :text-color ink :chevron-color ink :badge-color :transparent
             :bg-color surface :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -68,7 +70,7 @@
 (def heat-switch (section name title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :width 4.3 :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (heat-ink) :dim)
         :background-color (if on (heat-accent) :instrument-control-bg)
@@ -104,22 +106,27 @@
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope))
         (cut (eseq.effects.custom-ui-runtime/custom-ui-current-param (str prefix "_cutoff_hz")))
         (q (eseq.effects.custom-ui-runtime/custom-ui-current-param (str prefix "_q")))
-        (mode-binding (heat-bound (str prefix "_mode") 0))
-        (follow-binding (heat-bound "filter2_follow" 0))
+        (mode (heat-bound (str prefix "_mode") 0))
+        (follow (heat-bound "filter2_follow" 0))
         (first-cutoff (heat-bound "filter1_cutoff_hz" 1800))
         (offset (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter2_offset_octaves")))
     (subtree :key (str "heat-filter-curve-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
-      (let ((mode (round (reactive-value mode-binding)))
-            (follow (and (= section 6) (> (reactive-value follow-binding) 0.5))))
+      (let ((mode (round mode))
+            (follow (and (= section 6) (> follow 0.5))))
+        ;; Following, the band binds Filter 1's cutoff and draws it at the
+        ;; offset's ratio (:freq-scale): a p-locked cutoff moving under the
+        ;; playhead repaints the curve instead of re-rendering it.
         (let ((frequency (if follow
-                (clamp (* (reactive-value first-cutoff)
-                  (pow 2 (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding offset)))) 30 22000)
-                (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut))))
+                first-cutoff
+                (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut)))
+              (freq-scale (if follow
+                (pow 2 (eseq.effects.custom-ui-runtime/custom-ui-param-value offset))
+                1)))
           (response-curve-editor :width 20 :height 2.2 :mode :filter
             :debug-name (str "heat-" prefix "-response")
             :bands (map (lambda (id)
               (dict :id id :type (nth '("lowpass" "bandpass" "notch" "highpass") (floor (/ mode 2)))
-                :freq frequency
+                :freq frequency :freq-scale freq-scale
                 :freq-min 30 :freq-max 22000
                 :q (eseq.effects.custom-ui-runtime/custom-ui-param-binding q) :q-min 0.1 :q-max 100 :q-taper :log
                 :q-curve-power (if (or (= mode 1) (= mode 7)) 0.5 1)
@@ -133,7 +140,7 @@
                 (let ((updates (list
                         (dict :param-idx (get (if follow offset cut) :idx)
                           :value (if follow
-                            (clamp (/ (log (/ (get event :freq) (reactive-value first-cutoff))) (log 2)) -8 8)
+                            (clamp (/ (log (/ (get event :freq) first-cutoff)) (log 2)) -8 8)
                             (get event :freq)))
                         (dict :param-idx (get q :idx) :value (get event :q))))
                       (commit (= (get event :type) :commit-band)))
@@ -270,7 +277,7 @@
     (heat-group "Sub / Sync"
       (h-stack :gap 0.5
         (heat-option section (str prefix "_sub_sync") "Mode" '("Sub" "Sync"))
-        (if (> (reactive-value (heat-bound (str prefix "_sub_sync") 0)) 0.5)
+        (if (> (heat-value (str prefix "_sub_sync") 0) 0.5)
           (heat-num section (str prefix "_sync_semitones") "Ratio st")
           (heat-num section (str prefix "_sub_level") "Level"))))))
 (def heat-lfo-curve (prefix)
@@ -279,8 +286,8 @@
         (phase (heat-bound (str prefix "_phase") 0)))
     (subtree :key (str "heat-curve-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
       (lfo-curve :width 32.6 :height 2 :debug-name (str "heat-" prefix "-curve")
-        :shape (nth '(1 6 7 4 5) (round (reactive-value shape)))
-        :pw width :phase-offset (* 360 (reactive-value phase))
+        :shape (nth '(1 6 7 4 5) (round shape))
+        :pw width :phase-offset (* 360 phase)
         :cycles 2 :curve-color (heat-ink) :fill-color :transparent
         :background-color (heat-accent)))))
 (def heat-lfo-detail-row (prefix)
@@ -321,7 +328,7 @@
 (def heat-routing-selected (bindings)
   (= 0 (len
     (filter (lambda (pair)
-      (> (abs (- (reactive-value (get pair :binding)) (get pair :value))) 0.0001)) bindings))))
+      (> (abs (- (get pair :binding) (get pair :value))) 0.0001)) bindings))))
 (def heat-routing-callback (mode)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope))
         (config (heat-routing-config mode)))
@@ -342,7 +349,7 @@
   `(sdf/stroke (sdf/translate ,xx ,yy (sdf/rect (* width 0.10) 0.27)) 0.035 ,color))
 (defwidget heat-routing-diagram
   :width 7.8 :height 1.15
-  :state (mode selected) :bindable (selected)
+  :state (mode selected)
   :shader
   (let ((sx (* width -0.68)) (ax (* width 0.68))
         (ink (if (> selected 0.5) :control-on-bg :control-on-fg))
@@ -402,7 +409,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 0 p)))))))
 (def heat-screen-num (name title)
   (heat-screen-value name title 2 0.01 false))
@@ -421,7 +428,7 @@
             :value-index-offset (get p :min) :options options
             :text-color (heat-ink) :chevron-color (heat-ink) :badge-color :transparent
             :bg-color (heat-accent) :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

@@ -20,15 +20,14 @@ pub(crate) fn reset_midi_port(editor: &mut Editor, state: &SequencerState, port:
 }
 
 pub(crate) fn register_device_state(runtime: &mut eseqlisp::Runtime) {
-    // Presentation state only. Device changes always go through host commands;
-    // writable fields also let authoring/capture scripts preview device states.
-    runtime.register_reactive("MIDI", vec![
-        ("devices", Value::List(vec![])),
-        ("ports", Value::List((0..sequencer::midi_input::MAX_INPUT_PORTS)
-            .map(|_| cell(Value::Nil)).collect())),
-        ("error", Value::String(String::new())),
-        ("persistent", Value::Bool(sequencer::midi_input::service::persistent_device_ids())),
-    ], true);
+    // The device list, its error and whether choices are saved are the
+    // `settings` kind's (from the presented record, seeded here); `MIDI.ports`
+    // keeps each input port's device identity for `dispatch_midi_to_lisp`.
+    crate::presented::seed_midi_persistent(sequencer::midi_input::service::persistent_device_ids());
+    let ports = (0..sequencer::midi_input::MAX_INPUT_PORTS)
+        .map(|_| cell(Value::Nil))
+        .collect();
+    runtime.register_reactive("MIDI", vec![("ports", Value::List(ports))], true);
 }
 
 fn cell(value: Value) -> Rc<RefCell<Value>> {
@@ -45,18 +44,25 @@ pub(crate) fn sync_midi_port(editor: &mut Editor, port: usize, identity: Option<
     editor.runtime_mut().set_reactive_list_index("MIDI", "ports", port, value);
 }
 
-pub(crate) fn sync_midi_devices(editor: &mut Editor, snapshot: sequencer::midi_input::service::Snapshot) {
-    let devices = snapshot.devices.into_iter().map(|device| {
-        Value::Map(HashMap::from([
-            ("id".into(), cell(Value::String(device.id))),
-            ("name".into(), cell(Value::String(device.name))),
-            ("enabled".into(), cell(Value::Bool(device.enabled))),
-            ("connected".into(), cell(Value::Bool(device.connected))),
-            ("status".into(), cell(Value::String(device.status))),
-        ]))
-    }).map(cell).collect();
-    editor.runtime_mut().set_reactive("MIDI", "devices", Value::List(devices));
-    editor.runtime_mut().set_reactive("MIDI", "error", Value::String(snapshot.error));
+pub(crate) fn sync_midi_devices(
+    editor: &mut Editor,
+    snapshot: sequencer::midi_input::service::Snapshot,
+) {
+    let devices = snapshot
+        .devices
+        .into_iter()
+        .map(|device| crate::presented::MidiDevice {
+            id: device.id,
+            name: device.name,
+            enabled: device.enabled,
+            connected: device.connected,
+            status: device.status,
+        })
+        .collect();
+    present_settings(editor.runtime_mut(), |s| {
+        s.midi_devices = devices;
+        s.midi_error = snapshot.error;
+    });
     // Device discovery must repaint even while the transport and meters are idle.
     editor.runtime_mut().run_reactive_cycle();
     editor.mark_needs_redraw();

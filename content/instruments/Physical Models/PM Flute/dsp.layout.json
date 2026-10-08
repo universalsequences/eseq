@@ -3,10 +3,6 @@
   "authored": true,
   "root": {
     "nodes": {
-      "*#0": {
-        "x": 110.53,
-        "y": 121.14
-      },
       "-#0": {
         "x": 235.84999,
         "y": 78.36
@@ -38,6 +34,10 @@
       "add": {
         "x": 135.43666,
         "y": 31.892859
+      },
+      "amp": {
+        "x": 247.37001,
+        "y": 127.32
       },
       "attack": {
         "x": 4.0,
@@ -138,6 +138,14 @@
       "gate": {
         "x": 115.166214,
         "y": 13.835746
+      },
+      "gt#0": {
+        "x": 242.20001,
+        "y": 69.68
+      },
+      "max#0": {
+        "x": 247.37001,
+        "y": 74.020004
       },
       "mod#1": {
         "x": 203.39998,
@@ -257,13 +265,17 @@
       "velocity": {
         "x": 104.342545,
         "y": 10.68
+      },
+      "voice-amp#0": {
+        "x": 247.37001,
+        "y": 124.22
+      },
+      "voice_out": {
+        "x": 110.53,
+        "y": 121.12
       }
     },
     "cables": {
-      "*#0:0->audio:0": {
-        "segmented": true,
-        "y": 123.79
-      },
       "-#0:0->scale-2:3": {
         "segmented": true,
         "y": 85.575005
@@ -288,9 +300,9 @@
         "segmented": true,
         "y": 82.97
       },
-      "2:0->*#0:1": {
+      "2:0->voice_out:1": {
         "segmented": true,
-        "y": 120.380005
+        "y": 120.36
       },
       "attack:0->env:2": {
         "segmented": true,
@@ -308,9 +320,9 @@
         "segmented": true,
         "y": 74.71
       },
-      "clip#3:0->*#0:2": {
+      "clip#3:0->voice_out:2": {
         "segmented": true,
-        "y": 96.82001
+        "y": 99.61
       },
       "clip-2:0->flute-jet-waveguide-2:1": {
         "segmented": true,
@@ -340,13 +352,17 @@
         "segmented": true,
         "y": 50.130005
       },
+      "env:0->max#0:1": {
+        "segmented": true,
+        "y": 73.670006
+      },
       "floor:0->mod#5:0": {
         "segmented": true,
         "y": 55.490005
       },
-      "flute-body-bank-2:0->*#0:0": {
+      "flute-body-bank-2:0->voice_out:0": {
         "segmented": true,
-        "y": 120.380005
+        "y": 120.36
       },
       "gain:0->mod#8:0": {
         "segmented": true,
@@ -355,6 +371,18 @@
       "gate:0->env:0": {
         "segmented": true,
         "y": 19.11
+      },
+      "gate:0->gt#0:0": {
+        "segmented": true,
+        "y": 40.25
+      },
+      "gt#0:0->max#0:0": {
+        "segmented": true,
+        "y": 72.64
+      },
+      "max#0:0->voice-amp#0:0": {
+        "segmented": true,
+        "y": 100.53001
       },
       "mod#1:0->clip#0:0": {
         "segmented": true,
@@ -419,6 +447,22 @@
       "value:0->flute-jet-waveguide-2:2": {
         "segmented": true,
         "y": 31.29
+      },
+      "voice-amp#0:0->amp:0": {
+        "segmented": true,
+        "y": 126.56
+      },
+      "voice_out:0->audio:0": {
+        "segmented": true,
+        "y": 123.46001
+      },
+      "voice_out:0->voice-amp#0:1": {
+        "segmented": true,
+        "y": 123.46001
+      },
+      "voice_out:0->voice-amp#0:2": {
+        "segmented": true,
+        "y": 123.46001
       }
     },
     "inputPresentation": {
@@ -2422,10 +2466,10 @@
         ]
       },
       {
-        "id": "*#0",
+        "id": "voice_out",
         "op": "*",
         "kind": "builtin",
-        "label": "*",
+        "label": "* voice_out",
         "args": [
           {
             "kind": "symbol-ref",
@@ -2440,8 +2484,7 @@
         ],
         "outputs": [
           "out"
-        ],
-        "synthesized": true
+        ]
       },
       {
         "id": "audio",
@@ -2450,11 +2493,89 @@
         "label": "audio",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "voice_out"
           },
           {
             "kind": "literal",
             "value": "1"
+          }
+        ]
+      },
+      {
+        "id": "gt#0",
+        "op": "gt",
+        "kind": "builtin",
+        "label": "gt",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "gate"
+          },
+          {
+            "kind": "literal",
+            "value": "0.5"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "max#0",
+        "op": "max",
+        "kind": "builtin",
+        "label": "max",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "env"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "voice-amp#0",
+        "op": "voice-amp",
+        "kind": "macro-instance",
+        "label": "voice-amp",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "voice_out"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "voice_out"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "amp",
+        "op": "out",
+        "kind": "out",
+        "label": "out 2 @name amp @amp true",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "2"
           }
         ]
       }
@@ -2927,7 +3048,7 @@
       {
         "fromNode": "flute-body-bank-2",
         "fromOutput": 0,
-        "toNode": "*#0",
+        "toNode": "voice_out",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -2951,7 +3072,7 @@
       {
         "fromNode": "2",
         "fromOutput": 0,
-        "toNode": "*#0",
+        "toNode": "voice_out",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -2959,15 +3080,71 @@
       {
         "fromNode": "clip#3",
         "fromOutput": 0,
-        "toNode": "*#0",
+        "toNode": "voice_out",
         "toInput": 2,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "*#0",
+        "fromNode": "voice_out",
         "fromOutput": 0,
         "toNode": "audio",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "gate",
+        "fromOutput": 0,
+        "toNode": "gt#0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "gt#0",
+        "fromOutput": 0,
+        "toNode": "max#0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "env",
+        "fromOutput": 0,
+        "toNode": "max#0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "max#0",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice_out",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice_out",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
+        "toInput": 2,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice-amp#0",
+        "fromOutput": 0,
+        "toNode": "amp",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -5831,6 +6008,607 @@
             }
           ]
         }
+      },
+      {
+        "name": "pitch-transpose",
+        "params": [
+          "hz",
+          "semitones"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/pitch-transpose/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/pitch-transpose/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "hz",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name hz",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "hz"
+                }
+              ],
+              "outputs": [
+                "hz"
+              ]
+            },
+            {
+              "id": "semitones",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name semitones",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "semitones"
+                }
+              ],
+              "outputs": [
+                "semitones"
+              ]
+            },
+            {
+              "id": "/#0",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "semitones"
+                },
+                {
+                  "kind": "literal",
+                  "value": "12"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "2",
+              "op": "2",
+              "kind": "constant",
+              "label": "2",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "factor",
+              "op": "pow",
+              "kind": "builtin",
+              "label": "pow factor",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "return",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "hz"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "factor"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "semitones",
+              "fromOutput": 0,
+              "toNode": "/#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "2",
+              "fromOutput": 0,
+              "toNode": "factor",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "/#0",
+              "fromOutput": 0,
+              "toNode": "factor",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "hz",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "factor",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "voice-amp",
+        "params": [
+          "env",
+          "left",
+          "right"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/voice-amp/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/voice-amp/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "env",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name env",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "env"
+                }
+              ],
+              "outputs": [
+                "env"
+              ]
+            },
+            {
+              "id": "left",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name left",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "left"
+                }
+              ],
+              "outputs": [
+                "left"
+              ]
+            },
+            {
+              "id": "right",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name right",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "right"
+                }
+              ],
+              "outputs": [
+                "right"
+              ]
+            },
+            {
+              "id": "voice_amp_peak",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "abs#0",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "left"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "abs#1",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "right"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "max#0",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "/#0",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "-20"
+                },
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#0",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "*#0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "voice_amp_level",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max voice_amp_level",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gt#0",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "env"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.0001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "gt#1",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "voice_amp_level"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.00001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "return",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "left",
+              "fromOutput": 0,
+              "toNode": "abs#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs#0",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "right",
+              "fromOutput": 0,
+              "toNode": "abs#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs#1",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max#0",
+              "fromOutput": 0,
+              "toNode": "voice_amp_level",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_peak",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "/#0",
+              "fromOutput": 0,
+              "toNode": "exp#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "exp#0",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#0",
+              "fromOutput": 0,
+              "toNode": "voice_amp_level",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_level",
+              "fromOutput": 0,
+              "toNode": "voice_amp_peak",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "env",
+              "fromOutput": 0,
+              "toNode": "gt#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gt#0",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_level",
+              "fromOutput": 0,
+              "toNode": "gt#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gt#1",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
       }
     ],
     "hostModulators": [
@@ -5856,7 +6634,8 @@
       }
     ],
     "imports": [
-      "pitch-transpose"
+      "pitch-transpose",
+      "voice-amp"
     ]
   }
 }

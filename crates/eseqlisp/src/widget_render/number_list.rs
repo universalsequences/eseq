@@ -1,6 +1,6 @@
 //! A row of small numeric chips, e.g. the transposes a neuron is sounding.
 //!
-//! `:values` is a list of numbers or float bindings (`bind-nth` handles) and
+//! `:values` is a list of numbers or float bindings (element handles a host native returns) and
 //! `:count` how many of them are live, so a host can publish a fixed-width
 //! numeric list and a write that changes one row's values dirties only the
 //! widget bound to those indices: no Lisp re-eval, no relayout. Chips are a

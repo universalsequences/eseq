@@ -83,6 +83,20 @@ pub(super) fn apply_toggle_step_host_command(
         .ok_or_else(|| "step toggle track was invalid".to_string())?;
     let step =
         map_usize(map, "step").ok_or_else(|| "step toggle index was invalid".to_string())?;
+    // An absolute set (`seq-set-track-step`) toggles only when the step
+    // differs, judged when the command lands rather than when it was queued.
+    let wanted = map.get("active").and_then(|cell| match &*cell.borrow() {
+        Value::Bool(active) => Some(*active),
+        _ => None,
+    });
+    let unchanged = wanted.is_some_and(|active| {
+        track < app.state.active_track_count()
+            && step < MAX_STEPS
+            && app.state.pattern.patterns[track].is_active(step) == active
+    });
+    if unchanged {
+        return Ok((app::edit::EditOutcome::NoOp, track, step));
+    }
     app::try_apply_command(app, app::AppCommand::ToggleStep { track, step })
         .map(|outcome| (outcome, track, step))
         .map_err(|error| format!("could not toggle step: {error:?}"))
@@ -375,6 +389,71 @@ pub(super) fn apply_slice2_history_host_command(
         .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
 }
 
+/// An absolute mute or solo op (`set-mute` / `set-solo`, from the
+/// `seq-set-…-mute` / `-solo` natives) as the matching toggle, judged when the
+/// command lands: `None` when the target already is so (`muted`, `soloed`).
+fn absolute_as_toggle(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    op: &str,
+    (muted, soloed): (bool, bool),
+    toggle_mute: app::AppCommand,
+    toggle_solo: app::AppCommand,
+) -> Option<app::AppCommand> {
+    let on = map_number(map, "value").is_some_and(|value| value != 0.0);
+    let (current, toggle) = if op == "set-mute" {
+        (muted, toggle_mute)
+    } else {
+        (soloed, toggle_solo)
+    };
+    (current != on).then_some(toggle)
+}
+
+/// A Slice 3 op's payload with a numeric `value` (`{op, track?, value}`),
+/// as `slice3-history-action` takes it. Shared by the track-param natives
+/// and the host kinds' track settings.
+pub(crate) fn slice3_numeric_payload(
+    op: &str,
+    track: Option<usize>,
+    value: f64,
+) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+    let cell = |value| Rc::new(RefCell::new(value));
+    let mut payload = std::collections::HashMap::new();
+    payload.insert("op".to_string(), cell(Value::Keyword(op.to_string())));
+    if let Some(track) = track {
+        payload.insert("track".to_string(), cell(Value::Number(track as f64)));
+    }
+    payload.insert("value".to_string(), cell(Value::Number(value)));
+    payload
+}
+
+/// The index of the accumulator `label` names among `names`
+/// ([`build_accumulator_names`]), case-insensitively.
+pub(crate) fn accumulator_index(names: &[String], label: &str) -> Option<usize> {
+    names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(label))
+}
+
+/// The Slice 3 `accumulator` op choosing accumulator `idx` of `names`
+/// ([`build_accumulator_names`]) on `track`: a built-in one resets the limit
+/// to its default, a script one is named. Shared by `seq-set-accumulator`
+/// and the host kinds' `track.accumulator`.
+pub(crate) fn accumulator_edit_payload(
+    track: usize,
+    idx: usize,
+    names: &[String],
+) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+    let cell = |value| Rc::new(RefCell::new(value));
+    let mut payload = slice3_numeric_payload("accumulator", Some(track), idx as f64);
+    if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
+        let limit = builtin_accumulator_default_limit(idx) as f64;
+        payload.insert("default-limit".to_string(), cell(Value::Number(limit)));
+    } else if let Some(name) = names.get(idx) {
+        payload.insert("script-name".to_string(), cell(Value::String(name.clone())));
+    }
+    payload
+}
+
 pub(super) fn apply_slice3_history_host_command(
     app: &mut app::App,
     payload: &Value,
@@ -385,7 +464,27 @@ pub(super) fn apply_slice3_history_host_command(
     let op = map_string(map, "op")
         .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
     let track = map_usize(map, "track");
-    let command = slice3_command(map, &op, track)?;
+    let command = if op == "set-mute" || op == "set-solo" {
+        // An absolute mute or solo (`seq-set-track-mute`,
+        // `seq-set-track-solo`): toggle only when the track differs, judged
+        // when the command lands.
+        let track = track
+            .filter(|track| *track < app.state.active_track_count())
+            .ok_or_else(|| "Slice 3 edit track was invalid".to_string())?;
+        let params = &app.state.pattern.track_params[track];
+        let Some(command) = absolute_as_toggle(
+            map,
+            &op,
+            (params.is_muted(), params.is_solo()),
+            app::AppCommand::ToggleTrackMute { track },
+            app::AppCommand::ToggleTrackSolo { track },
+        ) else {
+            return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+        };
+        command
+    } else {
+        slice3_command(map, &op, track)?
+    };
     app::try_apply_command(app, command)
         .map(|outcome| (outcome, track))
         .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
@@ -393,7 +492,7 @@ pub(super) fn apply_slice3_history_host_command(
 
 /// Builds the app command for one Slice 3 op against one track (or none for
 /// the global ops). Shared by the single-track path and the multi-track batch.
-fn slice3_command(
+pub(super) fn slice3_command(
     map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
     op: &str,
     track: Option<usize>,
@@ -575,12 +674,40 @@ pub(super) fn apply_track_tuning_host_command(
     app: &mut app::App,
     payload: &Value,
 ) -> Result<(app::edit::EditOutcome, Option<usize>), String> {
-    use sequencer::scale::{self, TuningMode, MAX_SCALE_DEGREES};
     let Value::Map(map) = payload else {
         return Err("Scale edit payload was invalid".to_string());
     };
+    let track =
+        map_usize(map, "track").ok_or_else(|| "Scale edit track was invalid".to_string())?;
+    if map_string(map, "op").as_deref() == Some("import-scl") {
+        let params = app
+            .state
+            .pattern
+            .track_params
+            .get(track)
+            .ok_or_else(|| format!("Scale edit track {track} does not exist"))?;
+        let (scale_idx, current) = (params.get_fts_scale(), params.tuning());
+        return import_scala_scale(app, track, scale_idx, &current);
+    }
+    let Some(command) = track_tuning_command(app, track, map)? else {
+        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+    };
+    app::try_apply_command(app, command)
+        .map(|outcome| (outcome, Some(track)))
+        .map_err(|error| format!("could not apply scale edit: {error:?}"))
+}
+
+/// The `SetTrackTuning` one scale-editor edit (`{op, value?, label?,
+/// degree?}`, any op but `import-scl`) makes against `track`'s current
+/// tuning; `None` when it changes nothing. Shared by the scale editor and
+/// the host kinds' `set-tuning`.
+pub(super) fn track_tuning_command(
+    app: &app::App,
+    track: usize,
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<Option<app::AppCommand>, String> {
+    use sequencer::scale::{self, TuningMode, MAX_SCALE_DEGREES};
     let op = map_string(map, "op").ok_or_else(|| "Scale edit operation was missing".to_string())?;
-    let track = map_usize(map, "track").ok_or_else(|| "Scale edit track was invalid".to_string())?;
     let params = app
         .state
         .pattern
@@ -599,9 +726,6 @@ pub(super) fn apply_track_tuning_host_command(
             .ok_or_else(|| "Scale edit degree was invalid".to_string())
     };
     let label = map_string(map, "label");
-    if op == "import-scl" {
-        return import_scala_scale(app, track, scale_idx, &current);
-    }
     let mut tuning = current.clone();
     let edit = match op.as_str() {
         "root" => {
@@ -667,14 +791,14 @@ pub(super) fn apply_track_tuning_host_command(
         _ => return Err(format!("unknown scale edit operation {op}")),
     };
     if tuning == current {
-        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+        return Ok(None);
     }
-    app::try_apply_command(
-        app,
-        app::AppCommand::SetTrackTuning { track, tuning: Box::new(tuning), scale_idx: None, edit },
-    )
-    .map(|outcome| (outcome, Some(track)))
-    .map_err(|error| format!("could not apply scale edit: {error:?}"))
+    Ok(Some(app::AppCommand::SetTrackTuning {
+        track,
+        tuning: Box::new(tuning),
+        scale_idx: None,
+        edit,
+    }))
 }
 
 /// Scale editor `.scl…`: pick a Scala file and make it the track's scale.
@@ -748,8 +872,8 @@ pub(super) fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMi
     match map_string(map, "op")?.as_str() {
         "volume" => Some(TrackMixerInvalidation::Volume),
         "pan" => Some(TrackMixerInvalidation::Pan),
-        "toggle-mute" => Some(TrackMixerInvalidation::Mute),
-        "toggle-solo" => Some(TrackMixerInvalidation::Solo),
+        "toggle-mute" | "set-mute" => Some(TrackMixerInvalidation::Mute),
+        "toggle-solo" | "set-solo" => Some(TrackMixerInvalidation::Solo),
         _ => None,
     }
 }
@@ -762,8 +886,8 @@ pub(super) fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixe
     };
     match map_string(map, "op")?.as_str() {
         "volume" => Some(BusMixerInvalidation::Volume),
-        "toggle-mute" => Some(BusMixerInvalidation::Mute),
-        "toggle-solo" => Some(BusMixerInvalidation::Solo),
+        "toggle-mute" | "set-mute" => Some(BusMixerInvalidation::Mute),
+        "toggle-solo" | "set-solo" => Some(BusMixerInvalidation::Solo),
         _ => None,
     }
 }
@@ -803,6 +927,21 @@ pub(super) fn apply_bus_mixer_history_host_command(
         },
         "toggle-mute" => app::AppCommand::ToggleBusMute { bus },
         "toggle-solo" => app::AppCommand::ToggleBusSolo { bus },
+        // Absolute (`seq-set-bus-mute`/`-solo`): toggle only when the bus
+        // differs when the command lands.
+        "set-mute" | "set-solo" => {
+            let channel = &app.buses[bus_idx];
+            let Some(command) = absolute_as_toggle(
+                map,
+                &op,
+                (channel.mute, channel.solo),
+                app::AppCommand::ToggleBusMute { bus },
+                app::AppCommand::ToggleBusSolo { bus },
+            ) else {
+                return Ok((app::edit::EditOutcome::NoOp, bus_idx));
+            };
+            command
+        }
         _ => return Err(format!("Unsupported bus mixer edit operation: {op}")),
     };
     app::try_apply_command(app, command)
@@ -939,7 +1078,6 @@ pub(super) fn apply_piano_roll_gesture_update(
     let touched = piano_roll_gesture_touched_steps(&lanes, move_state, &action)?;
     if active.is_none() {
         let label = match kind {
-            PianoRollDragKind::Automation => "Edit piano-roll automation",
             PianoRollDragKind::Move => "Move piano-roll notes",
             PianoRollDragKind::Resize => "Resize piano-roll notes",
         };
@@ -1075,21 +1213,13 @@ pub(super) fn rack_slot_effect_param_needs_panel_rebuild(
         .is_none_or(|param| param_change_needs_fx_rebuild(&param))
 }
 
+/// Whether a change of `param`'s value redefines model data the host kinds
+/// derive (and so bumps `fx_epoch`). A param's own value, text and which
+/// modulation source settings show (`param.visible`) are live fields, so an
+/// option or toggle edit needs no rebuild; the sampler's `sens` and `slice`
+/// mode re-derive the slice markers the waveform draws.
 pub(super) fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
-    matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
-        || param_redefines_derived_panel_data(param)
-}
-
-/// Continuous params normally reach the UI through their bound display field,
-/// with no panel rebuild — a knob readout is all that changes.
-///
-/// The sampler's `sens` is not like that: it re-derives which slice markers are
-/// active, which is panel data the waveform draws, not a knob readout. Without
-/// this the audio followed the knob immediately while the flags kept their old
-/// colours until some Boolean/Enum edit (e.g. the warp button) happened to
-/// force a rebuild.
-fn param_redefines_derived_panel_data(param: &sequencer::effects::ParamDescriptor) -> bool {
-    param.name == "sens"
+    matches!(param.name.as_str(), "sens" | "slice")
 }
 
 pub(super) struct AgentDraftApplyResult {

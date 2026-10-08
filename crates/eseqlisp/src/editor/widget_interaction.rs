@@ -342,7 +342,10 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
                 dest: dest.unwrap_or(track_or_dest),
                 input: node_usize_prop(node, "input").unwrap_or(0),
                 active: node_bool_prop(node, "active"),
-                pending: node_bool_prop(node, "pending"),
+                pending: crate::widget_render::patch_port_pending(
+                    &node.props,
+                    track.unwrap_or(track_or_dest),
+                ),
                 center: (
                     node.rect.col + node.rect.width * 0.5,
                     node.rect.row + node.rect.height * 0.5,
@@ -677,6 +680,37 @@ mod tests {
             [Value::Number(source), Value::Number(dest), Value::Number(input)]
                 if *source == 0.0 && *dest == 1.0 && *input == 3.0
         ));
+    }
+
+    /// A port names the pending source by `:pending-port` (here a large id,
+    /// exact as a float slot holds it) in place of a `:pending` flag: the
+    /// one it names is the drag source, a neighbour id is not.
+    #[test]
+    fn patch_drop_takes_the_source_a_pending_port_prop_names() {
+        let id = (5121usize * 4096 + 2) * 16 + 1;
+        let with_pending_port = |track: usize| {
+            let mut node = port(PatchPortDirection::Out, track, 0, (2.0, 2.0), false);
+            node.props
+                .insert("pending-port".into(), Value::Number(id as f64));
+            node
+        };
+        let root = layout(vec![
+            with_pending_port(id),
+            port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false),
+        ]);
+        let output = patch_drop_output(&root, 20.4, 2.2).expect("drop output");
+        assert!(matches!(
+            output.args.as_slice(),
+            [Value::Number(source), ..] if *source == id as f64
+        ));
+        let root = layout(vec![
+            with_pending_port(id + 1),
+            port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false),
+        ]);
+        assert!(
+            patch_drop_output(&root, 20.4, 2.2).is_none(),
+            "no pending source"
+        );
     }
 
     #[test]
@@ -1317,6 +1351,7 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
+        modifiers: KeyModifiers,
     ) -> bool {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
@@ -1343,7 +1378,7 @@ impl Editor {
                 .offset_y
             });
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
-        if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
+        if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row, modifiers) {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
             let _ = self.apply_widget_output(output);
@@ -1361,7 +1396,7 @@ impl Editor {
             return false;
         };
         let Some(widget_event) =
-            map_double_click_event(&double_click_node, scrolled_col, scrolled_row)
+            map_double_click_event(&double_click_node, scrolled_col, scrolled_row, modifiers)
         else {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             return false;

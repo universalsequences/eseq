@@ -15,8 +15,10 @@
 (load "@/ui/themes.lisp")
 (seq-theme-mac-osx-dark)
 (import eseq.materials)
-(import eseq.bindings)
 (import eseq.seq-core-state)
+;; The host kinds (track, step, transport, …): loaded here so the host can
+;; publish them; views still `(import eseq.kinds :refer (...))` what they use.
+(import eseq.kinds)
 ;; Hardware MIDI mapping table + dispatch entry point (pure data, no UI).
 (import eseq.midi)
 
@@ -84,15 +86,13 @@
 (import eseq.seq-script-picker)
 (import eseq.seq-macro-mapping-hooks)
 (import eseq.step-grid-interactions)
+;; Cmd/Ctrl+A selects the visible surface's items; `.` toggles recording.
+;; Bound here, not in the library, so importing it binds nothing.
+(bind-key "C-a" "eseq.step-grid-interactions/seq-global-select-all")
+(bind-key "." "eseq.step-grid-interactions/seq-global-toggle-record")
 (import eseq.seqv-track-params)
 (import eseq.seq-grid-mode)
 
-;; ui/step-grid.lisp (the legacy *metal* step grid) is intentionally NOT
-;; loaded: no tile shows it, but as a loaded effect-buffer its whole-list
-;; SEQ reads (steps/velocities/...) forced a full hidden-buffer rerun on
-;; every step or scene edit (~5ms per launch/edit). The file is kept for
-;; reference; its `metal-track-tick` widget also lives in ui/sequencer.lisp
-;; (legacy-only since the expanded toggle moved to `seqv-step-shell`).
 (import eseq.sequencer)
 (import eseq.arrangement)
 (load "@/ui/effects/step-buffer.lisp")

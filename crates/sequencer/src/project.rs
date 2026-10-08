@@ -762,9 +762,7 @@ impl ProjectEffectSource {
         if let Some(name) = crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
             return Self::Builtin { name: name.to_string() };
         }
-        if crate::effects::EffectDescriptor::builtin_insert(name).is_some()
-            || crate::effects::dgen_builtin::contains(name)
-        {
+        if crate::effects::is_builtin_effect(name) {
             return Self::Builtin { name: name.to_string() };
         }
         Self::Saved { name: name.to_string() }
@@ -949,6 +947,32 @@ impl ProjectFile {
                         });
                     }
                 }
+            }
+        }
+
+        // One identity per device across every family: the registry binds
+        // each in one family, and the host kinds key a track's devices of
+        // every family by it. A persisted id several records share (a
+        // hand-edited or damaged file) keeps its first holder, in the order
+        // below; each later holder gets a fresh id. Nothing else in the
+        // project names these ids (a rack chain's own `rack_slot_id` is
+        // rewritten with it), so the record stays consistent.
+        let mut seen = std::collections::HashSet::new();
+        let instances = &mut self.device_instances;
+        let effects = (instances.track_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let midi = (instances.midi_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let buses = (instances.bus_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let racks = instances.rack_effects.iter_mut().flat_map(|chain| {
+            std::iter::once(&mut chain.rack_slot_id)
+                .chain(chain.instances.iter_mut().map(|instance| &mut instance.id))
+        });
+        let ids = (effects.map(|instance| &mut instance.id))
+            .chain(midi.map(|instance| &mut instance.id))
+            .chain(buses.map(|instance| &mut instance.id))
+            .chain(racks);
+        for id in ids {
+            if *id != 0 && !seen.insert(*id) {
+                *id = allocate();
             }
         }
 
@@ -1411,6 +1435,23 @@ impl ProjectTrackGroup {
         let pad = rack.pads.get(rack.pad_index_for_note(pad_note)?)?;
         self.members.get(pad.member).copied()
     }
+
+    /// The index (in the pad map) of the pad member track `track` backs,
+    /// when this group is a rack with one: [`Self::rack_pad_track`]'s
+    /// inverse.
+    pub fn rack_pad_index_of_track(&self, track: usize) -> Option<usize> {
+        let rack = self.rack.as_ref()?;
+        let member = self.members.iter().position(|member| *member == track)?;
+        rack.pads.iter().position(|pad| pad.member == member)
+    }
+}
+
+/// The position (in `groups`) of the plain group drawing rack `rack_id`
+/// inside its block (its `rack_members`), if any.
+pub fn rack_parent(groups: &[ProjectTrackGroup], rack_id: u64) -> Option<usize> {
+    groups
+        .iter()
+        .position(|group| group.rack_members.contains(&rack_id))
 }
 
 /// The drum-rack layer over a track group: an ordered pad map plus per-pad
@@ -4283,6 +4324,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
     }
 }
 
+/// Note ids are not saved: each loaded note gets a fresh one.
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
     let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
     let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
@@ -4290,7 +4332,9 @@ pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
         steps,
         durations,
         delays,
+        ids: Vec::new(),
     }
+    .with_fresh_ids()
 }
 
 pub fn chord_snapshot_from_steps_durations_and_delays(
@@ -4314,7 +4358,9 @@ pub fn chord_snapshot_from_steps_durations_and_delays(
         steps,
         durations,
         delays,
+        ids: Vec::new(),
     }
+    .with_fresh_ids()
 }
 
 pub fn chord_snapshot_from_steps_and_durations(

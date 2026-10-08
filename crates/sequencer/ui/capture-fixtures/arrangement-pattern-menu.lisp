@@ -10,7 +10,7 @@
 (def capture-after-sync ()
   (do
     (eseq.seq-panels/seq-open-arrangement)
-    (eseq.arrangement/open-placement-menu 0 (dict :sx -0.9 :col 34 :row 7))))
+    (eseq.arrangement/open-placement-menu 0 (dict :sx -0.9 :col 34 :row 7 :at (dict :col 34 :row 7)))))
 
 ;; Click the parent row through the normal editor pointer route before capture.
 (def capture-click-widgets (list "menu-item"))

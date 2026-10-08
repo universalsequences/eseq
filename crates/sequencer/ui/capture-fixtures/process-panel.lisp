@@ -6,4 +6,5 @@
 (process-inlet-demo-attach-track 0)
 
 (def capture-after-sync ()
-  (eseq.effects.process-panel/select-slot (nth SEQ.process-slots 0)))
+  (let ((t (eseq.effects.devices/track-at 0)))
+    (eseq.effects.process-panel/select-slot (first t.processes))))

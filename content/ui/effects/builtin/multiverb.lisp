@@ -13,8 +13,8 @@
   (fx-param-numeric-value
    fx-param-value-for
    fx-set-effect-value
-   instrument-mod-target-source-slot
-   instrument-param-mod-targets
+   mod-target-source-slot
+   param-mod-targets
    param-base-max-prop
    param-base-min-prop
    param-base-value-prop
@@ -24,12 +24,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value
    param-set-option))
@@ -88,9 +86,9 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color (label-color mode-p p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -104,7 +102,7 @@
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p)
-        :value-scale 100 :decimals 0
+        :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
         :mod-offset (eseq.effects.param-controls/param-mod-offset p)
         :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -116,9 +114,9 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color (label-color mode-p p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -135,16 +133,22 @@
       :width 2.72 :height 1.20 :padding 0 :font-size 8.5
       :background-color (if selected (accent index) :mixer-control-bg)
       :color (if selected :black :dim)
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p index))))
 
+;; Preset values below are the effect's stored units (a % param's 0-1
+;; fraction), so the preset writes send them as they are.
+(def set-depth (fx mt depth)
+  (eseq.effects.param-controls/fx-set-effect-stored-value fx
+    (dict :idx (eseq.effects.param-controls/mod-target-depth-idx mt) :control "param") depth))
+
 (def clear-mod-depths (fx target-params)
   (each target-params |p|
-    (each (eseq.effects.param-controls/instrument-param-mod-targets p) |target|
-      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0))))
+    (each (eseq.effects.param-controls/param-mod-targets fx p) |mt|
+      (set-depth fx mt 0))))
 
 (def source-section (fx source-slot)
   (nth
@@ -163,14 +167,12 @@
       (if source-p (eseq.effects.param-controls/param-set-option fx source-p "off")))))
 
 (def set-mod-depth (fx p source-slot depth)
-  (let ((target
-          (nth
+  (let ((mt
+          (first
             (filter |candidate|
-              (= (eseq.effects.param-controls/instrument-mod-target-source-slot candidate) source-slot)
-              (eseq.effects.param-controls/instrument-param-mod-targets p))
-            0)))
-    (if target
-      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") depth))))
+              (= (eseq.effects.param-controls/mod-target-source-slot candidate) source-slot)
+              (eseq.effects.param-controls/param-mod-targets fx p)))))
+    (when mt (set-depth fx mt depth))))
 
 (def preset-values (name)
   (if (= name "Xtal Wash")
@@ -208,7 +210,7 @@
         (clear-mod-depths fx (list decay-p size-p depth-p mix-p))
         (each (preset-values name) |setting|
           (let ((p (eseq.effects.builtin.filter-core/builtin-fx-param params (nth setting 0))))
-            (if p (eseq.effects.param-controls/fx-set-effect-value fx p (nth setting 1)))))
+            (when p (eseq.effects.param-controls/fx-set-effect-stored-value fx p (nth setting 1)))))
         (if (= name "Xtal Wash")
           (do
             (set-mod-depth fx decay-p 1 0.08)
@@ -233,7 +235,7 @@
         (mode-button fx mode-p 1 "Hall")
         (mode-button fx mode-p 2 "Quad")
         (mode-button fx mode-p 3 "Mod"))
-      (label (get mode-p :text-value) :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
+      (label (eseq.effects.param-controls/fx-param-text-value-for fx mode-p) :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (box :height 0.25)
       (label "FACTORY" :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (h-stack :gap 0.14

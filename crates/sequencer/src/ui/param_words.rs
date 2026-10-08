@@ -62,8 +62,9 @@ thread_local! {
     static TRACK_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Called wherever SEQ.track-names is published: a change bumps the `track`
-/// source so open slots re-ask.
+/// Called wherever the host's track names change (the track names cache,
+/// `refresh_track_names_cache`, and the edits that rename, add or replace a
+/// track): a change bumps the `track` source so open slots re-ask.
 pub(crate) fn set_track_word_names(names: &[String]) {
     let changed = TRACK_NAMES.with(|stored| {
         let mut stored = stored.borrow_mut();
@@ -112,6 +113,22 @@ const STEP_WORDS: [(StepParam, &str); 10] = [
     (StepParam::Retrig, "retrig"),
     (StepParam::RetrigRate, "retrig-rate"),
 ];
+
+/// The step params a process port may write, by their canonical
+/// `step-param` target names (`project.step-param-options`).
+pub(crate) fn step_param_target_names() -> impl Iterator<Item = &'static str> {
+    (STEP_WORDS.iter())
+        .filter(|(param, name)| step_param_from_target_name(name) == Some(*param))
+        .map(|(_, name)| *name)
+}
+
+/// The canonical `step-param` target name of the step param `name` names
+/// (any spelling `step_param_from_target_name` accepts), if it is one a
+/// process port may write.
+pub(crate) fn canonical_step_param_name(name: &str) -> Option<&'static str> {
+    let param = step_param_from_target_name(name)?;
+    step_param_target_names().find(|known| step_param_from_target_name(known) == Some(param))
+}
 
 struct CachedTrack {
     fingerprint: u64,
@@ -627,11 +644,9 @@ mod tests {
     use sequencer::process::ParamRef;
 
     #[test]
-    fn track_word_source_lists_tracks_only_never_bus_names() {
+    fn track_word_source_lists_the_tracks() {
         register_dyn_word_source(TRACK_WORD_SOURCE, Box::new(|_context| track_words()));
-        crate::state_values::build_track_names(&["Spectral".to_string(), "Digi FM".to_string()]);
-        // the mixer publishes bus names through its own list builder
-        crate::state_values::build_name_list(&["Mix".to_string(), "Bus A".to_string()]);
+        set_track_word_names(&["Spectral".to_string(), "Digi FM".to_string()]);
         let words = query_dyn_words(TRACK_WORD_SOURCE, &Value::Nil).expect("track source");
         let items: Vec<(String, String)> = words
             .items()

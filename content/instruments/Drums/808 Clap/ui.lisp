@@ -4,7 +4,7 @@
 (def idclap-section () eseq.vanilla/custom-ui-selected-section)
 (def idclap-p (name) (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
 (def idclap-bind (name) (eseq.effects.custom-ui-runtime/custom-ui-param-binding (idclap-p name)))
-(def idclap-value (name) (reactive-value (idclap-bind name)))
+(def idclap-value (name) (eseq.effects.custom-ui-runtime/custom-ui-param-value (idclap-p name)))
 (def idclap-knob (section name title width)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.45 2.15
     (idclap-c) 2 :linear :widget-knob-track 10 9.5 :center))
@@ -32,7 +32,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 
 ;; A named region shares its visible SDF with a larger independent grab area.
@@ -62,7 +62,6 @@
 (defwidget eseq-clap-burst-display
   :width 35.2 :height 4.65
   :state (sp1 sp2 sp3 flam bdec l2 l3 l4 sd sub burst fast fastd slow slowd)
-  :bindable (sp1 sp2 sp3 flam bdec l2 l3 l4 sd sub burst fast fastd slow slowd)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.94) 1.88) 0 1))
         (t (* 0.30 u u))
@@ -94,15 +93,15 @@
       (idclap-bracket t2 t3)
       (idclap-bracket t3 t4))))
 
+(def idclap-scope-value (scope name)
+  (eseq.effects.custom-ui-runtime/custom-ui-param-value
+    (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))
 (def idclap-drag (scope sx sy region)
   (let ((u (max 0 (min 1 (/ (+ sx 0.94) 1.88))))
-        (fl (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-              (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "flam")))))
+        (fl (idclap-scope-value scope "flam")))
     (let ((ms (/ (* 300 u u) (max 0.25 (min 4 fl))))
-          (a (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-              (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "sp1"))))
-          (b (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-              (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "sp2")))))
+          (a (idclap-scope-value scope "sp1"))
+          (b (idclap-scope-value scope "sp2")))
       (let ((name (if (= region :burst-2) "sp1" (if (= region :burst-3) "sp2" (if (= region :burst-4) "sp3" false))))
             (value (if (= region :burst-2) ms (if (= region :burst-3) (- ms a) (- ms a b)))))
         (if name
@@ -219,7 +218,7 @@
 ;; slew and note tracking. This is an editable control diagram, not audio.
 (defwidget eseq-clap-bank-display
   :width 35.2 :height 4.1
-  :state (floor depth duration) :bindable (floor depth duration)
+  :state (floor depth duration)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.94) 1.88) 0 1))
         (env (exp (/ (* -6907.7553 u) (max duration 1))))

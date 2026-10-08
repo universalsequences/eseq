@@ -109,25 +109,61 @@ fn value_string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
-fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
-    let mut payload = HashMap::new();
-    payload.insert(
-        "op".to_string(),
-        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
-    );
-    if let Some(track) = track {
-        payload.insert(
-            "track".to_string(),
-            Rc::new(RefCell::new(Value::Number(track as f64))),
-        );
+/// The step parameter a `seq-set-step-param` keyword names (also the
+/// `eseq.kinds` step field names).
+pub(crate) fn step_param_named(name: &str) -> Option<StepParam> {
+    Some(match name {
+        "velocity" | "vel" => StepParam::Velocity,
+        "duration" | "dur" => StepParam::Duration,
+        "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
+        "transpose" => StepParam::Transpose,
+        "pan" => StepParam::Pan,
+        "sync" | "syn" => StepParam::Sync,
+        "delay" | "dly" => StepParam::Delay,
+        "speed" => StepParam::Speed,
+        "retrig" | "rtrg" => StepParam::Retrig,
+        "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+        _ => return None,
+    })
+}
+
+/// A one-step parameter command (`set-step-param-history`,
+/// `print-step-param`): `param` to `value` at `step` of `track`.
+fn step_param_command(
+    name: &str,
+    track: usize,
+    param: &str,
+    value: f32,
+    step: usize,
+) -> HostCommand {
+    HostCommand::Custom {
+        name: name.to_string(),
+        payload: map_value([
+            ("track", Value::Number(track as f64)),
+            ("param", Value::Keyword(param.to_string())),
+            ("value", Value::Number(value as f64)),
+            ("steps", list_value([Value::Number(step as f64)])),
+        ]),
     }
-    payload.insert(
-        "value".to_string(),
-        Rc::new(RefCell::new(Value::Number(value))),
-    );
+}
+
+/// The value rule (kind-bindings spec §14.2c) for a kind setter's number:
+/// a finite `value` in `lo..=hi`, else an error naming `native` and the
+/// range (no silent clamping; nothing is set).
+fn value_in_range(native: &str, value: f64, lo: f64, hi: f64) -> Result<f64, String> {
+    if value.is_finite() && (lo..=hi).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{native}: {value} is not a number from {lo} to {hi}"
+        ))
+    }
+}
+
+fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
     HostCommand::Custom {
         name: "slice3-history-action".to_string(),
-        payload: Value::Map(payload),
+        payload: Value::Map(slice3_numeric_payload(op, track, value)),
     }
 }
 
@@ -305,7 +341,7 @@ fn value_symbol_name(value: &Value) -> Option<String> {
 /// A process class a track lane may be built from: one of the always-on
 /// default lane classes, or a `def-process` in the project's authoring
 /// snapshot (the process library).
-fn process_class_is_known(state: &Arc<SequencerState>, class_name: &str) -> bool {
+pub(super) fn process_class_is_known(state: &Arc<SequencerState>, class_name: &str) -> bool {
     sequencer::process::DEFAULT_LANE_CLASSES.contains(&class_name)
         || state
             .published_process_authoring()
@@ -340,11 +376,8 @@ fn process_slot_port_def(
     else {
         return None;
     };
-    state
-        .published_process_authoring()
-        .defs
-        .iter()
-        .find(|def| def.name == slot.class_name)
+    let published = state.published_process_authoring();
+    process_slot_def(&published, slot)
         .and_then(|def| def.ports.iter().find(|port| port.name == port_name))
         .cloned()
 }
@@ -396,27 +429,7 @@ pub(super) fn param_target_from_value(
         "instrument" | "instrument-param" => {
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "instrument process target must include :param-idx".to_string())?;
-            let slot =
-                state.pattern.instrument_slots.get(track).ok_or_else(|| {
-                    format!("instrument slot for track {} is not loaded", track + 1)
-                })?;
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            require_slot_param_index(param_idx, num_params, || {
-                format!("instrument track {}", track + 1)
-            })?;
-            let (_effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(instrument_descriptors.get(track), param_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "instrument process target must include :param for track {} param index {param_idx}",
-                        track + 1
-                    )
-                })?;
-            Ok(sequencer::process::ParamTarget::InstrumentParam {
-                param,
-                param_id: slot.param_node_id(param_idx),
-            })
+            instrument_process_target(state, track, param_idx, process_target_param_name(value))
         }
         "effect" | "effect-param" | "audio-fx" | "audio-effect" => {
             let slot_idx = value_number_field(value, "slot-idx")
@@ -424,50 +437,11 @@ pub(super) fn param_target_from_value(
                 .ok_or_else(|| "effect process target must include :slot-idx".to_string())?;
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "effect process target must include :param-idx".to_string())?;
-            let slot = state
-                .pattern
-                .effect_chains
-                .get(track)
-                .and_then(|chain| chain.get(slot_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "effect slot for track {} slot {} is not loaded",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            require_slot_param_index(param_idx, num_params, || {
-                format!("effect track {} slot {}", track + 1, slot_idx + 1)
-            })?;
-            let (effect_descriptors, _instrument_descriptors) = state.scratch_runtime_descriptors();
-            let desc = effect_descriptors
-                .get(track)
-                .and_then(|descs| descs.get(slot_idx));
-            let effect = process_target_effect_name(value)
-                .or_else(|| desc.map(|desc| desc.name.clone()))
-                .ok_or_else(|| {
-                    format!(
-                        "effect process target must include :effect for track {} slot {}",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(desc, param_idx))
-                .ok_or_else(|| {
-                    format!(
-                        "effect process target must include :param for track {} slot {} param index {param_idx}",
-                        track + 1,
-                        slot_idx + 1
-                    )
-                })?;
-            Ok(sequencer::process::ParamTarget::EffectParam {
-                slot: slot_idx,
-                effect,
-                param,
-                param_id: slot.param_node_id(param_idx),
-            })
+            let names = (
+                process_target_effect_name(value),
+                process_target_param_name(value),
+            );
+            effect_process_target(state, track, slot_idx, param_idx, names)
         }
         "midi-fx" | "midi-fx-param" | "midi-effect" => {
             let slot_idx = value_number_field(value, "slot-idx")
@@ -475,32 +449,11 @@ pub(super) fn param_target_from_value(
                 .ok_or_else(|| "midi-fx process target must include :slot-idx".to_string())?;
             let param_idx = value_number_field(value, "param-idx")
                 .ok_or_else(|| "midi-fx process target must include :param-idx".to_string())?;
-            let chain_fx_name = state
-                .pattern
-                .track_params
-                .get(track)
-                .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
-                .ok_or_else(|| {
-                    format!(
-                        "MIDI-FX slot {} is not loaded on track {}",
-                        slot_idx + 1,
-                        track + 1
-                    )
-                })?;
-            let fx = value_string_field(value, "fx").unwrap_or(chain_fx_name);
-            let desc = sequencer::lisp_host::load_midi_fx_descriptor(&fx)
-                .ok_or_else(|| format!("MIDI-FX descriptor for {fx} is not loaded"))?;
-            require_slot_param_index(param_idx, desc.params.len(), || format!("MIDI-FX {fx}"))?;
-            let param = process_target_param_name(value)
-                .or_else(|| descriptor_param_name(Some(&desc), param_idx))
-                .ok_or_else(|| {
-                    format!("midi-fx process target must include :param for {fx} param index {param_idx}")
-                })?;
-            Ok(sequencer::process::ParamTarget::MidiFxParam {
-                slot: slot_idx,
-                fx: desc.name,
-                param,
-            })
+            let names = (
+                value_string_field(value, "fx"),
+                process_target_param_name(value),
+            );
+            midi_fx_process_target(state, track, slot_idx, param_idx, names)
         }
         "process-inlet" | "process_inlet" => {
             let process = value_string_field(value, "process")
@@ -525,10 +478,7 @@ pub(super) fn param_target_from_value(
             let bus = value_number_field(value, "bus-id")
                 .or_else(|| value_number_field(value, "bus_id"))
                 .ok_or_else(|| "bus-send process target must include :bus-id".to_string())?;
-            if bus as u64 == sequencer::sequencer::MIX_BUS_ID {
-                return Err("the mix bus has no send".to_string());
-            }
-            Ok(sequencer::process::ParamTarget::BusSend { bus: bus as u64 })
+            bus_send_process_target(bus as u64)
         }
         "bus-effect" | "bus-fx" => {
             Err("bus FX process-port bindings are not supported".to_string())
@@ -537,30 +487,133 @@ pub(super) fn param_target_from_value(
     }
 }
 
-fn nonnegative_usize_arg(name: &str, value: f64) -> Result<usize, String> {
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(format!("{name} must be a non-negative integer"));
-    }
-    Ok(value as usize)
+/// A param of `track`'s instrument as a process target; `param` names it,
+/// else its descriptor does.
+pub(super) fn instrument_process_target(
+    state: &SequencerState,
+    track: usize,
+    param_idx: usize,
+    param: Option<String>,
+) -> Result<sequencer::process::ParamTarget, String> {
+    let slot = (state.pattern.instrument_slots.get(track))
+        .ok_or_else(|| format!("instrument slot for track {} is not loaded", track + 1))?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    require_slot_param_index(param_idx, num_params, || {
+        format!("instrument track {}", track + 1)
+    })?;
+    let (_effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
+    let param = param
+        .or_else(|| descriptor_param_name(instrument_descriptors.get(track), param_idx))
+        .ok_or_else(|| {
+            format!(
+                "instrument process target must include :param for track {} param index {param_idx}",
+                track + 1
+            )
+        })?;
+    Ok(sequencer::process::ParamTarget::InstrumentParam {
+        param,
+        param_id: slot.param_node_id(param_idx),
+    })
 }
 
-fn expanded_step_viewport_from_numbers(
-    track: f64,
-    track_id: f64,
-    page: f64,
-    mode: f64,
-    cursor_step: f64,
-) -> Result<ExpandedStepViewport, String> {
-    let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;
-    Ok(ExpandedStepViewport {
-        track: nonnegative_usize_arg("track", track)?
-            .min(sequencer::sequencer::MAX_TRACKS.saturating_sub(1)),
-        track_id: nonnegative_usize_arg("track-id", track_id)?,
-        page: nonnegative_usize_arg("page", page)?.min(max_page),
-        mode: nonnegative_usize_arg("mode", mode)?,
-        cursor_step: nonnegative_usize_arg("cursor-step", cursor_step)?
-            .min(MAX_STEPS.saturating_sub(1)),
+/// A param of the effect in `track`'s chain slot `slot_idx` as a process
+/// target; `(effect, param)` name them, else the descriptor does.
+pub(super) fn effect_process_target(
+    state: &SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    (effect, param): (Option<String>, Option<String>),
+) -> Result<sequencer::process::ParamTarget, String> {
+    let slot = state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+        .ok_or_else(|| {
+            format!(
+                "effect slot for track {} slot {} is not loaded",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    require_slot_param_index(param_idx, num_params, || {
+        format!("effect track {} slot {}", track + 1, slot_idx + 1)
+    })?;
+    let (effect_descriptors, _instrument_descriptors) = state.scratch_runtime_descriptors();
+    let desc = effect_descriptors
+        .get(track)
+        .and_then(|descs| descs.get(slot_idx));
+    let effect = effect
+        .or_else(|| desc.map(|desc| desc.name.clone()))
+        .ok_or_else(|| {
+            format!(
+                "effect process target must include :effect for track {} slot {}",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    let param = param
+        .or_else(|| descriptor_param_name(desc, param_idx))
+        .ok_or_else(|| {
+            format!(
+                "effect process target must include :param for track {} slot {} param index {param_idx}",
+                track + 1,
+                slot_idx + 1
+            )
+        })?;
+    Ok(sequencer::process::ParamTarget::EffectParam {
+        slot: slot_idx,
+        effect,
+        param,
+        param_id: slot.param_node_id(param_idx),
     })
+}
+
+/// A param of the MIDI effect in `track`'s slot `slot_idx` as a process
+/// target; `(fx, param)` name them, else the chain and descriptor do.
+pub(super) fn midi_fx_process_target(
+    state: &SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    (fx, param): (Option<String>, Option<String>),
+) -> Result<sequencer::process::ParamTarget, String> {
+    let chain_fx_name = state
+        .pattern
+        .track_params
+        .get(track)
+        .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+        .ok_or_else(|| {
+            format!(
+                "MIDI-FX slot {} is not loaded on track {}",
+                slot_idx + 1,
+                track + 1
+            )
+        })?;
+    let fx = fx.unwrap_or(chain_fx_name);
+    let desc = sequencer::lisp_host::load_midi_fx_descriptor(&fx)
+        .ok_or_else(|| format!("MIDI-FX descriptor for {fx} is not loaded"))?;
+    require_slot_param_index(param_idx, desc.params.len(), || format!("MIDI-FX {fx}"))?;
+    let param = param
+        .or_else(|| descriptor_param_name(Some(&desc), param_idx))
+        .ok_or_else(|| {
+            format!("midi-fx process target must include :param for {fx} param index {param_idx}")
+        })?;
+    Ok(sequencer::process::ParamTarget::MidiFxParam {
+        slot: slot_idx,
+        fx: desc.name,
+        param,
+    })
+}
+
+/// A send to bus `bus` as a process target (the mix bus has none).
+pub(super) fn bus_send_process_target(bus: u64) -> Result<sequencer::process::ParamTarget, String> {
+    if bus == sequencer::sequencer::MIX_BUS_ID {
+        return Err("the mix bus has no send".to_string());
+    }
+    Ok(sequencer::process::ParamTarget::BusSend { bus })
 }
 
 pub(super) fn value_string_list(value: Option<&Value>) -> Vec<String> {
@@ -942,9 +995,50 @@ pub(crate) fn register_transport_toggle_play_native(
         });
         Ok(Value::Bool(!state.is_playing()))
     });
+    // `seq-set-playing` — absolute Play/Stop: the state machine toggles only
+    // when the transport differs once the command lands, so repeated calls
+    // in one frame never double-toggle (the `transport.playing` :set).
+    runtime.register_native("seq-set-playing", move |args, ctx| {
+        let Some(Value::Bool(playing)) = args.first() else {
+            return Err("seq-set-playing: expected a bool".into());
+        };
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "song-transport-set-playing".to_string(),
+            payload: Value::Bool(*playing),
+        });
+        Ok(Value::Bool(*playing))
+    });
 }
 
+/// The song and arrangement natives removed with the legacy reactive
+/// layer (eseq-0l17.81; no factory caller since the arrangement's kind port)
+/// and what replaces each: registered without docs as natives that fail
+/// with the hint.
+const REMOVED_SONG_NATIVES: &[(&str, &str)] = &[
+    (
+        "seq-song-select-clip",
+        "seq-song-select-clip was removed; (set! song.bound-clip c) with c a clip of t.clips (eseq.kinds); it also selects the clip's span",
+    ),
+    (
+        "seq-song-deselect-clip",
+        "seq-song-deselect-clip was removed; (set! song.bound-clip nil) (eseq.kinds)",
+    ),
+    (
+        "seq-song-set-region",
+        "seq-song-set-region was removed; (select-region! t1 t2 start end [:scene-lane true]) (eseq.kinds)",
+    ),
+    (
+        "seq-song-clear-region",
+        "seq-song-clear-region was removed; (clear-region!) (eseq.kinds)",
+    ),
+    (
+        "seq-arrangement-clip-set-source",
+        "seq-arrangement-clip-set-source was removed; (set! c.cell cell) with cell one of the track's t.cells (eseq.kinds). Setting a clip's source to empty (the old nil pattern-id) has no kind equivalent yet",
+    ),
+];
+
 pub(crate) fn register_song_natives(runtime: &mut Runtime) {
+    sequencer::lisp_host::register_removed_natives(runtime, REMOVED_SONG_NATIVES);
     // Arrangement editing primitives (docs/arrangement-lane-model-spec.md 8).
     // Scene-lane ops address a scene change by its beat; clip ops address a
     // clip by its stable id.
@@ -1170,35 +1264,6 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
-        "seq-arrangement-clip-set-source",
-        "(seq-arrangement-clip-set-source clip-id [pattern-id])",
-        "Swap a clip's content in place, keeping its span and identity. The \
-         phase anchor resets to the new source's step 0.",
-        move |args, ctx| {
-            let clip_id =
-                song_row_id_arg("seq-arrangement-clip-set-source: clip-id", args.first())?;
-            let pattern_id = match args.get(1) {
-                None | Some(Value::Nil) => Value::Nil,
-                Some(Value::Number(id)) => Value::Number(*id),
-                Some(_) => {
-                    return Err(
-                        "seq-arrangement-clip-set-source: pattern-id must be a number or nil"
-                            .into(),
-                    )
-                }
-            };
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "arrangement-clip-set-source".to_string(),
-                payload: song_payload(vec![
-                    ("clip-id", Value::Number(clip_id as f64)),
-                    ("pattern-id", pattern_id),
-                ]),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
         "seq-arrangement-clear",
         "(seq-arrangement-clear)",
         "Remove the committed arrangement (and with it the compiled song) \
@@ -1391,120 +1456,6 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-back-to-song-track".to_string(),
                 payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-select-clip",
-        "(seq-song-select-clip track clip-id [start end])",
-        "Bind a track's device panel, monitor sound and take punch-in \
-         template to the stored clip `clip-id` on `track` (takes spec \
-         16.2/16.6). With the clip's beat span, ALSO select that span as a \
-         one-track region (region spec 4.1) so the clip body lights up and \
-         copy/delete have a target. Call with no arguments (or \
-         seq-song-deselect-clip) to fall back to the playing/scene source.",
-        move |args, ctx| {
-            let (Some(Value::Number(track)), Some(Value::Number(clip_id))) =
-                (args.first(), args.get(1))
-            else {
-                return Err("seq-song-select-clip: expected track and clip-id".into());
-            };
-            let mut payload = HashMap::new();
-            payload.insert(
-                "track".to_string(),
-                Rc::new(RefCell::new(Value::Number(*track))),
-            );
-            payload.insert(
-                "clip-id".to_string(),
-                Rc::new(RefCell::new(Value::Number(*clip_id))),
-            );
-            if let (Some(Value::Number(start)), Some(Value::Number(end))) =
-                (args.get(2), args.get(3))
-            {
-                payload.insert(
-                    "start".to_string(),
-                    Rc::new(RefCell::new(Value::Number(*start))),
-                );
-                payload.insert("end".to_string(), Rc::new(RefCell::new(Value::Number(*end))));
-            }
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-select-clip".to_string(),
-                payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-deselect-clip",
-        "(seq-song-deselect-clip)",
-        "Clear the timeline clip selection (takes spec 16.6 cause 1): every \
-         track falls back to the song-audible source, else its scene pattern.",
-        move |_args, ctx| {
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-deselect-clip".to_string(),
-                payload: Value::Nil,
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-set-region",
-        "(seq-song-set-region track-a track-b start end [scene-lane])",
-        "Select an arrangement REGION — the inclusive model-track span \
-         `track-a`..`track-b` over the half-open beat span `[start, end)` \
-         (region spec 4.1). Rust-owned, so it survives view switches; \
-         published as SEQ.song-region. A region names no single clip, so it \
-         clears the clip selection and releases the sound binding. Pass a \
-         truthy `scene-lane` for a marquee swept in the SCENE lane: \
-         copy/paste/delete then carry the scene EVENTS inside the rectangle \
-         as well as the clips (lane spec 8).",
-        move |args, ctx| {
-            let (
-                Some(Value::Number(track_a)),
-                Some(Value::Number(track_b)),
-                Some(Value::Number(start)),
-                Some(Value::Number(end)),
-            ) = (args.first(), args.get(1), args.get(2), args.get(3))
-            else {
-                return Err(
-                    "seq-song-set-region: expected track-a, track-b, start and end".into(),
-                );
-            };
-            let mut payload = HashMap::new();
-            for (key, value) in [
-                ("track-a", *track_a),
-                ("track-b", *track_b),
-                ("start", *start),
-                ("end", *end),
-            ] {
-                payload.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
-            }
-            let scene_lane = matches!(args.get(4), Some(Value::Bool(true)));
-            payload.insert(
-                "scene-lane".to_string(),
-                Rc::new(RefCell::new(Value::Bool(scene_lane))),
-            );
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-set-region".to_string(),
-                payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-clear-region",
-        "(seq-song-clear-region)",
-        "Clear the arrangement region selection (region spec 4.1): \
-         SEQ.song-region goes nil and every lane drops its region highlight.",
-        move |_args, ctx| {
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-clear-region".to_string(),
-                payload: Value::Nil,
             });
             Ok(Value::Bool(true))
         },
@@ -1869,6 +1820,74 @@ fn toggle_master_recording_capture(
     )
 }
 
+/// `seq-toggle-master-recording`: toggle the capture, bump the UI epoch,
+/// report the status and announce a saved take.
+fn toggle_master_recording_native(
+    master_recording: &AtomicBool,
+    master_recorder: &sequencer::recorder::MasterRecorder,
+    ui_epoch: &AtomicUsize,
+    ctx: &mut eseqlisp::NativeContext,
+) -> eseqlisp::NativeResult {
+    let result = toggle_master_recording_capture(master_recording, master_recorder);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    let (active, status, saved) = result?;
+    ctx.set_status(status);
+    if let Some(path) = saved {
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "master-recording-saved".to_string(),
+            payload: Value::String(path.to_string_lossy().into_owned()),
+        });
+    }
+    Ok(Value::Bool(active))
+}
+
+/// Set (`Some`) or flip (`None`) a track lane's collapsed flag, invalidating
+/// the mixer when it moves; returns the new flag. `track` is in range.
+fn update_track_collapsed(
+    state: &SequencerState,
+    collapsed: &Mutex<Vec<bool>>,
+    ui_invalidations: &UiInvalidationQueue,
+    track: usize,
+    value: Option<bool>,
+) -> bool {
+    let (now, changed) = {
+        let mut tracks = collapsed.lock().unwrap();
+        if tracks.len() < state.active_track_count() {
+            tracks.resize(state.active_track_count(), false);
+        }
+        let now = value.unwrap_or(!tracks[track]);
+        (now, std::mem::replace(&mut tracks[track], now) != now)
+    };
+    if changed {
+        ui_invalidations.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Collapsed,
+        });
+    }
+    now
+}
+
+/// Set (`Some`) or flip (`None`) a group's collapsed flag, invalidating the
+/// bus topology when it moves; returns the new flag, `None` when no group
+/// has `group_id`.
+fn update_group_collapsed(
+    groups: &Mutex<Vec<sequencer::project::ProjectTrackGroup>>,
+    ui_invalidations: &UiInvalidationQueue,
+    group_id: u64,
+    value: Option<bool>,
+) -> Option<bool> {
+    let (now, changed) = {
+        let mut groups = groups.lock().unwrap();
+        let group = groups.iter_mut().find(|g| g.id == group_id)?;
+        let now = value.unwrap_or(!group.collapsed);
+        (now, std::mem::replace(&mut group.collapsed, now) != now)
+    };
+    if changed {
+        ui_invalidations.push(UiInvalidation::BusTopology);
+    }
+    Some(now)
+}
+
 fn toggle_master_recording_capture_in(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
@@ -2065,11 +2084,110 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
 }
 
 /// Arming/clearing a delete target only moves the delete-target read
-/// surfaces (`SEQ.delete-target-version` + the mixer/rack binding fields),
-/// which the reactive tick republishes off the version counter alone — a
+/// surfaces (the host kinds' delete-target fields and the mixer/rack binding
+/// fields), which the ticks republish off the version counter alone — a
 /// `ui_epoch` bump here would buy nothing but a whole-project resync per
 /// clip-launch click (~7ms at 20-clip pool scale).
-fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
+/// What making a track the current one touches (`seq-set-track`, the host
+/// kinds' `selection.cursor-step`).
+#[derive(Clone)]
+pub(crate) struct CurrentTrackSwitch {
+    pub(crate) current_track: Arc<AtomicUsize>,
+    pub(crate) selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    pub(crate) selected_steps: Arc<Mutex<HashSet<usize>>>,
+    pub(crate) piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
+    pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    pub(crate) active_delete_target_version: Arc<AtomicUsize>,
+    pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
+    pub(crate) fx_epoch: Arc<AtomicUsize>,
+}
+
+impl CurrentTrackSwitch {
+    pub(crate) fn of(shared: &SharedHandles) -> Self {
+        Self {
+            current_track: shared.current_track.clone(),
+            selected_tracks: shared.selected_tracks.clone(),
+            selected_steps: shared.selected_steps.clone(),
+            piano_roll_selection: shared.piano_roll_selection.clone(),
+            active_delete_target: shared.active_delete_target.clone(),
+            active_delete_target_version: shared.active_delete_target_version.clone(),
+            ui_invalidations: shared.ui_invalidations.clone(),
+            fx_epoch: shared.fx_epoch.clone(),
+        }
+    }
+
+    /// Make `track` (in range) the current track and the only selected one;
+    /// a change clears the step and piano-roll selections and a step
+    /// delete target. Returns whether the current track changed.
+    pub(crate) fn select(&self, track: usize) -> bool {
+        {
+            let mut set = self.selected_tracks.lock().unwrap();
+            set.clear();
+            set.insert(track);
+        }
+        let previous = self.current_track.swap(track, Ordering::Relaxed);
+        if previous == track {
+            return false;
+        }
+        self.selected_steps.lock().unwrap().clear();
+        self.piano_roll_selection.lock().unwrap().clear();
+        let mut guard = self.active_delete_target.lock().unwrap();
+        if matches!(
+            guard.as_ref(),
+            Some(ActiveDeleteTarget::TrackPattern { .. })
+                | Some(ActiveDeleteTarget::TrackSteps { .. })
+        ) {
+            guard.take();
+            bump_delete_target_version(&self.active_delete_target_version);
+        }
+        drop(guard);
+        self.ui_invalidations.push(UiInvalidation::CurrentTrack {
+            previous,
+            current: track,
+        });
+        let next_fx_epoch = self.fx_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-set-track previous={} next={} fx_epoch={}",
+                previous, track, next_fx_epoch
+            );
+        }
+        true
+    }
+}
+
+/// `t.delete-target`'s setter (`seq-set-track-delete-target`) on `target`:
+/// `on` makes `track` the target unless the target already holds it; off
+/// takes it out (clearing a one-track target, shrinking a multi-track one).
+/// Returns whether the target changed.
+pub(crate) fn set_track_delete_target(
+    target: &mut Option<ActiveDeleteTarget>,
+    track: usize,
+    on: bool,
+) -> bool {
+    let held = mixer_track_delete_target_selected(target.as_ref(), track);
+    if on == held {
+        return false;
+    }
+    *target = if on {
+        Some(ActiveDeleteTarget::MixerTrack { track })
+    } else {
+        match target.take() {
+            Some(ActiveDeleteTarget::MixerTracks { mut tracks }) => {
+                tracks.retain(|member| *member != track);
+                match tracks[..] {
+                    [] => None,
+                    [track] => Some(ActiveDeleteTarget::MixerTrack { track }),
+                    _ => Some(ActiveDeleteTarget::MixerTracks { tracks }),
+                }
+            }
+            _ => None,
+        }
+    };
+    true
+}
+
+pub(crate) fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -2837,7 +2955,6 @@ fn register_step_selection_natives(
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
-    track_names: &[String],
     track_pan_ids: Arc<Mutex<Vec<i32>>>,
     track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<app::BusChannelState>>>,
@@ -2857,7 +2974,6 @@ pub(crate) fn init_runtime(
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
-    expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
@@ -2905,7 +3021,6 @@ pub(crate) fn init_runtime(
     process_authoring_natives.mark_package_defs();
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
-    let track_count = track_names.len();
     let effect_descriptors = app.graph.effect_descriptors.clone();
     state.set_scratch_runtime_descriptors(
         app.graph.effect_descriptors.clone(),
@@ -2914,865 +3029,15 @@ pub(crate) fn init_runtime(
     let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
     let midi_fx_names = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    // Register SEQ reactive namespace
-    runtime.register_reactive(
-        "SEQ",
-        {
-            let mut fields = vec![
-                ("macros", build_macros_value(app)),
-                ("playing", Value::Bool(false)),
-                ("bpm", Value::Number(120.0)),
-                ("scene-launch-quantize", Value::String("off".to_string())),
-                ("record-quantize", Value::String("1/16".to_string())),
-                ("metronome", Value::Bool(false)),
-                // Roll mode (docs/rolling-core-spec.md 8): toggle + rate label.
-                ("roll-mode", Value::Bool(false)),
-                ("roll-rate", Value::String("16".to_string())),
-                ("sequence-rolling", Value::Bool(false)),
-                // Per-track false or (start_beats len_beats), published by
-                // the scheduler for the sequence-roll bracket/playhead UI.
-                ("roll-window", Value::List(vec![])),
-                ("queued-scene", Value::Number(-1.0)),
-                // Per-track pattern id (-1 = none) with a pending quantized
-                // clip launch — drives the mixer grid's queued-cell blink.
-                ("queued-track-clips", Value::List(vec![])),
-                // Song mode observability (docs/song-mode-spec.md 12).
-                ("song-exists", Value::Bool(false)),
-                ("song-mode", Value::String("stopped".to_string())),
-                ("song-recording-kind", Value::String("".to_string())),
-                ("song-manual-latch", Value::Bool(false)),
-                ("song-track-latched", Value::List(vec![])),
-                ("song-scene-latched", Value::Bool(false)),
-                ("song-current-row", Value::Number(-1.0)),
-                ("song-current-row-id", Value::Number(-1.0)),
-                ("song-row-count", Value::Number(0.0)),
-                ("song-cursor-beats", Value::Number(0.0)),
-                ("song-position-beats", Value::Number(0.0)),
-                ("song-end-beat", Value::Number(0.0)),
-                ("song-loop-enabled", Value::Bool(false)),
-                ("song-capture-failed", Value::Bool(false)),
-                ("song-capture-error", Value::Nil),
-                ("song-edit-error", Value::Nil),
-                ("song-track-governed", Value::List(vec![])),
-                ("song-bound-clip", Value::Nil),
-                // Region selection (region spec 4.1): nil, or
-                // (track-a track-b start end scene-lane?).
-                ("song-region", Value::Nil),
-                // Arrangement read surfaces (lane spec 12): the stored clips
-                // and the derived scene-event spans. There is no third
-                // surface — a lane gap is silence, so it renders as nothing.
-                ("song-lanes", Value::List(vec![])),
-                ("scene-spans", Value::List(vec![])),
-                ("song-lane-events", Value::List(vec![])),
-                // Sound palette read surfaces (takes spec 17.6/18.3): the
-                // open overlay's entries (Nil = closed) and the per-clip
-                // sound divergence/color join for the timeline dots.
-                ("sound-palette", Value::Nil),
-                ("song-clip-sounds", Value::List(vec![])),
-                // Provisional arrangement-capture content
-                // (docs/realtime-arrangement-feedback-spec.md 3.2): nil
-                // unless a capture is running. Inert — no ids, so no gesture
-                // can address it.
-                ("song-pending", Value::Nil),
-                ("scene-names", Value::List(vec![])),
-                ("num-steps", Value::Number(PAGE_SIZE as f64)),
-                ("num-tracks", Value::Number(track_count as f64)),
-                ("current-track", Value::Number(0.0)),
-                ("selected-tracks", Value::List(vec![])),
-                ("groups", Value::List(vec![])),
-                ("rack-clips", Value::List(vec![])),
-                ("rack-clip-banks", Value::List(vec![])),
-                ("group-collapsed", Value::List(vec![])),
-                // Group id of the pad-armed drum rack; -1 = none.
-                ("armed-rack-id", Value::Number(-1.0)),
-                ("delete-target-version", Value::Number(0.0)),
-                ("selected-mod-routes", Value::List(vec![])),
-                (
-                    "current-pattern",
-                    Value::Number(state.current_scene_index() as f64),
-                ),
-                ("num-patterns", Value::Number(state.scene_count() as f64)),
-                ("neural-networks", build_neural_networks_value(&state)),
-                (
-                    "selected-neural-neurons",
-                    sequencer::lisp_host::selected_neural_neurons_to_value(
-                        &selected_neural_neurons.lock().unwrap(),
-                    ),
-                ),
-                (
-                    "neural-energy-matrix",
-                    build_neural_energy_matrix_value(&state),
-                ),
-                (
-                    "neural-trigger-matrix",
-                    build_neural_trigger_matrix_value(&state),
-                ),
-                (
-                    "neural-dampening-matrix",
-                    build_neural_dampening_matrix_value(&state),
-                ),
-                (
-                    "graph-visualizations",
-                    build_graph_visualizations_value(&state),
-                ),
-                ("track-events", build_track_output_events_value(&state)),
-                (
-                    "track-event-current-beat",
-                    build_track_output_current_beat_value(&state),
-                ),
-                ("auto-follow", Value::Bool(true)),
-                ("playhead", Value::Number(0.0)),
-                ("transport-playhead", Value::Number(0.0)),
-                ("sampler-playhead", Value::Number(0.0)),
-                ("browser-preview-playing", Value::Bool(false)),
-                ("browser-preview-playhead", Value::Number(0.0)),
-                ("track-ids", build_track_ids(&app)),
-                ("track-instrument-types", build_track_instrument_types(&app)),
-                ("track-instrument-ids", build_track_instrument_ids(&app)),
-                (
-                    "track-mod-output-available",
-                    build_track_mod_output_available(&app),
-                ),
-                (
-                    "track-instrument-run-modes",
-                    build_track_instrument_run_modes(&app),
-                ),
-                ("track-names", build_track_names(&track_names)),
-                ("track-collapsed", build_track_collapsed(app)),
-                (
-                    "track-pattern-cells",
-                    build_track_pattern_cells_value(&state, track_count),
-                ),
-                (
-                    "track-num-steps",
-                    build_all_track_num_steps_value(&state, app),
-                ),
-                (
-                    "track-duration-spans",
-                    build_all_track_duration_spans_value(&state, app),
-                ),
-                (
-                    "track-step-plock-kinds",
-                    build_all_track_step_plock_kinds(&state, app),
-                ),
-                (
-                    "track-step-variant-r",
-                    build_all_track_step_variant_color_channel(&state, app, 0),
-                ),
-                (
-                    "track-step-variant-g",
-                    build_all_track_step_variant_color_channel(&state, app, 1),
-                ),
-                (
-                    "track-step-variant-b",
-                    build_all_track_step_variant_color_channel(&state, app, 2),
-                ),
-                (
-                    "steps",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_steps_value(&state, 0)
-                    },
-                ),
-                ("piano-roll-lanes", build_piano_roll_lanes_value()),
-                ("piano-roll-automation-params", Value::List(vec![])),
-                ("piano-roll-automation", Value::Nil),
-                (
-                    "piano-roll-items",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_piano_roll_items_value(
-                            &PianoRollLanes::live(&state, 0),
-                            &piano_roll_selection,
-                        )
-                    },
-                ),
-                (
-                    "piano-roll-selection",
-                    build_piano_roll_selection_value(&piano_roll_selection),
-                ),
-                ("focus-num-steps", Value::Number(16.0)),
-                ("focus-label", Value::String(String::new())),
-                ("focus-live", Value::Bool(true)),
-                ("focus-kind", Value::Keyword("live".to_string())),
-                ("focus-clip-kind", Value::Keyword("none".to_string())),
-                ("focus-window-marker", Value::Number(-1.0)),
-                ("focus-window-span", Value::Nil),
-                ("focus-window-repeat", Value::Number(0.0)),
-                ("focus-clip-start", Value::Nil),
-                ("focus-clip-end", Value::Nil),
-                ("focus-clip-offset", Value::Nil),
-                ("piano-roll-playhead", Value::Number(-1.0)),
-                (
-                    "velocities",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Velocity)
-                    },
-                ),
-                (
-                    "durations",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Duration)
-                    },
-                ),
-                (
-                    "transposes",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Transpose)
-                    },
-                ),
-                (
-                    "auxas",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::AuxA)
-                    },
-                ),
-                (
-                    "pans",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Pan)
-                    },
-                ),
-                (
-                    "syncs",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Sync)
-                    },
-                ),
-                (
-                    "delays",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Delay)
-                    },
-                ),
-                (
-                    "retrigs",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::Retrig)
-                    },
-                ),
-                (
-                    "retrig-rates",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_param_list(&state, 0, StepParam::RetrigRate)
-                    },
-                ),
-                (
-                    "process-lanes",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_process_lanes_value(&state, 0)
-                    },
-                ),
-                (
-                    "track-process-lane-values",
-                    build_all_track_process_lane_values(&state, track_count),
-                ),
-                (
-                    "track-process-lanes",
-                    build_all_track_process_lanes_value(&state, track_count),
-                ),
-                (
-                    "process-slots",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_process_slots_value(&state, 0)
-                    },
-                ),
-                (
-                    "track-process-slots",
-                    build_all_track_process_slots_value(&state, track_count),
-                ),
-                (
-                    "track-lane-patch",
-                    build_all_track_lane_patch_value(&state, track_count),
-                ),
-                ("process-run-errors", build_process_run_errors_value(&state)),
-                ("process-library", build_process_library_value(&state)),
-                ("sync-labels", build_sync_labels()),
-                ("track-volumes", build_track_volumes(&state)),
-                (
-                    "track-pans",
-                    build_all_track_param_lists_value(&state, &app, StepParam::Pan),
-                ),
-                (
-                    "track-delays",
-                    build_all_track_param_lists_value(&state, &app, StepParam::Delay),
-                ),
-                (
-                    "track-retrigs",
-                    build_all_track_param_lists_value(&state, &app, StepParam::Retrig),
-                ),
-                (
-                    "track-retrig-rates",
-                    build_all_track_param_lists_value(&state, &app, StepParam::RetrigRate),
-                ),
-                ("track-mixer-pans", build_track_pans(&state)),
-                ("track-outputs", build_track_outputs(&app, &state)),
-                ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
-                ("mod-routes", build_mod_routes(&state)),
-                ("track-mutes", build_track_mutes(&state)),
-                ("track-solos", build_track_solos(&state)),
-                ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
-                ("bus-output-routes", build_bus_output_routes(&app)),
-                (
-                    "bus-ids",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "bus-names",
-                    build_name_list(
-                        &app.buses
-                            .iter()
-                            .map(|bus| bus.name.clone())
-                            .collect::<Vec<_>>(),
-                    ),
-                ),
-                (
-                    "bus-volumes",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.volume as f64))))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "bus-mutes",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.mute))))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "bus-solos",
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
-                            .collect(),
-                    ),
-                ),
-                ("bus-effects", build_bus_effects_value(&app)),
-                (
-                    "track-device-chains",
-                    build_track_device_chains_value(&app, &state),
-                ),
-                ("bus-device-chains", build_bus_device_chains_value(&app)),
-                (
-                    "effects",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_effects_value(&state, 0, &effect_descriptors, &selected_steps)
-                    },
-                ),
-                (
-                    "midi-effects",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_midi_effects_value(&state, 0, &selected_steps)
-                    },
-                ),
-                (
-                    "instrument-panel",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_instrument_panel_value(&app, 0, &selected_steps)
-                    },
-                ),
-                ("instrument-active-notes", Value::List(vec![])),
-                (
-                    "track-active-notes",
-                    build_track_active_notes_value(&state, track_count),
-                ),
-                ("track-params", build_track_params(&state, 0)),
-                (
-                    "tp-attack",
-                    Value::Number(state.pattern.track_params[0].get_attack_ms() as f64),
-                ),
-                (
-                    "tp-release",
-                    Value::Number(state.pattern.track_params[0].get_release_ms() as f64),
-                ),
-                (
-                    "tp-swing",
-                    Value::Number(state.pattern.track_params[0].get_swing() as f64),
-                ),
-                (
-                    "tp-send",
-                    Value::Number(state.pattern.track_params[0].get_send() as f64),
-                ),
-                ("tp-output", {
-                    let tp = &state.pattern.track_params[0];
-                    let label = match tp.output() {
-                        sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
-                        sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
-                        sequencer::sequencer::TrackOutput::Bus(id) => app
-                            .buses
-                            .iter()
-                            .find(|bus| bus.id == id)
-                            .map(|bus| bus.name.clone())
-                            .unwrap_or_else(|| "main".to_string()),
-                    };
-                    Value::String(label)
-                }),
-                (
-                    "track-output-options",
-                    Value::List(
-                        std::iter::once("main".to_string())
-                            .chain(std::iter::once("sends only".to_string()))
-                            .chain(
-                                app.buses
-                                    .iter()
-                                    .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-                                    .map(|bus| bus.name.clone()),
-                            )
-                            .map(|label| Rc::new(RefCell::new(Value::String(label))))
-                            .collect(),
-                    ),
-                ),
-                ("tp-bus-sends", {
-                    use std::collections::HashMap;
-                    let tp = &state.pattern.track_params[0];
-                    let sends = tp.sends();
-                    Value::List(
-                        app.buses
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
-                            .map(|(bus_idx, bus)| {
-                                let amount = sends
-                                    .iter()
-                                    .find(|send| send.destination == bus.id)
-                                    .map(|send| send.amount)
-                                    .unwrap_or(0.0);
-                                let mut map = HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(amount as f64))),
-                                );
-                                Rc::new(RefCell::new(Value::Map(map)))
-                            })
-                            .collect(),
-                    )
-                }),
-                (
-                    "tp-num-steps",
-                    Value::Number(state.pattern.track_params[0].get_num_steps() as f64),
-                ),
-                (
-                    "tp-gate",
-                    Value::Bool(state.pattern.track_params[0].is_gate_on()),
-                ),
-                (
-                    "tp-poly",
-                    Value::Bool(state.pattern.track_params[0].is_polyphonic()),
-                ),
-                (
-                    "tp-timebase",
-                    Value::String(
-                        state.pattern.track_params[0]
-                            .get_timebase()
-                            .label()
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "tp-swing-resolution",
-                    Value::String(
-                        state.pattern.track_params[0]
-                            .get_swing_resolution()
-                            .label()
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "tp-fts",
-                    Value::String(fts_scale_label(&state.pattern.track_params[0])),
-                ),
-                (
-                    "tp-mute-group",
-                    Value::String(mute_group_label(
-                        state.pattern.track_params[0].get_mute_group(),
-                    )),
-                ),
-                (
-                    "tp-accumulator",
-                    Value::String(selected_accumulator_name(&app, 0)),
-                ),
-                (
-                    "tp-accum-limit",
-                    Value::Number(state.pattern.track_params[0].get_accum_limit() as f64),
-                ),
-                (
-                    "tp-accum-mode",
-                    Value::String(
-                        accum_mode_label(state.pattern.track_params[0].get_accum_mode())
-                            .to_string(),
-                    ),
-                ),
-                ("accumulator-options", build_accumulator_options(&app)),
-                ("fts-options", build_fts_options()),
-                ("mute-group-options", build_mute_group_options()),
-                ("accum-mode-options", build_accum_mode_options()),
-                (
-                    "available-builtin-effects",
-                    build_available_builtin_effects(),
-                ),
-                ("available-effects", build_available_effects()),
-                ("available-midi-effects", build_available_midi_effects()),
-                ("selected-steps", build_selection_value(&selected_steps)),
-                (
-                    "step-has-plocks",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_step_has_plocks(&state, 0, &effect_descriptors)
-                    },
-                ),
-                (
-                    "step-plock-kinds",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_step_plock_kinds(&state, 0)
-                    },
-                ),
-                (
-                    "step-variant-r",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_step_variant_color_channel(&state, 0, 0)
-                    },
-                ),
-                (
-                    "step-variant-g",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_step_variant_color_channel(&state, 0, 1)
-                    },
-                ),
-                (
-                    "step-variant-b",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_step_variant_color_channel(&state, 0, 2)
-                    },
-                ),
-                (
-                    "track-plocks",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plocks_value(&app, &state, 0, &selected_steps)
-                    },
-                ),
-                (
-                    "track-plock-any",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plock_any_value(&app, &state, 0)
-                    },
-                ),
-                // Print latches are per-gesture; nothing can be armed at
-                // startup (bead eseq-4seq).
-                ("track-plock-printing", Value::List(vec![])),
-                (
-                    "track-plock-variants",
-                    if track_count == 0 {
-                        Value::List(vec![])
-                    } else {
-                        build_track_plock_variants_value(&state, 0, &selected_steps)
-                    },
-                ),
-                ("compiling", Value::Bool(false)),
-                ("recording", Value::Bool(false)),
-                ("master-recording", Value::Bool(false)),
-                ("cpu-load-pct", Value::Number(0.0)),
-                ("cpu-overloaded", Value::Bool(false)),
-                (
-                    "output-latency-ms",
-                    Value::Number((state.pdc_latency_seconds() * 1000.0) as f64),
-                ),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
-                (
-                    "record-armed",
-                    build_record_armed_value(&record_armed.lock().unwrap()),
-                ),
-                ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
-                ("sidebar-kind", Value::String("sampler".to_string())),
-                ("sidebar-instrument-name", Value::String(String::new())),
-                (
-                    "sidebar-instrument-display-name",
-                    Value::String(String::new()),
-                ),
-                ("sidebar-loaded-preset", Value::String(String::new())),
-                ("sidebar-selected-sample", Value::String(String::new())),
-                ("sidebar-track-index", Value::Number(0.0)),
-                ("sidebar-presets", Value::List(vec![])),
-                ("sidebar-user-presets", Value::List(vec![])),
-                ("sidebar-rack-slot-presets", Value::List(vec![])),
-                ("sidebar-preset-tree", Value::List(vec![])),
-                (
-                    "project-instrument-engines",
-                    build_string_list(&project_instrument_engine_names(app)),
-                ),
-                // Bumped when the instrument/effect library changes on disk
-                // (lisp_hot_reload::bump_content_library_epoch).
-                ("content-library-epoch", Value::Number(0.0)),
-                ("sound-presets", build_sound_presets_value()),
-                ("kit-presets", build_kit_presets_value()),
-                ("graph-sequencers", Value::List(vec![])),
-                ("rack-clips", Value::List(vec![])),
-                ("current-project-name", Value::String(String::new())),
-                ("scene-bank-view-generation", Value::Number(0.0)),
-                ("rack-panel-view-generation", Value::Number(0.0)),
-                // Editor mode state (for inline instrument/effect creation/editing)
-                ("editor-active", Value::Bool(false)),
-                ("editor-canceling", Value::Bool(false)),
-                ("editor-error", Value::String(String::new())),
-                ("editor-mode", Value::String(String::new())),
-                ("editor-buffer-name", Value::String(String::new())),
-                ("editor-active-macro-name", Value::String(String::new())),
-                ("editor-active-macro-action", Value::String(String::new())),
-                ("learn-target-path", Value::String(String::new())),
-                ("learn-target-name", Value::String(String::new())),
-                ("learn-phase", Value::String("pick".to_string())),
-                ("learn-plan-params", Value::List(vec![])),
-                ("learn-method", Value::String("Local fit + basin check".to_string())),
-                ("learn-epochs", Value::Number(300.0)),
-                ("learn-cma-generations", Value::Number(12.0)),
-                ("learn-cma-population", Value::Number(0.0)),
-                ("learn-cma-sigma", Value::Number(0.2)),
-                ("learn-cma-seed", Value::Number(1.0)),
-                ("learn-cma-forward-batch", Value::Number(0.0)),
-                ("learn-local-epochs", Value::Number(0.0)),
-                ("learn-cma-continue", Value::Number(8.0)),
-                ("learn-cma-refine-epochs", Value::Number(5.0)),
-                ("learn-cma-refine-mode", Value::String("Batched".to_string())),
-                ("learn-cma-final-epochs", Value::Number(300.0)),
-                ("learn-pitch-hz", Value::Number(0.0)),
-                ("learn-gate-frames", Value::Number(0.0)),
-                ("learn-stage", Value::String(String::new())),
-                ("learn-current-epoch", Value::Number(0.0)),
-                ("learn-total-epochs", Value::Number(0.0)),
-                ("learn-loss", Value::Number(0.0)),
-                ("learn-losses", Value::List(vec![])),
-                ("learn-optimization-losses", Value::List(vec![])),
-                ("learn-epoch-params", Value::List(vec![])),
-                ("learn-checkpoint-wav", Value::String(String::new())),
-                ("learn-improvement-pct", Value::Number(0.0)),
-                ("learn-abs-distance", Value::Number(0.0)),
-                ("learn-basin-check", Value::String(String::new())),
-                ("learn-result-deltas", Value::List(vec![])),
-                ("learn-final-wav", Value::String(String::new())),
-                ("learn-error", Value::String(String::new())),
-                ("editor-patch-macros", Value::List(vec![])),
-                ("editor-library-macros", Value::List(vec![])),
-                ("editor-assets", Value::List(vec![])),
-                ("editor-selected-asset", Value::Nil),
-                ("editor-open-macro", Value::String(String::new())),
-                (
-                    "editor-instrument-run-mode",
-                    Value::String("instrument".to_string()),
-                ),
-                ("tuning-root-options", build_tuning_root_options()),
-            ];
-            fields.extend(tuning_reactive_fields(&state.pattern.track_params[0]));
-            for idx in 0..track_count {
-                fields.push((
-                    Box::leak(track_selected_field(idx).into_boxed_str()),
-                    Value::Bool(idx == 0),
-                ));
-                fields.push((
-                    Box::leak(mixer_track_delete_target_field(idx).into_boxed_str()),
-                    Value::Bool(false),
-                ));
-                for cell in state.track_pattern_cells(idx) {
-                    let pattern_id = cell.pattern_id.0;
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_active_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.active_effective),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_assigned_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.assigned_to_current_scene),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_override_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.overridden),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_selected_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(false),
-                    ));
-                }
-                fields.push((
-                    Box::leak(format!("track-peak-{idx}").into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-                fields.push((
-                    Box::leak(format!("modulator-phase-{idx}").into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-                fields.push((
-                    Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
-                    Value::Number(1.0),
-                ));
-                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-                    fields.push((
-                        Box::leak(mod_in_level_field(idx, input).into_boxed_str()),
-                        Value::Number(0.0),
-                    ));
-                }
-                fields.push((
-                    Box::leak(mod_out_level_field(idx).into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-            }
-            for idx in 0..app.buses.len() {
-                fields.push((
-                    Box::leak(format!("bus-peak-{idx}").into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-            }
-            for bus in &app.buses {
-                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-                    fields.push((
-                        Box::leak(bus_mod_in_level_field(bus.id.0, input).into_boxed_str()),
-                        Value::Number(0.0),
-                    ));
-                }
-            }
-            for track in 0..track_count {
-                for (bus_idx, bus) in app.buses.iter().enumerate() {
-                    if bus.id == sequencer::sequencer::BusId::MIX {
-                        continue;
-                    }
-                    fields.push((
-                        Box::leak(track_bus_send_field(track, bus_idx).into_boxed_str()),
-                        Value::Number(
-                            track_bus_send_amount(&app, &state, track, bus_idx).unwrap_or(0.0)
-                                as f64,
-                        ),
-                    ));
-                }
-            }
-            if track_count > 0 {
-                for (bus_idx, bus) in app.buses.iter().enumerate() {
-                    if bus.id == sequencer::sequencer::BusId::MIX {
-                        continue;
-                    }
-                    fields.push((
-                        Box::leak(current_track_bus_send_field(bus_idx).into_boxed_str()),
-                        Value::Number(
-                            track_bus_send_amount(&app, &state, 0, bus_idx).unwrap_or(0.0) as f64,
-                        ),
-                    ));
-                }
-            }
-            for idx in 0..MAX_STEPS {
-                fields.push((
-                    Box::leak(format!("playhead-active-{idx}").into_boxed_str()),
-                    Value::Bool(idx == 0),
-                ));
-            }
-            for track in 0..track_count {
-                fields.push((
-                    Box::leak(track_playhead_page_field(track).into_boxed_str()),
-                    Value::Number((track_active_playhead_step(&state, track) / PAGE_SIZE) as f64),
-                ));
-                for step in 0..MAX_STEPS {
-                    fields.push((
-                        Box::leak(track_step_active_field(track, step).into_boxed_str()),
-                        Value::Bool(state.pattern.patterns[track].is_active(step)),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_duration_field(track, step).into_boxed_str()),
-                        Value::Bool(track_step_duration_covered(&state, track, step)),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_plocked_field(track, step).into_boxed_str()),
-                        Value::Bool(false),
-                    ));
-                    fields.push((
-                        Box::leak(track_step_selected_field(track, step).into_boxed_str()),
-                        Value::Bool(false),
-                    ));
-                    fields.push((
-                        Box::leak(track_playhead_active_field(track, step).into_boxed_str()),
-                        Value::Bool(step == track_active_playhead_step(&state, track)),
-                    ));
-                }
-            }
-            fields
-        },
-        false,
-    );
-    runtime.register_reactive("SEQV", vec![], true);
+    // The browser's saved Sounds and kits (`browser.sound-presets` /
+    // `kit-presets`, through the presented record).
+    record_sound_presets();
+    record_kit_presets();
+    // The sexp slots' `track` word source (jaki's `(harmony :track n)`).
+    crate::param_words::set_track_word_names(&app.tracks);
     crate::midi_dispatch::register_device_state(&mut runtime);
-    crate::host_commands::audio_settings::register_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
-    crate::host_commands::resample::register_state(&mut runtime);
-    crate::host_commands::factory_promote::register_state(&mut runtime);
-    runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
-    if track_count > 0 {
-        sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
-    }
 
     // ── Native functions ──
 
@@ -3798,6 +3063,29 @@ pub(crate) fn init_runtime(
     runtime.register_native("seq-clear-delete-target", move |_args, _ctx| {
         clear_active_delete_target(&delete_target, &delete_target_version);
         Ok(Value::Bool(true))
+    });
+
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let st = state.clone();
+    runtime.register_native("seq-set-track-delete-target", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-delete-target: expected (track bool)".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-delete-target: no track {track}").into());
+        }
+        if set_track_delete_target(&mut delete_target.lock().unwrap(), track, *on) {
+            bump_delete_target_version(&delete_target_version);
+        }
+        Ok(Value::Bool(*on))
+    });
+
+    runtime.register_native("seq-error", move |args, _ctx| match args.first() {
+        Some(Value::String(message)) => Err(message.clone().into()),
+        _ => Err("seq-error: expected a message".into()),
     });
 
     let delete_target = active_delete_target.clone();
@@ -3886,60 +3174,6 @@ pub(crate) fn init_runtime(
             name: "paste-effect".to_string(),
             payload: Value::Nil,
         });
-        Ok(Value::Bool(true))
-    });
-
-    let projection = expanded_step_projection.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seqv-sync-expanded-step-slots", move |args, _ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(track_id)),
-            Some(Value::Number(page)),
-            Some(Value::Number(mode)),
-            Some(Value::Number(cursor_step)),
-        ) = (
-            args.first(),
-            args.get(1),
-            args.get(2),
-            args.get(3),
-            args.get(4),
-        )
-        else {
-            return Err(
-                "seqv-sync-expanded-step-slots: expected (track track-id page mode cursor-step)"
-                    .into(),
-            );
-        };
-        let viewport =
-            expanded_step_viewport_from_numbers(*track, *track_id, *page, *mode, *cursor_step)?;
-        if projection.set_viewport(viewport) {
-            ui_inv.push(UiInvalidation::ExpandedStepViewport {
-                track: viewport.track,
-                track_id: viewport.track_id,
-            });
-        }
-        Ok(Value::Bool(true))
-    });
-
-    let projection = expanded_step_projection.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seqv-clear-expanded-step-slots", move |args, _ctx| {
-        let Some(Value::Number(track_id)) = args.first() else {
-            return Err("seqv-clear-expanded-step-slots: expected track-id".into());
-        };
-        if *track_id < 0.0 {
-            return Err("seqv-clear-expanded-step-slots: track-id must be non-negative".into());
-        }
-        let track_id = *track_id as usize;
-        if let Some(viewport) = projection.viewport(track_id) {
-            if projection.remove_viewport(track_id) {
-                ui_inv.push(UiInvalidation::ExpandedStepViewport {
-                    track: viewport.track,
-                    track_id,
-                });
-            }
-        }
         Ok(Value::Bool(true))
     });
 
@@ -4399,6 +3633,33 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(next_active))
     });
 
+    // seq-set-track-step — (seq-set-track-step track step active): an
+    // absolute step set. The toggle happens only when the step differs once
+    // the command lands (the `step.active` :set).
+    let st = state.clone();
+    runtime.register_native("seq-set-track-step", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(step)), Some(Value::Bool(active))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-set-track-step: expected (track step active)".into());
+        };
+        let (track, step, active) = (*track as usize, *step as usize, *active);
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-step: track {track} out of range").into());
+        }
+        if step >= MAX_STEPS {
+            return Err(format!("seq-set-track-step: step {step} out of range").into());
+        }
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "toggle-step".to_string(),
+            payload: map_value([
+                ("track", Value::Number(track as f64)),
+                ("step", Value::Number(step as f64)),
+                ("active", Value::Bool(active)),
+            ]),
+        });
+        Ok(Value::Bool(active))
+    });
 
     let st = state.clone();
     runtime.register_native("seq-track-step-active?", move |args, _ctx| {
@@ -4429,18 +3690,8 @@ pub(crate) fn init_runtime(
         if step >= MAX_STEPS {
             return Err(format!("seq-set-step-param: step {step} out of range").into());
         }
-        let param = match param_name.as_str() {
-            "velocity" | "vel" => StepParam::Velocity,
-            "duration" | "dur" => StepParam::Duration,
-            "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
-            "transpose" => StepParam::Transpose,
-            "pan" => StepParam::Pan,
-            "sync" | "syn" => StepParam::Sync,
-            "delay" | "dly" => StepParam::Delay,
-            "speed" => StepParam::Speed,
-            "retrig" | "rtrg" => StepParam::Retrig,
-            "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
-            other => return Err(format!("seq-set-step-param: unknown param :{other}").into()),
+        let Some(param) = step_param_named(param_name) else {
+            return Err(format!("seq-set-step-param: unknown param :{param_name}").into());
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
@@ -4451,18 +3702,49 @@ pub(crate) fn init_runtime(
                 fx_ep.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let mut payload = HashMap::new();
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
-        payload.insert(
-            "steps".to_string(),
-            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
-        );
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "set-step-param-history".to_string(),
-            payload: Value::Map(payload),
-        });
+        ctx.enqueue_command(step_param_command("set-step-param-history", track, param_name, val, step));
+        Ok(Value::Number(val as f64))
+    });
+
+    // seq-set-track-step-param — (seq-set-track-step-param track step :param
+    // value): one step's parameter on any track, in the param's range (the
+    // value rule: out of range is an error), as one undo entry;
+    // leaves the step selection alone (the `step.velocity` … :set).
+    let st = state.clone();
+    runtime.register_native("seq-set-track-step-param", move |args, ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(step)),
+            Some(Value::Keyword(param_name)),
+            Some(Value::Number(val)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err("seq-set-track-step-param: expected (track step :param value)".into());
+        };
+        let (track, step) = (*track as usize, *step as usize);
+        if track >= st.active_track_count() || step >= MAX_STEPS {
+            return Err(format!(
+                "seq-set-track-step-param: track {track} step {step} out of range"
+            )
+            .into());
+        }
+        let Some(param) = step_param_named(param_name) else {
+            return Err(format!("seq-set-track-step-param: unknown param :{param_name}").into());
+        };
+        let (lo, hi) = (f64::from(param.min()), f64::from(param.max()));
+        let val = value_in_range(
+            &format!("seq-set-track-step-param :{param_name}"),
+            *val,
+            lo,
+            hi,
+        )? as f32;
+        ctx.enqueue_command(step_param_command(
+            "set-step-param-history",
+            track,
+            param_name,
+            val,
+            step,
+        ));
         Ok(Value::Number(val as f64))
     });
 
@@ -4488,18 +3770,7 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
-        let mut payload = HashMap::new();
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
-        payload.insert(
-            "steps".to_string(),
-            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
-        );
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "print-step-param".to_string(),
-            payload: Value::Map(payload),
-        });
+        ctx.enqueue_command(step_param_command("print-step-param", track, param_name, val, step));
         Ok(Value::Number(val as f64))
     });
 
@@ -4522,13 +3793,23 @@ pub(crate) fn init_runtime(
         Ok(Value::Nil)
     });
 
-    for name in ["seq-set-process-lane-step", "seq-set-process-lane-steps"] {
+    // `seq-set-process-lane-step` (one step) went with the legacy layer
+    // (eseq-0l17.81): `set-lane-steps!` (eseq.kinds) or this with a list.
+    sequencer::lisp_host::register_removed_natives(
+        &mut runtime,
+        &[(
+            "seq-set-process-lane-step",
+            "seq-set-process-lane-step was removed; (set-lane-steps! l steps v) with l a lane of t.lanes and steps step instances (eseq.kinds), or seq-set-process-lane-steps with a list of step indices",
+        )],
+    );
+    {
+        let name = "seq-set-process-lane-steps";
         runtime.register_native(name, move |args, ctx| {
             let (Some(Value::Number(track)), Some(Value::Number(instance_id)),
                 Some(inlet), Some(targets), Some(Value::Number(value))) =
                 (args.first(), args.get(1), args.get(2), args.get(3), args.get(4))
             else {
-                return Err(format!("{name}: expected (track instance-id inlet step(s) value)"));
+                return Err(format!("{name}: expected (track instance-id inlet steps value)"));
             };
             let inlet = value_symbol_name(inlet)
                 .ok_or_else(|| format!("{name}: inlet must be a name"))?;
@@ -4536,10 +3817,8 @@ pub(crate) fn init_runtime(
                 Value::Number(step) if step.is_finite() && *step >= 0.0
                     && step.fract() == 0.0 && *step < MAX_STEPS as f64);
             let steps = match targets {
-                Value::Number(_) if name == "seq-set-process-lane-step" && valid_step(targets) =>
-                    Value::List(vec![Rc::new(RefCell::new(targets.clone()))]),
-                Value::List(steps) if name == "seq-set-process-lane-steps"
-                    && !steps.is_empty() && steps.iter().all(|step| valid_step(&step.borrow())) =>
+                Value::List(steps)
+                    if !steps.is_empty() && steps.iter().all(|step| valid_step(&step.borrow())) =>
                     targets.clone(),
                 _ => return Err(format!("{name}: invalid step targets")),
             };
@@ -5114,15 +4393,17 @@ pub(crate) fn init_runtime(
 
     // seq-set-track — switch current track (single-select: resets the multi-select set)
     let st = state.clone();
-    let ct = current_track.clone();
-    let sel_tracks = selected_tracks.clone();
-    let sel = selected_steps.clone();
-    let piano_sel = piano_roll_selection.clone();
     let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    let delete_target = active_delete_target.clone();
-    let delete_target_version = active_delete_target_version.clone();
+    let switch = CurrentTrackSwitch {
+        current_track: current_track.clone(),
+        selected_tracks: selected_tracks.clone(),
+        selected_steps: selected_steps.clone(),
+        piano_roll_selection: piano_roll_selection.clone(),
+        active_delete_target: active_delete_target.clone(),
+        active_delete_target_version: active_delete_target_version.clone(),
+        ui_invalidations: ui_invalidations.clone(),
+        fx_epoch: fx_epoch.clone(),
+    };
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -5131,37 +4412,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
         }
-        {
-            let mut set = sel_tracks.lock().unwrap();
-            set.clear();
-            set.insert(track);
-        }
-        let previous = ct.load(Ordering::Relaxed);
-        ct.store(track, Ordering::Relaxed);
-        if previous != track {
-            sel.lock().unwrap().clear();
-            piano_sel.lock().unwrap().clear();
-            let mut guard = delete_target.lock().unwrap();
-            if matches!(
-                guard.as_ref(),
-                Some(ActiveDeleteTarget::TrackPattern { .. })
-                    | Some(ActiveDeleteTarget::TrackSteps { .. })
-            ) {
-                guard.take();
-                bump_delete_target_version(&delete_target_version);
-            }
-            ui_inv.push(UiInvalidation::CurrentTrack {
-                previous,
-                current: track,
-            });
-            let next_fx_epoch = fx_ep.fetch_add(1, Ordering::Relaxed) + 1;
-            if trace_ui_enabled() {
-                eprintln!(
-                    "[ui-trace][native] seq-set-track previous={} next={} fx_epoch={}",
-                    previous, track, next_fx_epoch
-                );
-            }
-        } else if trace_ui_enabled() {
+        if !switch.select(track) && trace_ui_enabled() {
             eprintln!(
                 "[ui-trace][native] seq-set-track unchanged track={} ui_epoch={}",
                 track,
@@ -5222,8 +4473,8 @@ pub(crate) fn init_runtime(
     });
 
     // seq-toggle-group-collapsed — (seq-toggle-group-collapsed group-id)
-    // Flips the collapsed flag on the in-memory group; the main loop rebuilds the
-    // SEQ.group-collapsed / SEQ.groups reactive surfaces from the project groups.
+    // Flips the collapsed flag on the shared groups; the main loop's groups
+    // reconcile pulls them into the project and the host kinds publish them.
     let groups_state = track_groups.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-group-collapsed", move |args, _ctx| {
@@ -5231,21 +4482,28 @@ pub(crate) fn init_runtime(
             return Err("seq-toggle-group-collapsed: expected group id".into());
         };
         let group_id = *group_id as u64;
-        let collapsed = {
-            let mut groups = groups_state.lock().unwrap();
-            match groups.iter_mut().find(|g| g.id == group_id) {
-                Some(group) => {
-                    group.collapsed = !group.collapsed;
-                    group.collapsed
-                }
-                None => {
-                    return Err(
-                        format!("seq-toggle-group-collapsed: group {group_id} not found").into(),
-                    );
-                }
-            }
+        let Some(collapsed) = update_group_collapsed(&groups_state, &ui_inv, group_id, None) else {
+            return Err(format!("seq-toggle-group-collapsed: group {group_id} not found").into());
         };
-        ui_inv.push(UiInvalidation::BusTopology);
+        Ok(Value::Bool(collapsed))
+    });
+
+    // seq-set-group-collapsed — (seq-set-group-collapsed group-id collapsed):
+    // absolute (the `group.collapsed` :set).
+    let groups_state = track_groups.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-group-collapsed", move |args, _ctx| {
+        let (Some(Value::Number(group_id)), Some(Value::Bool(collapsed))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-set-group-collapsed: expected (group-id collapsed)".into());
+        };
+        let group_id = *group_id as u64;
+        let Some(collapsed) =
+            update_group_collapsed(&groups_state, &ui_inv, group_id, Some(*collapsed))
+        else {
+            return Err(format!("seq-set-group-collapsed: group {group_id} not found").into());
+        };
         Ok(Value::Bool(collapsed))
     });
 
@@ -5261,7 +4519,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track-volume: track {track} out of range").into());
         }
-        let vol = (*vol as f32).clamp(0.0, 1.0);
+        let vol = value_in_range("seq-set-track-volume", *vol, 0.0, 1.0)? as f32;
         ctx.enqueue_command(slice3_numeric_history_command(
             "volume",
             Some(track),
@@ -5303,7 +4561,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track-pan: track {track} out of range").into());
         }
-        let pan = (*pan as f32).clamp(-1.0, 1.0);
+        let pan = value_in_range("seq-set-track-pan", *pan, -1.0, 1.0)? as f32;
         ctx.enqueue_command(slice3_numeric_history_command(
             "pan",
             Some(track),
@@ -5358,6 +4616,65 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(muted))
     });
 
+    // seq-set-track-mute / seq-set-track-solo — (… track-idx on): absolute;
+    // the toggle happens only when the track differs once the command lands
+    // (the `track.muted` / `track.soloed` :set).
+    for (name, op, change) in [
+        (
+            "seq-set-track-mute",
+            "set-mute",
+            TrackMixerInvalidation::Mute,
+        ),
+        (
+            "seq-set-track-solo",
+            "set-solo",
+            TrackMixerInvalidation::Solo,
+        ),
+    ] {
+        let st = state.clone();
+        let ui_inv = ui_invalidations.clone();
+        runtime.register_native(name, move |args, ctx| {
+            let (Some(Value::Number(track)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+            else {
+                return Err(format!("{name}: expected (track on)").into());
+            };
+            let track = *track as usize;
+            if track >= st.active_track_count() {
+                return Err(format!("{name}: track {track} out of range").into());
+            }
+            ctx.enqueue_command(slice3_numeric_history_command(
+                op,
+                Some(track),
+                if *on { 1.0 } else { 0.0 },
+            ));
+            ui_inv.push(UiInvalidation::TrackMixer {
+                track,
+                change: change.clone(),
+            });
+            Ok(Value::Bool(*on))
+        });
+    }
+
+    // seq-set-track-collapsed — (seq-set-track-collapsed track-idx collapsed):
+    // absolute (the `track.collapsed` :set).
+    let st = state.clone();
+    let collapsed_tracks = track_collapsed.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-track-collapsed", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(collapsed))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-collapsed: expected (track collapsed)".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-collapsed: track {track} out of range").into());
+        }
+        let collapsed =
+            update_track_collapsed(&st, &collapsed_tracks, &ui_inv, track, Some(*collapsed));
+        Ok(Value::Bool(collapsed))
+    });
+
     // seq-toggle-track-collapsed — (seq-toggle-track-collapsed track-idx)
     let st = state.clone();
     let collapsed_tracks = track_collapsed.clone();
@@ -5370,18 +4687,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-toggle-track-collapsed: track {track} out of range").into());
         }
-        let collapsed = {
-            let mut tracks = collapsed_tracks.lock().unwrap();
-            if tracks.len() < st.active_track_count() {
-                tracks.resize(st.active_track_count(), false);
-            }
-            tracks[track] = !tracks[track];
-            tracks[track]
-        };
-        ui_inv.push(UiInvalidation::TrackMixer {
-            track,
-            change: TrackMixerInvalidation::Collapsed,
-        });
+        let collapsed = update_track_collapsed(&st, &collapsed_tracks, &ui_inv, track, None);
         Ok(Value::Bool(collapsed))
     });
 
@@ -5421,7 +4727,7 @@ pub(crate) fn init_runtime(
             return Err("seq-set-bus-volume: expected (bus volume)".into());
         };
         let bus_idx = *bus_idx as usize;
-        let vol = (*vol as f32).clamp(0.0, 1.0);
+        let vol = value_in_range("seq-set-bus-volume", *vol, 0.0, 1.0)? as f32;
         let bus_id = {
             let buses = bus_state.lock().unwrap();
             let Some(bus) = buses.get(bus_idx) else {
@@ -5495,6 +4801,33 @@ pub(crate) fn init_runtime(
         ));
         Ok(Value::Bool(solo))
     });
+
+    // seq-set-bus-mute / seq-set-bus-solo — (… bus on): absolute; the
+    // toggle happens only when the bus differs once the command lands (the
+    // `bus.muted` / `bus.soloed` :set).
+    for (name, op) in [
+        ("seq-set-bus-mute", "set-mute"),
+        ("seq-set-bus-solo", "set-solo"),
+    ] {
+        let bus_state = buses.clone();
+        runtime.register_native(name, move |args, ctx| {
+            let (Some(Value::Number(bus_idx)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+            else {
+                return Err(format!("{name}: expected (bus on)").into());
+            };
+            let bus_idx = *bus_idx as usize;
+            let Some(bus_id) = bus_state.lock().unwrap().get(bus_idx).map(|bus| bus.id) else {
+                return Err(format!("{name}: bus {bus_idx} out of range").into());
+            };
+            ctx.enqueue_command(bus_mixer_history_command(
+                op,
+                bus_idx,
+                bus_id,
+                Some(if *on { 1.0 } else { 0.0 }),
+            ));
+            Ok(Value::Bool(*on))
+        });
+    }
 
     // seq-set-effect-param — (seq-set-effect-param slot-idx param-idx value)
     let st = state.clone();
@@ -5570,7 +4903,6 @@ pub(crate) fn init_runtime(
     let descs = effect_descriptors.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
-    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -5633,18 +4965,6 @@ pub(crate) fn init_runtime(
                     }
                 }
             }
-            if let Some(name) = descs
-                .get(track)
-                .and_then(|d| d.get(slot_idx))
-                .and_then(|d| d.params.get(param_idx))
-                .map(|p| p.name.as_str())
-            {
-                reactive_bindings.write_float(
-                    "SEQ",
-                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
-                    clamped as f64,
-                );
-            }
             clamped_values.push(Value::Number(clamped as f64));
             ui_inv.push(UiInvalidation::TrackFx {
                 track,
@@ -5671,7 +4991,6 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
-    let reactive_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-set-effect-param-pair-live", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -5736,18 +5055,6 @@ pub(crate) fn init_runtime(
                         );
                     }
                 }
-            }
-            if let Some(name) = descs
-                .get(track)
-                .and_then(|d| d.get(slot_idx))
-                .and_then(|d| d.params.get(param_idx))
-                .map(|p| p.name.as_str())
-            {
-                reactive_bindings.write_float(
-                    "SEQ",
-                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
-                    clamped as f64,
-                );
             }
             clamped_values.push(Value::Number(clamped as f64));
         }
@@ -6072,7 +5379,10 @@ pub(crate) fn init_runtime(
         let Some(Value::Number(bpm)) = args.first() else {
             return Err("seq-set-bpm: expected bpm number".into());
         };
-        let bpm = (*bpm as u32).clamp(20, 300);
+        if bpm.fract() != 0.0 {
+            return Err(format!("seq-set-bpm: {bpm} is not a whole number").into());
+        }
+        let bpm = value_in_range("seq-set-bpm", *bpm, 20.0, 300.0)? as u32;
         ctx.enqueue_command(slice3_numeric_history_command("bpm", None, bpm as f64));
         Ok(Value::Number(bpm as f64))
     });
@@ -6327,31 +5637,12 @@ pub(crate) fn init_runtime(
             _ => return Err("seq-set-accumulator: expected string label".into()),
         };
         let names = accumulator_names_for_native.lock().unwrap();
-        let idx = names
-            .iter()
-            .position(|name| name.eq_ignore_ascii_case(label))
+        let idx = accumulator_index(&names, label)
             .ok_or_else(|| format!("seq-set-accumulator: unknown accumulator '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
-        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            payload.insert(
-                "default-limit".to_string(),
-                Rc::new(RefCell::new(Value::Number(
-                    builtin_accumulator_default_limit(idx) as f64,
-                ))),
-            );
-        } else {
-            payload.insert(
-                "script-name".to_string(),
-                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
-            );
-        }
         ctx.enqueue_command(HostCommand::Custom {
             name: "slice3-history-action".to_string(),
-            payload: Value::Map(payload),
+            payload: Value::Map(accumulator_edit_payload(track, idx, &names)),
         });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
@@ -6485,34 +5776,14 @@ pub(crate) fn init_runtime(
         }
 
         let mut names = accumulator_names_for_native.lock().unwrap();
-        if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+        if accumulator_index(&names, &label).is_none() {
             names.push(label.clone());
         }
-        let idx = names
-            .iter()
-            .position(|name| name.eq_ignore_ascii_case(&label))
+        let idx = accumulator_index(&names, &label)
             .ok_or_else(|| format!("seq-use-accumulator: unknown accumulator '{label}'"))?;
-
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
-        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            payload.insert(
-                "default-limit".to_string(),
-                Rc::new(RefCell::new(Value::Number(
-                    builtin_accumulator_default_limit(idx) as f64,
-                ))),
-            );
-        } else {
-            payload.insert(
-                "script-name".to_string(),
-                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
-            );
-        }
         ctx.enqueue_command(HostCommand::Custom {
             name: "slice3-history-action".to_string(),
-            payload: Value::Map(payload),
+            payload: Value::Map(accumulator_edit_payload(track, idx, &names)),
         });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
@@ -6963,8 +6234,8 @@ pub(crate) fn init_runtime(
             was_following
         };
         // Only the FOLLOWING -> PAUSED transition changes a UI surface, and
-        // `SEQ.auto-follow` has its own per-tick delta writer in
-        // `reactive_tick` that re-reads this cell every frame. Re-arming an
+        // the host kinds' `transport.auto-follow` re-reads this cell every
+        // sync. Re-arming an
         // already-paused cooldown is what every drag update after the first
         // does — `cool-off-follow` runs on every step/param edit — and bumping
         // ui_epoch there forced a whole-project resync (~7ms of
@@ -6999,25 +6270,45 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(!was))
     });
 
+    // seq-set-recording — (seq-set-recording on): `seq-toggle-record` when
+    // the record flag differs, else nothing (the `transport.recording` :set).
+    let rec = recording.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-recording", move |args, ctx| {
+        let Some(Value::Bool(on)) = args.first() else {
+            return Err("seq-set-recording: expected a bool".into());
+        };
+        if rec.swap(*on, Ordering::Relaxed) != *on {
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-toggle-record".to_string(),
+                payload: Value::Bool(*on),
+            });
+        }
+        Ok(Value::Bool(*on))
+    });
+
     let master_rec = master_recording.clone();
     let master = master_recorder.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-master-recording", move |_args, ctx| {
-        let result = toggle_master_recording_capture(&master_rec, &master);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        match result {
-            Ok((active, status, saved)) => {
-                ctx.set_status(status);
-                if let Some(path) = saved {
-                    ctx.enqueue_command(HostCommand::Custom {
-                        name: "master-recording-saved".to_string(),
-                        payload: Value::String(path.to_string_lossy().into_owned()),
-                    });
-                }
-                Ok(Value::Bool(active))
-            }
-            Err(error) => Err(error.into()),
+        toggle_master_recording_native(&master_rec, &master, &ui_ep, ctx)
+    });
+
+    // seq-set-master-recording — (seq-set-master-recording on):
+    // `seq-toggle-master-recording` when the capture differs, else nothing
+    // (the `master.recording` :set).
+    let master_rec = master_recording.clone();
+    let master = master_recorder.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-master-recording", move |args, ctx| {
+        let Some(Value::Bool(on)) = args.first() else {
+            return Err("seq-set-master-recording: expected a bool".into());
+        };
+        if master_rec.load(Ordering::Acquire) == *on {
+            return Ok(Value::Bool(*on));
         }
+        toggle_master_recording_native(&master_rec, &master, &ui_ep, ctx)
     });
 
     // seq-toggle-record-arm — toggle record arm for a given track index
@@ -7043,6 +6334,35 @@ pub(crate) fn init_runtime(
             Some(armed) => {
                 ui_ep.fetch_add(1, Ordering::Relaxed);
                 Ok(Value::Bool(armed))
+            }
+            None => Ok(Value::Bool(false)),
+        }
+    });
+
+    // seq-set-record-arm — (seq-set-record-arm track armed): toggle the
+    // track's record arm only when it differs (the `track.armed` :set).
+    let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-record-arm", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(armed))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-record-arm: expected (track armed)".into());
+        };
+        let track = *track as usize;
+        let mut record_armed = ra.lock().unwrap();
+        match record_armed.get(track) {
+            Some(current) if *current == *armed => Ok(Value::Bool(*armed)),
+            Some(_) => {
+                let armed = toggle_track_record_arm(
+                    &mut record_armed,
+                    &mut ar.lock().unwrap(),
+                    &groups_state.lock().unwrap(),
+                    track,
+                );
+                ui_ep.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Bool(armed.unwrap_or(false)))
             }
             None => Ok(Value::Bool(false)),
         }
@@ -7127,35 +6447,56 @@ pub(crate) fn init_runtime(
     // chromatically and starts hitting this kit's pads. Only one rack is armed
     // at a time, and arming it disarms its own member tracks so a member never
     // answers a key both as a pad and chromatically.
-    let ra = record_armed.clone();
-    let ar = armed_rack.clone();
-    let groups_state = track_groups.clone();
-    let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-toggle-rack-arm", move |args, _ctx| {
-        let Some(Value::Number(group_id)) = args.first() else {
-            return Err("seq-toggle-rack-arm: expected group id".into());
-        };
-        let group_id = *group_id as u64;
-        let members = {
-            let groups = groups_state.lock().unwrap();
-            match groups
-                .iter()
-                .find(|group| group.id == group_id && group.is_rack())
-            {
-                Some(group) => group.members.clone(),
-                None => {
-                    return Err(format!("seq-toggle-rack-arm: rack {group_id} not found").into());
+    // seq-set-rack-armed — (seq-set-rack-armed group-id armed): absolute (the
+    // `group.armed` :set); toggles only when the rack's arm differs, through
+    // the same exclusive arm.
+    let rack_arm = |name: &'static str, absolute: bool| {
+        let ra = record_armed.clone();
+        let ar = armed_rack.clone();
+        let groups_state = track_groups.clone();
+        let ui_ep = ui_epoch.clone();
+        move |args: Vec<Value>, _ctx: &mut eseqlisp::NativeContext| -> eseqlisp::NativeResult {
+            let usage = if absolute {
+                "(group-id armed)"
+            } else {
+                "group id"
+            };
+            let (group_id, wanted) = match (args.first(), args.get(1)) {
+                (Some(Value::Number(group_id)), _) if !absolute => (*group_id as u64, None),
+                (Some(Value::Number(group_id)), Some(Value::Bool(armed))) => {
+                    (*group_id as u64, Some(*armed))
                 }
+                _ => return Err(format!("{name}: expected {usage}").into()),
+            };
+            let members = {
+                let groups = groups_state.lock().unwrap();
+                match groups
+                    .iter()
+                    .find(|group| group.id == group_id && group.is_rack())
+                {
+                    Some(group) => group.members.clone(),
+                    None => {
+                        return Err(format!("{name}: rack {group_id} not found").into());
+                    }
+                }
+            };
+            // Lock order matches `seq-toggle-record-arm`: record arms, then
+            // the rack arm.
+            let mut track_armed = ra.lock().unwrap();
+            let mut rack = ar.lock().unwrap();
+            if let Some(armed) = wanted.filter(|armed| (*rack == Some(group_id)) == *armed) {
+                return Ok(Value::Bool(armed));
             }
-        };
-        // Lock order matches `seq-toggle-record-arm`: record arms, then the
-        // rack arm.
-        let mut track_armed = ra.lock().unwrap();
-        let mut rack = ar.lock().unwrap();
-        let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        Ok(Value::Bool(armed))
-    });
+            let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Bool(armed))
+        }
+    };
+    runtime.register_native(
+        "seq-toggle-rack-arm",
+        rack_arm("seq-toggle-rack-arm", false),
+    );
+    runtime.register_native("seq-set-rack-armed", rack_arm("seq-set-rack-armed", true));
 
     let sample_db = Rc::new(
         sequencer::sample_db::SampleDb::open(
@@ -7168,7 +6509,7 @@ pub(crate) fn init_runtime(
     crate::host_commands::packages::register_package_import_natives(&mut runtime);
     crate::host_commands::packages::register_package_export_natives(&mut runtime);
     crate::host_commands::packages::register_package_tree_natives(&mut runtime, state.clone());
-    runtime.register_reactive("EXPORT", vec![], true);
+    crate::presented::register_fixture_native(&mut runtime);
 
     let sample_db_for_search = sample_db.clone();
     runtime.register_native("seq-search-samples", move |args, _ctx| {
@@ -8019,14 +7360,14 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle a step on a specific track without changing the current track.",
         ),
         (
+            "seq-set-track-step",
+            "(seq-set-track-step track step active)",
+            "Turn a step on a specific track on or off; nothing happens when it already is.",
+        ),
+        (
             "seq-set-step-param",
             "(seq-set-step-param step :param value)",
             "Set a per-step parameter on the current track.",
-        ),
-        (
-            "seq-set-process-lane-step",
-            "(seq-set-process-lane-step track instance-id inlet step value)",
-            "Set one value in an attached process lane.",
         ),
         (
             "seq-set-process-lane-steps",
@@ -8109,6 +7450,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Clear the active destructive keyboard target.",
         ),
         (
+            "seq-set-track-delete-target",
+            "(seq-set-track-delete-target track on)",
+            "Put track into (true) or take it out of (false) the mixer's delete target.",
+        ),
+        (
+            "seq-error",
+            "(seq-error message)",
+            "Report message as an error (the status line, like any failing native); returns false.",
+        ),
+        (
             "seq-delete-target?",
             "(seq-delete-target? kind payload)",
             "Return true when the active destructive keyboard target matches kind and payload.",
@@ -8149,6 +7500,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle a track's mute state.",
         ),
         (
+            "seq-set-track-mute",
+            "(seq-set-track-mute track muted)",
+            "Mute or unmute a track; nothing happens when it already is.",
+        ),
+        (
             "seq-toggle-track-solo",
             "(seq-toggle-track-solo track)",
             "Toggle a track's solo state and update solo mute routing.",
@@ -8167,6 +7523,41 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-bus-solo",
             "(seq-toggle-bus-solo bus)",
             "Toggle a bus solo state.",
+        ),
+        (
+            "seq-set-track-solo",
+            "(seq-set-track-solo track soloed)",
+            "Solo or unsolo a track; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-track-collapsed",
+            "(seq-set-track-collapsed track collapsed)",
+            "Collapse or expand a track's lane in the sequencer.",
+        ),
+        (
+            "seq-set-bus-mute",
+            "(seq-set-bus-mute bus muted)",
+            "Mute or unmute a bus; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-bus-solo",
+            "(seq-set-bus-solo bus soloed)",
+            "Solo or unsolo a bus; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-group-collapsed",
+            "(seq-set-group-collapsed group-id collapsed)",
+            "Collapse or expand a track group.",
+        ),
+        (
+            "seq-set-master-recording",
+            "(seq-set-master-recording on)",
+            "Start or stop recording the master output; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-track-step-param",
+            "(seq-set-track-step-param track step :param value)",
+            "Set one step's parameter (:velocity, :duration, :transpose, …) on any track.",
         ),
         (
             "seq-set-effect-param",
@@ -8247,6 +7638,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-play",
             "(seq-toggle-play)",
             "Toggle sequencer playback.",
+        ),
+        (
+            "seq-set-playing",
+            "(seq-set-playing playing)",
+            "Start or stop playback; nothing happens when the transport already is.",
         ),
         (
             "seq-set-bpm",
@@ -8359,6 +7755,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle recording when at least one track is armed.",
         ),
         (
+            "seq-set-recording",
+            "(seq-set-recording on)",
+            "Turn recording on or off; nothing happens when it already is.",
+        ),
+        (
             "seq-toggle-master-recording",
             "(seq-toggle-master-recording)",
             "Toggle final master-output WAV recording.",
@@ -8372,6 +7773,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-record-arm",
             "(seq-toggle-record-arm track)",
             "Toggle record-arm state for a track.",
+        ),
+        (
+            "seq-set-record-arm",
+            "(seq-set-record-arm track armed)",
+            "Arm or disarm a track for recording; nothing happens when it already is.",
         ),
         (
             "seq-armed-tracks",
@@ -9248,21 +8654,6 @@ mod tests {
             accumulator_names.lock().unwrap().as_slice(),
             &["legacy-preview".to_string()]
         );
-    }
-
-    #[test]
-    fn expanded_step_viewport_parser_preserves_dynamic_process_modes() {
-        let viewport =
-            expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.0, 3.0).expect("viewport");
-        assert_eq!(viewport.track, 0);
-        assert_eq!(viewport.track_id, 12);
-        assert_eq!(viewport.page, 0);
-        assert_eq!(viewport.mode, 7);
-        assert_eq!(viewport.cursor_step, 3);
-
-        let err = expanded_step_viewport_from_numbers(0.0, 12.0, 0.0, 7.5, 3.0)
-            .expect_err("fractional mode should be rejected");
-        assert!(err.contains("mode"), "unexpected error: {err}");
     }
 
     impl Drop for TempDirGuard {

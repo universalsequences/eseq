@@ -1,5 +1,7 @@
 # One Transport — Killing the SONG/SESSION Mode
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: BUILT (rev 2, 2026-08-02; §10 records what the build refined)
 Builds on: docs/empty-arrangement-spec.md (prerequisite — always-present
 arrangement, silent `scene: None` rows, capture always splices) and
@@ -343,7 +345,8 @@ merge into latched lanes while a song is installed.
   `->SONG` pill are replaced by ONE `back-to-arrangement-icon` button
   (orange tile, play triangle + three lanes, Ableton-style) that lights
   whenever `SEQ.song-manual-latch` is set and clears the latch on click —
-  stopped or playing. `SEQ.song-recording-kind` stays published for future
+  stopped or playing (since eseq-0l17.12 it binds `#'song.manual-latch`
+  and clicks `(set! song.manual-latch false)`; the SEQ field is gone). `SEQ.song-recording-kind` stays published for future
   use. Known edge: `launch_scene` inside the latch-skipping resync still
   clears override pins, so live edits to a still-latched lane made while
   STOPPED don't self-write until re-claimed. Tests:
@@ -382,8 +385,9 @@ Per-lane, not global: a latched lane's committed timeline clips render at
 35% color (`arrangement-lane-clip-color`), and the scene lane dims the same
 way while the scene identity is latched — "the arrangement is not what you
 hear here until Back to Arrangement". Driven by two new bindings published
-from the latch atomics in `sync_song_state`: `SEQ.song-track-latched`
-(per-track bool list) and `SEQ.song-scene-latched`. Provisional
+from the latch atomics: `track.latched` and `song.scene-latched` (the host
+kinds, kind-bindings spec §14.2d; formerly `SEQ.song-track-latched` and
+`SEQ.song-scene-latched` from `sync_song_state`). Provisional
 (pending-capture) items never dim — they ARE what is being recorded.
 
 ## 10.4 A latched lane owns its sound (2026-08-03, user-reported bug)

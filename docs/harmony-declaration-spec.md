@@ -199,7 +199,7 @@ hashed by position), so a progression varies but replays exactly.
 - `(voice)`: `voice-pick` per hit, claims reset each tick (`jv:tick`,
   `jv:mask`), last note per route key (`jv:<rkey>:last`). `:pref` not built.
 - Kind: route -2 = **Chords** (last route-dropdown entry); the row shows the
-  chord being declared (subtree on `generator-mark-<id>-chord`); row schema
+  chord being declared (subtree on the generator's `"chord"` mark); row schema
   offers `(chord Q)` (with `:declared`), `voice`, and `(deg n)` inside note /
   note+ values. Fixture: `ui/capture-fixtures/jaki-chords-row.lisp`.
 - Not yet: `(deg n :of row)`, `:pref`, named fields in the kind (always

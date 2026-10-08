@@ -28,12 +28,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
@@ -44,7 +42,10 @@
 (def cyan   () (rgba 0.45 0.78 0.95 1.0))
 (def pink   () (rgba 0.95 0.45 0.62 1.0))
 
-(defstate selected-stage 0)
+;; The stage tab shown (one for every Roar panel).
+(def-kind roar-view
+  :key ()
+  :state ((stage 0)))
 
 (def effect-source (fx)
   (if (get fx :bus-fx)
@@ -76,8 +77,8 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -86,8 +87,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -100,10 +101,10 @@
     (subtree :key (str "roar-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -112,8 +113,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 7.5
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -126,17 +127,18 @@
     :width w :height 1.05 :padding 0 :font-size 8.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))
 
 (def option (fx p w)
-  (dropdown :value (get p :text-value)
+  (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
     :options (get p :options)
     :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -173,7 +175,7 @@
       (label "ROUTING" :font-size 8.0 :width 6.2 :color :dim :bg :transparent)
       (subtree :key "roar-routing-control"
         (option fx routing-p 6.4))
-      (routing-fields fx (round (eseq.effects.param-controls/fx-param-numeric-value routing-p)) blend-p xlow-p xhigh-p))))
+      (routing-fields fx (round (eseq.effects.param-controls/fx-param-numeric-value-for fx routing-p)) blend-p xlow-p xhigh-p))))
 
 ;; ── Stage box (tab row + shaper/filter views for the selected stage) ──
 
@@ -182,7 +184,7 @@
     :width 5.0 :height 1.15 :padding 0 :font-size 8.5
     :background-color (if selected (stage-color idx) :mixer-control-bg)
     :color (if selected :black :dim)
-    :on-click |x y r| (set! selected-stage idx)))
+    :on-click |x y r| (set! roar-view.stage idx)))
 
 (def stage-tabs (fx routing stage)
   (let ((count (tab-count routing)))
@@ -197,12 +199,12 @@
       :source (effect-source fx)
       :stage stage
       ;; Effective-value bindings, not snapshot values: knob drags update the
-      ;; value field in place and do not rebuild the panel, and the effective
+      ;; param in place and do not rebuild the panel, and the effective
       ;; value follows an LFO on amount/bias (eseq-hpc), falling back to the
       ;; base value when nothing is modulating.
       :shaper (eseq.effects.param-controls/param-effective-value shaper-p)
-      :amount (eseq.effects.param-controls/param-effective-value amount-p)
-      :bias (eseq.effects.param-controls/param-effective-value bias-p))
+      :amount (eseq.effects.param-controls/param-effective-ratio amount-p)
+      :bias (eseq.effects.param-controls/param-effective-ratio bias-p))
     (subtree :key (str "roar-shaper-option-" stage)
       (option fx shaper-p 8.4))
     (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "levl" level-p)))
@@ -215,7 +217,7 @@
       :stage stage
       :filter (eseq.effects.param-controls/param-effective-value filter-p)
       :freq (eseq.effects.param-controls/param-effective-value freq-p)
-      :res (eseq.effects.param-controls/param-effective-value res-p))
+      :res (eseq.effects.param-controls/param-effective-ratio res-p))
     (subtree :key (str "roar-filter-option-" stage)
       (option fx filter-p 8.4))
     (h-stack :gap 0.30 :align :baseline
@@ -223,7 +225,7 @@
       (parameter-toggle fx pre-p "Pre" 2.4))))
 
 (def stage-box (fx params routing)
-  (let ((stage (min selected-stage (- (tab-count routing) 1))))
+  (let ((stage (min roar-view.stage (- (tab-count routing) 1))))
     (let ((shaper-p (stage-param params stage "shaper"))
           (amount-p (stage-param params stage "amount"))
           (bias-p (stage-param params stage "bias"))
@@ -253,7 +255,7 @@
       (label "FEEDBACK" :font-size 8.0 :width 6.4 :color :dim :bg :transparent)
       (subtree :key "roar-fb-mode-control"
         (option fx fbmode-p 5.4))
-      (if (= (get fbmode-p :text-value) "note")
+      (if (= (eseq.effects.param-controls/fx-param-text-value-for fx fbmode-p) "note")
         (subtree :key "roar-fb-div-control"
           (option fx fbdiv-p 5.4))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "time" fbtime-p))
@@ -306,7 +308,7 @@
         (h-stack :gap 0.35 :align :start
           (input-box fx drive-p tone-p tone-freq-p tone-mode-p)
           (routing-box fx routing-p blend-p xlow-p xhigh-p)
-          (stage-box fx params (round (eseq.effects.param-controls/fx-param-numeric-value routing-p)))
+          (stage-box fx params (round (eseq.effects.param-controls/fx-param-numeric-value-for fx routing-p)))
           (feedback-box fx fbmode-p fbtime-p fbdiv-p fbamount-p fbinvert-p fbduck-p fbfreq-p fbwidth-p)
           (out-box fx compress-p schpf-p output-p mix-p))
         (eseq.effects.param-grid/fx-param-grid params fx)))))

@@ -475,6 +475,21 @@ mod tests {
         (min, median, avg)
     }
 
+    /// `(test-bind-nth "NS" "field" i)`: a binding to element i of a host
+    /// namespace list field, as host natives hand Lisp (`bind-nth` itself
+    /// was removed in eseq-0l17.80).
+    fn register_test_bind_nth(runtime: &mut Runtime) {
+        let store = runtime.reactive_binding_store();
+        runtime.register_native("test-bind-nth", move |args, _| {
+            let (Some(Value::String(namespace)), Some(Value::String(field)), Some(Value::Number(i))) =
+                (args.first(), args.get(1), args.get(2))
+            else {
+                return Ok(Value::Nil);
+            };
+            Ok(store.indexed_float_ref(namespace, field.clone(), *i as usize))
+        });
+    }
+
     fn assert_widget_diagnostic(value: &Value, expected_message: &str) {
         let Value::Map(map) = value else {
             panic!("expected widget diagnostic map, got {value:?}");
@@ -765,6 +780,185 @@ mod tests {
         assert_eq!(
             run_prog("(->> 5 (list 1 2) (reverse) first)"),
             Ok(Some(Value::Number(5.0)))
+        );
+    }
+
+    /// `(import eseq.effects)` resolves to content/ui/effects/index.lisp
+    /// (kind-bindings spec §11) and loads every module factory device UIs
+    /// call by qualified name, without the app's ui/effects.lisp manifest.
+    #[test]
+    fn import_eseq_effects_loads_factory_ui_modules() {
+        let content = super::factory_core_dir().join("..");
+        let mut runtime = Runtime::new();
+        runtime.set_module_load_path(vec![content]);
+        // No SEQ namespace (removed, eseq-0l17.78/.80): no module reads it.
+        let result = runtime.eval_str("(import eseq.effects)").unwrap();
+        assert!(!matches!(result, Some(Value::String(_))), "{result:?}");
+        assert_eq!(runtime.take_source_load_errors(), Vec::<String>::new());
+        for module in [
+            "eseq.effects",
+            "eseq.effects.state",
+            "eseq.effects.param-controls",
+            "eseq.effects.custom-ui-runtime",
+            "eseq.effects.custom-ui-sections",
+            "eseq.effects.custom-ui-controls",
+            "eseq.effects.custom-ui-lego",
+            "eseq.effects.custom-effect-ui",
+            "eseq.effects.mnm-surface",
+            "eseq.effects.drum-surface",
+            "eseq.effects.physical-model-surface",
+            "eseq.effects.identified-drum",
+            "eseq.effects.panel-bodies",
+        ] {
+            assert!(runtime.declared_modules().contains_key(module), "{module} not loaded");
+        }
+        // The entry points PM / drum / MnM factory UIs call.
+        for name in [
+            "eseq.effects.physical-model-surface/panel",
+            "eseq.effects.drum-surface/bind",
+            "eseq.effects.mnm-surface/mnm-panel",
+        ] {
+            let value = runtime.eval_str(name).unwrap();
+            assert!(
+                matches!(value, Some(Value::Function(..) | Value::Closure(..))),
+                "{name} = {value:?}"
+            );
+        }
+    }
+
+    /// `when`, `unless` and `toggle!` come from content/core/init.lisp
+    /// (kind-bindings spec §6) and must be visible from inside a `(module
+    /// ...)` too.
+    #[test]
+    fn core_init_when_and_toggle_macros() {
+        let init = include_str!("../../../content/core/init.lisp");
+        let mut runtime = Runtime::with_init_source(init);
+        let eval = |runtime: &mut Runtime, src: &str| runtime.eval_str(src).unwrap();
+
+        // when: every body form runs, the last one is the value.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(module core-init-macro-test)
+                 (def n 0)
+                 (when (> 2 1) (set! n (+ n 1)) (set! n (+ n 10)) n)"
+            ),
+            Some(Value::Number(11.0))
+        );
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def hits 0) (when true (set! hits (+ hits 1)) (set! hits (+ hits 10))) hits"
+            ),
+            Some(Value::Number(11.0))
+        );
+        // when: a false condition skips the body and yields nil.
+        assert_eq!(
+            eval(&mut runtime, "(when false (set! hits 99)) hits"),
+            Some(Value::Number(11.0))
+        );
+        assert_eq!(eval(&mut runtime, "(when false 1)"), Some(Value::Nil));
+
+        // unless: the body runs only on a falsy condition (nil too).
+        assert_eq!(
+            eval(&mut runtime, "(unless false (set! hits (+ hits 1)) hits)"),
+            Some(Value::Number(12.0))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(unless nil 2)"),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(unless true (set! hits 99)) hits"),
+            Some(Value::Number(12.0))
+        );
+
+        // toggle!: a plain variable.
+        assert_eq!(
+            eval(&mut runtime, "(def flag false) (toggle! flag) flag"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(toggle! flag) flag"),
+            Some(Value::Bool(false))
+        );
+        // toggle!: a dotted map field.
+        assert_eq!(
+            eval(&mut runtime, "(def m (dict :on false)) (toggle! m.on) m.on"),
+            Some(Value::Bool(true))
+        );
+        // toggle!: a singleton kind's field (kind-bindings spec §3.1).
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def-kind menu :key () :state ((open false))) (toggle! menu.open) menu.open"
+            ),
+            Some(Value::Bool(true))
+        );
+    }
+
+    /// `cond` (content/core/init.lisp): the first truthy clause's body runs,
+    /// every form of it, and its last form is the value; `else` / `true` is
+    /// the fallthrough; no match is nil.
+    #[test]
+    fn core_init_cond_macro() {
+        let init = include_str!("../../../content/core/init.lisp");
+        let mut runtime = Runtime::with_init_source(init);
+        let eval = |runtime: &mut Runtime, src: &str| runtime.eval_str(src).unwrap();
+
+        assert_eq!(
+            eval(&mut runtime, "(cond (false 1) (true 3))"),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def pick (x) (cond ((= x 1) \"one\") ((= x 2) \"two\") (else \"many\")))
+                 (list (pick 1) (pick 2) (pick 7))"
+            ),
+            eval(&mut runtime, "(list \"one\" \"two\" \"many\")")
+        );
+        // Multi-form bodies: every form runs, the last is the value; later
+        // clauses (and their tests) do not run.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def hits 0)
+                 (def tested 0)
+                 (list
+                   (cond ((> 2 1) (set! hits (+ hits 1)) (set! hits (+ hits 10)) hits)
+                         ((do (set! tested 1) true) 99))
+                   tested)"
+            ),
+            eval(&mut runtime, "(list 11 0)")
+        );
+        // No matching clause (and no clauses at all) is nil.
+        assert_eq!(
+            eval(&mut runtime, "(cond (false 1) (nil 2))"),
+            Some(Value::Nil)
+        );
+        assert_eq!(eval(&mut runtime, "(cond)"), Some(Value::Nil));
+        // A clause yielding a binding keeps it a binding (the macro-call
+        // wrapper passes refs through), as an `if` of the same shape does.
+        let binding = eval(
+            &mut runtime,
+            "(def-kind dk :key () :state ((open 3)))
+             (def pick-ref (x i) (cond ((= i 1) #'x.open) (else nil)))
+             (pick-ref dk 1)",
+        );
+        assert!(
+            matches!(binding, Some(Value::ReactiveRef { .. })),
+            "{binding:?}"
+        );
+        // Inside a module, with else in the middle of a chain of tests.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(module core-init-cond-test)
+                 (def sign (n) (cond ((< n 0) -1) ((= n 0) 0) (else 1)))
+                 (list (sign -5) (sign 0) (sign 4))"
+            ),
+            eval(&mut runtime, "(list -1 0 1)")
         );
     }
 
@@ -1326,7 +1520,7 @@ mod tests {
                 r#"
                 (effect
                   (mixer-meter
-                    :level-l (bind "APP" "peak")
+                    :level-l #'APP.peak
                     :level-r 0.0
                     :width 2.22 :height 4.24))
                 "#,
@@ -1373,7 +1567,7 @@ mod tests {
                 r#"
                 (effect
                   (number-label
-                    :value (bind "APP" "cpu")
+                    :value #'APP.cpu
                     :decimals 0
                     :suffix "%"
                     :width 4
@@ -1417,17 +1611,18 @@ mod tests {
             true,
         );
 
+        register_test_bind_nth(&mut runtime);
         runtime
             .eval_str(
                 r#"
                 (effect
                   (h-stack
                     (mixer-meter
-                      :level-l (bind-nth "APP" "levels" 0)
+                      :level-l (test-bind-nth "APP" "levels" 0)
                       :level-r 0.0
                       :width 2.22 :height 4.24)
                     (mixer-meter
-                      :level-l (bind-nth "APP" "levels" 1)
+                      :level-l (test-bind-nth "APP" "levels" 1)
                       :level-r 0.0
                       :width 2.22 :height 4.24)))
                 "#,
@@ -1469,14 +1664,14 @@ mod tests {
     }
 
     #[test]
-    fn reactive_get_still_subscribes_effects() {
+    fn a_namespace_field_read_subscribes_effects() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);
         runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
 
         runtime
-            .eval_str(r#"(effect (label (fmt "peak: {}" (reactive-get "APP" "peak"))))"#)
-            .expect("install reactive-get effect");
+            .eval_str(r#"(effect (label (fmt "peak: {}" APP.peak)))"#)
+            .expect("install namespace read effect");
         let _ = runtime.drain_rendered_layouts();
 
         runtime.set_reactive("APP", "peak", Value::Number(0.8));
@@ -1488,12 +1683,12 @@ mod tests {
                 .iter()
                 .flatten()
                 .any(|line| line.contains("peak: 0.8")),
-            "reactive-get writes should rerun dependent effects: {rendered:?}"
+            "namespace writes should rerun dependent effects: {rendered:?}"
         );
     }
 
     #[test]
-    fn reactive_set_reruns_only_matching_field_subtree() {
+    fn namespace_set_reruns_only_matching_field_subtree() {
         let mut runtime = Runtime::new();
         runtime.register_reactive("APP", vec![], true);
 
@@ -1503,23 +1698,23 @@ mod tests {
                 (effect-buffer "*rows*"
                   (v-stack
                     (subtree :key "row-a"
-                      (label (if (reactive-get "APP" "a") "a on" "a off")))
+                      (label (if APP.a "a on" "a off")))
                     (subtree :key "row-b"
-                      (label (if (reactive-get "APP" "b") "b on" "b off")))))
+                      (label (if APP.b "b on" "b off")))))
                 "#,
             )
             .expect("install row subtrees");
         let _ = runtime.take_pending_buffer_widget_trees();
 
         runtime
-            .eval_str(r#"(reactive-set "APP" "a" true)"#)
+            .eval_str(r#"(set! APP.a true)"#)
             .expect("set reactive field from Lisp");
 
         let pending = runtime.take_pending_buffer_widget_trees();
         assert_eq!(
             pending.len(),
             1,
-            "reactive-set should rerun only subtrees that read the changed field"
+            "(set! APP.a …) should rerun only subtrees that read the changed field"
         );
         let rendered_tree = match &pending[0] {
             crate::vm::PendingUiUpdate::FullTree(update) => format!("{:?}", update.tree),
@@ -1593,7 +1788,7 @@ mod tests {
         let value = runtime
             .eval_str(
                 r#"(transport-clock
-                    :playhead (bind "APP" "playhead")
+                    :playhead #'APP.playhead
                     :width 10
                     :height 1.2)"#,
             )
@@ -1615,7 +1810,7 @@ mod tests {
         runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
 
         let value = runtime
-            .eval_str(r#"(mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0)"#)
+            .eval_str(r#"(mixer-meter :width #'APP.peak :level-l 0 :level-r 0)"#)
             .expect("evaluate invalid binding")
             .expect("invalid binding returns an error value");
 
@@ -1631,7 +1826,7 @@ mod tests {
         runtime.register_reactive("APP", vec![("mask", Value::Number(5.0))], true);
 
         let value = runtime
-            .eval_str(r#"(sexp-slot :schema '(forms (word left)) :value '(left) :lit (bind "APP" "mask"))"#)
+            .eval_str(r#"(sexp-slot :schema '(forms (word left)) :value '(left) :lit #'APP.mask)"#)
             .expect("evaluate sexp-slot")
             .expect("a widget");
 
@@ -1652,7 +1847,7 @@ mod tests {
         let value = runtime
             .eval_str(
                 r#"(box
-                    (mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0))"#,
+                    (mixer-meter :width #'APP.peak :level-l 0 :level-r 0))"#,
             )
             .expect("evaluate wrapper with invalid child binding")
             .expect("wrapper should return a widget");
@@ -1683,7 +1878,7 @@ mod tests {
         let value = runtime
             .eval_str(
                 r#"(box :width 30
-                    (mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0))"#,
+                    (mixer-meter :width #'APP.peak :level-l 0 :level-r 0))"#,
             )
             .expect("evaluate wrapper with invalid child binding")
             .expect("wrapper should return a widget");
@@ -1722,9 +1917,8 @@ mod tests {
                 (defwidget bindable-bg
                   :width 1 :height 1
                   :state (active)
-                  :bindable (active)
                   :shader (if (= active 1) (rgba 1 1 1 1) (rgba 0 0 0 0)))
-                (box :background "bindable-bg" :active (bind "APP" "active"))
+                (box :background "bindable-bg" :active #'APP.active)
                 "#,
             )
             .expect("evaluate box background binding")
@@ -1740,14 +1934,14 @@ mod tests {
     }
 
     #[test]
-    fn reactive_set_updates_bindable_float_slots() {
+    fn namespace_set_updates_bound_float_slots() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);
         runtime.register_reactive("APP", vec![("active", Value::Bool(false))], true);
         runtime
             .eval_str(
                 r#"
-                (def active-ref (bind "APP" "active"))
+                (def active-ref #'APP.active)
                 (effect (label "cursor" :active active-ref :active-color :yellow))
                 "#,
             )
@@ -1760,21 +1954,21 @@ mod tests {
         let _ = runtime.take_dirty_widget_ids();
 
         assert_eq!(
-            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            runtime.eval_str("(+ 0 active-ref)").unwrap(),
             Some(Value::Number(0.0))
         );
         runtime
-            .eval_str(r#"(reactive-set "APP" "active" true)"#)
-            .expect("set active through lisp reactive-set");
+            .eval_str(r#"(set! APP.active true)"#)
+            .expect("set active through lisp set!");
         assert_eq!(
-            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            runtime.eval_str("(+ 0 active-ref)").unwrap(),
             Some(Value::Number(1.0)),
-            "Lisp reactive-set should update the slot read by bind/reactive-value"
+            "a Lisp set! should update the slot the #' ref reads"
         );
         assert_eq!(
             runtime.take_dirty_widget_ids(),
             vec![widget_id],
-            "Lisp reactive-set should dirty widgets bound through bind"
+            "a Lisp set! should dirty widgets bound through #'"
         );
     }
 
@@ -1783,28 +1977,28 @@ mod tests {
         let mut first = Runtime::new();
         first.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
         first
-            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .eval_str(r#"(def level-ref #'APP.level)"#)
             .expect("bind first runtime level");
 
         let mut second = Runtime::new();
         second.register_reactive("APP", vec![("level", Value::Number(0.0))], true);
         second
-            .eval_str(r#"(def level-ref (bind "APP" "level"))"#)
+            .eval_str(r#"(def level-ref #'APP.level)"#)
             .expect("bind second runtime level");
 
         first
-            .eval_str(r#"(reactive-set "APP" "level" 0.25)"#)
+            .eval_str(r#"(set! APP.level 0.25)"#)
             .expect("set first runtime level");
         second
-            .eval_str(r#"(reactive-set "APP" "level" 0.75)"#)
+            .eval_str(r#"(set! APP.level 0.75)"#)
             .expect("set second runtime level");
 
         assert_eq!(
-            first.eval_str("(reactive-value level-ref)").unwrap(),
+            first.eval_str("(+ 0 level-ref)").unwrap(),
             Some(Value::Number(0.25))
         );
         assert_eq!(
-            second.eval_str("(reactive-value level-ref)").unwrap(),
+            second.eval_str("(+ 0 level-ref)").unwrap(),
             Some(Value::Number(0.75))
         );
     }
@@ -1824,8 +2018,8 @@ mod tests {
         let value = runtime
             .eval_str(
                 r#"(box
-                    :selected (bind "APP" "selected")
-                    :muted (bind "APP" "muted")
+                    :selected #'APP.selected
+                    :muted #'APP.muted
                     :background-color :black
                     :selected-background-color :blue
                     :muted-background-color :gray
@@ -1865,7 +2059,7 @@ mod tests {
                 (effect
                   (if APP.show
                     (mixer-meter
-                      :level-l (bind "APP" "peak")
+                      :level-l #'APP.peak
                       :level-r 0.0
                       :width 2.22 :height 4.24)
                     (label "off")))
@@ -3178,7 +3372,7 @@ mod tests {
                                 (label (fmt "{}" step)
                                   :color (if selected
                                            :yellow
-                                             (if (reactive-get "APP" (fmt "active-{}" step))
+                                             (if (if (= step 0) APP.active-0 APP.active-1)
                                                :white
                                              :gray)))))))))))
                 "#,
@@ -3642,17 +3836,18 @@ mod tests {
             )],
             true,
         );
+        register_test_bind_nth(&mut runtime);
         runtime
             .eval_str(
                 r#"
                 (effect
                   (h-stack
                     (mixer-meter
-                      :level-l (bind-nth "APP" "values" 0)
+                      :level-l (test-bind-nth "APP" "values" 0)
                       :level-r 0.0
                       :width 2.22 :height 4.24)
                     (mixer-meter
-                      :level-l (bind-nth "APP" "values" 1)
+                      :level-l (test-bind-nth "APP" "values" 1)
                       :level-r 0.0
                       :width 2.22 :height 4.24)))
                 "#,
@@ -3684,7 +3879,7 @@ mod tests {
     fn set_reactive_list_index_invalidates_direct_bus_solo_read_effects() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
-            "SEQ",
+            "APP",
             vec![(
                 "bus-solos",
                 Value::List(vec![
@@ -3700,20 +3895,20 @@ mod tests {
                 (effect-buffer "*mixer*"
                   (v-stack
                     (subtree :key "bus-0"
-                      (label (fmt "bus0:{}" (nth SEQ.bus-solos 0))))
+                      (label (fmt "bus0:{}" (nth APP.bus-solos 0))))
                     (subtree :key "bus-1"
-                      (label (fmt "bus1:{}" (nth SEQ.bus-solos 1))))))
+                      (label (fmt "bus1:{}" (nth APP.bus-solos 1))))))
                 "#,
             )
             .expect("install direct bus solo read effect");
         let _ = runtime.take_pending_buffer_widget_trees();
 
-        runtime.set_reactive_list_index("SEQ", "bus-solos", 1, Value::Bool(true));
+        runtime.set_reactive_list_index("APP", "bus-solos", 1, Value::Bool(true));
         runtime.run_reactive_cycle();
 
         assert!(
             !runtime.take_pending_buffer_widget_trees().is_empty(),
-            "partial bus solo writes must dirty effects that read SEQ.bus-solos directly"
+            "partial bus solo writes must dirty effects that read APP.bus-solos directly"
         );
     }
 
@@ -3732,7 +3927,7 @@ mod tests {
 
     fn install_fx_reader(runtime: &mut Runtime) {
         runtime.register_reactive(
-            "SEQ",
+            "APP",
             vec![("effects", fx_panel_value("Delay", 0.5))],
             false,
         );
@@ -3741,7 +3936,7 @@ mod tests {
                 r#"
                 (effect-buffer "*fx*"
                   (v-stack
-                    (each SEQ.effects |fx idx|
+                    (each APP.effects |fx idx|
                       (label (fmt "{}:{}" (get fx :name) (get fx :value))))))
                 "#,
             )
@@ -3755,7 +3950,7 @@ mod tests {
         install_fx_reader(&mut runtime);
 
         let result =
-            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+            runtime.set_reactive_value_patch("APP", "effects", fx_panel_value("Delay", 0.9));
         assert!(!result.changed && !result.effects_dirty && !result.widgets_dirty);
         runtime.run_reactive_cycle();
         assert!(
@@ -3766,13 +3961,13 @@ mod tests {
         // The patched cell is shared with the VM global: the next honest
         // rerun (structural change) must render the patched number.
         let value = runtime
-            .eval_str("(get (nth SEQ.effects 0) :value)")
+            .eval_str("(get (nth APP.effects 0) :value)")
             .unwrap()
             .unwrap();
         assert_eq!(value, Value::Number(0.9));
         // A rebuilt identical tree now compares equal: no rerun either.
         let result =
-            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+            runtime.set_reactive_value_patch("APP", "effects", fx_panel_value("Delay", 0.9));
         assert!(!result.changed);
     }
 
@@ -3782,7 +3977,7 @@ mod tests {
         install_fx_reader(&mut runtime);
 
         let result =
-            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Reverb", 0.5));
+            runtime.set_reactive_value_patch("APP", "effects", fx_panel_value("Reverb", 0.5));
         assert!(result.changed, "renames are structural");
         runtime.run_reactive_cycle();
         assert!(
@@ -3803,7 +3998,7 @@ mod tests {
             Value::List(extra) => extra,
             _ => unreachable!(),
         });
-        let result = runtime.set_reactive_value_patch("SEQ", "effects", Value::List(items));
+        let result = runtime.set_reactive_value_patch("APP", "effects", Value::List(items));
         assert!(result.changed, "list growth is structural");
         runtime.run_reactive_cycle();
         assert!(

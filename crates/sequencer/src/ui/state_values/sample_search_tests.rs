@@ -21,7 +21,7 @@ fn settle_browser(editor: &mut Editor, browser: &RefCell<DebouncedSampleBrowser>
 }
 
 fn focus_search(editor: &mut Editor) {
-    editor.runtime_mut().eval_str(r#"(set! sbrowser-tab "samples")"#).unwrap();
+    set_browser_view_field(editor, "browser-view", "tab", r#""samples""#);
     editor.refresh_runtime_side_effects();
     editor.set_active_buffer(browser_id(editor));
     editor.set_layout_viewport(72, 60);
@@ -55,8 +55,10 @@ fn sample_search_result_arrival_keeps_focus_and_accepts_more_typing() {
     assert_eq!(items.len(), 2000);
     assert_eq!(editor.focused_widget_id(), focus);
     editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
-    assert_eq!(editor.runtime_mut().eval_str("eseq.browser/search-filter").unwrap(),
-        Some(Value::String("ki".to_string())));
+    assert_eq!(
+        browser_view_field(&mut editor, "browser-view", "search"),
+        Value::String("ki".to_string())
+    );
     settle_browser(&mut editor, &browser);
     assert_eq!(editor.focused_widget_id(), focus);
     let embedded_id = editor.buffers.iter().find(|b| b.name == "*embedded-sample-test*").unwrap().id;

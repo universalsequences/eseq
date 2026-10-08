@@ -1,3 +1,5 @@
+use super::process_edit::{apply_process_edit, process_edit_from_payload};
+use super::track_settings::slice3_edit_applied;
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -6,7 +8,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "piano-roll-gesture-update",
     "piano-roll-gesture-finish",
     "piano-roll-history-action",
-    "piano-roll-automation-refresh",
     "delete-selected-steps",
     "paste-steps",
     "set-step-param-history",
@@ -30,6 +31,37 @@ pub(super) const COMMANDS: &[&str] = &[
     "clear-step-variant-locks",
 ];
 
+/// Which piano-roll note edit landed ([`piano_roll_edit_landed`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PianoRollLanding {
+    /// A drag frame (its entry stays open).
+    Frame,
+    /// A drag's release (its entry committed).
+    Release,
+    /// A one-shot edit, recorded.
+    Recorded,
+}
+
+/// What a piano-roll note edit refreshes, the legacy piano roll's actions
+/// and the note setters alike: the piano roll's items (and the views over
+/// the track), the step panels once an entry is committed, and a pause in
+/// the playhead follow while the user edits.
+pub(super) fn piano_roll_edit_landed(ctx: &LoopCtx<'_>, track: usize, landing: PianoRollLanding) {
+    let shared = ctx.shared;
+    if landing != PianoRollLanding::Release {
+        *shared.auto_follow_override_until.lock().unwrap() =
+            Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+    }
+    shared.ui_invalidations.push(UiInvalidation::PianoRoll {
+        track,
+        change: PianoRollInvalidation::Items,
+    });
+    if landing != PianoRollLanding::Frame {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -41,7 +73,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let piano_roll_move_state = ctx.shared.piano_roll_move_state.clone();
     let step_clipboard = ctx.shared.step_clipboard.clone();
@@ -239,306 +270,17 @@ pub(super) fn handle(
             // `scope: "all"` writes the shared project slot (every track);
             // the default forks the slot for this track only.
             let all_tracks = matches!(field("scope"), Some(Value::String(scope)) if scope == "all");
-            // A bus-send target needs a persistent graph edge on every track
-            // it will write to, exactly like a send p-lock at a zero baseline:
-            // the scheduler addresses sends through runtime targets that only
-            // exist once the track lists that destination. Done before the
-            // recorded mutation so the graph edit keeps its own history entry.
-            if matches!(op.as_str(), "bind-port" | "add-fanout") {
-                if let Some(sequencer::process::ParamTarget::BusSend { bus }) = field("target")
-                    .and_then(|target| natives::param_target_from_value(&app.state, track, &target).ok())
-                {
-                    let destination = sequencer::sequencer::BusId(bus);
-                    let tracks: Vec<usize> = if all_tracks {
-                        (0..state.active_track_count()).collect()
-                    } else {
-                        vec![track]
-                    };
-                    for track in tracks {
-                        let Some(params) = app.state.pattern.track_params.get(track) else {
-                            continue;
-                        };
-                        let mut sends = params.sends();
-                        if sends.iter().any(|send| send.destination == destination) {
-                            continue;
-                        }
-                        sends.push(sequencer::sequencer::TrackSendSnapshot {
-                            destination,
-                            amount: 0.0,
-                        });
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetTrackSends { track, sends },
-                        );
-                    }
+            let result = process_edit_from_payload(&app.state, &op, track, &field)
+                .and_then(|edit| apply_process_edit(app, track, instance_id, all_tracks, edit));
+            let error = match result {
+                Ok(true) => {
+                    ui_invalidations.push(UiInvalidation::ProcessChain { track });
+                    return;
                 }
-            }
-            let result = app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
-                let changed = match op.as_str() {
-                    "clear-project-lane-override" => {
-                        let inlet = field("inlet")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process lane inlet is missing".to_string())?;
-                        app.state
-                            .clear_project_process_lane_override(track, instance_id, &inlet)
-                    }
-                    "set-inlet" => {
-                        let inlet = field("inlet")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process inlet is missing".to_string())?;
-                        let literal = match field("value")
-                            .ok_or_else(|| "Process inlet value is missing".to_string())?
-                        {
-                            Value::Number(value) => {
-                                sequencer::process::ProcessLiteral::Number(value)
-                            }
-                            Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(value),
-                            Value::String(value) => {
-                                sequencer::process::ProcessLiteral::String(value)
-                            }
-                            Value::Keyword(value) => {
-                                sequencer::process::ProcessLiteral::Keyword(value)
-                            }
-                            Value::Symbol(value) => {
-                                sequencer::process::ProcessLiteral::Symbol(value)
-                            }
-                            Value::Nil => sequencer::process::ProcessLiteral::Nil,
-                            _ => return Err("Unsupported process inlet literal".to_string()),
-                        };
-                        if all_tracks {
-                            app.state.set_process_inlet_value(instance_id, &inlet, literal) > 0
-                        } else {
-                            app.state
-                                .set_track_process_inlet_value(track, instance_id, &inlet, literal)
-                        }
-                    }
-                    "set-enabled" => {
-                        let enabled = field("enabled")
-                            .and_then(|value| match value {
-                                Value::Bool(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process enabled state is missing".to_string())?;
-                        if all_tracks {
-                            app.state.set_process_slot_enabled_all(instance_id, enabled)
-                        } else {
-                            app.state
-                                .set_track_process_slot_enabled(track, instance_id, enabled)
-                        }
-                    }
-                    "move-slot" => {
-                        let before = match field("before-instance-id") {
-                            Some(Value::Number(value)) if value >= 0.0 => {
-                                Some(sequencer::process::ProcessInstanceId(value as u64))
-                            }
-                            Some(Value::Nil) | None => None,
-                            _ => return Err("Process move target is invalid".to_string()),
-                        };
-                        app.state
-                            .move_track_process_slot_before(track, instance_id, before)
-                    }
-                    "add-roster-slot" => {
-                        let class_name = field("class-name")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process class name is missing".to_string())?;
-                        // The native already minted `instance_id`; the state
-                        // layer keeps it unless another slot took it first.
-                        app.state
-                            .add_track_roster_slot_with_id(
-                                track,
-                                &class_name,
-                                Some(instance_id),
-                            )
-                            .is_some()
-                    }
-                    // A roster slot exists in every scene, so removing it goes
-                    // through the roster (eseq-53y7); project-layer slots and
-                    // script-authored track slots keep the per-pattern detach.
-                    "remove-slot" => {
-                        if sequencer::process::is_track_roster_instance_id(instance_id) {
-                            app.state.remove_track_roster_slot(track, instance_id)
-                        } else {
-                            app.state.remove_track_process_slot(track, instance_id)
-                        }
-                    }
-                    "bind-port" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        let target = field("target")
-                            .ok_or_else(|| "Process binding target is missing".to_string())?;
-                        let target = natives::param_target_from_value(&app.state, track, &target)?;
-                        if all_tracks {
-                            app.state.set_process_port_binding_for_instance(
-                                instance_id,
-                                &port,
-                                target,
-                            ) > 0
-                        } else {
-                            app.state
-                                .set_process_port_binding(track, instance_id, &port, target)
-                        }
-                    }
-                    "unbind-port" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        if all_tracks {
-                            app.state.unbind_process_port_for_instance(instance_id, &port)
-                        } else {
-                            app.state.unbind_process_port(track, instance_id, &port)
-                        }
-                    }
-                    "clear-port-binding" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        if all_tracks {
-                            app.state
-                                .clear_process_port_binding_for_instance(instance_id, &port)
-                        } else {
-                            app.state
-                                .clear_process_port_binding(track, instance_id, &port)
-                        }
-                    }
-                    "add-fanout" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        let target = field("target")
-                            .ok_or_else(|| "Process fan-out target is missing".to_string())?;
-                        let target = natives::param_target_from_value(&app.state, track, &target)?;
-                        let (lo, hi) = (
-                            field("lo").and_then(|value| match value {
-                                Value::Number(value) => Some(value as f32),
-                                _ => None,
-                            }),
-                            field("hi").and_then(|value| match value {
-                                Value::Number(value) => Some(value as f32),
-                                _ => None,
-                            }),
-                        );
-                        // Default to the slot's own output range: identity
-                        // scaling until the user narrows it.
-                        let source = app
-                            .state
-                            .composed_track_process_chain(track)
-                            .and_then(|chain| {
-                                chain
-                                    .slots
-                                    .into_iter()
-                                    .find(|slot| slot.instance_id == instance_id)
-                            })
-                            .map(|slot| sequencer::process::process_slot_output_range(&slot))
-                            .unwrap_or((0.0, 1.0));
-                        let entry = sequencer::process::ProcessPortFanout {
-                            target,
-                            lo: lo.unwrap_or(source.0),
-                            hi: hi.unwrap_or(source.1),
-                        };
-                        app.state.edit_process_port_fanout(
-                            track,
-                            instance_id,
-                            &port,
-                            all_tracks,
-                            |list| list.push(entry),
-                        )
-                    }
-                    "set-fanout-range" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        let index = field("index")
-                            .and_then(|value| match value {
-                                Value::Number(value) if value >= 0.0 => Some(value as usize),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process fan-out index is missing".to_string())?;
-                        let lo = field("lo").and_then(|value| match value {
-                            Value::Number(value) => Some(value as f32),
-                            _ => None,
-                        });
-                        let hi = field("hi").and_then(|value| match value {
-                            Value::Number(value) => Some(value as f32),
-                            _ => None,
-                        });
-                        app.state.edit_process_port_fanout(
-                            track,
-                            instance_id,
-                            &port,
-                            all_tracks,
-                            |list| {
-                                if let Some(entry) = list.get_mut(index) {
-                                    if let Some(lo) = lo {
-                                        entry.lo = lo;
-                                    }
-                                    if let Some(hi) = hi {
-                                        entry.hi = hi;
-                                    }
-                                }
-                            },
-                        )
-                    }
-                    "remove-fanout" => {
-                        let port = field("port")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process port is missing".to_string())?;
-                        let index = field("index")
-                            .and_then(|value| match value {
-                                Value::Number(value) if value >= 0.0 => Some(value as usize),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process fan-out index is missing".to_string())?;
-                        app.state.edit_process_port_fanout(
-                            track,
-                            instance_id,
-                            &port,
-                            all_tracks,
-                            |list| {
-                                if index < list.len() {
-                                    list.remove(index);
-                                }
-                            },
-                        )
-                    }
-                    _ => return Err(format!("Unknown process history operation {op}")),
-                };
-                changed
-                    .then_some(())
-                    .ok_or_else(|| "Process edit target was missing or unchanged".to_string())
-            });
-            match result {
-                Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
-                Err(error) => editor
-                    .handle_host_event(HostEvent::Status(format!("Process edit failed: {error}"))),
-            }
+                Ok(false) => "Process edit target was missing or unchanged".to_string(),
+                Err(error) => error,
+            };
+            editor.handle_host_event(HostEvent::Status(format!("Process edit failed: {error}")));
         }
         "piano-roll-gesture-update" => {
             match apply_piano_roll_gesture_update(
@@ -549,13 +291,7 @@ pub(super) fn handle(
                 &payload,
             ) {
                 Ok((status, track)) => {
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::PianoRoll {
-                        track,
-                        change: PianoRollInvalidation::Items,
-                    });
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    piano_roll_edit_landed(ctx, track, PianoRollLanding::Frame);
                     editor.show_transient_message(status);
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
@@ -569,12 +305,7 @@ pub(super) fn handle(
                 &payload,
             ) {
                 Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                    ui_invalidations.push(UiInvalidation::PianoRoll {
-                        track,
-                        change: PianoRollInvalidation::Items,
-                    });
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    piano_roll_edit_landed(ctx, track, PianoRollLanding::Release);
                     editor.show_transient_message(result.label);
                 }
                 Ok((app::edit::EditOutcome::NoOp, _)) => {}
@@ -596,28 +327,12 @@ pub(super) fn handle(
             ) {
                 Ok((outcome, status, track)) => {
                     if matches!(outcome, app::edit::EditOutcome::Applied(_)) {
-                        *auto_follow_override_until.lock().unwrap() =
-                            Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                        ui_invalidations.push(UiInvalidation::PianoRoll {
-                            track,
-                            change: PianoRollInvalidation::Items,
-                        });
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        piano_roll_edit_landed(ctx, track, PianoRollLanding::Recorded);
                     }
                     editor.show_transient_message(status);
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
-        }
-        // The lane changed its selected parameter (a Lisp-side pinned def):
-        // republish through the ordinary piano-roll sync so the lane body
-        // follows the new key.
-        "piano-roll-automation-refresh" => {
-            ui_invalidations.push(UiInvalidation::PianoRoll {
-                track: current_track.load(Ordering::Relaxed),
-                change: PianoRollInvalidation::Selection,
-            });
         }
         "delete-selected-steps" => {
             let (track, tracks) = match &payload {
@@ -766,49 +481,11 @@ pub(super) fn handle(
             let Some(param) = param else {
                 return;
             };
+            // The pickers show the latch through the host kinds
+            // (`step.*` of the edit step): nothing to hand back.
             let mut print = ctx.shared.step_print.lock().unwrap();
-            let was_latched = print.armed();
-            let ended = print.unlatch(param);
+            print.unlatch(param);
             print.publish_engine_override(&state);
-            // A step-param release can end the whole latch, which must also
-            // drop any device-param print overlay it was holding.
-            let overlay_dirty =
-                crate::step_print::sync_print_latch_rows(editor.runtime_mut(), &print);
-            drop(print);
-            flush_reactive_display_edit(editor, overlay_dirty);
-            if was_latched && ended {
-                // The whole latch ended here (not in the tick's gate check),
-                // so restore all picker readouts to the cursor step now.
-                if crate::step_print::restore_cursor_display_fields(
-                    editor.runtime_mut(),
-                    &state,
-                    current_track.load(Ordering::Relaxed),
-                    &selected_steps,
-                ) {
-                    editor.refresh_visible_layouts_for_buffer_named("*step*");
-                }
-            } else if was_latched {
-                // Other params are still held: hand only THIS param's picker
-                // readout back to the cursor step. (When the whole latch
-                // ends, the tick's disarm branch restores all three.)
-                if let Some(field) = fx_step_param_value_field(param) {
-                    let track = current_track.load(Ordering::Relaxed);
-                    if track < state.pattern.step_data.len() {
-                        let cursor = fx_step_cursor_from_runtime(editor.runtime());
-                        let num_steps = state.pattern.track_params[track]
-                            .get_num_steps()
-                            .clamp(1, MAX_STEPS);
-                        let value = state.pattern.step_data[track]
-                            .get(cursor.min(num_steps.saturating_sub(1)), param);
-                        editor.runtime_mut().set_reactive(
-                            "SEQ",
-                            field,
-                            Value::Number(value as f64),
-                        );
-                        editor.refresh_visible_layouts_for_buffer_named("*step*");
-                    }
-                }
-            }
         }
         "set-step-param-history" => {
             match apply_step_param_history_host_command(&mut app, &payload) {
@@ -982,25 +659,7 @@ pub(super) fn handle(
             apply_slice3_history_host_command(&mut app, &payload)
         } {
             Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                *auto_follow_override_until.lock().unwrap() =
-                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                match (track, slice3_track_mixer_invalidation(&payload)) {
-                    (Some(track), Some(change)) => {
-                        ui_invalidations.push(UiInvalidation::TrackMixer { track, change });
-                    }
-                    (track, None) => {
-                        if let Some(track) = track {
-                            ui_invalidations.push(UiInvalidation::Pattern(
-                                PatternInvalidation::WholeTrack { track },
-                            ));
-                        }
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    }
-                    (None, Some(_)) => {
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                editor.show_transient_message(result.label);
+                slice3_edit_applied(editor, ctx, &payload, track, Some(result.label));
             }
             Ok((app::edit::EditOutcome::NoOp, _)) => {}
             Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
@@ -1091,21 +750,15 @@ pub(super) fn handle(
                 ));
                 return;
             }
-            let track = track as usize;
-            let bar = bar as usize;
-            match app::edit::apply_bar_transpose_edit(&mut app, track, bar, value as f32) {
-                Ok(app::edit::EditOutcome::Applied(_)) => {
-                    for viewport in ctx.shared.expanded_step_projection.viewports_for_track(track) {
-                        ui_invalidations.push(UiInvalidation::ExpandedStepViewport {
-                            track,
-                            track_id: viewport.track_id,
-                        });
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+            if let Err(error) = app::edit::apply_bar_transpose_edit(
+                &mut app,
+                track as usize,
+                bar as usize,
+                value as f32,
+            ) {
+                editor.handle_host_event(HostEvent::Error(format!(
                     "Bar transpose edit failed: {error:?}"
-                ))),
+                )));
             }
         }
         "toggle-step" => {
@@ -1838,15 +1491,6 @@ pub(super) fn handle(
                         _ => {}
                     }
                     if changed {
-                        let selection = selected_neural_neurons.lock().unwrap().clone();
-                        sync_track_plocks_for_neural_selection(
-                            editor.runtime_mut(),
-                            &app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            &selection,
-                        );
                         editor.runtime_mut().run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -1879,15 +1523,7 @@ pub(super) fn handle(
                 return;
             };
             let steps: Vec<usize> = if map_string(map, "scope").as_deref() == Some("selected") {
-                let mut steps: Vec<usize> = selected_steps
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .copied()
-                    .filter(|step| *step < MAX_STEPS)
-                    .collect();
-                steps.sort_unstable();
-                steps
+                step_list(selected_steps.lock().unwrap().iter().copied())
             } else {
                 (0..MAX_STEPS).collect()
             };
@@ -1899,57 +1535,8 @@ pub(super) fn handle(
             if track >= state.active_track_count() {
                 return;
             }
-            let command = match target.as_str() {
-                "rack-slot-param" => slot_idx.and_then(|slot_idx| {
-                    sequencer::sequencer::RackSlotParam::ALL.iter().copied()
-                        .find(|param| param.index() == param_idx)
-                        .map(|param| app::AppCommand::ClearRackSlotParamPlockMulti {
-                            track, slot_idx, steps, param,
-                        })
-                }),
-                "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
-                    track,
-                    steps,
-                    macro_idx: param_idx,
-                }),
-                "bus-send" => app.buses.get(param_idx).map(|bus| {
-                    app::AppCommand::ClearTrackBusSendPlockMulti {
-                        track,
-                        steps,
-                        destination: bus.id,
-                    }
-                }),
-                "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
-                    track,
-                    steps,
-                    param_idx,
-                }),
-                "effect" => slot_idx.map(|slot_idx| app::AppCommand::ClearEffectPlockMulti {
-                    track,
-                    steps,
-                    slot_idx,
-                    param_idx,
-                }),
-                "midi-fx" => slot_idx.map(|slot_idx| app::AppCommand::ClearMidiFxPlockMulti {
-                    track,
-                    steps,
-                    slot_idx,
-                    param_idx,
-                }),
-                "rack-effect" => match (rack_slot, slot_idx) {
-                    (Some(rack_slot_idx), Some(effect_slot_idx)) => {
-                        Some(app::AppCommand::ClearRackSlotEffectPlockMulti {
-                            track,
-                            steps,
-                            rack_slot_idx,
-                            effect_slot_idx,
-                            param_idx,
-                        })
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
+            let command =
+                clear_plocks_command(&app, &target, track, steps, param_idx, slot_idx, rack_slot);
             let Some(command) = command else {
                 return;
             };
@@ -1958,50 +1545,9 @@ pub(super) fn handle(
             if !changed {
                 return;
             }
-            // Refresh the clicked strip without changing the selected track's
-            // parameter projection. Mixer controls may belong to any track.
-            if target == "rack-macro" || target == "rack-slot-param" {
-                let display_step = if track == selected_track {
-                    displayed_plock_step(&state, track, selected_plock_step(&selected_steps))
-                } else {
-                    None
-                };
-                if target == "rack-macro" {
-                    sync_rack_macro_value_fields(editor.runtime_mut(), &app, track, display_step);
-                } else {
-                    sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, track, display_step);
-                }
-            }
-            if target == "bus-send" {
-                sync_track_bus_send_binding_field(editor.runtime_mut(), &app, &state, track, param_idx);
-                sync_selected_track_bus_send_binding_fields(
-                    editor.runtime_mut(), &app, &state, selected_track, &selected_steps,
-                );
-            }
-            let track = selected_track;
-            // Same refresh arms the per-step clear uses, plus the automation
-            // presence field so the knob's dot goes out with the locks.
-            let selection = selected_neural_neurons.lock().unwrap().clone();
-            {
-                let rt = editor.runtime_mut();
-                sync_track_plocks_for_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    track,
-                    &selected_steps,
-                    &selection,
-                );
-                sync_instrument_plock_presence_display_fields(
-                    rt,
-                    &state,
-                    &app,
-                    &ctx.shared.expanded_step_projection,
-                    track,
-                    &selected_steps,
-                );
-                rt.run_reactive_cycle();
-            }
+            // The panels and the step grids read the locks through the host
+            // kinds (the knob's dot goes out with them).
+            editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2015,21 +1561,9 @@ pub(super) fn handle(
                         ctx.gesture.preview_plock_variant = None;
                         return;
                     }
+                    // The host kinds show the variant's locks at the next
+                    // sync (`selection.plock-rows`, `plock-variant`).
                     ctx.gesture.preview_plock_variant = Some((track, label));
-                    {
-                        let rt = editor.runtime_mut();
-                        sync_track_plock_variant_preview(
-                            rt,
-                            &app,
-                            &state,
-                            track,
-                            &selected_steps,
-                            ctx.gesture.preview_plock_variant.as_ref(),
-                        );
-                        rt.run_reactive_cycle();
-                    }
-                    editor.refresh_runtime_side_effects();
-                    editor.refresh_visible_layouts_for_buffer_named("*step*");
                     editor.mark_needs_redraw();
                 }
             }
@@ -2065,49 +1599,167 @@ pub(super) fn handle(
                         .assignment_for_label(label)
                         .map(|assignment| assignment.key.clone())
                 });
-                let outcome = app::edit::apply_recorded_step_mutation(
-                    &mut app,
-                    track,
-                    &steps,
-                    if is_clear {
-                        "Clear step variant locks"
-                    } else {
-                        "Stamp step variant"
-                    },
-                    |app| {
-                        if is_clear {
-                            app.state
-                                .clear_variant_locks_for_steps_no_publish(track, &steps);
-                        } else if let Some(key) = &assignment {
-                            app.state
-                                .stamp_variant_key_to_steps_no_publish(track, key, &steps);
-                        }
-                        Ok(())
-                    },
-                );
-                let changed = match outcome {
-                    Ok(app::edit::EditOutcome::Applied(_)) => true,
-                    Ok(app::edit::EditOutcome::NoOp) => false,
-                    Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
-                        editor.handle_host_event(HostEvent::Error(
-                            "Variant edit was applied without history".to_string(),
-                        ));
-                        false
-                    }
-                    Err(error) => {
-                        editor.handle_host_event(HostEvent::Error(format!(
-                            "Could not apply variant edit: {error:?}"
-                        )));
-                        false
-                    }
-                };
-                if changed {
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                if !is_clear && assignment.is_none() {
+                    return; // an unknown label stamps nothing
+                }
+                let key = if is_clear { None } else { assignment.as_ref() };
+                match stamp_step_variant(&mut app, track, &steps, key) {
+                    Ok(true) => variant_edit_applied(ctx.shared),
+                    Ok(false) => {}
+                    Err(error) => editor.handle_host_event(HostEvent::Error(error)),
                 }
             }
         }
         _ => {}
+    }
+}
+
+/// Stamp the variant `key` onto `steps` of `track`, or clear the steps'
+/// variant locks (`None`), as one undo entry (a missing assignment stamps
+/// nothing); returns whether the model changed. Shared by
+/// `stamp-plock-variant` / `clear-step-variant-locks` and the host kinds'
+/// `stamp-variant`.
+pub(super) fn stamp_step_variant(
+    app: &mut app::App,
+    track: usize,
+    steps: &[usize],
+    key: Option<&sequencer::plock_variants::PlockVariantKey>,
+) -> Result<bool, String> {
+    let label = match key {
+        None => "Clear step variant locks",
+        Some(_) => "Stamp step variant",
+    };
+    let outcome = app::edit::apply_recorded_step_mutation(app, track, steps, label, |app| {
+        match key {
+            None => app
+                .state
+                .clear_variant_locks_for_steps_no_publish(track, steps),
+            Some(key) => app
+                .state
+                .stamp_variant_key_to_steps_no_publish(track, key, steps),
+        };
+        Ok(())
+    });
+    match outcome {
+        Ok(app::edit::EditOutcome::Applied(_)) => Ok(true),
+        Ok(app::edit::EditOutcome::NoOp) => Ok(false),
+        Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+            Err("Variant edit was applied without history".to_string())
+        }
+        Err(error) => Err(format!("Could not apply variant edit: {error:?}")),
+    }
+}
+
+/// After a variant stamp or clear landed: the panels' structural resync
+/// (the fx and UI epochs), as the variant strip's commands do.
+pub(super) fn variant_edit_applied(shared: &SharedHandles) {
+    shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A command's `:steps`, whose `:step-tracks` must each name `track_id`
+/// (else an error: the steps must be steps of `noun`).
+pub(super) fn track_steps(
+    map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    track_id: sequencer::sequencer::TrackId,
+    noun: &str,
+) -> Result<Vec<usize>, String> {
+    let steps = map_usize_list(map, "steps").unwrap_or_default();
+    let tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
+    if tracks.len() != steps.len() || tracks.iter().any(|tid| *tid as u64 != track_id.0) {
+        return Err(format!("steps must be steps of {noun}"));
+    }
+    Ok(steps)
+}
+
+/// Steps sorted, deduplicated, within `MAX_STEPS`.
+pub(super) fn step_list(steps: impl IntoIterator<Item = usize>) -> Vec<usize> {
+    let mut steps: Vec<usize> = steps.into_iter().filter(|step| *step < MAX_STEPS).collect();
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+/// The `Clear*PlockMulti` command clearing `param_idx`'s p-locks on `steps`
+/// of `track` for a `clear-param-plocks` target (`instrument`, `effect`,
+/// `midi-fx`, `rack-effect`, `rack-slot-instrument`, `rack-slot-param`,
+/// `rack-macro`, `bus-send`); `None` for an unknown target or a missing slot.
+pub(super) fn clear_plocks_command(
+    app: &app::App,
+    target: &str,
+    track: usize,
+    steps: Vec<usize>,
+    param_idx: usize,
+    slot_idx: Option<usize>,
+    rack_slot: Option<usize>,
+) -> Option<app::AppCommand> {
+    match target {
+        "rack-slot-param" => slot_idx.and_then(|slot_idx| {
+            sequencer::sequencer::RackSlotParam::ALL
+                .iter()
+                .copied()
+                .find(|param| param.index() == param_idx)
+                .map(|param| app::AppCommand::ClearRackSlotParamPlockMulti {
+                    track,
+                    slot_idx,
+                    steps,
+                    param,
+                })
+        }),
+        "rack-slot-instrument" => {
+            slot_idx.map(
+                |slot_idx| app::AppCommand::ClearRackSlotInstrumentPlockMulti {
+                    track,
+                    slot_idx,
+                    steps,
+                    param_idx,
+                },
+            )
+        }
+        "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx: param_idx,
+        }),
+        "bus-send" => {
+            app.buses
+                .get(param_idx)
+                .map(|bus| app::AppCommand::ClearTrackBusSendPlockMulti {
+                    track,
+                    steps,
+                    destination: bus.id,
+                })
+        }
+        "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
+            track,
+            steps,
+            param_idx,
+        }),
+        "effect" => slot_idx.map(|slot_idx| app::AppCommand::ClearEffectPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        }),
+        "midi-fx" => slot_idx.map(|slot_idx| app::AppCommand::ClearMidiFxPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        }),
+        "rack-effect" => match (rack_slot, slot_idx) {
+            (Some(rack_slot_idx), Some(effect_slot_idx)) => {
+                Some(app::AppCommand::ClearRackSlotEffectPlockMulti {
+                    track,
+                    steps,
+                    rack_slot_idx,
+                    effect_slot_idx,
+                    param_idx,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -2142,7 +1794,6 @@ mod tests {
         record_armed: Arc<Mutex<Vec<bool>>>,
         active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
         active_delete_target_version: Arc<AtomicUsize>,
-        expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
         ui_epoch: Arc<AtomicUsize>,
         ui_invalidations: Arc<UiInvalidationQueue>,
     }
@@ -2182,11 +1833,9 @@ mod tests {
                 sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
 
             let mut runtime = Runtime::new();
-            runtime.register_reactive("SEQ", Vec::new(), true);
-            // `sync_single_step_param_binding` resolves the *step* panel's
-            // "parameter step" from the lisp `cursor-step` global, exactly as
-            // ui/main.lisp defines it. Park the cursor on the edited step,
-            // which is what dragging that panel's picker means.
+            // The *step* panel's cursor (the lisp `cursor-step` global, as
+            // ui/main.lisp defines it), parked on the edited step, which is
+            // what dragging that panel's picker means.
             runtime
                 .eval_str(&format!("(def cursor-step {STEP})"))
                 .expect("seed the lisp cursor-step global");
@@ -2200,7 +1849,6 @@ mod tests {
             let record_armed = Arc::new(Mutex::new(vec![false]));
             let active_delete_target = Arc::new(Mutex::new(None));
             let active_delete_target_version = Arc::new(AtomicUsize::new(0));
-            let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
             let ui_epoch = Arc::new(AtomicUsize::new(0));
             let ui_invalidations = Arc::new(UiInvalidationQueue::new());
             let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db");
@@ -2217,9 +1865,7 @@ mod tests {
                 step_clipboard: Arc::new(Mutex::new(None)),
                 ui_epoch: ui_epoch.clone(),
                 fx_epoch: Arc::new(AtomicUsize::new(0)),
-                fx_value_epoch: Arc::new(AtomicUsize::new(0)),
                 ui_invalidations: ui_invalidations.clone(),
-                expanded_step_projection: expanded_step_projection.clone(),
                 active_delete_target: active_delete_target.clone(),
                 active_delete_target_version: active_delete_target_version.clone(),
                 auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -2257,7 +1903,6 @@ mod tests {
                     cached_peak_l_level: 0.0,
                     cached_peak_r_level: 0.0,
                     cached_track_peak_levels: vec![0.0],
-                    cached_rack_slot_peak_levels: Vec::new(),
                     cached_bus_peak_levels: Vec::new(),
                     cached_modulator_phases: Vec::new(),
                     cached_modulator_levels: Vec::new(),
@@ -2269,8 +1914,6 @@ mod tests {
                     cached_cpu_load_bits: 0.0f32.to_bits(),
                     last_meter_poll_at: Instant::now(),
                     last_cpu_ui_poll_at: Instant::now(),
-                    last_neural_visualization_poll_at: Instant::now(),
-                    visualization_liveness: VisualizationLiveness::default(),
                     last_voice_count_log_at: Instant::now(),
                 },
                 track_names: vec!["Track 1".to_string()],
@@ -2282,7 +1925,6 @@ mod tests {
                 record_armed,
                 active_delete_target,
                 active_delete_target_version,
-                expanded_step_projection,
                 ui_epoch,
                 ui_invalidations,
             }
@@ -2360,9 +2002,6 @@ mod tests {
                 !invalidations.is_empty(),
                 "a step-param edit must queue targeted invalidations"
             );
-            let neural = BTreeSet::new();
-            let peaks = vec![0.0f64];
-            let bus_peaks: Vec<f64> = Vec::new();
             apply_ui_invalidations(
                 invalidations,
                 UiInvalidationApplyCtx {
@@ -2372,119 +2011,33 @@ mod tests {
                     track_collapsed: &self.track_collapsed,
                     bus_state: &self.bus_state,
                     current_track_idx: TRACK,
-                    selected_steps: &self.selected_steps,
-                    selected_neural_neurons: &neural,
-                    piano_roll_selection: &self.piano_roll_selection,
                     accumulator_names: &self.accumulator_names,
-                    cached_track_peak_levels: &peaks,
-                    cached_bus_peak_levels: &bus_peaks,
-                    record_armed: &self.record_armed,
-                    active_delete_target: &self.active_delete_target,
-                    active_delete_target_version: &self.active_delete_target_version,
-                    expanded_step_projection: &self.expanded_step_projection,
-                    fx_visible: true,
-                    sequencer_visible: true,
-                    mixer_visible: true,
                 },
             );
         }
 
-        fn number(&self, field: &str) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::Number(value)) => *value,
-                other => panic!("SEQ.{field} should be a number, got {other:?}"),
-            }
-        }
 
-        fn list_number(&self, field: &str, index: usize) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(items)) => {
-                    match items.get(index).map(|item| item.borrow().clone()) {
-                        Some(Value::Number(value)) => value,
-                        other => panic!("SEQ.{field}[{index}] should be a number, got {other:?}"),
-                    }
-                }
-                other => panic!("SEQ.{field} should be a list, got {other:?}"),
-            }
-        }
 
-        fn nested_list_number(&self, field: &str, outer: usize, inner: usize) -> f64 {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
-                    Some(Value::List(items)) => {
-                        match items.get(inner).map(|item| item.borrow().clone()) {
-                            Some(Value::Number(value)) => value,
-                            other => panic!(
-                                "SEQ.{field}[{outer}][{inner}] should be a number, got {other:?}"
-                            ),
-                        }
-                    }
-                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
-                },
-                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
-            }
-        }
-
+        /// The lanes of the edited step's notes (lane 0 is the highest
+        /// pitch), as the host kinds read them for `piano-roll.notes`.
         fn piano_roll_lanes(&self) -> Vec<f64> {
-            match self
-                .editor
-                .runtime()
-                .reactive_field_value("SEQ", "piano-roll-items")
-            {
-                Some(Value::List(items)) => items
-                    .iter()
-                    .filter_map(|item| match &*item.borrow() {
-                        Value::Map(map) => map.get("lane").and_then(|cell| match &*cell.borrow() {
-                            Value::Number(lane) => Some(*lane),
-                            _ => None,
-                        }),
-                        _ => None,
-                    })
-                    .collect(),
-                other => panic!("SEQ.piano-roll-items should be a list, got {other:?}"),
-            }
+            (PianoRollLanes::live(&self.state, TRACK)
+                .note_entries(STEP)
+                .iter())
+            .map(|note| f64::from(PIANO_ROLL_MAX_TRANSPOSE) - f64::from(note.transpose))
+            .collect()
         }
 
-        fn nested_list_bool(&self, field: &str, outer: usize, inner: usize) -> bool {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
-                    Some(Value::List(items)) => {
-                        match items.get(inner).map(|item| item.borrow().clone()) {
-                            Some(Value::Bool(value)) => value,
-                            other => panic!(
-                                "SEQ.{field}[{outer}][{inner}] should be a bool, got {other:?}"
-                            ),
-                        }
-                    }
-                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
-                },
-                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
-            }
-        }
-
-        fn bool_field(&self, field: &str) -> bool {
-            match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::Bool(value)) => *value,
-                other => panic!("SEQ.{field} should be a bool, got {other:?}"),
-            }
-        }
     }
 
-    /// Every surface a Transpose / Velocity edit from the `*step*` panel feeds.
-    ///
-    /// `set-step-param-history` no longer bumps `ui_epoch` (that bump cost
-    /// ~7ms of `sync_all_track_sequencer_state` + a whole-list
-    /// `sync_step_param_lists` per drag update), so the targeted invalidations
-    /// are now the ONLY writer for all of these:
-    ///   - `SEQ.{transposes,velocities}` — read by the `*step*` panel's
-    ///     `fx-step-param-value`, `set-cursor-step-value`, and `*metal*`.
-    ///   - `SEQ.track-{transposes,velocities}` — read by
-    ///     `seqv-track-param-values` for every non-current expanded lane.
-    ///   - `seq-track-step-param-{slider,haptic}-{track}-{mode}-{step}`.
-    ///   - `fx-step-value-{param}` — the number-picker readout being dragged.
-    ///   - `SEQ.piano-roll-items` — note pitch comes from the step transpose.
+    /// A Transpose / Velocity edit from the `*step*` panel stays on the
+    /// targeted path: `set-step-param-history` bumps no `ui_epoch` (a resync
+    /// of every track per drag update); the targeted invalidations it queues
+    /// feed the host kinds (`step.*`, `a_step_panel_param_edit_moves_the_step_fields_without_a_ui_epoch_bump`),
+    /// and the piano roll's notes follow (note pitch comes from the step
+    /// transpose).
     #[test]
-    fn set_step_param_publishes_every_step_panel_surface_without_a_ui_epoch_bump() {
+    fn set_step_param_stays_on_the_targeted_path_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
@@ -2500,32 +2053,6 @@ mod tests {
             epoch_before,
             "a step-param edit must stay on the targeted path — a ui_epoch bump \
              resyncs every track on every drag update"
-        );
-        assert_eq!(
-            harness.list_number("transposes", STEP),
-            7.0,
-            "the current track's flat transpose list must be published"
-        );
-        assert_eq!(
-            harness.nested_list_number("track-transposes", TRACK, STEP),
-            7.0,
-            "the per-track transpose list-of-lists (eseq.seqv-track-params/seqv-track-param-values) \
-             must be published"
-        );
-        assert_eq!(
-            harness.number(&track_step_param_slider_field(TRACK, 3, STEP)),
-            7.0,
-            "the per-step transpose slider binding must be published"
-        );
-        assert_eq!(
-            harness.number(&track_step_param_haptic_field(TRACK, 3, STEP)),
-            7.0,
-            "the per-step transpose haptic binding must be published"
-        );
-        assert_eq!(
-            harness.number("fx-step-value-transpose"),
-            7.0,
-            "the *step* panel's Transpose number-picker readout must be published"
         );
         let lanes_at_7 = harness.piano_roll_lanes();
         assert!(
@@ -2554,23 +2081,9 @@ mod tests {
 
         // Velocity shares the funnel but a different mode index / list.
         harness.set_step_param("velocity", 0.25);
-        assert_eq!(harness.list_number("velocities", STEP), 0.25);
         assert_eq!(
-            harness.nested_list_number("track-velocities", TRACK, STEP),
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
             0.25
-        );
-        assert_eq!(
-            harness.number(&track_step_param_slider_field(TRACK, 0, STEP)),
-            0.25
-        );
-        assert_eq!(
-            harness.number(&track_step_param_haptic_field(TRACK, 0, STEP)),
-            0.25
-        );
-        assert_eq!(
-            harness.number("fx-step-value-velocity"),
-            0.25,
-            "the *step* panel's Velocity number-picker readout must be published"
         );
         assert_eq!(
             harness.ui_epoch.load(Ordering::Relaxed),
@@ -2615,29 +2128,24 @@ mod tests {
         harness.set_step_param("transpose", 12.0);
         assert_eq!(harness.state.pattern.chord_data[TRACK].get(STEP, 0), 12.0);
         assert_eq!(harness.piano_roll_lanes(), vec![36.0]);
-        assert_eq!(harness.number("fx-step-value-transpose"), 12.0);
 
         harness.set_step_param("duration", 3.5);
         assert_eq!(
             harness.state.pattern.chord_data[TRACK].get_duration(STEP, 0),
             3.5
         );
-        assert_eq!(harness.number("fx-step-value-duration"), 3.5);
 
         harness.set_step_param("velocity", 0.375);
         assert_eq!(
             harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
             0.375
         );
-        assert_eq!(harness.number("fx-step-value-velocity"), 0.375);
     }
 
-    /// Duration additionally paints the compact grid's duration bar, which is
-    /// a SEPARATE surface with a separate writer: the per-step
-    /// `seq-track-step-duration-{track}-{step}` bools cover every cell the
-    /// note now reaches, and `SEQ.track-duration-spans` is the list form.
+    /// A duration edit stays on the targeted path too (the step grid binds
+    /// `step.held`, which the host kinds derive from the durations).
     #[test]
-    fn set_step_duration_publishes_the_duration_bar_surfaces_without_a_ui_epoch_bump() {
+    fn set_step_duration_stays_on_the_targeted_path_without_a_ui_epoch_bump() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
@@ -2653,65 +2161,43 @@ mod tests {
             epoch_before,
             "duration edits must stay on the targeted path"
         );
-        assert_eq!(harness.list_number("durations", STEP), 4.0);
-        assert_eq!(
-            harness.nested_list_number("track-durations", TRACK, STEP),
-            4.0
-        );
-        assert_eq!(
-            harness.number("fx-step-value-duration"),
-            4.0,
-            "the *step* panel's Duration number-picker readout must be published"
-        );
-        // The duration bar: the note now reaches STEP..STEP+4.
-        for step in STEP..STEP + 4 {
-            assert!(
-                harness.bool_field(&track_step_duration_field(TRACK, step)),
-                "step {step} must be marked as covered by the duration bar"
-            );
-        }
         assert!(
-            !harness.bool_field(&track_step_duration_field(TRACK, STEP + 4)),
-            "the cell past the note's reach must not be marked covered"
-        );
-        assert!(
-            harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
-            "the list form of the duration span must be published too"
+            track_step_duration_covered(&harness.state, TRACK, STEP + 3),
+            "the duration holds the steps it reaches"
         );
 
         // Shortening it must clear the cells it no longer reaches.
         harness.set_step_param("duration", 1.0);
-        for step in STEP + 1..STEP + 4 {
-            assert!(
-                !harness.bool_field(&track_step_duration_field(TRACK, step)),
-                "step {step} must be released when the note is shortened"
-            );
-        }
+        assert!(
+            !track_step_duration_covered(&harness.state, TRACK, STEP + 3),
+            "the span is released when the note is shortened"
+        );
     }
 
-    /// The compact step shell's p-lock tick / variant tint is
+    /// The step shells' p-lock tick / variant tint (`step.lock-kind`) is
     /// `plock_variant_step_render_values`, whose `live_track_has_seq_lock` term
     /// is true as soon as ANY `StepParam` departs from its default — so a
-    /// transpose edit flips `seq-track-step-plock-kind-{track}-{step}` 0 -> 1
-    /// and restoring the default flips it back. Nothing else writes that field
-    /// on a step-param edit now that the funnel skips `ui_epoch`.
+    /// transpose edit flips the step's kind 0 -> 1 and restoring the default
+    /// flips it back, without an epoch resync.
     #[test]
     fn set_step_param_flips_the_compact_shell_seq_lock_tick() {
         let mut harness = Harness::new();
         let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
 
+        let kind =
+            |harness: &Harness| plock_variant_step_render_values(&harness.state, TRACK)[STEP].kind;
         harness.set_step_param("transpose", 7.0);
         assert_eq!(
-            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
-            1.0,
+            kind(&harness),
+            1,
             "a step param off its default must light the compact shell's \
              seq-lock tick"
         );
 
         harness.set_step_param("transpose", 0.0);
         assert_eq!(
-            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
-            0.0,
+            kind(&harness),
+            0,
             "restoring the default must clear the tick again"
         );
         assert_eq!(

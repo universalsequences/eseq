@@ -9,4 +9,4 @@
 (def capture-after-sync ()
   (do
     (eseq.effects.state/rack-panel-set-view
-      (get (nth SEQ.instrument-panel 0) :track-id) true true false)))
+      (get (eseq.effects.panel-data/current-instrument-panel) :track-id) true true false)))

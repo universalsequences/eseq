@@ -27,12 +27,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 
@@ -75,10 +73,9 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
-                :updates (list
-                  (dict :param-idx (get freq-p :idx) :value (get event :freq))
-                  (dict :param-idx (get q-p :idx) :value (get event :q)))
+                :target-node-id (eseq.effects.devices/fx-node-id fx)
+                :updates (eseq.effects.param-controls/effect-param-updates fx
+                  (list (list freq-p (get event :freq)) (list q-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
@@ -90,22 +87,21 @@
       :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :effect-mode-on-bg :mixer-control-bg)
       :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :control-on-fg :dim)
       :border-color :transparent
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p))))
 
-;; `current` must come from fx-param-text-value-for, not (get p :text-value):
-;; the params dict is frozen at panel build, so the raw text-value never sees a
-;; p-locked division — the :value-field SEQV binding does.
+;; `current` comes from fx-param-text-value-for: the param's live text
+;; (or the division at its value), so a p-locked division shows.
 (def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 1.12 :padding 0 :font-size 8.0
     :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
     :border-color :transparent
     :color (if (= current label-text) :control-on-fg :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -152,8 +148,8 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -162,8 +158,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -176,10 +172,10 @@
     (subtree :key (str "str8-delay-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -188,8 +184,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)

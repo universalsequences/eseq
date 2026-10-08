@@ -22,6 +22,7 @@ impl SequencerState {
         };
         if removed {
             self.published_sequencers_version.fetch_add(1, Ordering::AcqRel);
+            self.drop_generator_marks(id);
         }
         removed
     }
@@ -210,17 +211,26 @@ impl SequencerState {
     }
 
     pub fn unpublish_sequencer_by_name(&self, name: &str) -> bool {
-        let removed = {
-            let mut list = self.published_sequencers.lock().unwrap();
-            let before = list.len();
-            list.retain(|sequencer| sequencer.name != name);
-            list.len() != before
-        };
-        if removed {
-            self.published_sequencers_version
-                .fetch_add(1, Ordering::AcqRel);
+        let mut removed = Vec::new();
+        self.published_sequencers
+            .lock()
+            .unwrap()
+            .retain(|sequencer| {
+                let keep = sequencer.name != name;
+                if !keep {
+                    removed.push(sequencer.id);
+                }
+                keep
+            });
+        if removed.is_empty() {
+            return false;
         }
-        removed
+        self.published_sequencers_version
+            .fetch_add(1, Ordering::AcqRel);
+        for id in removed {
+            self.drop_generator_marks(id);
+        }
+        true
     }
     pub fn published_sequencers(&self) -> Vec<PublishedSequencer> {
         self.published_sequencers.lock().unwrap().clone()
@@ -417,11 +427,37 @@ impl SequencerState {
     ) -> HashMap<(usize, usize), crate::process::ProcessEffectiveParam> {
         self.process_effective_params.lock().unwrap().clone()
     }
+    /// One entry of [`Self::process_effective_params`], without copying
+    /// the rest (the host kinds' `param.process-value`).
+    pub fn process_effective_param(
+        &self,
+        track: usize,
+        param_idx: usize,
+    ) -> Option<crate::process::ProcessEffectiveParam> {
+        let published = self.process_effective_params.lock().unwrap();
+        published.get(&(track, param_idx)).copied()
+    }
     pub fn process_scope_values_version(&self) -> u64 {
         self.process_scope_values_version.load(Ordering::Acquire)
     }
     pub fn process_scope_values(&self) -> HashMap<u64, HashMap<String, Vec<f32>>> {
         self.process_scope_values.lock().unwrap().clone()
+    }
+    /// Read one state cell's scope history (of process runtime
+    /// `runtime_id`) in place, without copying the rest.
+    pub fn with_process_scope_cell<R>(
+        &self,
+        runtime_id: u64,
+        cell: &str,
+        read: impl FnOnce(Option<&[f32]>) -> R,
+    ) -> R {
+        let scopes = self.process_scope_values.lock().unwrap();
+        read(
+            scopes
+                .get(&runtime_id)
+                .and_then(|cells| cells.get(cell))
+                .map(Vec::as_slice),
+        )
     }
     pub fn process_channel_values_version(&self) -> u64 {
         self.process_channel_values_version.load(Ordering::Acquire)
@@ -444,6 +480,31 @@ impl SequencerState {
             .unwrap()
             .get(track)
             .cloned()
+    }
+    /// Whether track `track`'s own chain is `chain` (compared in place).
+    pub fn track_process_chain_is(
+        &self,
+        track: usize,
+        chain: &crate::process::TrackProcessChain,
+    ) -> bool {
+        track < self.active_track_count()
+            && self.pattern.process_chains.lock().unwrap().get(track) == Some(chain)
+    }
+    /// Track `track`'s project lane overrides (its forks of project slots).
+    pub fn project_lane_overrides(&self, track: usize) -> crate::process::ProjectLaneOverrides {
+        let all = self.pattern.project_process_lane_overrides.lock().unwrap();
+        all.get(track).cloned().unwrap_or_default()
+    }
+    /// Whether track `track`'s project lane overrides are `overrides`
+    /// (compared in place).
+    pub fn project_lane_overrides_are(
+        &self,
+        track: usize,
+        overrides: &crate::process::ProjectLaneOverrides,
+    ) -> bool {
+        let all = self.pattern.project_process_lane_overrides.lock().unwrap();
+        all.get(track)
+            .map_or(overrides.is_empty(), |own| own == overrides)
     }
     pub fn set_track_process_chain(
         &self,
@@ -811,13 +872,13 @@ impl SequencerState {
     /// Enable or bypass a slot on every track. Track attachments of the
     /// instance flip in place; a project slot flips the shared object and
     /// drops each track's `enabled` fork so "all tracks" means exactly that.
+    /// Returns whether anything changed (false when nothing matched).
     pub fn set_process_slot_enabled_all(
         &self,
         instance_id: crate::process::ProcessInstanceId,
         enabled: bool,
     ) -> bool {
         let mut changed = false;
-        let mut matched = false;
         {
             let mut chains = self.pattern.process_chains.lock().unwrap();
             for slot in chains
@@ -825,7 +886,6 @@ impl SequencerState {
                 .flat_map(|chain| chain.slots.iter_mut())
                 .filter(|slot| slot.instance_id == instance_id)
             {
-                matched = true;
                 changed |= slot.enabled != enabled;
                 slot.enabled = enabled;
             }
@@ -836,7 +896,6 @@ impl SequencerState {
             .into_iter()
             .find(|slot| slot.instance_id == instance_id);
         if let Some(shared) = shared {
-            matched = true;
             let identity = crate::process::project_slot_identity_id(&shared);
             let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
             for track_overrides in all.iter_mut() {
@@ -856,13 +915,10 @@ impl SequencerState {
                 slot.enabled = enabled;
             });
         }
-        if !matched {
-            return false;
-        }
         if changed {
             self.publish_process_chain_edit();
         }
-        true
+        changed
     }
     /// Move a slot before another instance, or to the end when `before` is
     /// `None`. Instance ids make this stable across reactive UI refreshes and
@@ -1042,9 +1098,11 @@ impl SequencerState {
         }
         let last_step = *steps.iter().max().unwrap();
         let inlet_name = inlet_name.into();
-        let write_lane = |lane: &mut crate::process::ProcessLane| {
+        // Steps before the last one written that the lane does not hold yet
+        // take the lane's default (what they read as until now), not 0.
+        let write_lane = |lane: &mut crate::process::ProcessLane, default: f32| {
             if lane.values.len() <= last_step {
-                lane.values.resize(last_step + 1, 0.0);
+                lane.values.resize(last_step + 1, default);
             }
             for step in steps {
                 lane.values[*step] = value;
@@ -1061,7 +1119,12 @@ impl SequencerState {
                 .find(|slot| slot.instance_id == instance_id)
             {
                 Some(slot) => {
-                    write_lane(slot.lanes.entry(inlet_name.clone()).or_default());
+                    let default = self.process_lane_default(
+                        slot.inlets.get(&inlet_name),
+                        &slot.class_name,
+                        &inlet_name,
+                    );
+                    write_lane(slot.lanes.entry(inlet_name.clone()).or_default(), default);
                     true
                 }
                 None => false,
@@ -1081,9 +1144,14 @@ impl SequencerState {
             let Some(track_overrides) = overrides.get_mut(track) else {
                 return false;
             };
-            let lane = track_overrides
-                .entry(identity)
-                .or_default()
+            let override_ = track_overrides.entry(identity).or_default();
+            // The track's own inlet literal (a fork) wins, as composed.
+            let literal = override_
+                .inlets
+                .get(&inlet_name)
+                .or_else(|| project_slot.inlets.get(&inlet_name));
+            let default = self.process_lane_default(literal, &project_slot.class_name, &inlet_name);
+            let lane = override_
                 .lanes
                 .entry(inlet_name.clone())
                 .or_insert_with(|| {
@@ -1093,7 +1161,7 @@ impl SequencerState {
                         .cloned()
                         .unwrap_or_default()
                 });
-            write_lane(lane);
+            write_lane(lane, default);
         }
         // Content, not topology: publish so the next fire reads the new
         // value, but do not bump `pattern_epoch`. The epoch makes the
@@ -1102,6 +1170,40 @@ impl SequencerState {
         // transport for as long as the mouse moved.
         self.publish_scheduler_track(track);
         true
+    }
+    /// The value a lane step holds when none is written (as the lane view
+    /// shows it): the slot's `literal` for the inlet, else the class
+    /// default, else 0.
+    fn process_lane_default(
+        &self,
+        literal: Option<&crate::process::ProcessLiteral>,
+        class_name: &str,
+        inlet_name: &str,
+    ) -> f32 {
+        fn as_f32(literal: &crate::process::ProcessLiteral) -> Option<f32> {
+            match literal {
+                crate::process::ProcessLiteral::Number(value) => Some(*value as f32),
+                crate::process::ProcessLiteral::Bool(on) => Some(if *on { 1.0 } else { 0.0 }),
+                _ => None,
+            }
+        }
+        let class_default = |def: &crate::process::PublishedProcessDef| {
+            (def.inlets.iter())
+                .find(|inlet| inlet.name == inlet_name)
+                .and_then(|inlet| as_f32(&inlet.default))
+        };
+        literal
+            .and_then(as_f32)
+            .or_else(|| {
+                let published = self.published_process_authoring.lock().unwrap();
+                let def = published.defs.iter().find(|def| def.name == class_name);
+                def.and_then(class_default)
+            })
+            .or_else(|| {
+                let defs = self.expr_process_defs.lock().unwrap();
+                defs.get(class_name).and_then(class_default)
+            })
+            .unwrap_or(0.0)
     }
     pub fn clear_project_process_lane_override(
         &self,
@@ -1188,7 +1290,8 @@ impl SequencerState {
     /// Edit a port's fan-out list. Track slots edit in place; project slots
     /// fork this track's list (starting from the effective composed list)
     /// unless `all_tracks`, which edits the shared slot and drops every
-    /// track's fork of that port. Returns false when nothing matched.
+    /// track's fork of that port. Returns false when nothing matched, and a
+    /// shared edit false when it changed nothing.
     pub fn edit_process_port_fanout(
         &self,
         track: usize,
@@ -1201,6 +1304,9 @@ impl SequencerState {
             return false;
         }
         let mut edit = Some(edit);
+        // A shared edit reports whether it changed anything; the others
+        // whether the slot matched.
+        let mut shared_edit = false;
         let edited_track_slot = {
             let mut chains = self.pattern.process_chains.lock().unwrap();
             let Some(chain) = chains.get_mut(track) else {
@@ -1216,9 +1322,12 @@ impl SequencerState {
             Some(changed) => changed,
             None => {
                 if all_tracks {
-                    let Some(changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
-                        edit_fanout_list(&mut slot.fanout, port_name, edit.take().unwrap())
-                    }) else {
+                    shared_edit = true;
+                    let Some(mut changed) = self
+                        .edit_project_process_chain_slot(instance_id, |slot| {
+                            edit_fanout_list(&mut slot.fanout, port_name, edit.take().unwrap())
+                        })
+                    else {
                         return false;
                     };
                     let identity = self
@@ -1231,7 +1340,7 @@ impl SequencerState {
                         let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
                         for track_overrides in all.iter_mut() {
                             if let Some(override_) = track_overrides.get_mut(&identity) {
-                                override_.fanout.remove(port_name);
+                                changed |= override_.fanout.remove(port_name).is_some();
                                 if override_.is_empty() {
                                     track_overrides.remove(&identity);
                                 }
@@ -1271,7 +1380,7 @@ impl SequencerState {
         if changed {
             self.publish_process_chain_edit();
         }
-        true
+        changed || !shared_edit
     }
     /// Remove a project port binding from the shared slot on every track.
     /// Disconnect a port outright: drop its manual binding and mute the
@@ -1416,13 +1525,21 @@ impl SequencerState {
     /// `instance_id`. This is the durable counterpart to authoring-handle knob
     /// edits like `(climb :limit 6)`: it updates pattern-scoped attachment
     /// state without touching step data or p-lock storage.
+    /// Returns whether any slot's inlet changed (false when none matched).
     pub fn set_process_inlet_value(
         &self,
         instance_id: crate::process::ProcessInstanceId,
         inlet_name: &str,
         value: crate::process::ProcessLiteral,
-    ) -> usize {
-        let mut updated = 0;
+    ) -> bool {
+        let set = |slot: &mut crate::process::TrackProcessSlot| {
+            let changed = slot.inlets.get(inlet_name) != Some(&value);
+            if changed {
+                slot.inlets.insert(inlet_name.to_string(), value.clone());
+            }
+            changed
+        };
+        let mut changed = false;
         {
             let mut chains = self.pattern.process_chains.lock().unwrap();
             for chain in chains.iter_mut() {
@@ -1431,24 +1548,18 @@ impl SequencerState {
                     .iter_mut()
                     .filter(|slot| slot.instance_id == instance_id)
                 {
-                    slot.inlets.insert(inlet_name.to_string(), value.clone());
-                    updated += 1;
+                    changed |= set(slot);
                 }
             }
         }
-        if self
-            .edit_project_process_chain_slot(instance_id, |slot| {
-                slot.inlets.insert(inlet_name.to_string(), value.clone());
-            })
-            .is_some()
-        {
-            updated += 1;
-        }
-        if updated > 0 {
+        changed |= self
+            .edit_project_process_chain_slot(instance_id, set)
+            .unwrap_or(false);
+        if changed {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             self.publish_scheduler_snapshot();
         }
-        updated
+        changed
     }
     /// Replace a scalar inlet on one track attachment. UI slot editors use
     /// this track-local form; authored process handles intentionally retain
@@ -1556,13 +1667,13 @@ impl SequencerState {
     /// `instance_id`. This mirrors `set_process_lane_values`: authored Lisp and
     /// UI interactions both update the pattern-owned slots currently attached to
     /// tracks without touching step/plock storage.
+    /// Returns whether any slot's binding changed (false when none matched).
     pub fn set_process_port_binding_for_instance(
         &self,
         instance_id: crate::process::ProcessInstanceId,
         port_name: &str,
         target: crate::process::ParamTarget,
-    ) -> usize {
-        let mut updated = 0;
+    ) -> bool {
         let mut changed = false;
         {
             let mut chains = self.pattern.process_chains.lock().unwrap();
@@ -1572,7 +1683,6 @@ impl SequencerState {
                     .iter_mut()
                     .filter(|slot| slot.instance_id == instance_id)
                 {
-                    updated += 1;
                     changed |= slot.unbound_ports.remove(port_name);
                     let current = slot.bindings.get(port_name);
                     if !matches!(current, Some(Some(existing)) if existing == &target) {
@@ -1594,14 +1704,13 @@ impl SequencerState {
                 true
             }
         }) {
-            updated += 1;
             changed |= project_changed;
         }
         if changed {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             self.publish_scheduler_snapshot();
         }
-        updated
+        changed
     }
     pub fn clear_process_port_binding(
         &self,

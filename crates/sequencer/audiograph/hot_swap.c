@@ -107,6 +107,13 @@ bool apply_hot_swap(LiveGraph *lg, GEHotSwapNode *p) {
   // are wrong size. rebuild_node_io_cache() will reallocate on next process.
   n->io_cache_valid = false;
 
+  // A hot swap is not a topology change (no update_orphaned_status), so that
+  // rebuild runs lazily on whichever worker processes the node. Reserve the
+  // discard buffers for any added (unconnected) ports here, in the edit
+  // phase, so the worker only assigns pointers. On allocation failure the
+  // rebuild falls back to the shared scratch.
+  (void)node_reserve_unconnected_outputs(lg, n);
+
   // Allocate new state memory if needed
   void *new_state = NULL;
   if (p->state_size > 0) {

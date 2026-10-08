@@ -8,6 +8,6 @@
 (def capture-after-sync ()
   (do
     (eseq.seq-panels/seq-open-arrangement)
-    (eseq.arrangement/open-scene-menu (dict :sx -0.9 :col 34 :row 5))))
+    (eseq.arrangement/open-scene-menu (dict :sx -0.9 :col 34 :row 5 :at (dict :col 34 :row 5)))))
 
 (def capture-click-widgets (list "menu-item"))

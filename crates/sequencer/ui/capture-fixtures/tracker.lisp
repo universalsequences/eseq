@@ -20,7 +20,7 @@
 ;; Show a process lane as a column on the Bass track and open the Hat
 ;; track's column picker so the nested device groups are visible.
 (def capture-after-sync ()
-  (do
-    (alez.tracker.ui/toggle-column 3
-      (alez.tracker.ui/lane-key (nth (nth SEQ.track-process-lanes 3) 0)))
-    (alez.tracker.ui/open-column-menu 2 (dict :col 62 :row 8))))
+  (let ((bass (eseq.kinds/track 3)))
+    (alez.tracker.ui/toggle-column bass (alez.tracker.ui/lane-key (first bass.lanes)))
+    (alez.tracker.ui/open-column-menu (eseq.kinds/track 2)
+      (dict :at (dict :col 62 :row 8)))))

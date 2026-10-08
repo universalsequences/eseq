@@ -25,19 +25,10 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         vec![sequencer::sequencer::default_empty_effect_chain()],
     ));
     state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
-    let effects = build_effects_value(
-        &state,
-        0,
-        &[vec![desc.clone()]],
-        &Arc::new(Mutex::new(HashSet::new())),
-    );
     let mut editor = full_grid_editor_for_scroll_tests();
     let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
     projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
-    for idx in 0..desc.params.len() {
-        sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
-    }
-    editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+    seed_app_panels(&mut editor, &projection_app, 0);
     editor
         .runtime_mut()
         .eval_str(r#"(set-layout (list :buf "*fx*" :hide-status true))"#)
@@ -51,7 +42,7 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.effects.builtin.chorus/select-filter (nth SEQ.effects 0) {tab})"
+                "(eseq.effects.builtin.chorus/select-filter (first (eseq.effects.panel-data/current-effect-panels)) {tab})"
             ))
             .unwrap();
         editor.runtime_mut().run_reactive_cycle();
@@ -119,12 +110,9 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         .runtime_mut()
         .eval_str(
             r#"
-        (set! eseq.effects.state/effect-mods-chain "audio")
-        (set! eseq.effects.state/effect-mods-track 0)
-        (set! eseq.effects.state/effect-mods-slot 0)
-        (set! eseq.effects.state/effect-mods-rack-slot -1)
-        (set! eseq.effects.state/effect-mods-bus -1)
-        (set! eseq.effects.state/effect-mods-open true)
+        (let ((m eseq.effects.state/effect-mods))
+          (do (set! m.chain "audio") (set! m.track 0) (set! m.slot 0)
+              (set! m.rack-slot -1) (set! m.bus -1) (set! m.open true)))
     "#,
         )
         .unwrap();
@@ -132,14 +120,14 @@ fn chorus_filters_controls_and_modulation_have_live_bindings_and_visible_geometr
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(set! eseq.effects.state/effect-selected-mod-slot {slot})"
+                "(let ((m eseq.effects.state/effect-mods)) (set! m.mod-slot {slot}))"
             ))
             .unwrap();
         for tab in 0..2 {
             editor
                 .runtime_mut()
                 .eval_str(&format!(
-                    "(eseq.effects.builtin.chorus/select-filter (nth SEQ.effects 0) {tab})"
+                    "(eseq.effects.builtin.chorus/select-filter (first (eseq.effects.panel-data/current-effect-panels)) {tab})"
                 ))
                 .unwrap();
             editor.runtime_mut().run_reactive_cycle();

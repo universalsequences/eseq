@@ -18,12 +18,10 @@
    param-knob-mod-slot-prop
    param-mod-wrapper
    param-mods-open?
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
@@ -47,8 +45,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 10.0 :label-font-size 10.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -57,7 +55,7 @@
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def toggle-active? (fx p)
-  (> (reactive-value (eseq.effects.param-controls/fx-param-value-for fx p)) 0.5))
+  (> (eseq.effects.param-controls/fx-param-value-for fx p) 0.5))
 
 (def toggle-mod-mode? (fx p)
   (and (eseq.effects.param-controls/param-mods-open? fx) (get p :modulatable)))
@@ -73,7 +71,7 @@
           :active-background-color (if mod-mode (rgba 0.00 0.48 0.95 1.0) (rgba 1.0 0.62 0.25 1.0))
           :color :dim
           :active-color (if mod-mode :white :black)
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -88,7 +86,7 @@
     :width 5.6 :height 1.2 :padding 0 :font-size 11.0
     :background-color (if (eseq.effects.param-controls/fx-param-on? p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on? p) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -99,7 +97,7 @@
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= current label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (= current label-text) :black :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

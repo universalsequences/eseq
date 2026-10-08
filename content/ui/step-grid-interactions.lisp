@@ -1,7 +1,7 @@
 ;; Step-grid pointer/cursor/selection interactions: paging, drag gestures, step param helpers.
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
 ;;
-;; This is the step-gesture hub: ui/step-grid.lisp,
+;; This is the step-gesture hub:
 ;; ui/sequencer.lisp, ui/seq-grid-mode.lisp, ui/seqv-track-params.lisp and several
 ;; Rust call sites reach its names by their flat spellings, so it converts with NO
 ;; renames and a full set of *identity* compat aliases (the seq-core-state /
@@ -36,6 +36,8 @@
 (module eseq.step-grid-interactions)
 
 (import eseq.seq-core-state :as core)
+;; `selection`: the current track, and the kind-based gestures (down / drag / up / double-click).
+(import eseq.kinds :refer (selection))
 ;; Rack membership for the rack-wide select-all (drum rack v2 groups).
 (import eseq.drum-rack-v2)
 
@@ -51,11 +53,13 @@
         selection-click?
         cmd-click?
         set-track-cursor-step
+        set-cursor-step-for-track
         step-clear-drag-state
         step-shift-anchor
         step-hold-select-maybe-engage
         step-selected?
         step-select-drag-start
+        step-select-drag-start-for-track
         step-select-drag-over-for-track
         step-select-drag-over-for-track-no-cursor
         step-select-drag-over
@@ -65,9 +69,7 @@
         step-double-click-for-track
         step-double-click
         seq-set-step-param-from-step
-        seq-set-process-lane-from-step
         seq-set-step-param-from-selection-or-step
-        seq-set-process-lane-from-selection-or-step
         select-all-steps
         seq-global-select-all
         seq-global-select-all-steps
@@ -82,7 +84,16 @@
         retrig-slider-value
         step-param-value
         step-slider-param-value
-        param-decimals)
+        param-decimals
+        down
+        drag
+        up
+        double-click
+        bind-step-keys)
+
+;; Importing this module binds no keys. The DAW root (ui/main.lisp) binds
+;; C-a and `.` to seq-global-select-all / seq-global-toggle-record; a view
+;; built on eseq.kinds calls (bind-step-keys).
 
 
 (def page-button-width 2.8)
@@ -101,7 +112,7 @@
   (+ (eseq.seq-core-state/page-offset) i))
 
 (def step-visible? (i)
-  (< (step-index i) SEQ.tp-num-steps))
+  (< (step-index i) (eseq.seq-core-state/cursor-num-steps)))
 
 (def cursor-left ()
   (if (seq-has-selection?)
@@ -184,10 +195,18 @@
 (def eseq.vanilla/sequencer-cursor-step-changed (track step)
   nil)
 
-(def set-track-cursor-step (step)
+;; Put the shared step cursor on `step` of the track at position `track`. A
+;; gesture names its own track: right after a handler selects a track for edit,
+;; `current-track-index` still reads the previous one until the host pushes the
+;; new selection, and that track's cursor and page would move instead.
+(def set-cursor-step-for-track (track step)
   (do
     (eseq.seq-core-state/set-cursor-step-value step)
-    (eseq.vanilla/sequencer-cursor-step-changed SEQ.current-track step)))
+    (eseq.vanilla/sequencer-cursor-step-changed track step)))
+
+;; The keyboard/legacy form: the cursor of the current track.
+(def set-track-cursor-step (step)
+  (set-cursor-step-for-track (eseq.seq-core-state/current-track-index) step))
 
 ;; PINNED (hazard m): the shared drag-gesture state, read and `set!` flat by
 ;; vanilla callers. See the file header.
@@ -244,7 +263,7 @@
 (def step-selected? (step)
   (seq-step-selected? step))
 
-(def step-select-drag-start (step evt)
+(def step-select-drag-start-for-track (track step evt)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (set! eseq.vanilla/step-click-pending nil)
@@ -255,21 +274,24 @@
     (if (cmd-click? evt)
       (do
         (set! eseq.vanilla/step-key-select-anchor nil)
-        (set-track-cursor-step step)
+        (set-cursor-step-for-track track step)
         (set! eseq.vanilla/step-drag-anchor nil)
         (set! eseq.vanilla/step-cmd-drag-last step)
         (seq-select-step step))
       (let ((anchor (step-shift-anchor step)))
         (do
           (set! eseq.vanilla/step-key-select-anchor anchor)
-          (set-track-cursor-step step)
+          (set-cursor-step-for-track track step)
           (set! eseq.vanilla/step-drag-anchor anchor)
           (set! eseq.vanilla/step-cmd-drag-last nil)
           (seq-select-step-range anchor step))))))
 
-(def step-set-cursor-if (update-cursor step)
+(def step-select-drag-start (step evt)
+  (step-select-drag-start-for-track (eseq.seq-core-state/current-track-index) step evt))
+
+(def step-set-cursor-if (track update-cursor step)
   (if update-cursor
-    (set-track-cursor-step step)
+    (set-cursor-step-for-track track step)
     nil))
 
 (def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
@@ -281,7 +303,7 @@
         (set! eseq.vanilla/step-move-last nil)
         (set! eseq.vanilla/step-toggle-drag-value nil)
         (eseq.seq-core-state/cool-off-follow)
-        (step-set-cursor-if update-cursor step)
+        (step-set-cursor-if track update-cursor step)
         (if (and (cmd-click? evt) (not eseq.vanilla/step-hold-select))
           (if (= step eseq.vanilla/step-cmd-drag-last)
             nil
@@ -297,7 +319,7 @@
           (do
             (set! eseq.vanilla/step-click-pending nil)
             (eseq.seq-core-state/cool-off-follow)
-            (step-set-cursor-if update-cursor step)
+            (step-set-cursor-if track update-cursor step)
             (if (= (seq-track-step-active? track step) eseq.vanilla/step-toggle-drag-value)
               nil
               (seq-toggle-step step)))
@@ -310,7 +332,7 @@
                 (eseq.seq-core-state/cool-off-follow)
                 (seq-move-step-drag eseq.vanilla/step-move-last step)
                 (set! eseq.vanilla/step-move-last step)
-                (step-set-cursor-if update-cursor step)))))))))
+                (step-set-cursor-if track update-cursor step)))))))))
 
 (def step-select-drag-over-for-track (track step evt)
   (step-select-drag-over-for-track-with-cursor track step evt true))
@@ -319,14 +341,14 @@
   (step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
-  (step-select-drag-over-for-track SEQ.current-track step evt))
+  (step-select-drag-over-for-track (eseq.seq-core-state/current-track-index) step evt))
 
 (def step-pointer-down-for-track (track step evt use-selection)
   (if (selection-click? evt)
-    (step-select-drag-start step evt)
+    (step-select-drag-start-for-track track step evt)
     (do
       (eseq.seq-core-state/cool-off-follow)
-      (set-track-cursor-step step)
+      (set-cursor-step-for-track track step)
       (set! eseq.vanilla/step-drag-anchor nil)
       (set! eseq.vanilla/step-press-ms (now-ms))
       (set! eseq.vanilla/step-press-step step)
@@ -345,7 +367,7 @@
           (step-select-drag-over-for-track track step evt))))))
 
 (def step-pointer-down (step evt)
-  (step-pointer-down-for-track SEQ.current-track step evt true))
+  (step-pointer-down-for-track (eseq.seq-core-state/current-track-index) step evt true))
 
 (def step-pointer-up (step evt)
   (do
@@ -371,7 +393,7 @@
     nil))
 
 (def step-double-click (step evt)
-  (step-double-click-for-track SEQ.current-track step evt))
+  (step-double-click-for-track (eseq.seq-core-state/current-track-index) step evt))
 
 (def seq-set-step-param-from-step (step param value)
   (if (step-selected? step)
@@ -380,52 +402,22 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
-(def seq-selected-step-indexes ()
-  (seq-selected-step-indexes-native))
-
-(def seq-set-process-lane-step-value (track lane step value)
-  (seq-set-process-lane-step
-    track
-    (get lane :instance-id)
-    (get lane :inlet)
-    step
-    value))
-
-(def seq-set-process-lane-from-step (track mode step value)
-  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
-    (if (step-selected? step)
-      (seq-set-process-lane-steps
-        track (get lane :instance-id) (get lane :inlet)
-        (seq-selected-step-indexes) value)
-      (do
-        (if (seq-has-selection?) (seq-clear-selection) nil)
-        (seq-set-process-lane-step-value track lane step value)))))
-
-;; Selection-first variants for the row-wide number picker: a live selection
+;; Selection-first variant for a row-wide number picker: a live selection
 ;; wins over the cursor step, whether or not the cursor sits inside it.
 (def seq-set-step-param-from-selection-or-step (step param value)
   (if (seq-has-selection?)
     (seq-set-step-param-plock param value)
     (seq-set-step-param step param value)))
 
-(def seq-set-process-lane-from-selection-or-step (track mode step value)
-  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
-    (if (seq-has-selection?)
-      (seq-set-process-lane-steps
-        track (get lane :instance-id) (get lane :inlet)
-        (seq-selected-step-indexes) value)
-      (seq-set-process-lane-step-value track lane step value))))
-
 ;; Tracks a Cmd+A spans beyond the current one: every member of the selected
 ;; drum rack (the rack header/bus is selected), else the multi-track selection
 ;; when it has two or more tracks. Empty means the plain single-track select.
 (def select-all-tracks ()
-  (let ((rack (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)))
-    (if (>= rack 0)
-      (eseq.drum-rack-v2/members rack)
-      (if (>= (len SEQ.selected-tracks) 2)
-        SEQ.selected-tracks
-        '()))))
+  (let ((rack (eseq.drum-rack-v2/selected-bus-rack)))
+    (if rack
+      (map (lambda (t) t.index) rack.tracks)
+      (let ((tracks (map (lambda (t) t.index) selection.tracks)))
+        (if (>= (len tracks) 2) tracks '())))))
 
 (def track-in-list? (tracks track)
   (> (len (filter (lambda (t) (= t track)) tracks)) 0))
@@ -440,7 +432,7 @@
     (let ((tracks (select-all-tracks)))
       (if (>= (len tracks) 2)
         (do
-          (if (track-in-list? tracks SEQ.current-track)
+          (if (track-in-list? tracks (eseq.seq-core-state/current-track-index))
             nil
             (seq-set-track (nth tracks 0)))
           (seq-select-all-steps-on-tracks tracks))
@@ -462,7 +454,7 @@
       :arrangement
       (if (= buf "*piano-roll*")
         :piano-roll
-        (if (or (= buf "*sequencer*") (= buf "*metal*"))
+        (if (= buf "*sequencer*")
           :steps
           (if (buffer-visible? "*arrangement*")
             :arrangement
@@ -484,11 +476,14 @@
         ;; Selecting this surface relinquishes the prior destructive target,
         ;; even when it is empty or its selection is already complete.
         (seq-clear-delete-target)
-        (if (= context :arrangement)
+        ;; The arrangement, piano roll and DAW *sequencer* modules are the
+        ;; DAW root's: a `-noui` session (whose own view may be named
+        ;; *sequencer*) has none of them and gets the plain step select-all.
+        (if (and (= context :arrangement) (module-loaded? "eseq.arrangement"))
           (do (drop-step-selection) (eseq.arrangement/select-all-clips))
-          (if (= context :piano-roll)
+          (if (and (= context :piano-roll) (module-loaded? "eseq.piano-roll"))
             (do (drop-step-selection) (eseq.piano-roll/piano-roll-select-all))
-            (if (= (current-buffer-name) "*sequencer*")
+            (if (and (= (current-buffer-name) "*sequencer*") (module-loaded? "eseq.sequencer"))
               (eseq.sequencer/select-all-current-track-steps)
               (select-all-steps))))
         true))
@@ -497,19 +492,70 @@
 ;; Kept as the historical name: user lisp may rebind or call it.
 (def seq-global-select-all-steps () (seq-global-select-all))
 
-(bind-key "C-a" "seq-global-select-all")
-
 (def seq-global-toggle-record ()
   (if (or (buffer-read-only?) (= (view-mode) "ui"))
     (seq-toggle-record)
     false))
 
-(bind-key "." "seq-global-toggle-record")
-
 (def delete-selected-steps ()
   (do
     (eseq.seq-core-state/cool-off-follow)
     (seq-delete-selected-steps)))
+
+;; ── Kind-based gestures ──
+;; The main grid's step gestures over an eseq.kinds step instance `s`:
+;; click empty = on (drag paints), click on = select, drag = move, hold+drag =
+;; sweep-select, shift/cmd-drag = range/add, double-click = off. Each selects
+;; s's track first; a gesture stays on the track it started on.
+;;
+;;   (box :on-mouse-down (lambda (e) (sgi/down s e)) :on-drag (lambda (e) (sgi/drag s e))
+;;        :on-mouse-up (lambda (e) (sgi/up s e)) :on-double-click (lambda (e) (sgi/double-click s e)) ...)
+
+;; The track the current gesture started on (nil between gestures).
+(def gesture-track nil)
+
+(def down (s e)
+  (let ((t s.track)
+        ;; read before selecting: a selection applies on an already-selected track only
+        (use-selection s.track.selected))
+    (do (set! selection.track t)
+        (set! gesture-track t)
+        (step-pointer-down-for-track t.index s.index e use-selection))))
+
+(def drag (s e)
+  (when (= gesture-track s.track)
+    (set! selection.track s.track)
+    (step-select-drag-over-for-track s.track.index s.index e)))
+
+(def up (s e)
+  (do (when (= gesture-track s.track)
+        (set! selection.track s.track)
+        (step-pointer-up s.index e))
+      (set! gesture-track nil)))
+
+(def double-click (s e)
+  (do (set! selection.track s.track)
+      (step-double-click-for-track s.track.index s.index e)))
+
+;; ── Step keys for a kinds view ──
+;; ESC clears the step selection, C-a / s-a select every step (rack-wide
+;; over a selected drum rack), BS deletes the selected steps. Each acts in a
+;; widget (`ui`) view only and hands the key back (false) elsewhere, so code
+;; buffers keep their own ESC, C-a and BS.
+(def step-key-clear-selection ()
+  (if (= (view-mode) "ui") (do (seq-clear-selection) true) false))
+
+(def step-key-select-all ()
+  (if (= (view-mode) "ui") (do (select-all-steps) true) false))
+
+(def step-key-delete ()
+  (if (and (= (view-mode) "ui") (seq-has-selection?)) (do (delete-selected-steps) true) false))
+
+(def bind-step-keys ()
+  (do (bind-key "ESC" "eseq.step-grid-interactions/step-key-clear-selection")
+      (bind-key "C-a" "eseq.step-grid-interactions/step-key-select-all")
+      (bind-key "s-a" "eseq.step-grid-interactions/step-key-select-all")
+      (bind-key "BS" "eseq.step-grid-interactions/step-key-delete")))
 
 (def duration-slider-position (duration)
   (let ((d (max 0 (min duration 32))))

@@ -346,10 +346,13 @@ impl GraphController<'_> {
         // ones; until then every modulator slot renders.
         crate::instruments::voice_modulator::publish_engine_mod_lease(engine_id, &[], None);
 
-        let audio_output_channels = manifest_audio_output_channels(manifest);
+        let audio_output_channels = manifest.audio_output_channels();
         let mod_output_channels = manifest_mod_output_channels(manifest);
         let primary_mod_output_channel = mod_output_channels.first().copied();
 
+        // Published before the voice registry swaps libraries below; renders
+        // of the old library fail the new set's process_fn check.
+        lisp_host::publish_dgen_instrument_probes(engine_id, manifest, lib.process_fn as usize);
         let mut new_synth_ids = Vec::with_capacity(MAX_VOICES);
         for v in 0..MAX_VOICES {
             let old_synth = engine.synth_ids[v];

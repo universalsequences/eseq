@@ -207,6 +207,7 @@ void destroy_live_graph(LiveGraph *lg) {
       if (node->succ) {
         free(node->succ);
       }
+      node_free_null_outputs(node);
       // Free cached IO pointers
       if (node->cached_inPtrs) {
         if (!using_inline_in_cache(node)) {
@@ -873,6 +874,20 @@ bool graph_node_meter_take(LiveGraph *lg, int slot, float *peak_l,
   return true;
 }
 
+// Test/debug: a node's private discard buffers (RTNode.null_out) and how many
+// ports they cover. Read it only between blocks, like any edit-owned field.
+const float *ap_debug_node_null_outputs(LiveGraph *lg, int node_id,
+                                        int *capacity) {
+  if (capacity)
+    *capacity = 0;
+  if (!lg || node_id < 0 || node_id >= lg->node_count)
+    return NULL;
+  const RTNode *n = &lg->nodes[node_id];
+  if (capacity)
+    *capacity = n->null_out_capacity;
+  return n->null_out;
+}
+
 // Debug: dump graph topology to stderr
 void debug_dump_graph(LiveGraph *lg) {
   if (!lg) return;
@@ -912,7 +927,8 @@ void debug_dump_graph(LiveGraph *lg) {
       for (int p = 0; p < n->nOutputs; p++) {
         fprintf(stderr, "    cached_out[%d]=%p%s\n",
                 p, (void*)n->cached_outPtrs[p],
-                n->cached_outPtrs[p] == lg->scratch_null ? " (SCRATCH_NULL!)" : "");
+                n->cached_outPtrs[p] == lg->scratch_null ? " (SCRATCH_NULL!)"
+                : node_output_is_null(lg, n, n->cached_outPtrs[p]) ? " (null_out)" : "");
       }
     }
   }

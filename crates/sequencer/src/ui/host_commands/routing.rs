@@ -8,6 +8,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-mod-route",
     "refresh-mixer-ui",
     "set-track-bus-send",
+    "set-track-send-base",
     "set-bus-effect-param",
     "set-bus-effect-plock",
     "set-bus-effect-param-option",
@@ -20,6 +21,53 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-bus-effect",
 ];
 
+/// Set `track`'s own send level to `bus` (adding the send when missing).
+fn set_track_send_base(
+    app: &mut app::App,
+    track: usize,
+    bus: sequencer::sequencer::BusId,
+    amount: f32,
+) {
+    let mut sends = app.state.pattern.track_params[track].sends();
+    if let Some(send) = sends.iter_mut().find(|send| send.destination == bus) {
+        send.amount = amount;
+    } else {
+        sends.push(TrackSendSnapshot {
+            destination: bus,
+            amount,
+        });
+    }
+    app::apply_command(app, app::AppCommand::SetTrackSends { track, sends });
+}
+
+/// After a bus effect's param value landed (`set-bus-effect-param`, the
+/// host kinds' `param.base` of a bus effect): publish the bus runtime and
+/// the shared bus copy the natives and the host kinds read, and bump the
+/// epochs when the param's value redefines model data
+/// (`param_change_needs_fx_rebuild`); the panels bind the param.
+pub(super) fn bus_effect_param_applied(
+    app: &mut app::App,
+    shared: &SharedHandles,
+    pdesc: Option<&sequencer::effects::ParamDescriptor>,
+) {
+    app.publish_bus_effect_runtime();
+    *shared.bus_state.lock().unwrap() = app.buses.clone();
+    if let Some(pdesc) = pdesc {
+        super::rebuild_panel_if_needed(shared, pdesc);
+    }
+}
+
+/// After a track's output changed (`set-track-output`, the host kinds'
+/// `track.output`): resync (the mixer and the track panel read the host
+/// kinds).
+pub(super) fn track_output_applied(editor: &mut Editor, ctx: &LoopCtx<'_>) {
+    let shared = ctx.shared;
+    let rt = editor.runtime_mut();
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -31,7 +79,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
@@ -43,9 +90,6 @@ pub(super) fn handle(
                     *bus_state.lock().unwrap() = app.buses.clone();
                     *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                     let rt = editor.runtime_mut();
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_mixer_state(rt, app, &state);
-                    rt.set_reactive("SEQ", "track-output-options", build_track_output_options(app));
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -64,51 +108,19 @@ pub(super) fn handle(
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
-                if let Some(label) = label {
-                    let track = payload_track
-                        .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
-                    let output = if label == "main" {
-                        Some(TrackOutput::Mix)
-                    } else if label == "sends only" {
-                        Some(TrackOutput::None)
-                    } else {
-                        app.buses
-                            .iter()
-                            .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-                            .find(|bus| bus.name == label)
-                            .map(|bus| TrackOutput::Bus(bus.id))
-                    };
-                    if let Some(output) = output {
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetTrackOutput { track, output },
-                        );
-                        let rt = editor.runtime_mut();
-                        sync_track_mixer_state(rt, &app, &state);
-                        if track == current_track.load(Ordering::Relaxed) {
-                            let selected_neural_snapshot =
-                                selected_neural_neurons.lock().unwrap().clone();
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                &app,
-                                &state,
-                                track,
-                                &selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                rt,
-                                &app,
-                                &state,
-                                track,
-                                &selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                        }
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                // By label (the output dropdown) or by `:bus-id`.
+                let output = match (label, map_usize(map, "bus-id")) {
+                    (Some(label), _) => track_output_named(app, &label),
+                    (None, Some(bus)) => {
+                        track_output_for_bus(app, Some(sequencer::sequencer::BusId(bus as u64)))
                     }
+                    (None, None) => None,
+                };
+                if let Some(output) = output {
+                    let track =
+                        payload_track.unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                    app::apply_command(&mut app, app::AppCommand::SetTrackOutput { track, output });
+                    track_output_applied(editor, ctx);
                 }
             }
         }
@@ -161,7 +173,6 @@ pub(super) fn handle(
                             );
                             eprintln!("[mod-route] {message}");
                             let rt = editor.runtime_mut();
-                            sync_track_mixer_state(rt, &app, &state);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -229,7 +240,6 @@ pub(super) fn handle(
                             );
                             eprintln!("[mod-route] {message}");
                             let rt = editor.runtime_mut();
-                            sync_track_mixer_state(rt, &app, &state);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -250,7 +260,6 @@ pub(super) fn handle(
         }
         "refresh-mixer-ui" => {
             let rt = editor.runtime_mut();
-            sync_track_mixer_state(rt, &app, &state);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             refresh_visible_mixer_layouts(editor);
@@ -283,27 +292,17 @@ pub(super) fn handle(
                     if track >= state.active_track_count() {
                         return;
                     }
-                    let selected: Vec<usize> = selected_steps.lock().unwrap()
-                        .iter()
-                        .copied()
-                        .collect();
+                    // The step selection belongs to the current track: a
+                    // send of another track sets its own level.
+                    let current = current_track.load(Ordering::Relaxed);
+                    let selected: Vec<usize> = if track == current {
+                        selected_steps.lock().unwrap().iter().copied().collect()
+                    } else {
+                        Vec::new()
+                    };
                     let has_selection = !selected.is_empty();
                     if !has_selection {
-                        let mut sends = app.state.pattern.track_params[track].sends();
-                        if let Some(send) =
-                            sends.iter_mut().find(|send| send.destination == bus_id)
-                        {
-                            send.amount = amount;
-                        } else {
-                            sends.push(TrackSendSnapshot {
-                                destination: bus_id,
-                                amount,
-                            });
-                        }
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetTrackSends { track, sends },
-                        );
+                        set_track_send_base(app, track, bus_id, amount);
                     } else {
                         // A zero baseline still needs a persistent graph edge so the
                         // realtime scheduler can address this destination at a lock.
@@ -335,36 +334,50 @@ pub(super) fn handle(
                         });
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                     }
+                    // The send controls read eseq.kinds `send.display` (the
+                    // edited lock at the selected step, else the base).
                     let rt = editor.runtime_mut();
-                    let current = current_track.load(Ordering::Relaxed);
-                    if has_selection {
-                        // The persisted baseline intentionally did not change. Publish
-                        // the edited lock value instead of immediately snapping both
-                        // controls back to that baseline.
-                        rt.set_reactive(
-                            "SEQ",
-                            &track_bus_send_field(track, bus_idx),
-                            Value::Number(amount as f64),
-                        );
-                        if track == current {
-                            rt.set_reactive(
-                                "SEQ",
-                                &current_track_bus_send_field(bus_idx),
-                                Value::Number(amount as f64),
-                            );
-                        }
-                    } else {
-                        sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
-                        if track == current {
-                            sync_current_track_bus_send_binding_field(
-                                rt, &app, &state, track, bus_idx,
-                            );
-                        }
-                    }
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                 }
             }
+        }
+        // `send.amount` :set: the track's own send level, never a p-lock;
+        // the bus is named by id, so a reorder before this lands cannot
+        // retarget it.
+        "set-track-send-base" => {
+            let Value::Map(ref map) = payload else {
+                return;
+            };
+            let number = |key: &str| {
+                map.get(key).and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+            };
+            let (Some(track), Some(bus_id), Some(amount)) =
+                (number("track"), number("bus-id"), number("amount"))
+            else {
+                return;
+            };
+            let (track, bus_id) = (track as usize, sequencer::sequencer::BusId(bus_id as u64));
+            if !app.buses.iter().any(|bus| bus.id == bus_id) {
+                return;
+            }
+            if bus_id == sequencer::sequencer::BusId::MIX || track >= state.active_track_count() {
+                return;
+            }
+            // The value rule (kind-bindings spec §14.2c): no silent clamping.
+            if !(amount.is_finite() && (0.0..=1.0).contains(&amount)) {
+                editor.handle_host_event(eseqlisp::HostEvent::Error(format!(
+                    "set-track-send-base: {amount} is not a number from 0 to 1"
+                )));
+                return;
+            }
+            set_track_send_base(app, track, bus_id, amount as f32);
+            let rt = editor.runtime_mut();
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
         }
         "set-bus-effect-param" => {
             if let Value::Map(ref map) = payload {
@@ -409,8 +422,6 @@ pub(super) fn handle(
                     let print_gesture = printable
                         && try_latch_param_print(
                             ctx.shared,
-                            &mut *editor,
-                            &app,
                             track,
                             &[(PrintTarget::BusEffect {
                                 bus_idx,
@@ -428,22 +439,11 @@ pub(super) fn handle(
                                 bus_idx, slot_idx, param_idx, stored,
                             ),
                         ) {
-                            Ok(()) => {
-                                app.publish_bus_effect_runtime();
-                                *bus_state.lock().unwrap() = app.buses.clone();
-                                sync_bus_effect_param_value_field(
-                                    editor.runtime_mut(),
-                                    &app,
-                                    bus_idx,
-                                    slot_idx,
-                                    param_idx,
-                                );
-                                if desc.as_ref().is_some_and(param_change_needs_fx_rebuild)
-                                {
-                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            Ok(()) => bus_effect_param_applied(
+                                app,
+                                ctx.shared,
+                                desc.as_ref(),
+                            ),
                             Err(error) => editor.handle_host_event(HostEvent::Status(
                                 format!("Error setting bus effect param: {error}"),
                             )),
@@ -496,7 +496,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -559,8 +558,6 @@ pub(super) fn handle(
                         let print_gesture = printable
                             && try_latch_param_print(
                                 ctx.shared,
-                                &mut *editor,
-                                &app,
                                 track,
                                 &[(PrintTarget::BusEffect {
                                     bus_idx,
@@ -589,15 +586,6 @@ pub(super) fn handle(
                                     app.publish_bus_effect_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     let rt = editor.runtime_mut();
-                                    sync_bus_mixer_state(rt, &app);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "bus-effects",
-                                        build_bus_effects_value_for_selection(
-                                            &app,
-                                            Some(&selected_steps),
-                                        ),
-                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -663,7 +651,6 @@ pub(super) fn handle(
                                 app.publish_bus_effect_runtime();
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 let rt = editor.runtime_mut();
-                                sync_bus_mixer_state(rt, &app);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -700,7 +687,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -748,7 +734,6 @@ pub(super) fn handle(
                             app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
-                            sync_bus_mixer_state(rt, &app);
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -787,7 +772,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -824,7 +808,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -855,7 +838,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -900,7 +882,6 @@ pub(super) fn handle(
                         app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
-                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);

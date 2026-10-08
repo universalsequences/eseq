@@ -30,7 +30,8 @@
       (v-stack :width 10.4 :height 1.65 :gap 0.10 :align :start
         (label "source" :font-size 8.2 :width 10.4 :height 0.52 :color :dim :bg :transparent)
         (if p
-          (dropdown :value (get p :text-value)
+          (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
             :options (get p :options)
             :on-change (lambda (v) (eseq.effects.param-controls/param-set-option fx p v))
             :width 10.4 :height 0.92 :font-size 8.8)

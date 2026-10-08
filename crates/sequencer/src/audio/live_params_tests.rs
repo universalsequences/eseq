@@ -26,7 +26,7 @@ impl Fixture {
                 unit: None, hidden: false, group: None, env: None, role: None, options: None,
             }],
             groups: vec![], envelopes: vec![], inputs: vec![], modulators: vec![],
-            mod_outputs: vec![], amp_output_channel: None, mod_destinations: vec![], n_inputs: 0, n_outputs: 1,
+            mod_outputs: vec![], amp_output_channel: None, probes: vec![], mod_destinations: vec![], n_inputs: 0, n_outputs: 1,
             tensors: vec![crate::lisp_host::TensorMeta {
                 name: "shape".into(), cell_offset: 2, shape: vec![2], kind: "param".into(),
                 mutable: true, source_file: None, source_sample_rate: None,

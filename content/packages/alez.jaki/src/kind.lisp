@@ -33,6 +33,8 @@
 
 (import alez.jaki.doc)
 (import alez.jaki.chords)
+(import eseq.view-kit :refer (color-rgba))
+(import eseq.kinds :refer (tracks groups generator-of generator-mark-named generator-mark-of))
 
 (export jk-panel)
 
@@ -180,36 +182,34 @@
 
 ;; ── routes ─────────────────────────────────────────────────────────────────
 
-;; Owned by a rack: routes are its members (pads), in member order. `self.owner`
-;; is `:project` or the rack's group id; SEQ.groups is read so a member that
-;; joins later shows up.
+;; The tracks a row may play: the project's, or on a rack its members (its
+;; pads), in member order. `self.owner` is `:project` or the rack's group id.
 (def jk-route-tracks (self)
-  (let ((owner self.owner) (groups SEQ.groups))
+  (let ((owner self.owner))
     (if (number? owner)
-      (let ((gidx (eseq.drum-rack-v2/group-index-by-id owner)))
-        (if (>= gidx 0) (eseq.drum-rack-v2/members gidx) (list)))
-      (range 0 (len SEQ.track-names)))))
+      (let ((rack (first (filter (lambda (g) (= g.gid owner)) (groups)))))
+        (if rack rack.tracks (list)))
+      (tracks))))
 
 ;; Option 0 is Off; option k+1 is route k (a track, or pad k on a rack).
 ;; Option 0 is Off, then the routes; the last is Chords: the row declares
 ;; the chord the other rows read (docs/harmony-declaration-spec.md).
 (def jk-chords-label "Chords")
 
-(def jk-route-options (self)
-  (let ((names SEQ.track-names))
-    (append
-      (cons "Off"
-        (map (lambda (track) (str (+ track 1) " " (nth names track)))
-             (jk-route-tracks self)))
-      (list jk-chords-label))))
+;; `routes`: (jk-route-tracks self)
+(def jk-route-options (routes)
+  (append
+    (cons "Off" (map (lambda (t) (str (+ t.index 1) " " t.name)) routes))
+    (list jk-chords-label)))
 
 (def jk-chords-row? (row) (= (get row :route) alez.jaki.doc/chords-route))
 
-(def jk-route-index (self row)
+;; `n`: how many routes there are
+(def jk-route-index (row n)
   (let ((route (get row :route)))
     (if (jk-chords-row? row)
-      (+ 1 (len (jk-route-tracks self)))
-      (if (and (number? route) (>= route 0) (< route (len (jk-route-tracks self))))
+      (+ 1 n)
+      (if (and (number? route) (>= route 0) (< route n))
         (+ route 1)
         0))))
 
@@ -217,42 +217,56 @@
 (def jk-route-of-label (self label)
   (if (= label jk-chords-label)
     alez.jaki.doc/chords-route
-    (- (max 0 (jk-index-of (jk-route-options self) label)) 1)))
-
-(def jk-route-color (self row)
-  (let ((route (get row :route)) (tracks (jk-route-tracks self)))
-    (if (jk-chords-row? row)
-      :process-lane-accent
-      (if (and (number? route) (>= route 0) (< route (len tracks)))
-        (let ((c (nth SEQ.track-colors (nth tracks route))))
-          (if (and c (>= (len c) 3)) (rgba (nth c 0) (nth c 1) (nth c 2) 1) :mixer-strip-border))
-        :mixer-strip-border))))
+    (- (max 0 (jk-index-of (jk-route-options (jk-route-tracks self)) label)) 1)))
 
 ;; The track a row plays (a rack's pad → its member track), or nil when the
 ;; row is Off: the sexp-slot's :dyn-context, so `(plock NAME V)` completes
 ;; and checks NAME against that track's parameters (jaki-plock-spec §5.3).
-(def jk-row-track (self row)
-  (let ((route (get row :route)) (tracks (jk-route-tracks self)))
-    (if (and (number? route) (>= route 0) (< route (len tracks)))
-      (nth tracks route)
+(def jk-row-track (routes row)
+  (let ((route (get row :route)))
+    (if (and (number? route) (>= route 0) (< route (len routes)))
+      (nth routes route)
       nil)))
+
+;; `t`: the row's track (jk-row-track)
+(def jk-route-color (row t)
+  (if (jk-chords-row? row)
+    :process-lane-accent
+    (if t (color-rgba t.color 1) :mixer-strip-border)))
+
+;; ── generator marks ────────────────────────────────────────────────────────
+;; The tick stamps marks as its hits sound (alez.jaki.doc/tick): the playing
+;; tick under "", a Chords row's chord under "chord", and per route slot the
+;; items applied to the hit and the (seq …) members it played (`(gen-mark v
+;; key)`). A mark shows the stamp sounding now, 0 while stopped; it exists
+;; from its first stamp on, so a read before that is 0 too.
+(def jk-mark-value (self key)
+  (let ((m (generator-mark-of self key))) (if m m.value 0)))
+
+;; The mark as a binding: a hit repaints the widget without re-running Lisp.
+;; `g`: the instance's generator (generator-of self, taken once per row), or
+;; nil.
+(def jk-mark-binding (g key)
+  (let ((m (if g (generator-mark-named g key) nil))) (if m #'m.value 0)))
 
 ;; The chord a Chords row declared last, as it sounds: the tick stamps it as
 ;; a mark (alez.jaki.chords/field-code); its own subtree, so a chord change
 ;; repaints only this label. "—" before anything is declared (or stopped).
 (def jk-chord-now (self k index)
   (subtree :key (jk-key k (str "jaki-chord-now-" index "-" self.id))
-    (let ((name (alez.jaki.chords/decode-name
-                  (reactive-value (bind-seq (str "generator-mark-" self.id "-chord"))))))
+    (let ((name (alez.jaki.chords/decode-name (jk-mark-value self "chord"))))
       (label (if (= name "") "—" name)
         :width 6 :height jk-row-height :font-size 12 :h-align :center
         :color :process-lane-accent :bg :transparent))))
 
 ;; ── plock names after a reroute (jaki-plock-spec §6) ──────────────────────
 ;; The slot draws a name its track does not have in the error color and keeps
-;; it; hovering the item says why. One hovered row at a time, so one global:
-;; (list instance-id pattern row text), or nil.
-(defstate jk-hover-reason nil)
+;; it; hovering the item says why. One hovered row at a time: the row (its
+;; instance id, pattern and index; nil for none) and why.
+(def-kind jk-plock-hover
+  :key ()
+  :state ((row :any :default nil)
+          (reason "")))
 
 ;; the NAME of a (plock NAME V) item, bare or under (on SEL …); nil otherwise
 (def jk-plock-name (item)
@@ -265,31 +279,25 @@
         nil))
     nil))
 
-(def jk-plock-reason (item track)
+(def jk-plock-reason (item t)
   (let ((name (jk-plock-name item)))
-    (if (and (string? name) (number? track)
-             (= (dyn-word-valid? "param" track name) false))
-      (str "not on " (nth SEQ.track-names track))
+    (if (and (string? name) t (= (dyn-word-valid? "param" t.index name) false))
+      (str "not on " t.name)
       nil)))
 
-(def jk-hover-row (self k index item track)
-  (let ((text (jk-plock-reason item track)))
-    (if text
-      (set! jk-hover-reason (list self.id k index text))
-      (if (and jk-hover-reason
-               (= (nth jk-hover-reason 0) self.id)
-               (= (nth jk-hover-reason 1) k)
-               (= (nth jk-hover-reason 2) index))
-        (set! jk-hover-reason nil)
-        nil))))
+(def jk-row-id (self k index) (list self.id k index))
+
+(def jk-hover-row (self k index item t)
+  (let ((text (jk-plock-reason item t)) (row (jk-row-id self k index)))
+    (when text
+      (set! jk-plock-hover.row row)
+      (set! jk-plock-hover.reason text))
+    (unless text
+      (when (= jk-plock-hover.row row)
+        (set! jk-plock-hover.row nil)))))
 
 (def jk-row-reason (self k index)
-  (if (and jk-hover-reason
-           (= (nth jk-hover-reason 0) self.id)
-           (= (nth jk-hover-reason 1) k)
-           (= (nth jk-hover-reason 2) index))
-    (nth jk-hover-reason 3)
-    nil))
+  (if (= jk-plock-hover.row (jk-row-id self k index)) jk-plock-hover.reason nil))
 
 ;; ── widgets ────────────────────────────────────────────────────────────────
 
@@ -359,10 +367,10 @@
 ;; Two cycles of the figure strip's pattern as its symbols — one cell per
 ;; dot, one double-width cell per dash — figures and cycles set apart. While
 ;; the transport plays, the symbol under the playhead lights up: the tick
-;; stamps (gen-mark (+ tick 1)) at its audio time (alez.jaki.doc/tick), the
-;; host publishes the latest sounded one as SEQ.generator-mark-<id> (0 when
-;; stopped), and the strip locates that tick in the pattern. The strip is its
-;; own subtree so the playhead re-runs only it.
+;; stamps (gen-mark (+ tick 1)) at its audio time (alez.jaki.doc/tick), its
+;; "" mark shows the latest sounded one (0 when stopped), and the strip
+;; locates that tick in the pattern. The strip is its own subtree so the
+;; playhead re-runs only it.
 
 (def jk-preview-cycles 2)
 (def jk-preview-width 80)
@@ -389,8 +397,8 @@
 
 ;; the playing (cycle unit) of pattern p, or nil when stopped
 (def jk-playhead (self p)
-  (let ((mark (reactive-value (bind-seq (str "generator-mark-" self.id)))))
-    (if (and (number? mark) (> mark 0))
+  (let ((mark (jk-mark-value self "")))
+    (if (> mark 0)
       (let ((tick (- mark 1)))
         (let ((loc (alez.jaki.core/locate p tick)))
           (list (nth loc 0) (- tick (nth loc 1)))))
@@ -453,19 +461,21 @@
 ;; `sounding`: the row is routed and its pattern plays, so its route has marks
 (def jk-row (self k index row route-slot sounding)
   (let ((live (alez.jaki.doc/row-live? row))
-        (track (jk-row-track self row))
+        (routes (jk-route-tracks self))
+        (t (jk-row-track routes row))
+        (g (generator-of self))
         (reason (jk-row-reason self k index)))
     (box :key (jk-key k (str "jaki-row-" index))
       :height jk-row-height :padding 0 :background-color :transparent
       (h-stack :gap 0.4 :align :center
         (box :width 0.3 :height jk-row-height :corner-radius 2
-          :background-color (jk-route-color self row))
+          :background-color (jk-route-color row t))
         (label (str index) :width 1.4 :height jk-row-height :font-size 9
           :h-align :center :color (if live :foreground :dim) :bg :transparent)
         (dropdown
           :key (jk-key k (str "jaki-route-" index))
-          :value-index (jk-route-index self row)
-          :options (jk-route-options self)
+          :value-index (jk-route-index row (len routes))
+          :options (jk-route-options routes)
           :badge-color :transparent :bg-color :mixer-strip-bg
           :border-color :mixer-strip-selected-bg
           :width 8 :height jk-row-height :font-size 9
@@ -489,16 +499,16 @@
           ;; the items applied to the sounding hit — (on …) and (every …) —
           ;; ring up: the tick stamps a bitmask per route at each hit's audio
           ;; time (jaki-sequencer-spec §7.3); a render binding, no Lisp rerun
-          :lit (if sounding (bind-seq (str "generator-mark-" self.id "-" route-slot)) 0)
+          :lit (if sounding (jk-mark-binding g (str route-slot)) 0)
           ;; and the member of each (seq …) / cycle list the hit played (§7.4)
           :lit-values (if sounding
-            (map (lambda (k) (bind-seq (str "generator-mark-" self.id "-" route-slot "." k)))
+            (map (lambda (k) (jk-mark-binding g (str route-slot "." k)))
               (range 0 (len (get row :mods))))
             (list))
           :lit-color :process-lane-accent
           ;; `(dyn "param")` names complete and validate against this track
-          :dyn-context track
-          :on-hover (lambda (item) (jk-hover-row self k index item track))
+          :dyn-context (if t t.index nil)
+          :on-hover (lambda (item) (jk-hover-row self k index item t))
           :on-change (lambda (mods) (jk-set-mods self k index mods)))
         (if reason
           (label reason :width 12 :height jk-row-height :font-size 9

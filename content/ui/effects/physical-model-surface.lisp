@@ -8,9 +8,9 @@
 (defmacro screen-ink () `(rgba 0.16 0.06 0.11 1))
 (def accent () (eseq.effects.physical-model-surface/screen))
 (def ink () (eseq.effects.physical-model-surface/screen-ink))
-(def bind (name)
-  (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+;; The instrument's param `name` as a control binds it (0 when the
+;; instrument has none).
+(def bind (name) (eseq.effects.custom-ui-controls/ui-param-bound-value name 0))
 (def knob (spec section)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (nth spec 0) (nth spec 1)
     8.5 3.5 2.55 (accent) (nth spec 2) (nth spec 3) :widget-knob-track 11 9.5 :center))
@@ -41,7 +41,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color text-ink :edit-color text-ink :cursor-color text-ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 (def details (specs section)
   (v-stack :gap 0.15
@@ -98,7 +98,7 @@
 ;; Analytic mechanism views, not an audio scope. Every varying shader input
 ;; is bindable so automation can update the drawing without rebuilding the UI.
 (defwidget pm-reed-response
-  :width 35.3 :height 3.1 :state (slope closure direction curvature) :bindable (slope closure curvature)
+  :width 35.3 :height 3.1 :state (slope closure direction curvature)
   :shader
   (let ((delta (clamp (/ x aspect) -1 1))
         (linear (clamp (+ closure (* direction (max 0.1 slope) delta)) -1 1))
@@ -116,7 +116,7 @@
     (pm-reed-response :debug-name "pm-reed" :slope slope :closure closure :direction direction :curvature curvature)))
 
 (defwidget pm-bore-loss
-  :width 35.3 :height 3.1 :state (cutoff loss) :bindable (cutoff loss)
+  :width 35.3 :height 3.1 :state (cutoff loss)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (f (* 40 (pow 400 u)))
@@ -133,7 +133,7 @@
     (pm-bore-loss :debug-name "pm-bore-loss" :cutoff cutoff :loss loss)))
 
 (defwidget pm-air-column
-  :width 35.3 :height 3.1 :state (position) :bindable (position)
+  :width 35.3 :height 3.1 :state (position)
   :shader
   (let ((marker (* aspect (+ -0.88 (* 1.76 position)))))
     (sdf/layer
@@ -147,7 +147,7 @@
     (pm-air-column :debug-name "pm-column" :position position)))
 
 (defwidget pm-flutter-motion
-  :width 35.3 :height 3.1 :state (rate drift depth floor) :bindable (rate drift depth floor)
+  :width 35.3 :height 3.1 :state (rate drift depth floor)
   :shader
   (let ((t (+ 1 (/ x aspect)))
         (lo (- 1 depth))
@@ -166,7 +166,7 @@
       :drift (bind "flutter.drift_hz") :depth (bind "flutter.depth") :floor (bind "flutter.floor"))))
 
 (defwidget pm-vibrato-motion
-  :width 35.3 :height 3.1 :state (rate depth wait) :bindable (rate depth wait)
+  :width 35.3 :height 3.1 :state (rate depth wait)
   :shader
   (let ((t (+ 1 (/ x aspect)))
         (fade (clamp (/ (- t (* wait 0.001)) 0.15) 0 1))
@@ -184,7 +184,7 @@
 ;; Normalized analogue bandpass magnitude is a nominal response preview;
 ;; the DSP's discrete SVF and bell lowpass determine the rendered spectrum.
 (defwidget pm-body-response
-  :width 35.3 :height 3.1 :state (frequency q amount) :bindable (frequency q amount)
+  :width 35.3 :height 3.1 :state (frequency q amount)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (f (* 40 (pow 400 u)))
@@ -208,7 +208,7 @@
 
 (export partials-view)
 (defwidget pm-flute-body-partials
-  :width 35.3 :height 3.1 :state (frequency stretch brightness) :bindable (frequency stretch brightness)
+  :width 35.3 :height 3.1 :state (frequency stretch brightness)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (f (* 40 (pow 350 u)))
@@ -236,7 +236,7 @@
 
 (export envelope-titled bow-view pluck-view cello-body-view section-view)
 (defwidget pm-bow-friction
-  :width 35.3 :height 3.1 :state (pressure curve speed) :bindable (pressure curve speed)
+  :width 35.3 :height 3.1 :state (pressure curve speed)
   :shader
   (let ((relative (* 0.8 (/ x aspect)))
         (slip (+ 0.75 (/ (abs relative) (+ 0.1 (* 0.6 pressure)))))
@@ -255,7 +255,7 @@
       :curve (bind "bow.rosin") :speed (bind "bow.speed"))))
 
 (defwidget pm-pluck-pulse
-  :width 35.3 :height 3.1 :state (duration amount texture) :bindable (duration amount texture)
+  :width 35.3 :height 3.1 :state (duration amount texture)
   :shader
   (let ((t (* 12.5 (+ 1 (/ x aspect))))
         (phase (clamp (/ t duration) 0 1))
@@ -274,7 +274,6 @@
 (defwidget pm-cello-body
   :width 35.3 :height 3.1
   :state (amount size q f1 g1 f2 g2 f3 g3 f4 g4)
-  :bindable (amount size q f1 g1 f2 g2 f3 g3 f4 g4)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (f (* 40 (pow 400 u)))
@@ -307,7 +306,7 @@
       :f4 (bind "body.air_hz") :g4 (bind "body.air"))))
 
 (defwidget pm-string-section
-  :width 35.3 :height 3.1 :state (amount spread) :bindable (amount spread)
+  :width 35.3 :height 3.1 :state (amount spread)
   :shader
   (let ((offset (* aspect (/ spread 55))))
     (sdf/layer
@@ -323,7 +322,7 @@
 (export piano-hammer-view piano-string-view piano-body-view piano-tuning-view piano-damper-view piano-motion-view piano-swell-view piano-output-view)
 
 (defwidget pm-piano-hammer
-  :width 35.3 :height 3.1 :state (hardness contact position) :bindable (hardness contact position)
+  :width 35.3 :height 3.1 :state (hardness contact position)
   :shader
   (let ((t (* 1.5 (+ 1 (/ x aspect))))
         (tau (* 0.12 contact (pow 2 (* 3 (- 0.5 hardness)))))
@@ -342,7 +341,7 @@
       :contact (bind "hammer.contact") :position (bind "hammer.position"))))
 
 (defwidget pm-piano-strings
-  :width 35.3 :height 3.1 :state (decay damping stiffness aftersound) :bindable (decay damping stiffness aftersound)
+  :width 35.3 :height 3.1 :state (decay damping stiffness aftersound)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (n (+ 1 (floor (* u 16))))
@@ -362,7 +361,7 @@
       :damping (bind "string.damping") :stiffness (bind "string.stiffness") :aftersound (bind "string.aftersound"))))
 
 (defwidget pm-piano-body
-  :width 35.3 :height 3.1 :state (size amount color low high) :bindable (size amount color low high)
+  :width 35.3 :height 3.1 :state (size amount color low high)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (f (* 40 (pow 400 u)))
@@ -381,7 +380,7 @@
       :color (bind "body.color") :low (bind "body.low_hz") :high (bind "body.high_hz"))))
 
 (defwidget pm-piano-unison
-  :width 35.3 :height 3.1 :state (spread stereo stretch) :bindable (spread stereo stretch)
+  :width 35.3 :height 3.1 :state (spread stereo stretch)
   :shader
   (let ((u (+ 1 (/ x aspect)))
         (envelope (* 0.22 (sin (* 1.5707963 u))))
@@ -400,7 +399,7 @@
       :stereo (bind "tuning.width") :stretch (bind "tuning.stretch"))))
 
 (defwidget pm-piano-dampers
-  :width 35.3 :height 3.1 :state (release pedal upper) :bindable (release pedal upper)
+  :width 35.3 :height 3.1 :state (release pedal upper)
   :shader
   (let ((t (* 0.5 (+ 1 (/ x aspect))))
         (rate (/ (* 6.907755 (- 1 pedal) (- 1 pedal)) release))
@@ -417,7 +416,7 @@
       :pedal (bind "damper.pedal") :upper (bind "damper.upper_free"))))
 
 (defwidget pm-piano-motion
-  :width 35.3 :height 3.1 :state (depth rate pan panrate) :bindable (depth rate pan panrate)
+  :width 35.3 :height 3.1 :state (depth rate pan panrate)
   :shader
   (let ((t (+ 1 (/ x aspect)))
         (amp (- 1 (* depth 0.5 (+ 1 (sin (* 6.2831853 rate t))))))
@@ -433,7 +432,7 @@
       :rate (bind "motion.tremolo_hz") :pan (bind "motion.pan") :panrate (bind "motion.pan_hz"))))
 
 (defwidget pm-piano-output
-  :width 35.3 :height 3.1 :state (drive gain) :bindable (drive gain)
+  :width 35.3 :height 3.1 :state (drive gain)
   :shader
   (let ((input (/ x aspect))
         (v (* input (+ 1 (* drive 12))))
@@ -450,7 +449,7 @@
 
 
 (defwidget pm-piano-swell
-  :width 35.3 :height 3.1 :state (amount duration curve tail) :bindable (amount duration curve tail)
+  :width 35.3 :height 3.1 :state (amount duration curve tail)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (span (+ duration 1))
@@ -477,7 +476,7 @@
 (export saron-mallet-view saron-bar-view saron-tuning-view saron-damper-view saron-output-view)
 
 (defwidget pm-saron-mallet
-  :width 35.3 :height 3.1 :state (hardness contact spread) :bindable (hardness contact spread)
+  :width 35.3 :height 3.1 :state (hardness contact spread)
   :shader
   (let ((time (* 0.5 (+ 1 (/ x aspect))))
         (tau (* 0.06 contact (pow 2 (* 3 (- 0.5 hardness)))))
@@ -495,7 +494,7 @@
       :contact (bind "mallet.contact") :spread (bind "mallet.spread"))))
 
 (defwidget pm-saron-bar
-  :width 35.3 :height 3.1 :state (decay bloom loss) :bindable (decay bloom loss)
+  :width 35.3 :height 3.1 :state (decay bloom loss)
   :shader
   (let ((time (* 1.5 (+ 1 (/ x aspect))))
         (rise (max 0.00005 (* 0.079 bloom)))
@@ -514,7 +513,7 @@
       :bloom (bind "bar.bloom") :loss (bind "bar.loss"))))
 
 (defwidget pm-saron-tuning
-  :width 35.3 :height 3.1 :state (amount tune) :bindable (amount tune)
+  :width 35.3 :height 3.1 :state (amount tune)
   :shader
   (let ((u (* 0.5 (+ 1 (/ x aspect))))
         (n (floor (* u 7))) (slot (- (* u 7) n))
@@ -533,7 +532,7 @@
       :tune (bind "tuning.tune"))))
 
 (defwidget pm-saron-damper
-  :width 35.3 :height 3.1 :state (touch release lift) :bindable (touch release lift)
+  :width 35.3 :height 3.1 :state (touch release lift)
   :shader
   (let ((time (* (+ release 0.6) 0.5 (+ 1 (/ x aspect))))
         (key-up (max 0 (- time 0.25)))
@@ -552,7 +551,7 @@
       :release (bind "damper.release_s") :lift (bind "damper.lift"))))
 
 (defwidget pm-saron-output
-  :width 35.3 :height 3.1 :state (drive gain) :bindable (drive gain)
+  :width 35.3 :height 3.1 :state (drive gain)
   :shader
   (let ((input (/ x aspect)) (v (* input (+ 1 (* drive 8))))
         (e (pow 2.7182818 (* 2 v)))
@@ -571,7 +570,7 @@
 ;; Shared diagrams take the current instrument's measured reference constants.
 ;; Curves illustrate mechanisms; they are not live audio measurements.
 (defwidget pm-gamelan-mallet
-  :width 35.3 :height 3.1 :state (hardness contact spread) :bindable (hardness contact spread)
+  :width 35.3 :height 3.1 :state (hardness contact spread)
   :shader
   (let ((time (* 6 (+ 1 (/ x aspect))))
         (tau (* contact (pow 2 (* 3 (- 0.5 hardness)))))
@@ -590,7 +589,7 @@
 
 (defwidget pm-gamelan-body
   :width 35.3 :height 3.1
-  :state (decay bloom loss rate rise direct) :bindable (decay bloom loss rate rise direct)
+  :state (decay bloom loss rate rise direct)
   :shader
   (let ((time (* 2.5 (+ 1 (/ x aspect))))
         (tau (max 0.00005 (* rise bloom)))
@@ -609,7 +608,7 @@
       :bloom (bind "body.bloom") :loss (bind "body.loss") :rate rate :rise rise :direct direct)))
 
 (defwidget pm-gamelan-tuning
-  :width 35.3 :height 3.1 :state (amount tune offset) :bindable (amount tune offset)
+  :width 35.3 :height 3.1 :state (amount tune offset)
   :shader
   (let ((position (* aspect (/ (+ tune (* amount offset)) 200))))
     (sdf/layer
@@ -624,7 +623,7 @@
       :tune (bind "tuning.tune") :offset offset)))
 
 (defwidget pm-gamelan-damper
-  :width 35.3 :height 3.1 :state (touch release lift rate) :bindable (touch release lift rate)
+  :width 35.3 :height 3.1 :state (touch release lift rate)
   :shader
   (let ((time (* (+ release 0.6) 0.5 (+ 1 (/ x aspect))))
         (key-up (max 0 (- time 0.25)))
@@ -652,7 +651,7 @@
      ,stroke (eseq.effects.physical-model-surface/screen-ink)))
 
 (defwidget pm-cymbal-body
-  :width 35.3 :height 3.1 :state (size character) :bindable (size character)
+  :width 35.3 :height 3.1 :state (size character)
   :shader
   (let ((major (* aspect (+ 0.45 (* size 0.2)))))
     (sdf/layer
@@ -671,7 +670,7 @@
       :character (bind "voicing.character"))))
 
 (defwidget pm-cymbal-loss
-  :width 35.3 :height 3.1 :state (decay damping touch) :bindable (decay damping touch)
+  :width 35.3 :height 3.1 :state (decay damping touch)
   :shader
   (let ((time (* 1.5 (+ 1 (/ x aspect))))
         (loss (* 180 touch touch))
@@ -687,7 +686,7 @@
       :damping (bind "body.damping") :touch (bind "contact.touch"))))
 
 (defwidget pm-cymbal-contact
-  :width 35.3 :height 3.1 :state (hardness openness touch hat) :bindable (hardness openness touch)
+  :width 35.3 :height 3.1 :state (hardness openness touch hat)
   :shader
   (let ((u (/ x aspect)) (profile (* 0.1 (- 1 (* u u))))
         (gap (* hat (+ 0.015 (* openness 0.4))))
@@ -707,7 +706,7 @@
       :openness (if hat? (bind "contact.openness") 0) :touch (bind "contact.touch") :hat (if hat? 1 0))))
 
 (defwidget pm-cymbal-output
-  :width 35.3 :height 3.1 :state (bell wash gain width) :bindable (bell wash gain width)
+  :width 35.3 :height 3.1 :state (bell wash gain width)
   :shader
   (let ((u (/ x aspect)) (extent (+ 0.08 (* width 0.24)))
         (b (- 0.8 (* 0.38 bell gain))) (w (- 0.8 (* 0.38 wash gain)))

@@ -122,6 +122,11 @@ impl PadRole {
         PadRole::ALL.into_iter().find(|role| role.key() == key)
     }
 
+    /// [`Self::from_key`], ignoring ASCII case (a script's `"SNARE"`).
+    pub fn from_key_ignore_case(key: &str) -> Option<PadRole> {
+        (PadRole::ALL.into_iter()).find(|role| role.key().eq_ignore_ascii_case(key))
+    }
+
     /// Menu label.
     pub fn label(self) -> &'static str {
         match self {

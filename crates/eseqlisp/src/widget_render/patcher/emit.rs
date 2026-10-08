@@ -53,10 +53,15 @@ fn emit_patch_debug_lisp_body(patch: &Patch, context: EmitContext) -> String {
         .unwrap_or_default();
     let mut emitted = Vec::new();
     let mut emitted_node_ids = HashSet::new();
+    let consumed_node_ids = patch
+        .connections
+        .iter()
+        .map(|connection| connection.from_node.as_str())
+        .collect::<HashSet<_>>();
     let mut top_level = patch.nodes.iter().collect::<Vec<_>>();
     top_level.sort_by_key(|node| source_order(node).unwrap_or((usize::MAX, usize::MAX)));
     for node in top_level {
-        if !should_emit_top_level(node) {
+        if !should_emit_top_level(node, consumed_node_ids.contains(node.id.as_str())) {
             continue;
         }
         if tuple_return_source_ids.contains(node.id.as_str()) {
@@ -220,7 +225,13 @@ fn source_order(node: &PatchNode) -> Option<(usize, usize)> {
     Some((form_id.index, path_len))
 }
 
-fn should_emit_top_level(node: &PatchNode) -> bool {
+/// Whether `node` is its own top-level form rather than an expression inlined
+/// into a consumer. Besides `out`, that is any probe nothing reads: a probe is
+/// a compiler root (spec §2), so a dangling one is still a form of its own.
+fn should_emit_top_level(node: &PatchNode, has_consumer: bool) -> bool {
+    if super::probe::is_probe_node(node) && !has_consumer {
+        return true;
+    }
     let Some(source) = node.source.as_ref() else {
         return matches!(node.kind, NodeKind::Out);
     };

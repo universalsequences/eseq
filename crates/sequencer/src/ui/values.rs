@@ -28,10 +28,6 @@ pub(crate) fn build_string_list(items: &[String]) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_flat_tree_items(items: &[String]) -> Value {
-    build_tree_items(items, None)
-}
-
 pub(crate) fn build_icon_tree_items(items: &[String], icon: &str) -> Value {
     build_tree_items(items, Some(icon))
 }

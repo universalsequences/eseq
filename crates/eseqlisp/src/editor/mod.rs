@@ -2,7 +2,7 @@ mod commands;
 mod minibuffer;
 mod natives;
 mod runtime_context;
-pub use natives::{asset_metadata_lisp_value, asset_option_labels};
+pub use natives::{AssetMetadata, asset_metadata, asset_metadata_lisp_value, asset_option_labels};
 pub(crate) mod widget_focus;
 mod widget_interaction;
 
@@ -6466,8 +6466,8 @@ impl Editor {
         // A modified global chord prefix that is not itself a direct binding
         // opens the chord before a catch-all on-key handler can swallow it,
         // so "C-x …" commands keep working from every mode. Unmodified
-        // prefixes ("ESC" with "ESC ." chords) still reach the mode first:
-        // Escape is a cancellation key modes rely on.
+        // prefixes still reach the mode first (Escape, a cancellation key
+        // modes rely on, is deliberately never a prefix).
         if !vim_insert_literal
             && key.modifiers != KeyModifiers::NONE
             && !self.lisp_bindings.contains_key(&ks)
@@ -7318,6 +7318,7 @@ impl Editor {
                         content_row,
                         precise_col,
                         precise_row,
+                        mouse.modifiers,
                     ) {
                         self.remember_widget_click(
                             content_col,
@@ -7903,7 +7904,8 @@ impl Editor {
         let handled = match self.runtime.invoke_global(fn_name, args.to_vec()) {
             Ok(Some(Value::Bool(false))) => false,
             Ok(Some(result)) => {
-                self.show_transient_message(format_value_for_minibuffer(&result));
+                let text = truncate_for_minibuffer(self.runtime.format_value(&result));
+                self.show_transient_message(text);
                 true
             }
             Ok(None) => {
@@ -7995,7 +7997,10 @@ impl Editor {
         }
 
         match self.runtime.eval_str(&source) {
-            Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
+            Ok(Some(result)) => {
+                let text = truncate_for_minibuffer(self.runtime.format_value(&result));
+                self.show_transient_message(text);
+            }
             Ok(None) => self.show_transient_message("No result"),
             Err(e) => self.show_transient_message(format!("Error: {e:?}")),
         }
@@ -8076,8 +8081,7 @@ impl Editor {
     /// state. Depth-guarded; each pass either clears the deferred work or
     /// leaves it hidden again.
     fn resume_deferred_effects_for_presentation(&mut self) {
-        if self.deferred_effect_resume_depth >= 3
-            || !self.runtime.has_resumable_hidden_effect_work()
+        if self.deferred_effect_resume_depth >= 3 || !self.runtime.has_pending_visible_effect_work()
         {
             return;
         }
@@ -8369,6 +8373,7 @@ impl Editor {
                 leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                widget_focus::remap_leaf_focus_to_layout(leaf);
                 leaf.cached_inactive_frame = None;
             }
             self.record_layout_refresh_timing(
@@ -8582,6 +8587,7 @@ impl Editor {
                 leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                widget_focus::remap_leaf_focus_to_layout(leaf);
                 leaf.cached_inactive_frame = None;
             }
             self.record_layout_refresh_timing(
@@ -11062,8 +11068,8 @@ fn filter_candidates(candidates: &[String], input: &str) -> Vec<String> {
         .collect()
 }
 
-fn format_value_for_minibuffer(value: &Value) -> String {
-    let mut s = format_lisp_value(value);
+fn truncate_for_minibuffer(formatted: String) -> String {
+    let mut s = formatted;
     if s.len() > 240 {
         s.truncate(237);
         s.push_str("...");

@@ -11,12 +11,23 @@
 ;; transpose-reset / vel-decay / vel-reset / state-reset / resolution / quantize plus
 ;; the 16x16 connection-weight matrix.
 ;;
+;; The panel reads and edits the graph through the kinds (kind-bindings spec §14.2k,
+;; §14.2s): every control edit is one undo entry, a drag's frames joining one. The
+;; timing controls (dur x, swing) set every node's param at once through the graph-*
+;; natives, one undo entry each.
+;;
 ;; Project scratch entrypoint:
 ;;   (load "content/scripts/sequencers/graph-neural-16-demo.lisp")
 ;;
-;; Loading this file only publishes the graph/UI and syncs controls from the current
-;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
+;; Loading this file only publishes the graph/UI. It does not write graph overrides.
+;; For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
+
+(import eseq.kinds :refer (graph-of graph-param-named graph-quantize-options))
+(import eseq.view-kit :refer (nothing))
+(import eseq.graph-kit :refer (route-options node-route-label set-route-label! weight-rows
+                               set-weight! column rack-name res-options
+                               set-param-on-nodes!))
 
 ;; `def-sequencer` returns the instance handle; every graph-* native below takes
 ;; it, so this script also works when a drum rack owns it (routes then address
@@ -83,40 +94,12 @@
 (def script-buffer-name "*16x16*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def g16-owner-rack (graph-owner g16-name))
-(def g16-route-tracks ()
-  ;; Read live so a member that joins the rack later shows up; SEQ.groups
-  ;; is read only to re-render when the membership changes.
-  (let ((groups SEQ.groups)) (graph-route-tracks g16-name)))
-(def script-tab-label
-  (if g16-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id g16-owner-rack)) "16x16"))
+(def script-tab-label (if g16-owner-rack (rack-name g16-owner-rack) "16x16"))
 (def script-sequencer-name "neural-16-demo")
 
-;; Dropdown option lists. Order is the index space bind-graph maps into.
-
-(def g16-res-options (list "1" "2" "4" "8" "16" "32" "64"))
-(def g16-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
-;; Route option n is track n (project-owned) or rack member n (rack-owned);
-;; "Off" is always last. Either way the option index IS the route value.
-(def g16-route-options ()
-  (if (g16-route-tracks)
-    (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (g16-route-tracks))
-      (list "Off"))
-    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-          "Off")))
-
-(def g16-index-of (xs item)
-  (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
-    (if (> (len hits) 0) (nth hits 0) 0)))
-
-;; Route dropdown label -> the internal route the engine stores (:off or a track index).
-(def g16-route->internal (label)
-  (if (= label "Off") :off (g16-index-of (g16-route-options) label)))
-
-;; Connection weights: one list-valued widget, so a single state cell is fine.
-;; Per-node knobs avoid defstate via bind-graph. The matrix keeps one g16-weights
-;; cell rebuilt from the graph on render and patched one cell at a time on edit.
+;; ── init helpers (explicit-only; loading the file does NOT call these) ──
+;; They write through the graph-* natives, which answer at once: the graph is
+;; not a kind instance until the host's next sync.
 
 (def g16-ring-weights ()
   (map
@@ -125,39 +108,6 @@
         (lambda (c) (if (= c (if (= r (- g16-node-count 1)) 0 (+ r 1))) 1 0))
         (range 0 g16-node-count)))
     (range 0 g16-node-count)))
-
-(defstate g16-weights (list))
-(defstate g16-dur-factor 1)
-(defstate g16-swing 62)
-
-(def g16-read-weights ()
-  (map
-    (lambda (r) (map (lambda (c) (graph-edge-value g16-name r c :weight)) (range 0 g16-node-count)))
-    (range 0 g16-node-count)))
-
-(def g16-set-cell (w r c v)
-  (set-nth w r (set-nth (nth w r) c v)))
-
-(def g16-zero-row ()
-  (map (lambda (n) 0) (range 0 g16-node-count)))
-
-(def g16-zero-matrix ()
-  (map (lambda (n) (g16-zero-row)) (range 0 g16-node-count)))
-
-(def g16-zero-column-matrix ()
-  (map (lambda (n) (list 0)) (range 0 g16-node-count)))
-
-(def g16-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :id) g16-name)) visualizations)))
-    (if (> (len hits) 0) (nth hits 0) nil)))
-
-(def g16-viz-matrix (viz field fallback)
-  (if viz
-    (let ((value (get viz field)))
-      (if value value fallback))
-    fallback))
-
-;; Init helpers are explicit-only; loading the file does not call these.
 
 (def g16-apply-weights (w)
   (for-each
@@ -169,46 +119,13 @@
     (range g16-node-count)))
 
 (def g16-init-ring-defaults ()
-  (do
-    (set! g16-weights (g16-ring-weights))
-    (g16-apply-weights g16-weights)
-    (graph-node g16-name 0 :seed-from 0)))
+  (g16-apply-weights (g16-ring-weights))
+  (graph-node g16-name 0 :seed-from 0))
 
 (def script-init-fn ()
   (g16-init-ring-defaults))
 
-;; Edit helpers dirty the bound widget (reactive-set) and persist the override.
-
-(def g16-edit-num (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key g16-name n field) v)
-    (graph-node g16-name n field v)))
-
-(def g16-edit-param (n field v)
-  (do
-    (reactive-set "GRAPH" (graph-key g16-name n field) v)
-    (graph-param g16-name n field v)))
-
-(def g16-edit-global-param (field v)
-  (for-each
-    (lambda (n)
-      (do
-        (reactive-set "GRAPH" (graph-key g16-name n field) v)
-        (graph-param g16-name n field v)))
-    (range 0 g16-node-count)))
-
-(def g16-edit-enum (n field options label internal)
-  (do
-    (reactive-set "GRAPH" (graph-key g16-name n field) (g16-index-of options label))
-    (graph-node g16-name n field internal)))
-
-;; Sequencer-level config is per-pattern like node/edge overrides.
-(def g16-edit-config (field v)
-  (do
-    (reactive-set "GRAPH" (graph-config-key g16-name field) v)
-    (graph-config g16-name field v)))
-
-;; UI
+;; ── UI ──
 
 (def g16-row-height 1.3)
 (def g16-node-width 1.4)
@@ -222,161 +139,140 @@
     :width g16-control-width :height g16-row-height :font-size 9
     :on-change on-change))
 
-(def g16-pick (key value-index options on-change)
+(def g16-pick (key value options on-change)
   (dropdown
     :key key
-    :value-index value-index :options options
+    :value value :options options
     :width g16-dropdown-width :height g16-row-height :font-size 9
     :on-change on-change))
 
-(def g16-row (n)
-  (h-stack :gap 0.4 :align :center
-    (label (str n) :width g16-node-width :height g16-row-height :font-size 9 :h-align :center :color :dim)
-    (g16-pick (str "graph-16-route-" n)
-      (bind-graph g16-name n :route (g16-route-options)) (g16-route-options)
-      (lambda (v) (g16-edit-enum n :route (g16-route-options) v (g16-route->internal v))))
-    (g16-num (str "graph-16-delay-" n)
-      (bind-graph g16-name n :delay) 0 16 1 0
-      (lambda (v) (g16-edit-num n :delay v)))
-    (g16-num (str "graph-16-transpose-" n)
-      (bind-graph g16-name n :transpose) -48 48 1 0
-      (lambda (v) (g16-edit-param n :transpose v)))
-    (g16-num (str "graph-16-transpose-reset-" n)
-      (bind-graph g16-name n :transpose-reset) 0 1 1 0
-      (lambda (v) (g16-edit-param n :transpose-reset v)))
-    (g16-num (str "graph-16-vel-decay-" n)
-      (bind-graph g16-name n :vel-decay) 0 2 0.01 2
-      (lambda (v) (g16-edit-param n :vel-decay v)))
-    (g16-num (str "graph-16-vel-reset-" n)
-      (bind-graph g16-name n :vel-reset) 0 1 1 0
-      (lambda (v) (g16-edit-param n :vel-reset v)))
-    (g16-num (str "graph-16-state-reset-" n)
-      (bind-graph g16-name n :state-reset) 0 1 1 0
-      (lambda (v) (g16-edit-param n :state-reset v)))
-    (g16-num (str "graph-16-dampening-" n)
-      (bind-graph g16-name n :dampening) 0 1 0.01 2
-      (lambda (v) (g16-edit-param n :dampening v)))
-    (g16-num (str "graph-16-recovery-" n)
-      (bind-graph g16-name n :recovery) 0 1 0.01 2
-      (lambda (v) (g16-edit-param n :recovery v)))
-    (g16-pick (str "graph-16-resolution-" n)
-      (bind-graph g16-name n :resolution g16-res-options) g16-res-options
-      (lambda (v) (g16-edit-enum n :resolution g16-res-options v v)))
-    (g16-pick (str "graph-16-quantize-" n)
-      (bind-graph g16-name n :quantize g16-quant-options) g16-quant-options
-      (lambda (v) (g16-edit-enum n :quantize g16-quant-options v v)))))
+;; Node n's param `name`, bound.
+(def g16-param (n name lo hi stp dec)
+  (let ((p (graph-param-named n name)))
+    (g16-num (str "graph-16-" name "-" n.index) #'p.value lo hi stp dec
+      (lambda (v) (set! p.value v)))))
+
+;; A param every node carries alike: shows node 0's, sets every node's.
+(def g16-global-param (g key name lo hi stp dec)
+  (let ((p (graph-param-named (first g.nodes) name)))
+    (g16-num key #'p.value lo hi stp dec
+      (lambda (v) (set-param-on-nodes! g g16-node-count name v)))))
+
+(def g16-row (n routes)
+  (subtree :key (str "graph-16-row-" n.index)
+    (h-stack :gap 0.4 :align :center
+      (label (str n.index) :width g16-node-width :height g16-row-height :font-size 9 :h-align :center :color :dim)
+      (g16-pick (str "graph-16-route-" n.index)
+        (node-route-label n) routes
+        (lambda (label) (set-route-label! n label)))
+      (g16-num (str "graph-16-delay-" n.index) #'n.delay 0 16 1 0
+        (lambda (v) (set! n.delay v)))
+      (g16-param n "transpose" -48 48 1 0)
+      (g16-param n "transpose-reset" 0 1 1 0)
+      (g16-param n "vel-decay" 0 2 0.01 2)
+      (g16-param n "vel-reset" 0 1 1 0)
+      (g16-param n "state-reset" 0 1 1 0)
+      (g16-param n "dampening" 0 1 0.01 2)
+      (g16-param n "recovery" 0 1 0.01 2)
+      (g16-pick (str "graph-16-resolution-" n.index) n.resolution res-options
+        (lambda (v) (set! n.resolution v)))
+      (g16-pick (str "graph-16-quantize-" n.index) n.quantize graph-quantize-options
+        (lambda (v) (set! n.quantize v))))))
+
+(def g16-header-label (text width)
+  (label text :width width :height 1.0 :font-size 8 :h-align :center :color :dim))
 
 (def g16-header ()
   (h-stack :gap 0.4 :align :center
-    (label "node" :width g16-node-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "route" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "delay" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "transp" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "trn rst" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel x" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel rst" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "state rst" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "dampen" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "recover" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "res" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "quant" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
+    (g16-header-label "node" g16-node-width)
+    (g16-header-label "route" g16-dropdown-width)
+    (g16-header-label "delay" g16-control-width)
+    (g16-header-label "transp" g16-control-width)
+    (g16-header-label "trn rst" g16-control-width)
+    (g16-header-label "vel x" g16-control-width)
+    (g16-header-label "vel rst" g16-control-width)
+    (g16-header-label "state rst" g16-control-width)
+    (g16-header-label "dampen" g16-control-width)
+    (g16-header-label "recover" g16-control-width)
+    (g16-header-label "res" g16-dropdown-width)
+    (g16-header-label "quant" g16-dropdown-width)))
 
-(def g16-panel (current-pattern graph-visualizations)
-  (do
-    ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
-    ;; per-node knobs need no sync; bind-graph re-seeds their slots as rows render.
-    current-pattern
-    (set! g16-weights (g16-read-weights))
-    (set! g16-dur-factor (graph-param-value g16-name 0 :dur-factor))
-    (set! g16-swing (graph-param-value g16-name 0 :swing))
-    (let ((viz (g16-viz graph-visualizations)))
-      (box
-        :padding 0.85
-        :gap 0.6
-        :width 37
-        :height 47
+(def g16-config-label (text width)
+  (label text :width width :height 1.2 :font-size 9 :h-align :right :color :dim))
+
+;; A playback column (each node's trigger or energy), in a subtree of its
+;; own so playback re-runs only it.
+(def g16-column-matrix (key width hi values)
+  (v-stack :gap 0.35
+    (box :height 2.5)
+    (subtree :key key
+      (matrix
+        :key key
+        :rows 16
+        :cols 1
+        :width width
+        :height 24
+        :min 0
+        :max hi
+        :value (column (values))))))
+
+(def g16-graph-panel (g)
+  (box
+    :padding 0.85
+    :gap 0.6
+    :width 37
+    :height 47
+    (v-stack :gap 0.5
+      (h-stack
+        (v-stack
+          (h-stack :gap 0.6 :align :center
+            (label "16x16 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
+            (g16-config-label "reset bars" 6)
+            (g16-num "graph-16-reset-bars" #'g.reset-bars 0 64 1 0
+              (lambda (v) (set! g.reset-bars v)))
+            (g16-config-label "max poly" 6)
+            (g16-num "graph-16-max-poly" #'g.max-poly 0 16 1 0
+              (lambda (v) (set! g.max-poly v))))
+          (h-stack :gap 0.6 :align :center
+            (label "timing" :width 8 :height 1.2 :font-size 9 :color :dim)
+            (g16-config-label "dur x" 6)
+            (g16-global-param g "graph-16-dur-factor" "dur-factor" 0 8 0.25 2)
+            (g16-config-label "swing" 6)
+            (g16-global-param g "graph-16-swing" "swing" 50 75 1 0)))
+        (subtree :key "graph-16-event-view"
+          (event-view
+            :key "graph-16-event-view"
+            :events g.events
+            :current-beat #'g.beat
+            :renderer :isometric
+            :x :transpose
+            :x-min -24
+            :x-max 24
+            :y :node
+            :y-min 0
+            :y-max 15
+            :z :beat-phase
+            :z-min 0
+            :z-max 16
+            :phase-beats 16
+            :window-beats 16
+            :brightness :velocity
+            :cube-padding 0
+            :width 12
+            :height 6)))
+      (h-stack
         (v-stack :gap 0.5
-          (h-stack 
-            (v-stack
-            (h-stack :gap 0.6 :align :center
-              (label "16x16 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-              (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-              (g16-num "graph-16-reset-bars"
-                (bind-graph-config g16-name :reset-bars) 0 64 1 0
-                (lambda (v) (g16-edit-config :reset-bars v)))
-              (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-              (g16-num "graph-16-max-poly"
-                (bind-graph-config g16-name :max-poly) 0 16 1 0
-                (lambda (v) (g16-edit-config :max-poly v))))
-            (h-stack :gap 0.6 :align :center
-              (label "timing" :width 8 :height 1.2 :font-size 9 :color :dim)
-              (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-              (g16-num "graph-16-dur-factor"
-                g16-dur-factor 0 8 0.25 2
-                (lambda (v)
-                  (do
-                    (set! g16-dur-factor v)
-                    (g16-edit-global-param :dur-factor v))))
-              (label "swing" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-              (g16-num "graph-16-swing"
-                g16-swing 50 75 1 0
-                (lambda (v)
-                  (do
-                    (set! g16-swing v)
-                    (g16-edit-global-param :swing v))))
-              ))
-            (event-view
-              :key "graph-16-event-view"
-              :events (if viz (get viz :event-history) (list))
-              :current-beat (if viz (get viz :current-beat) 0)
-              :renderer :isometric
-              :x :transpose
-              :x-min -24
-              :x-max 24
-              :y :node
-              :y-min 0
-              :y-max 15
-              :z :beat-phase
-              :z-min 0
-              :z-max 16
-              :phase-beats 16
-              :window-beats 16
-              :brightness :velocity
-              :cube-padding 0
-              :width 12
-              :height 6)
-            )
-        (h-stack
-          (v-stack :gap 0.5
-            (h-stack :gap 0.5 :align :center
-              (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
-            (v-stack :gap 0.2
-              (g16-header)
-              (each (range 0 g16-node-count) |n| (g16-row n))))
-          (v-stack :gap 0.35
-            (box :height 2.5)
-            (matrix
-              :key "graph-16-trigger-matrix"
-              :rows 16
-              :cols 1
-              :width 1
-              :height 24
-              :min 0
-              :max 1
-              :value (g16-viz-matrix viz :trigger-matrix (g16-zero-column-matrix))))
-          (v-stack :gap 0.35
-            (box :height 2.5)
-            (matrix
-              :key "graph-16-energy-matrix"
-              :rows 16
-              :cols 1
-              :width 2
-              :height 24
-              :min 0
-              :max 4
-              :value (g16-viz-matrix viz :energy-matrix (g16-zero-column-matrix))))
-          (v-stack :gap 0.35
-            (box :height 2.5)
+          (h-stack :gap 0.5 :align :center
+            (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
+          (v-stack :gap 0.2
+            (g16-header)
+            (let ((routes (route-options g)))
+              (each g.nodes |n| (g16-row n routes)))))
+        (g16-column-matrix "graph-16-trigger-matrix" 1 1 (lambda () g.triggers))
+        (g16-column-matrix "graph-16-energy-matrix" 2 4 (lambda () g.energy))
+        (v-stack :gap 0.35
+          (box :height 2.5)
+          (subtree :key "graph-16-weight-matrix"
             (matrix
               :key "graph-16-weight-matrix"
               :rows 16
@@ -385,13 +281,11 @@
               :height 24
               :min 0
               :max 1
-              :value g16-weights
-              :on-cell-change (lambda (r c v)
-                (do
-                  (set! g16-weights (g16-set-cell g16-weights r c v))
-                  (graph-edge g16-name :from r :to c :weight v))))))
-        (v-stack :gap 0.5
-          (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
+              :value (weight-rows g)
+              :on-cell-change (lambda (r c v) (set-weight! g r c v))))))
+      (v-stack :gap 0.5
+        (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
+        (subtree :key "graph-16-dampening-matrix"
           (matrix
             :key "graph-16-dampening-matrix"
             :rows 16
@@ -403,7 +297,12 @@
             :fill :primary
             :min 0
             :max 1
-            :value (g16-viz-matrix viz :dampening-matrix (g16-zero-matrix)))))))))
+            :value g.dampening))))))
 
-(effect-buffer "*16x16*" (g16-panel SEQ.current-pattern SEQ.graph-visualizations))
+;; The panel, empty until the host publishes the graph (at its next sync).
+(def g16-panel ()
+  (let ((g (graph-of g16-name)))
+    (if g (g16-graph-panel g) (nothing))))
+
+(effect-buffer "*16x16*" (g16-panel))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

@@ -1,7 +1,198 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::parser::Expression;
+use crate::vm::KindKey;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// The legacy binding natives removed in eseq-0l17.80 (kind-bindings spec
+/// §11, §14.4), each with its migration hint. A use is a compile error
+/// unless the unit (or an earlier one) defines the name itself, so a
+/// module's own `(def bind (name) …)` keeps working.
+pub const REMOVED_BINDING_FORMS: &[(&str, &str)] = &[
+    (
+        "bind-seq",
+        "bind-seq was removed; bind an eseq.kinds instance field with #', \
+         e.g. #'transport.playing or (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "bind-seq-nth",
+        "bind-seq-nth was removed; bind a field of the indexed eseq.kinds \
+         instance, e.g. (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "bind",
+        "bind was removed; bind an eseq.kinds instance field with #', \
+         e.g. #'t.volume (or #'NS.field on a live host namespace such as THEME)",
+    ),
+    (
+        "bind-nth",
+        "bind-nth was removed; bind a field of the indexed eseq.kinds \
+         instance, e.g. (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "reactive-get",
+        "reactive-get was removed; read the eseq.kinds instance field as a \
+         value, e.g. t.volume (or NS.field on a live host namespace)",
+    ),
+    (
+        "reactive-set",
+        "reactive-set was removed; write a writable eseq.kinds instance \
+         field, e.g. (set! t.volume 0.5) (or (set! NS.field v) on a writable \
+         host namespace)",
+    ),
+];
+
+/// Host namespaces deleted with their publishers (eseq-0l17.78, .80):
+/// `NS.field` and `#'NS.field` on one that is not registered is a compile
+/// error naming eseq.kinds. A live namespace (THEME, MIDI, …) is untouched.
+pub const REMOVED_HOST_NAMESPACES: &[&str] = &["SEQ", "SEQV", "EXPORT", "AGENT"];
+
+/// What a removed host namespace path says (see [`REMOVED_HOST_NAMESPACES`]).
+fn removed_namespace_message(path: &str, write: bool) -> String {
+    if write {
+        format!(
+            "{path} was removed; write a writable eseq.kinds instance field, \
+             e.g. (set! t.volume 0.5)"
+        )
+    } else {
+        format!(
+            "{path} was removed; read the eseq.kinds instance fields, \
+             e.g. (map (lambda (t) t.color) (tracks))"
+        )
+    }
+}
+
+/// The removed binding forms (see [`REMOVED_BINDING_FORMS`]) and removed
+/// host namespace paths (see [`REMOVED_HOST_NAMESPACES`]) that `exprs`
+/// use, as the compile errors they would raise, found without compiling.
+///
+/// For a host that splices many independent sources into one unit (the
+/// custom instrument and effect UIs): a compile error fails the whole
+/// unit, so one stale source (a user instrument still calling
+/// `reactive-get`) would take every other source down with it. The host
+/// drops the stale source instead. Conservative: a name the sources bind
+/// anywhere (a `def…` name, a parameter, a `let` name) is not reported, so
+/// a source that defines its own `bind` keeps working; anything this
+/// misses still fails in the compiler as before.
+pub fn removed_form_uses(exprs: &[Expression]) -> Vec<String> {
+    fn bind_symbols(expr: Option<&Expression>, bound: &mut HashSet<String>) {
+        if let Some(Expression::List(names)) = expr {
+            for name in names {
+                match name {
+                    Expression::Symbol(name) => {
+                        bound.insert(name.clone());
+                    }
+                    // A `let` binding pair: `(name value)`.
+                    Expression::List(pair) => {
+                        if let Some(Expression::Symbol(name)) = pair.first() {
+                            bound.insert(name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Pass 1: every name the sources bind, whatever its scope.
+    let mut bound = HashSet::new();
+    let mut stack: Vec<&Expression> = exprs.iter().collect();
+    while let Some(expr) = stack.pop() {
+        let items = match expr {
+            Expression::List(items) => items,
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => {
+                stack.push(inner);
+                continue;
+            }
+            _ => continue,
+        };
+        match items.first() {
+            Some(Expression::Symbol(head)) if head.starts_with("def") => {
+                if let Some(Expression::Symbol(name)) = items.get(1) {
+                    bound.insert(name.clone());
+                }
+                // `(def name (params) body…)`; `(def name (value))` has no body.
+                if items.len() >= 4 {
+                    bind_symbols(items.get(2), &mut bound);
+                }
+            }
+            Some(Expression::Symbol(head)) if matches!(head.as_str(), "lambda" | "fn") => {
+                bind_symbols(items.get(1), &mut bound);
+            }
+            Some(Expression::Symbol(head)) if head.starts_with("let") => {
+                bind_symbols(items.get(1), &mut bound);
+            }
+            _ => {}
+        }
+        stack.extend(items.iter());
+    }
+
+    // Pass 2: the uses, in source order, each message once.
+    #[derive(Clone, Copy)]
+    enum Position { Read, Write, Binding }
+    let mut messages: Vec<String> = Vec::new();
+    let mut stack: Vec<(&Expression, Position)> =
+        exprs.iter().rev().map(|expr| (expr, Position::Read)).collect();
+    while let Some((expr, position)) = stack.pop() {
+        let message = match expr {
+            Expression::Symbol(name) => {
+                if let Some((form, message)) =
+                    REMOVED_BINDING_FORMS.iter().find(|(form, _)| form == name)
+                {
+                    (!bound.contains(*form)).then(|| message.to_string())
+                } else if let Some((head, rest)) = name.split_once('.')
+                    && REMOVED_HOST_NAMESPACES.contains(&head)
+                    && !bound.contains(head)
+                    && !rest.is_empty()
+                {
+                    Some(match position {
+                        Position::Read => removed_namespace_message(name, false),
+                        Position::Write => removed_namespace_message(name, true),
+                        Position::Binding => {
+                            let field = rest.split('.').next().unwrap_or_default();
+                            format!(
+                                "#'{head}.{field} was removed; bind an eseq.kinds instance field \
+                                 instead, e.g. #'transport.playing or #'t.volume"
+                            )
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => {
+                stack.push((inner, Position::Read));
+                None
+            }
+            Expression::List(items) => {
+                let position_of_second = match items.first() {
+                    Some(Expression::Symbol(head)) if head == "set!" => Position::Write,
+                    Some(Expression::Symbol(head)) if head == crate::parser::FUNCTION_FORM => {
+                        Position::Binding
+                    }
+                    _ => Position::Read,
+                };
+                for (index, item) in items.iter().enumerate().rev() {
+                    let position = if index == 1 { position_of_second } else { Position::Read };
+                    stack.push((item, position));
+                }
+                None
+            }
+            // A quoted list or symbol is data, not code.
+            _ => None,
+        };
+        if let Some(message) = message
+            && !messages.contains(&message)
+        {
+            messages.push(message);
+        }
+    }
+    messages
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReactiveChunkKind { Derived, View, Observer }
@@ -24,6 +215,38 @@ pub struct Chunk {
     /// `OpCode::ExpansionOriginBegin(idx)`. Kept out of the op stream so
     /// `OpCode` stays `Copy` and the VM fetches ops without cloning.
     pub origins: Vec<std::rc::Rc<ExpansionOrigin>>,
+    /// `Some` only for a function whose argument list declares `&optional`,
+    /// `&rest` or `&key`; plain fixed-arity functions keep the direct call
+    /// path. See [`LambdaList`].
+    pub lambda_list: Option<std::rc::Rc<LambdaList>>,
+}
+
+/// How a call binds its arguments to a function that declares `&optional`,
+/// `&rest` or `&key` (Common Lisp lambda-list conventions). Locals are laid
+/// out `required… optional… [rest] key…`; an optional or key local the call
+/// leaves unsupplied stays unbound, and the function's prologue
+/// (`OpCode::JumpIfLocalBound`) fills it with its default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaList {
+    pub required: usize,
+    pub optional: usize,
+    pub rest: bool,
+    /// Keyword names (without the colon), in local order after the rest
+    /// local.
+    pub keys: Vec<String>,
+    pub allow_other_keys: bool,
+}
+
+impl LambdaList {
+    /// The `&rest` local, when the list declares one.
+    pub fn rest_slot(&self) -> usize {
+        self.required + self.optional
+    }
+
+    /// The first `&key` local.
+    pub fn key_base(&self) -> usize {
+        self.rest_slot() + usize::from(self.rest)
+    }
 }
 
 #[derive(Debug)]
@@ -138,6 +361,9 @@ pub enum OpCode {
     JumpIfFalse(usize),
     PushBool(bool),
     PushNil,
+    /// Skip `offset` ops when local `idx` is bound (an optional or key
+    /// argument the call supplied); otherwise fall through to its default.
+    JumpIfLocalBound(usize, usize),
     /// Index into the executing chunk's `Chunk::origins`.
     ExpansionOriginBegin(usize),
     ExpansionOriginEnd,
@@ -224,6 +450,14 @@ pub struct Compiler<'a> {
     /// Fatal resolution errors (unknown alias/namespace, malformed module
     /// forms) recorded mid-compile and reported when `compile` finishes.
     errors: Vec<String>,
+    /// Globals that existed before this unit (natives, earlier units'
+    /// definitions): see [`Self::note_removed_form`].
+    initial_global_count: usize,
+    /// Globals this unit stores into (`def`, `set!`), by index.
+    defined_globals: HashSet<usize>,
+    /// Removed legacy names this unit loads as globals, checked when the
+    /// unit finishes (a later `def` in the same unit may still define one).
+    removed_form_uses: Vec<(&'static str, usize)>,
     pub macros: HashMap<String, MacroDef>,
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
     next_macro_expansion_ordinal: usize,
@@ -269,6 +503,192 @@ fn is_widget_name(name: &str) -> bool {
     )
 }
 
+/// The `:slot value` pairs of a `def-kind` form, in order, and its `:key`
+/// (kind-bindings spec §3.1): `None` without `:key` (a created kind). This
+/// is the one place the key's shape (at most two names) is checked. A
+/// `:key` of names without a `:host` group is view-local
+/// ([`KindKey::Local`], any number of plain names; eseq-0l17.62): there is
+/// nothing for a host to publish, so Lisp creates the instances. A
+/// malformed slot list or key is an error.
+pub(crate) fn def_kind_slots<'e>(
+    name: &str,
+    list: &'e [Expression],
+) -> Result<(Vec<(String, &'e Expression)>, Option<KindKey>), CompilerError> {
+    let mut slots = Vec::new();
+    let mut key_value = None;
+    let key_shape = || {
+        CompilerError::Message(format!(
+            "def-kind {name}: :key expects () (a singleton), (index), (parent index) or ((parent …) index)"
+        ))
+    };
+    for (offset, pair) in list[2..].chunks(2).enumerate() {
+        let Expression::Keyword(slot) = strip_source_origin_wrappers(pair[0].clone()) else {
+            return Err(CompilerError::Message(format!(
+                "def-kind {name}: expected a :slot keyword at position {}",
+                offset * 2 + 1
+            )));
+        };
+        let Some(value) = pair.get(1) else {
+            return Err(CompilerError::Message(format!(
+                "def-kind {name}: missing value for :{slot}"
+            )));
+        };
+        if slot == "key" {
+            key_value = Some(value);
+        }
+        slots.push((slot, value));
+    }
+    let Some(value) = key_value else {
+        return Ok((slots, None));
+    };
+    let host = slots.iter().any(|(slot, _)| slot == "host");
+    let key_name = |name: &Expression| match name {
+        Expression::Symbol(name) if name != "nil" => Ok(name.clone()),
+        _ => Err(key_shape()),
+    };
+    let key = match strip_source_origin_wrappers(value.clone()) {
+        Expression::List(names) | Expression::QuoteList(names) if !host && !names.is_empty() => {
+            let names = names
+                .iter()
+                .map(|name| key_name(&strip_source_origin_wrappers(name.clone())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    CompilerError::Message(format!(
+                        "def-kind {name}: a view-local :key (no :host) is a list of names"
+                    ))
+                })?;
+            if let Some(duplicate) = first_duplicate(&names) {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {name}: :key names {duplicate} twice"
+                )));
+            }
+            KindKey::Local { names }
+        }
+        Expression::List(names) | Expression::QuoteList(names) => match names.as_slice() {
+            [] => KindKey::Singleton,
+            [index] => KindKey::Indexed {
+                index: key_name(index)?,
+            },
+            [parent, index] => {
+                let parents = match strip_source_origin_wrappers(parent.clone()) {
+                    // `((p1 p2 …) index)`: under any of several kinds.
+                    Expression::List(parents) | Expression::QuoteList(parents)
+                        if !parents.is_empty() =>
+                    {
+                        parents
+                            .iter()
+                            .map(|parent| key_name(&strip_source_origin_wrappers(parent.clone())))
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                    parent => vec![key_name(&parent)?],
+                };
+                if let Some(duplicate) = first_duplicate(&parents) {
+                    return Err(CompilerError::Message(format!(
+                        "def-kind {name}: :key names parent {duplicate} twice"
+                    )));
+                }
+                KindKey::Under {
+                    parents,
+                    index: key_name(index)?,
+                }
+            }
+            _ => return Err(key_shape()),
+        },
+        Expression::Symbol(nil) if nil == "nil" => KindKey::Singleton,
+        _ => return Err(key_shape()),
+    };
+    Ok((slots, Some(key)))
+}
+
+/// The first name `names` holds twice, if any (a `:key`'s parent list).
+pub(crate) fn first_duplicate(names: &[String]) -> Option<&str> {
+    names
+        .iter()
+        .enumerate()
+        .find(|(at, name)| names[..*at].contains(name))
+        .map(|(_, name)| name.as_str())
+}
+
+/// The entries of a def-kind field group (`:host`, `:state`), free of
+/// source-origin wrappers at every level; `None` for anything but a list
+/// (or nil, no entries).
+fn def_kind_entries(value: &Expression) -> Option<Vec<Expression>> {
+    match strip_source_origin_wrappers(value.clone()) {
+        Expression::List(items) | Expression::QuoteList(items) => Some(items),
+        Expression::Symbol(symbol) if symbol == "nil" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// A singleton or index-keyed kind binds its name (to the instance, to the
+/// constructor `(name i)`), so a name that is a widget constructor (a
+/// built-in widget, or a `defwidget` already registered) would shadow the
+/// widget in the defining module, and source annotation, which adds widget
+/// source props to every call whose head is a widget name, broke
+/// `(knob 0)` with "takes one non-negative integer" (eseq-0l17.24). The
+/// error, if any; a parent-keyed kind binds nothing and may take any name.
+/// `def-kind` runs the same check again ([`crate::vm::VM`]'s
+/// `__def-keyed-kind`) for a `defwidget` earlier in the same unit, which
+/// registers only when it runs.
+pub(crate) fn kind_name_widget_collision(name: &str, key: &KindKey) -> Option<String> {
+    if !matches!(
+        key,
+        KindKey::Singleton | KindKey::Indexed { .. } | KindKey::Local { .. }
+    ) {
+        return None;
+    }
+    let what = if crate::widgets::is_builtin_widget_name(name) {
+        "a built-in widget"
+    } else if crate::widget_render::sdf_widget::sdf_widget_def(name).is_some() {
+        "a defwidget"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "def-kind {name}: '{name}' is {what}; a :key () or :key (index) kind binds its name \
+         (as does a view-local kind), which would shadow the widget (and `({name} …)` calls get widget source props); \
+         rename the kind"
+    ))
+}
+
+/// A declared field may not reuse a built-in field of its kind's instances
+/// (`key` on a keyed kind, `owner` on a created one; eseq-0l17.60). The
+/// schema check (`InstanceKindSchema::validate`) rejects the same at run
+/// time; failing the compile names the field before anything runs.
+fn check_def_kind_field_name(
+    kind: &str,
+    slot: &str,
+    field: &str,
+    key: &KindKey,
+) -> Result<(), CompilerError> {
+    if crate::vm::builtin_fields_for(key).contains(&field) {
+        return Err(CompilerError::Message(crate::vm::builtin_field_message(
+            kind, slot, field, key,
+        )));
+    }
+    Ok(())
+}
+
+/// Compile-time check of a typed field entry's type (kind-bindings spec
+/// §3.3); `KindField::from_entry` parses the same data at runtime. `ty` is
+/// already free of source-origin wrappers.
+fn check_def_kind_field_type(ty: &Expression) -> Result<(), String> {
+    use crate::vm::{FIELD_TYPES_HINT, FieldType};
+    match ty {
+        Expression::Keyword(name) => FieldType::from_keyword(name)
+            .map(drop)
+            .ok_or_else(|| format!("unknown field type :{name}; {FIELD_TYPES_HINT}")),
+        Expression::Symbol(name) if !matches!(name.as_str(), "nil" | "true" | "false") => Ok(()),
+        Expression::List(items) => match items.as_slice() {
+            [Expression::Symbol(head), inner] if head == "list-of" => {
+                check_def_kind_field_type(inner)
+            }
+            _ => Err(format!("invalid field type; {FIELD_TYPES_HINT}")),
+        },
+        _ => Err(format!("invalid field type; {FIELD_TYPES_HINT}")),
+    }
+}
+
 fn extract_function_definition(
     list: &[Expression],
 ) -> Option<(Option<String>, Vec<Expression>, Vec<Expression>)> {
@@ -285,6 +705,202 @@ fn extract_function_definition(
         {
             Some((None, args.clone(), list[2..].to_vec()))
         }
+        _ => None,
+    }
+}
+
+/// A function argument list split at its lambda-list markers. `None` from
+/// [`parse_lambda_list`] means a plain fixed-arity list.
+struct ParsedLambdaList {
+    /// Symbols or map-destructuring patterns, as in a fixed-arity list.
+    required: Vec<Expression>,
+    optional: Vec<(String, Option<Expression>)>,
+    rest: Option<String>,
+    keys: Vec<(String, Option<Expression>)>,
+    allow_other_keys: bool,
+}
+
+/// Splits `(a b &optional c (d 10) &rest more &key size (color :white)
+/// &allow-other-keys)`. Markers must appear in that order, each at most
+/// once; an optional or key parameter is `name` or `(name default)`.
+fn parse_lambda_list(
+    function: Option<&str>,
+    args: &[Expression],
+) -> Result<Option<ParsedLambdaList>, CompilerError> {
+    let is_marker = |arg: &Expression| matches!(arg, Expression::Symbol(s) if s.starts_with('&'));
+    if !args.iter().any(is_marker) {
+        return Ok(None);
+    }
+    let function = function.unwrap_or("lambda");
+    let error = |message: String| CompilerError::Message(format!("{function}: {message}"));
+    #[derive(PartialEq, PartialOrd, Clone, Copy)]
+    enum Section {
+        Required,
+        Optional,
+        Rest,
+        Key,
+        AllowOtherKeys,
+    }
+    let mut parsed = ParsedLambdaList {
+        required: Vec::new(),
+        optional: Vec::new(),
+        rest: None,
+        keys: Vec::new(),
+        allow_other_keys: false,
+    };
+    let mut section = Section::Required;
+    let mut saw_optional = false;
+    let mut names = HashSet::new();
+    let mut add_name = |name: &str| {
+        if names.insert(name.to_string()) {
+            Ok(())
+        } else {
+            Err(error(format!("parameter `{name}` appears twice")))
+        }
+    };
+    let defaulted = |arg: &Expression| -> Result<(String, Option<Expression>), CompilerError> {
+        match arg {
+            Expression::Symbol(name) => Ok((name.clone(), None)),
+            Expression::List(items) => match items.as_slice() {
+                [Expression::Symbol(name)] => Ok((name.clone(), None)),
+                [Expression::Symbol(name), default] => Ok((name.clone(), Some(default.clone()))),
+                _ => Err(error(
+                    "an optional or key parameter is `name` or `(name default)`".to_string(),
+                )),
+            },
+            _ => Err(error("invalid parameter".to_string())),
+        }
+    };
+    for arg in args {
+        if let Expression::Symbol(marker) = arg
+            && marker.starts_with('&')
+        {
+            let next = match marker.as_str() {
+                "&optional" => Section::Optional,
+                "&rest" => Section::Rest,
+                "&key" => Section::Key,
+                "&allow-other-keys" => Section::AllowOtherKeys,
+                _ => {
+                    return Err(error(format!(
+                        "unknown lambda-list marker `{marker}`; use &optional, &rest, &key or &allow-other-keys"
+                    )));
+                }
+            };
+            if next <= section {
+                return Err(error(format!(
+                    "`{marker}` out of order; the order is required &optional &rest &key &allow-other-keys"
+                )));
+            }
+            saw_optional |= next == Section::Optional;
+            if next == Section::Key && saw_optional {
+                return Err(error(
+                    "&optional and &key together are ambiguous; use &key".to_string(),
+                ));
+            }
+            if section == Section::Rest && parsed.rest.is_none() {
+                return Err(error("&rest needs a parameter name".to_string()));
+            }
+            if next == Section::AllowOtherKeys {
+                if section != Section::Key {
+                    return Err(error("&allow-other-keys must follow &key".to_string()));
+                }
+                parsed.allow_other_keys = true;
+            }
+            section = next;
+            continue;
+        }
+        match section {
+            Section::Required => {
+                let mut bound = Vec::new();
+                collect_pattern_symbols(arg, &mut bound);
+                for name in &bound {
+                    add_name(name)?;
+                }
+                parsed.required.push(arg.clone());
+            }
+            Section::Optional => {
+                let (name, default) = defaulted(arg)?;
+                add_name(&name)?;
+                parsed.optional.push((name, default));
+            }
+            Section::Rest => {
+                let Expression::Symbol(name) = arg else {
+                    return Err(error("&rest takes one parameter name".to_string()));
+                };
+                if parsed.rest.is_some() {
+                    return Err(error("&rest takes one parameter name".to_string()));
+                }
+                add_name(name)?;
+                parsed.rest = Some(name.clone());
+            }
+            Section::Key => {
+                let (name, default) = defaulted(arg)?;
+                add_name(&name)?;
+                parsed.keys.push((name, default));
+            }
+            Section::AllowOtherKeys => {
+                return Err(error("nothing may follow &allow-other-keys".to_string()));
+            }
+        }
+    }
+    if section == Section::Rest && parsed.rest.is_none() {
+        return Err(error("&rest needs a parameter name".to_string()));
+    }
+    Ok(Some(parsed))
+}
+
+/// A `defmacro` argument list: plain names, optionally ending in `&rest
+/// name`.
+fn parse_macro_params(
+    name: &str,
+    args: &[Expression],
+) -> Result<(Vec<String>, Option<String>), CompilerError> {
+    let error = |message: &str| CompilerError::Message(format!("{name}: {message}"));
+    let parsed = parse_lambda_list(Some(name), args)?;
+    let (required, rest) = match parsed {
+        Some(parsed) => {
+            if !parsed.optional.is_empty() || !parsed.keys.is_empty() || parsed.allow_other_keys {
+                return Err(error("macros take &rest only"));
+            }
+            (parsed.required, parsed.rest)
+        }
+        None => (args.to_vec(), None),
+    };
+    let mut names = HashSet::new();
+    let mut params = Vec::with_capacity(required.len());
+    for param in required {
+        let Expression::Symbol(param) = param else {
+            return Err(error("macros take &rest only; a parameter must be a name"));
+        };
+        if !names.insert(param.clone()) {
+            return Err(error(&format!("parameter `{param}` appears twice")));
+        }
+        params.push(param);
+    }
+    Ok((params, rest))
+}
+
+/// The first of `names` that `expression` reads (a bare symbol or the head
+/// of a dotted one), quoted data excluded. Conservative: an inner binding of
+/// the same name still counts.
+fn first_symbol_read<'a>(expression: &Expression, names: &[&'a str]) -> Option<&'a str> {
+    match expression {
+        Expression::Symbol(symbol) => {
+            let head = symbol.split('.').next().unwrap_or(symbol);
+            names
+                .iter()
+                .copied()
+                .find(|name| *name == symbol || *name == head)
+        }
+        Expression::List(items)
+            if matches!(items.first(), Some(Expression::Symbol(head)) if head == "quote") =>
+        {
+            None
+        }
+        Expression::List(items) => items.iter().find_map(|item| first_symbol_read(item, names)),
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => first_symbol_read(inner, names),
         _ => None,
     }
 }
@@ -466,6 +1082,9 @@ impl<'a> Compiler<'a> {
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            initial_global_count: 0,
+            defined_globals: HashSet::new(),
+            removed_form_uses: Vec::new(),
             macros: HashMap::new(),
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
@@ -490,6 +1109,7 @@ impl<'a> Compiler<'a> {
         source_file: Option<PathBuf>,
         source_label: Option<String>,
     ) -> Self {
+        let existing_global_names_len = existing_global_names.len();
         Compiler {
             expressions,
             chunks: existing_chunks,
@@ -512,6 +1132,9 @@ impl<'a> Compiler<'a> {
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            initial_global_count: existing_global_names_len,
+            defined_globals: HashSet::new(),
+            removed_form_uses: Vec::new(),
             macros,
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
@@ -902,11 +1525,8 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params) = &items[1] else {
                     unreachable!()
                 };
-                let mut body_bound = bound.to_vec();
-                for param in params {
-                    collect_pattern_symbols(param, &mut body_bound);
-                }
-                let mut lowered = vec![items[0].clone(), items[1].clone()];
+                let (params, body_bound) = self.lower_scene_references_in_params(params, bound);
+                let mut lowered = vec![items[0].clone(), params];
                 lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
                 Expression::List(lowered)
             }
@@ -946,11 +1566,8 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params) = &items[2] else {
                     unreachable!()
                 };
-                let mut body_bound = bound.to_vec();
-                for param in params {
-                    collect_pattern_symbols(param, &mut body_bound);
-                }
-                let mut lowered = items[..3].to_vec();
+                let (params, body_bound) = self.lower_scene_references_in_params(params, bound);
+                let mut lowered = vec![items[0].clone(), items[1].clone(), params];
                 lowered.extend(items[3..].iter().map(|body| lower(body, &body_bound)));
                 Expression::List(lowered)
             }
@@ -1004,6 +1621,40 @@ impl<'a> Compiler<'a> {
             }
             _ => expression.clone(),
         }
+    }
+
+    /// Lowers an argument list's default expressions, each seeing only the
+    /// parameters before it, and returns the list with every name it binds
+    /// (for the body).
+    fn lower_scene_references_in_params(
+        &self,
+        params: &[Expression],
+        bound: &[String],
+    ) -> (Expression, Vec<String>) {
+        let mut body_bound = bound.to_vec();
+        let mut after_marker = false;
+        let mut lowered = Vec::with_capacity(params.len());
+        for param in params {
+            match param {
+                Expression::Symbol(name) if name.starts_with('&') => after_marker = true,
+                Expression::List(items) if after_marker => {
+                    if let [name, default] = items.as_slice() {
+                        let default =
+                            self.lower_scene_references_for_shipping(default, &body_bound);
+                        lowered.push(Expression::List(vec![name.clone(), default]));
+                    } else {
+                        lowered.push(param.clone());
+                    }
+                    if let Some(Expression::Symbol(name)) = items.first() {
+                        body_bound.push(name.clone());
+                    }
+                    continue;
+                }
+                _ => collect_pattern_symbols(param, &mut body_bound),
+            }
+            lowered.push(param.clone());
+        }
+        (Expression::List(lowered), body_bound)
     }
 
     /// Descend a quasiquoted template: its symbols are data, so only the
@@ -1239,6 +1890,7 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
+            lambda_list: None,
         });
 
         if kind != ReactiveChunkKind::Derived {
@@ -1394,6 +2046,52 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// `#'h.f1…fn`, read as `(function h.f1…fn)` (kind-bindings spec §7.1):
+    /// evaluate `h.f1…f(n-1)` by value like any dotted path (each step
+    /// records its dependency), then `(__field-ref instance "fn")` builds the
+    /// binding. A live host namespace head (`#'THEME.accent`) compiles to
+    /// `(__ns-ref "THEME" "accent")`, its float slot's ref; a removed one
+    /// (`#'SEQ.playing`) is a compile error.
+    fn compile_field_binding(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        const USAGE: &str = "#' takes a field path like t.volume";
+        let path = match list {
+            [_, Expression::Symbol(path)] if !super::modules::is_qualified(path) => path,
+            _ => return Err(CompilerError::Message(USAGE.to_string())),
+        };
+        let Some((prefix, last)) = path.rsplit_once('.') else {
+            return Err(CompilerError::Message(USAGE.to_string()));
+        };
+        if path.split('.').any(str::is_empty) {
+            return Err(CompilerError::Message(USAGE.to_string()));
+        }
+        let native = if self.reactive_namespaces.contains(prefix) {
+            let idx = self.use_string_constant(prefix);
+            self.emit(OpCode::PushStr(idx));
+            crate::vm::NAMESPACE_REF_NATIVE
+        } else if let Some(head) = self.removed_namespace_head(prefix) {
+            let field = path[head.len() + 1..].split('.').next().unwrap_or_default();
+            return Err(CompilerError::Message(format!(
+                "#'{head}.{field} was removed; bind an eseq.kinds instance field \
+                 instead, e.g. #'transport.playing or #'t.volume"
+            )));
+        } else if let Some((head, _)) = prefix.split_once('.')
+            && self.reactive_namespaces.contains(head)
+        {
+            let field = path[head.len() + 1..].split('.').next().unwrap_or_default();
+            return Err(CompilerError::Message(format!(
+                "#'{path}: a reactive namespace binding takes one field, like #'{head}.{field}"
+            )));
+        } else {
+            self.compile_expression(&Expression::Symbol(prefix.to_string()))?;
+            crate::vm::FIELD_REF_NATIVE
+        };
+        let idx = self.use_string_constant(last);
+        self.emit(OpCode::PushStr(idx));
+        self.emit_symbol_load(native);
+        self.emit(OpCode::Call(2));
+        Ok(())
+    }
+
     fn compile_set_statement(
         &mut self,
         target: &Expression,
@@ -1429,6 +2127,9 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 if parts.len() == 2 {
+                    if self.removed_namespace_head(parts[0]).is_some() {
+                        self.errors.push(removed_namespace_message(name, true));
+                    }
                     let fields = parts[1].split('.').collect::<Vec<_>>();
                     self.emit_symbol_load(parts[0]);
                     for field in fields.iter().take(fields.len().saturating_sub(1)) {
@@ -1806,9 +2507,15 @@ impl<'a> Compiler<'a> {
     /// - `:sequencer` is a graph `def-sequencer` body without the name,
     ///   captured as data exactly like graph-mode `def-sequencer` (each
     ///   element macro-expanded and quoted; a top-level `,x` still evaluates).
-    /// - `:state` becomes a list of `(field value)` pairs: the field name as a
-    ///   symbol and the default EVALUATED here (`field` or `(field)` means nil).
+    /// - `:state`/`:document` become a list of `(field value)` entries (or
+    ///   `(field value type)` for a typed `(field type :default d)`): the
+    ///   field name as a symbol, the default EVALUATED here and the type as
+    ///   data. An untyped nil default (`field`, `(field)`, `(field nil)`) is
+    ///   an error (kind-bindings spec §3.3).
     /// - every other slot (`:view`, ...) evaluates normally.
+    ///
+    /// A `:key` makes it a singleton or keyed kind
+    /// ([`Self::compile_def_keyed_kind`]).
     fn compile_def_kind_form(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         let Some(name) = list.get(1).map(|name| strip_source_origin_wrappers(name.clone())) else {
             return Err(CompilerError::Message("def-kind expects a kind name".to_string()));
@@ -1818,22 +2525,20 @@ impl<'a> Compiler<'a> {
                 "def-kind expects a kind name symbol".to_string(),
             ));
         };
+        let (slots, key) = def_kind_slots(&name, list)?;
+        if let Some(key) = &key {
+            return self.compile_def_keyed_kind(&name, key, &slots);
+        }
+        if slots.iter().any(|(slot, _)| slot == "host") {
+            // kind-bindings spec §12 D5.
+            return Err(CompilerError::Message(format!(
+                "def-kind {name}: :host fields need :key"
+            )));
+        }
         let name_idx = self.use_string_constant(&name);
         self.emit(OpCode::PushSymbol(name_idx));
         let mut arity = 1;
-        let mut i = 2;
-        while i < list.len() {
-            let Expression::Keyword(key) = strip_source_origin_wrappers(list[i].clone()) else {
-                return Err(CompilerError::Message(format!(
-                    "def-kind {name}: expected a :slot keyword at position {}",
-                    i - 1
-                )));
-            };
-            let Some(value) = list.get(i + 1) else {
-                return Err(CompilerError::Message(format!(
-                    "def-kind {name}: missing value for :{key}"
-                )));
-            };
+        for (key, value) in slots {
             let key_idx = self.use_string_constant(&key);
             self.emit(OpCode::PushKeyword(key_idx));
             match key.as_str() {
@@ -1841,7 +2546,9 @@ impl<'a> Compiler<'a> {
                 // (docs/jaki-kind-spec.md §4); `:document` defaults evaluate
                 // like `:state` ones (§3).
                 "sequencer" | "generator" => self.compile_def_kind_sequencer(&name, &key, value)?,
-                "state" | "document" => self.compile_def_kind_state(&name, &key, value)?,
+                "state" | "document" => {
+                    self.compile_def_kind_state(&name, &key, &KindKey::Created, value)?
+                }
                 // `:keymap eseq.sequencer-keys/sequencer-keys` names a mode;
                 // a bare symbol is its name, never a variable read.
                 "keymap" => match strip_source_origin_wrappers(value.clone()) {
@@ -1854,10 +2561,157 @@ impl<'a> Compiler<'a> {
                 _ => self.compile_expression(value)?,
             }
             arity += 2;
-            i += 2;
         }
         self.emit_symbol_load("def-kind");
         self.emit(OpCode::Call(arity));
+        Ok(())
+    }
+
+    /// `(def-kind name :key (...) :host (...) :state (...))` (kind-bindings
+    /// spec §3.1) compiles to `(__def-keyed-kind 'name :key '(...) ...)`.
+    /// A singleton (`:key ()`) and an index-keyed kind (`:key (index)`)
+    /// wrap it in `(def name ...)`, so the kind's name is an ordinary
+    /// definition of the defining module, bound to the one instance or to
+    /// the constructor `(name i)`; the form's value is that binding. A
+    /// parent-keyed kind (`:key (parent index)`) binds nothing: its
+    /// instances are reached through the parent. These kinds opt out of
+    /// everything only created kinds have, so `:host` and `:state` are the
+    /// only other slots.
+    fn compile_def_keyed_kind(
+        &mut self,
+        name: &str,
+        key: &KindKey,
+        slots: &[(String, &Expression)],
+    ) -> Result<(), CompilerError> {
+        if let Some(message) = kind_name_widget_collision(name, key) {
+            return Err(CompilerError::Message(message));
+        }
+        let name_idx = self.use_string_constant(name);
+        self.emit(OpCode::PushSymbol(name_idx));
+        let key_idx = self.use_string_constant(match key {
+            KindKey::Local { .. } => "local-key",
+            _ => "key",
+        });
+        self.emit(OpCode::PushKeyword(key_idx));
+        // The key names as data: `(index)`, `(parent index)`, or
+        // `((p1 p2 …) index)` for several parent kinds.
+        let (parents, index): (&[String], Option<&String>) = match key {
+            KindKey::Created | KindKey::Singleton => (&[], None),
+            KindKey::Indexed { index } => (&[], Some(index)),
+            KindKey::Under { parents, index } => (parents, Some(index)),
+            // `:local-key (name …)`, all names as data.
+            KindKey::Local { names } => (names.as_slice(), None),
+        };
+        for parent in parents {
+            let parent_idx = self.use_string_constant(parent);
+            self.emit(OpCode::PushSymbol(parent_idx));
+        }
+        let local = matches!(key, KindKey::Local { .. });
+        if parents.len() > 1 && !local {
+            self.emit(OpCode::MakeList(parents.len()));
+        }
+        if let Some(index) = index {
+            let index_idx = self.use_string_constant(index);
+            self.emit(OpCode::PushSymbol(index_idx));
+        }
+        let parts = if local {
+            parents.len()
+        } else {
+            usize::from(!parents.is_empty()) + usize::from(index.is_some())
+        };
+        if parts == 0 {
+            self.emit(OpCode::PushNil);
+        } else {
+            self.emit(OpCode::MakeList(parts));
+        }
+        let mut arity = 3;
+        let what = if parts == 0 {
+            "a singleton (:key ())"
+        } else {
+            "a keyed kind"
+        };
+        for (slot, value) in slots {
+            match slot.as_str() {
+                "key" => continue,
+                "state" | "host" => {
+                    let slot_idx = self.use_string_constant(slot);
+                    self.emit(OpCode::PushKeyword(slot_idx));
+                    if slot == "state" {
+                        self.compile_def_kind_state(name, slot, key, value)?;
+                    } else {
+                        self.compile_def_kind_host(name, key, value)?;
+                    }
+                    arity += 2;
+                }
+                other => {
+                    return Err(CompilerError::Message(format!(
+                        "def-kind {name}: {what} has no :{other}; it takes only :host and :state"
+                    )));
+                }
+            }
+        }
+        self.emit_symbol_load(crate::vm::DEF_KEYED_KIND_NATIVE);
+        self.emit(OpCode::Call(arity));
+        if !matches!(key, KindKey::Under { .. }) {
+            self.emit_symbol_store_for_definition(name);
+            self.emit_symbol_load(name);
+        }
+        Ok(())
+    }
+
+    /// `:host ((field type option…) ...)` (kind-bindings spec §3.2): each
+    /// entry becomes `(field type option…)` with the name and type as data,
+    /// `:set` evaluated (a function), `:range` as data and `:doc` as is.
+    fn compile_def_kind_host(
+        &mut self,
+        kind: &str,
+        key: &KindKey,
+        value: &Expression,
+    ) -> Result<(), CompilerError> {
+        let shape = || CompilerError::Message(crate::vm::host_entry_shape_message(kind));
+        let items = def_kind_entries(value).ok_or_else(shape)?;
+        for item in &items {
+            let Expression::List(entry) = item else {
+                return Err(shape());
+            };
+            let [Expression::Symbol(field), ty, options @ ..] = entry.as_slice() else {
+                return Err(shape());
+            };
+            check_def_kind_field_name(kind, "host", field, key)?;
+            check_def_kind_field_type(ty).map_err(|error| {
+                CompilerError::Message(format!("def-kind {kind}: :host field '{field}': {error}"))
+            })?;
+            let field_idx = self.use_string_constant(field);
+            self.emit(OpCode::PushSymbol(field_idx));
+            self.compile_quoted_expression(ty)?;
+            if options.len() % 2 != 0 {
+                return Err(shape());
+            }
+            for pair in options.chunks(2) {
+                let Expression::Keyword(option) = &pair[0] else {
+                    return Err(shape());
+                };
+                let option_message =
+                    || CompilerError::Message(crate::vm::host_option_message(kind, field, option));
+                let option_idx = self.use_string_constant(option);
+                self.emit(OpCode::PushKeyword(option_idx));
+                match (option.as_str(), &pair[1]) {
+                    ("set", setter) => self.compile_expression(setter)?,
+                    ("range", Expression::List(bounds))
+                        if bounds.len() == 2
+                            && bounds
+                                .iter()
+                                .all(|bound| matches!(bound, Expression::Number(_))) =>
+                    {
+                        self.compile_quoted_expression(&pair[1])?
+                    }
+                    ("doc", Expression::String(_)) => self.compile_expression(&pair[1])?,
+                    _ => return Err(option_message()),
+                }
+            }
+            self.emit(OpCode::MakeList(2 + options.len()));
+        }
+        self.emit(OpCode::MakeList(items.len()));
         Ok(())
     }
 
@@ -1893,43 +2747,58 @@ impl<'a> Compiler<'a> {
         &mut self,
         kind: &str,
         slot: &str,
+        key: &KindKey,
         value: &Expression,
     ) -> Result<(), CompilerError> {
-        let items = match strip_source_origin_wrappers(value.clone()) {
-            Expression::List(items) | Expression::QuoteList(items) => items,
-            Expression::Symbol(symbol) if symbol == "nil" => Vec::new(),
-            _ => {
-                return Err(CompilerError::Message(format!(
-                    "def-kind {kind}: :{slot} expects ((field default) ...)"
-                )));
-            }
-        };
+        let items = def_kind_entries(value).ok_or_else(|| {
+            CompilerError::Message(format!(
+                "def-kind {kind}: :{slot} expects ((field default) ...)"
+            ))
+        })?;
+        // `def_kind_entries` strips source-origin wrappers at every level,
+        // so the entries below are already unwrapped.
+        let nil_default =
+            |field: &str| CompilerError::Message(crate::vm::nil_default_message(kind, slot, field));
+        let entry_shape =
+            || CompilerError::Message(crate::vm::state_entry_shape_message(kind, slot));
         for item in &items {
-            let (field, default) = match strip_source_origin_wrappers(item.clone()) {
-                Expression::Symbol(field) => (field, None),
-                Expression::List(pair) if pair.len() == 1 || pair.len() == 2 => {
-                    match strip_source_origin_wrappers(pair[0].clone()) {
-                        Expression::Symbol(field) => (field, pair.get(1).cloned()),
-                        _ => {
-                            return Err(CompilerError::Message(format!(
-                                "def-kind {kind}: :{slot} field names must be symbols"
-                            )));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(CompilerError::Message(format!(
-                        "def-kind {kind}: each :{slot} entry is (field default)"
-                    )));
-                }
+            // `(field default)`, or `(field type :default d)`, which becomes
+            // `(field d type)` with the type as data (kind-bindings spec
+            // §3.3). nil says nothing about a type, so a nil default needs
+            // the typed form.
+            let entry = match item {
+                Expression::List(entry) => entry,
+                Expression::Symbol(field) => return Err(nil_default(field)),
+                _ => return Err(entry_shape()),
             };
-            let field_idx = self.use_string_constant(&field);
-            self.emit(OpCode::PushSymbol(field_idx));
-            match default {
-                Some(default) => self.compile_expression(&default)?,
-                None => self.emit(OpCode::PushNil),
+            let Some(Expression::Symbol(field)) = entry.first() else {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {kind}: :{slot} field names must be symbols"
+                )));
+            };
+            check_def_kind_field_name(kind, slot, field, key)?;
+            let field_idx = self.use_string_constant(field);
+            match entry.as_slice() {
+                [_] => return Err(nil_default(field)),
+                [_, Expression::Symbol(nil)] if nil == "nil" => return Err(nil_default(field)),
+                [_, default] => {
+                    self.emit(OpCode::PushSymbol(field_idx));
+                    self.compile_expression(default)?;
+                    self.emit(OpCode::MakeList(2));
+                }
+                [_, ty, Expression::Keyword(default_key), default] if default_key == "default" => {
+                    check_def_kind_field_type(ty).map_err(|error| {
+                        CompilerError::Message(format!(
+                            "def-kind {kind}: :{slot} field '{field}': {error}"
+                        ))
+                    })?;
+                    self.emit(OpCode::PushSymbol(field_idx));
+                    self.compile_expression(default)?;
+                    self.compile_quoted_expression(ty)?;
+                    self.emit(OpCode::MakeList(3));
+                }
+                _ => return Err(entry_shape()),
             }
-            self.emit(OpCode::MakeList(2));
         }
         self.emit(OpCode::MakeList(items.len()));
         Ok(())
@@ -2305,6 +3174,7 @@ impl<'a> Compiler<'a> {
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
             SymbolResolution::Global(idx) => {
+                self.note_removed_form(name, idx);
                 if let Some(key) = self.scene_binding_for(name) {
                     let name_idx = self.use_string_constant(&key);
                     self.emit(OpCode::PushStr(name_idx));
@@ -2324,10 +3194,13 @@ impl<'a> Compiler<'a> {
 
     fn emit_symbol_store(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
-                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
-                None => self.emit(OpCode::StoreGlobal(idx)),
-            },
+            SymbolResolution::Global(idx) => {
+                self.defined_globals.insert(idx);
+                match self.state_binding_for(name) {
+                    Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                    None => self.emit(OpCode::StoreGlobal(idx)),
+                }
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
         }
@@ -2360,6 +3233,50 @@ impl<'a> Compiler<'a> {
     /// module-qualified entry (see `emit_symbol_store_for_definition`);
     /// otherwise the ordinary reference ladder.
     fn use_global_for_definition(&mut self, name: &str) -> usize {
+        let idx = self.use_global_for_definition_slot(name);
+        self.defined_globals.insert(idx);
+        idx
+    }
+
+    /// A removed legacy binding name (see [`REMOVED_BINDING_FORMS`]) loaded
+    /// as a global that no earlier unit defined: checked when the unit
+    /// finishes, in case the unit defines it after this use.
+    fn note_removed_form(&mut self, name: &str, idx: usize) {
+        if idx < self.initial_global_count {
+            return;
+        }
+        if let Some((form, _)) = REMOVED_BINDING_FORMS.iter().find(|(form, _)| *form == name) {
+            self.removed_form_uses.push((form, idx));
+        }
+    }
+
+    /// The removed host namespace (see [`REMOVED_HOST_NAMESPACES`]) a
+    /// dotted path's head names, unless it is registered, a local, or a
+    /// global the code defines (`(def AGENT …)`, here or in an earlier unit).
+    fn removed_namespace_head<'p>(&self, head: &'p str) -> Option<&'p str> {
+        let head = head.split('.').next().unwrap_or(head);
+        (REMOVED_HOST_NAMESPACES.contains(&head)
+            && !self.reactive_namespaces.contains(head)
+            && !self.symbol_is_locally_bound(head)
+            && !self.global_is_defined(head))
+        .then_some(head)
+    }
+
+    /// Whether bare `name` resolves to a global that existed before this
+    /// unit or that this unit stores into (no interning, unlike
+    /// `resolve_global_name`).
+    fn global_is_defined(&self, name: &str) -> bool {
+        let qualified = super::modules::qualify(&self.current_module, name);
+        let candidates = [Some(name), Some(qualified.as_str()), self.refers.get(name).map(String::as_str)];
+        candidates.into_iter().flatten().any(|candidate| {
+            self.global_symbols
+                .iter()
+                .position(|symbol| symbol == candidate)
+                .is_some_and(|idx| idx < self.initial_global_count || self.defined_globals.contains(&idx))
+        })
+    }
+
+    fn use_global_for_definition_slot(&mut self, name: &str) -> usize {
         if self.declared_module().is_none()
             || super::modules::is_qualified(name)
             || self.reactive_namespaces.contains(name)
@@ -2445,6 +3362,17 @@ impl<'a> Compiler<'a> {
         if let Some(rest) = rest_param {
             symbols.push(rest.to_string());
         }
+        // A `&rest` macro binds through the lambda-list path, which packs
+        // the trailing arguments into the rest list.
+        let lambda_list = rest_param.map(|_| {
+            std::rc::Rc::new(LambdaList {
+                required: params.len(),
+                optional: 0,
+                rest: true,
+                keys: Vec::new(),
+                allow_other_keys: false,
+            })
+        });
         let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -2455,6 +3383,7 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: self.declared_module(),
             origins: Vec::new(),
+            lambda_list,
         });
         self.compiling_macro_body += 1;
         let compile_result = self.compile_expression(body);
@@ -2485,6 +3414,11 @@ impl<'a> Compiler<'a> {
             exprs.extend(body.iter().cloned());
             Expression::List(exprs)
         };
+        let lambda_list = parse_lambda_list(name.as_deref(), &args)?;
+        let args = match &lambda_list {
+            Some(parsed) => parsed.required.clone(),
+            None => args,
+        };
         let mut arg_symbols = Vec::with_capacity(args.len());
         for arg in args.iter() {
             match arg {
@@ -2496,16 +3430,50 @@ impl<'a> Compiler<'a> {
                 _ => return Err(CompilerError::InvalidArg),
             }
         }
-        for (arg, symbol) in args.iter().zip(arg_symbols.iter()).rev() {
-            if matches!(arg, Expression::List(_)) {
-                wrapped_body = self.desugar_pattern_binding(
-                    arg,
-                    Expression::Symbol(symbol.clone()),
-                    wrapped_body,
-                )?;
+        // A fixed-arity function destructures a pattern parameter around its
+        // body; a lambda-list function does it into locals ahead of its
+        // defaults prologue (below), so defaults can read the fields.
+        if lambda_list.is_none() {
+            for (arg, symbol) in args.iter().zip(arg_symbols.iter()).rev() {
+                if matches!(arg, Expression::List(_)) {
+                    wrapped_body = self.desugar_pattern_binding(
+                        arg,
+                        Expression::Symbol(symbol.clone()),
+                        wrapped_body,
+                    )?;
+                }
             }
         }
         symbols.extend(arg_symbols);
+        let runtime_lambda_list = lambda_list.as_ref().map(|parsed| {
+            symbols.extend(parsed.optional.iter().map(|(param, _)| param.clone()));
+            symbols.extend(parsed.rest.iter().cloned());
+            symbols.extend(parsed.keys.iter().map(|(param, _)| param.clone()));
+            std::rc::Rc::new(LambdaList {
+                required: parsed.required.len(),
+                optional: parsed.optional.len(),
+                rest: parsed.rest.is_some(),
+                keys: parsed.keys.iter().map(|(param, _)| param.clone()).collect(),
+                allow_other_keys: parsed.allow_other_keys,
+            })
+        });
+        // (pattern temp local, field, field local) for a lambda-list
+        // function's destructured required parameters.
+        let mut destructured = Vec::new();
+        if lambda_list.is_some() {
+            for (idx, arg) in args.iter().enumerate() {
+                let Expression::List(fields) = arg else {
+                    continue;
+                };
+                for field in fields {
+                    let Expression::Symbol(field) = field else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+                    destructured.push((symbols[idx].clone(), field.clone(), symbols.len()));
+                    symbols.push(field.clone());
+                }
+            }
+        }
         let (new_chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -2516,7 +3484,54 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
+            lambda_list: runtime_lambda_list.clone(),
         });
+        if let (Some(parsed), Some(layout)) = (&lambda_list, &runtime_lambda_list) {
+            for (temp, field, local) in &destructured {
+                self.compile_expression(&Expression::List(vec![
+                    Expression::Symbol("get".to_string()),
+                    Expression::Symbol(temp.clone()),
+                    Expression::Keyword(field.clone()),
+                ]))?;
+                self.emit(OpCode::StoreLocal(*local));
+            }
+            // Prologue: each unsupplied optional/key local gets its default,
+            // evaluated here in the callee so it can read earlier params.
+            // (local, name, default; None for the rest local)
+            let mut later_params: Vec<(usize, &str, Option<&Option<Expression>>)> = Vec::new();
+            for (idx, (param, default)) in parsed.optional.iter().enumerate() {
+                later_params.push((layout.required + idx, param, Some(default)));
+            }
+            if let Some(rest) = &parsed.rest {
+                later_params.push((layout.rest_slot(), rest, None));
+            }
+            for (idx, (param, default)) in parsed.keys.iter().enumerate() {
+                later_params.push((layout.key_base() + idx, param, Some(default)));
+            }
+            for (position, &(local, param, default)) in later_params.iter().enumerate() {
+                let Some(default) = default else {
+                    continue;
+                };
+                if let Some(default) = default {
+                    let later = later_params[position..].iter().map(|&(_, name, _)| name);
+                    if let Some(read) = first_symbol_read(default, &later.collect::<Vec<_>>()) {
+                        return Err(CompilerError::Message(format!(
+                            "{}: the default for `{param}` reads `{read}`, which is not bound yet; defaults see earlier parameters only",
+                            name.as_deref().unwrap_or("lambda")
+                        )));
+                    }
+                }
+                let jump_idx = self.op_idx();
+                self.emit(OpCode::JumpIfLocalBound(local, 0));
+                match default {
+                    Some(default) => self.compile_expression(default)?,
+                    None => self.emit(OpCode::PushNil),
+                }
+                self.emit(OpCode::StoreLocal(local));
+                let offset = self.op_idx() - jump_idx;
+                self.chunk_mut().unwrap().ops[jump_idx] = OpCode::JumpIfLocalBound(local, offset);
+            }
+        }
         self.compile_expression(&wrapped_body)?;
 
         let scope = self.scopes.pop().unwrap();
@@ -3158,33 +4173,7 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params_expr) = &list[2] else {
                     return Err(CompilerError::InvalidArg);
                 };
-                let mut params = Vec::new();
-                let mut param_names = HashSet::new();
-                let mut rest_param = None;
-                let mut index = 0;
-                while index < params_expr.len() {
-                    let Expression::Symbol(param) = &params_expr[index] else {
-                        return Err(CompilerError::InvalidArg);
-                    };
-                    if param == "&rest" {
-                        let Some(Expression::Symbol(rest)) = params_expr.get(index + 1) else {
-                            return Err(CompilerError::InvalidArg);
-                        };
-                        if index + 2 != params_expr.len()
-                            || rest == "&rest"
-                            || !param_names.insert(rest.clone())
-                        {
-                            return Err(CompilerError::InvalidArg);
-                        }
-                        rest_param = Some(rest.clone());
-                        break;
-                    }
-                    if !param_names.insert(param.clone()) {
-                        return Err(CompilerError::InvalidArg);
-                    }
-                    params.push(param.clone());
-                    index += 1;
-                }
+                let (params, rest_param) = parse_macro_params(name, params_expr)?;
                 // Inside a declared module, bare macro names intern
                 // qualified (`sdf/circle`); headerless (eseq.vanilla)
                 // files keep flat keys until slice 3 so the patcher's
@@ -3255,6 +4244,9 @@ impl<'a> Compiler<'a> {
             }
             if s == "set!" && list.len() == 3 {
                 return self.compile_set_statement(&list[1], &list[2]);
+            }
+            if s == super::parser::FUNCTION_FORM {
+                return self.compile_field_binding(list);
             }
             if s == "defstate" && list.len() == 3 {
                 let Expression::Symbol(name) = &list[1] else {
@@ -3543,6 +4535,12 @@ impl<'a> Compiler<'a> {
                         let field_idx = self.use_string_constant(fields[0]);
                         self.emit(OpCode::LoadReactive(ns_idx, field_idx));
                     } else {
+                        if self.removed_namespace_head(parts[0]).is_some() {
+                            let message = removed_namespace_message(s, false);
+                            if !self.errors.contains(&message) {
+                                self.errors.push(message);
+                            }
+                        }
                         self.emit_symbol_load(parts[0]);
                         let idx = self.use_string_constant(fields[0]);
                         self.emit(OpCode::GetField(idx));
@@ -3610,10 +4608,23 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: entry_module,
             origins: Vec::new(),
+            lambda_list: None,
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
             self.compile_expression(expression)?;
+        }
+        for (form, idx) in std::mem::take(&mut self.removed_form_uses) {
+            if self.defined_globals.contains(&idx) {
+                continue;
+            }
+            let (_, message) = REMOVED_BINDING_FORMS
+                .iter()
+                .find(|(name, _)| *name == form)
+                .expect("a removed form");
+            if !self.errors.iter().any(|error| error == message) {
+                self.errors.push(message.to_string());
+            }
         }
         if !self.errors.is_empty() {
             return Err(CompilerError::Message(self.errors.join("; ")));

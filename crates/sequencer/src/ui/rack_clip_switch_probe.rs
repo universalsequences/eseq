@@ -90,11 +90,10 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     let selected_track = app.ui.cursor_track;
     shared.current_track.store(selected_track, Ordering::Relaxed);
 
-    // Match project-load ordering: publish topology before evaluating rack
-    // scripts, whose tab labels and owner bindings read SEQ.groups.
+    // Match project-load ordering: share the topology before evaluating
+    // rack scripts.
     *shared.bus_state.lock().unwrap() = app.buses.clone();
     *shared.track_groups.lock().unwrap() = app.groups.clone();
-    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     let paths = sequencer::app_paths::app_paths();
     let (roots, errors) = paths.module_load_roots();
     assert!(errors.is_empty(), "{errors:?}");
@@ -105,10 +104,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     if !collapsed {
         editor.runtime_mut().eval_str(&format!("(seq-toggle-group-collapsed {group_id})")).unwrap();
     }
-    // No musical boundary wait in an input-to-frame benchmark.
-    editor.runtime_mut().set_reactive("SEQ", "scene-launch-quantize", Value::String("off".into()));
     if playing { shared.state.start_playback(); } else { shared.state.stop_playback(); }
-    editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(playing));
 
     let dimension = |name: &str, default: u32| std::env::var(name).ok()
         .map(|value| value.parse::<u32>().expect("pixel dimension")).unwrap_or(default);
@@ -126,13 +122,14 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     editor.update_tile_rects(cols as u16, rows as u16);
     let mut sessions = EditSessionState::default();
     let mut frame = FrameDiffState::default();
+    // No musical boundary wait in an input-to-frame benchmark.
+    frame.host_kinds.set_scene_launch_quantize(sequencer::quantized_launch::LaunchQuantize::Off);
     let mut gesture = GestureState::default();
     let mut track_names = app.tracks.clone();
     let mut stats = UiLoopStats::new();
     let mut meters = MeterCache {
         cached_peak_l_level: 0.0, cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0; app.tracks.len()],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: vec![0.0; app.buses.len()],
         cached_modulator_phases: Vec::new(), cached_modulator_levels: Vec::new(),
         cached_mod_port_levels: Default::default(), cached_mod_display_values: Default::default(),
@@ -140,18 +137,15 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         mod_display_poll_fx_epoch: usize::MAX, mod_display_poll_track: None,
         cached_cpu_load_bits: 0,
         last_meter_poll_at: Instant::now(), last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
     let mut ctx = LoopCtx {
         sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
         gesture: &mut gesture, track_names: &mut track_names, shared,
     };
-    let tick = TickInputs { cols, rows, playing_now: playing };
     for _ in 0..3 {
         editor.sync_reactive_bindings_for_visible_layouts();
-        sync_reactive_tick(app, editor, &mut ctx, &tick, &mut stats);
+        sync_reactive_tick(app, editor, &mut ctx, &mut stats);
         let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
         backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("warm initial frame"));
         editor.clear_needs_redraw();
@@ -205,7 +199,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         }
         let phase = Instant::now();
         editor.sync_reactive_bindings_for_visible_layouts();
-        sync_reactive_tick(app, editor, &mut ctx, &tick, &mut stats);
+        sync_reactive_tick(app, editor, &mut ctx, &mut stats);
         let reactive_tick_ms = milliseconds(phase);
         let phase = Instant::now();
         let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);

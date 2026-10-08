@@ -1,18 +1,158 @@
 use super::*;
 
-/// The panel header's sound-binding label (takes spec 16.6): the bound
-/// sound's identity only — the patch name, or the binding label
-/// (`Take 2 · bars 0–2` / `Pattern 2 (scene)`) when no palette entry
-/// resolves. Deliberately *not* `App::sound_binding_badge`, which appends
-/// the reverse referent index ("— used by Scene 1, Take 2, …"): that list
-/// grows without bound and carries nothing the header needs.
-fn sound_binding_label(app: &app::App, track: usize) -> Option<String> {
-    let target = app.palette_target_or_binding(track, None);
-    app.sound_palette_entries(track, target)
-        .into_iter()
-        .find(|entry| entry.is_current)
-        .map(|entry| entry.name)
-        .or_else(|| app.track_binding_label(track))
+/// Where a param sits on its device's panel: the main controls, a
+/// modulation lane's own params (`mod …`), a modulation source's settings
+/// (voice modulator source params), or host plumbing nobody shows. Shared by
+/// the instrument panel builders and the host kinds' `param.section`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelSection {
+    Main,
+    Mod,
+    Source,
+    Hidden,
+}
+
+impl PanelSection {
+    pub(crate) fn of(pdesc: &sequencer::effects::ParamDescriptor) -> Self {
+        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
+            Self::Hidden
+        } else if is_source_param(pdesc.node_param_idx) {
+            Self::Source
+        } else if is_mod_param(&pdesc.name) {
+            Self::Mod
+        } else {
+            Self::Main
+        }
+    }
+
+    /// Where param `index` of `desc` sits on `device`'s panel. An effect's
+    /// (a track chain, bus or drum rack slot effect) has no `mod` split: it
+    /// lists every param (main) but its voice-modulator source settings
+    /// (source; a host-routed sidechain param stays main), its modulation
+    /// routing (a lane's depth, source and switch params) and the host
+    /// plumbing (both hidden). Any other device's is [`Self::of`].
+    pub(crate) fn of_device(
+        device: DeviceSlot,
+        desc: &sequencer::effects::EffectDescriptor,
+        index: usize,
+    ) -> Self {
+        let Some(pdesc) = desc.params.get(index) else {
+            return Self::Hidden;
+        };
+        if !device.is_effect() {
+            return Self::of(pdesc);
+        }
+        let sidechain = matches!(
+            pdesc.host_control,
+            Some(sequencer::effects::HostControl::FxSidechain { .. })
+        );
+        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
+            Self::Hidden
+        } else if sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx)
+            && !sidechain
+        {
+            // A host-only control (u32::MAX) is no modulation source's.
+            match pdesc.node_param_idx {
+                u32::MAX => Self::Hidden,
+                _ => Self::Source,
+            }
+        } else if modulation_routing_param_indices(desc).contains(&index) {
+            Self::Hidden
+        } else {
+            Self::Main
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Mod => "mod",
+            Self::Source => "source",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// The name the panel shows: a mod param without its `mod ` prefix, a
+    /// source param by its role (`type`, `rate`, …).
+    pub(crate) fn label(self, pdesc: &sequencer::effects::ParamDescriptor) -> String {
+        match self {
+            Self::Mod => (pdesc.name.strip_prefix("mod ").unwrap_or(&pdesc.name)).to_string(),
+            Self::Source => rename_source_param(&pdesc.name),
+            Self::Main | Self::Hidden => pdesc.name.clone(),
+        }
+    }
+
+    /// The modulation source (1-based) a source param sets; 0 otherwise.
+    pub(crate) fn mod_slot(self, pdesc: &sequencer::effects::ParamDescriptor) -> usize {
+        match self {
+            Self::Source => {
+                sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn is_mod_param(name: &str) -> bool {
+    name.starts_with("mod ")
+}
+
+fn is_generated_host_mod_param(name: &str) -> bool {
+    name.starts_with("__host_mod__")
+}
+
+fn is_hidden_dgen_mod_param(name: &str) -> bool {
+    name.starts_with("__dgen_mod_active__")
+}
+
+fn is_source_param(node_param_idx: u32) -> bool {
+    // u32::MAX marks host-only controls such as sampler slicing; it is not a
+    // packed voice-modulator source index.
+    node_param_idx != u32::MAX
+        && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+}
+
+fn rename_source_param(name: &str) -> String {
+    sequencer::instruments::voice_modulator::source_param_display_name(name)
+}
+
+/// An instrument's visible key locks: per param, `(note, value)` in display
+/// units, ascending by note; and the notes holding any, ascending. A lock
+/// whose node id no longer matches its param's (a rebuilt instrument) is
+/// not shown. Shared by the instrument panel and the host kinds'
+/// `param.key-locks` / `device.key-locked-notes`.
+pub(crate) struct InstrumentKeyLocks {
+    pub(crate) by_param: Vec<Vec<(u8, f32)>>,
+    pub(crate) notes: Vec<u8>,
+}
+
+pub(crate) fn instrument_key_locks(
+    slot: &sequencer::effects::EffectSlotState,
+    params: &[sequencer::effects::ParamDescriptor],
+) -> InstrumentKeyLocks {
+    let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let mut by_param = vec![Vec::<(u8, f32)>::new(); params.len()];
+    let mut notes = Vec::<u8>::new();
+    for note in 0..sequencer::effects::MAX_MIDI_NOTES {
+        let note = note as u8;
+        if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
+            continue;
+        }
+        for (param_idx, pdesc) in params.iter().enumerate().take(slot_num_params) {
+            let Some(value) = slot.key_locks.get(note, param_idx) else {
+                continue;
+            };
+            if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
+                continue;
+            }
+            by_param[param_idx].push((note, pdesc.stored_to_user(value)));
+            if notes.last() != Some(&note) {
+                notes.push(note);
+            }
+        }
+    }
+    InstrumentKeyLocks { by_param, notes }
 }
 
 /// Slice sensitivity as the sampler panel resolves it. Marker indices in
@@ -67,1454 +207,152 @@ pub(crate) fn sampler_slice_sensitivity(
     )
 }
 
-pub(crate) fn build_sampler_panel_value(
-    app: &app::App,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> Value {
-    use std::collections::HashMap;
-
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
-    }
-
-    fn is_generated_host_mod_param(name: &str) -> bool {
-        name.starts_with("__host_mod__")
-    }
-
-    fn is_hidden_dgen_mod_param(name: &str) -> bool {
-        name.starts_with("__dgen_mod_active__")
-    }
-
-    fn is_source_param(node_param_idx: u32) -> bool {
-        // u32::MAX marks host-only controls such as sampler slicing; it is not
-        // a packed voice-modulator source index.
-        node_param_idx != u32::MAX
-            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
-    }
-
-    fn rename_source_param(name: &str) -> String {
-        sequencer::instruments::voice_modulator::source_param_display_name(name)
-    }
-
-    app.publish_sampler_analysis_runtime(track);
-
-    let sel = selected.lock().unwrap();
-    let plock_step = sel.iter().copied().min();
-    let slot = &app.state.pattern.instrument_slots[track];
-    let desc = app
-        .graph
-        .instrument_descriptors
-        .get(track)
-        .cloned()
-        .unwrap_or_else(sequencer::effects::EffectDescriptor::builtin_sampler);
-
-    // Look up the pre-registered SampleBuffer and pass its Value map directly
-    // to the Lisp side, so the waveform widget can use it without re-loading.
-    let sampler_path = app.sampler_path_for_track(track);
-    let registered_sample = sampler_path.as_ref().and_then(|path| {
-        match load_waveform_sample(path) {
-            Ok(sample) => Some(sample),
-            Err(error) => {
-                eprintln!(
-                    "waveform: failed to register sample {}: {error}",
-                    path.display()
-                );
-                None
-            }
-        }
-    });
-    let buffer_value = registered_sample.as_ref().map(|s| s.to_value());
-    let sample_duration = registered_sample
-        .as_ref()
-        .map(|s| s.duration_seconds)
-        .unwrap_or(1.0);
-
-    struct UiModMetadata {
-        source_param_idx: Option<usize>,
-        depth_param_idx: usize,
-        source_slot: f32,
-        source_value_field: Option<String>,
-        depth_value: f32,
-        depth_value_field: Option<String>,
-        depth_min: f32,
-        depth_max: f32,
-        depth_unit: Option<String>,
-    }
-
-    fn insert_mod_metadata(
-        pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
-        targets: &[UiModMetadata],
-    ) {
-        pmap.insert(
-            "modulatable".to_string(),
-            Rc::new(RefCell::new(Value::Bool(true))),
-        );
-        let target_values = targets
-            .iter()
-            .map(|meta| {
-                let mut target = HashMap::new();
-                if let Some(source_param_idx) = meta.source_param_idx {
-                    target.insert(
-                        "source-idx".to_string(),
-                        Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
-                    );
-                }
-                target.insert(
-                    "depth-idx".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
-                );
-                target.insert(
-                    "source-slot".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
-                );
-                if let Some(field) = &meta.source_value_field {
-                    target.insert(
-                        "source-value-field".to_string(),
-                        Rc::new(RefCell::new(Value::String(field.clone()))),
-                    );
-                }
-                target.insert(
-                    "depth".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
-                );
-                if let Some(field) = &meta.depth_value_field {
-                    target.insert(
-                        "depth-value-field".to_string(),
-                        Rc::new(RefCell::new(Value::String(field.clone()))),
-                    );
-                }
-                target.insert(
-                    "depth-min".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
-                );
-                target.insert(
-                    "depth-max".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
-                );
-                if let Some(unit) = &meta.depth_unit {
-                    target.insert(
-                        "depth-unit".to_string(),
-                        Rc::new(RefCell::new(Value::String(unit.clone()))),
-                    );
-                }
-                Rc::new(RefCell::new(Value::Map(target)))
-            })
-            .collect();
-        pmap.insert(
-            "mod-targets".to_string(),
-            Rc::new(RefCell::new(Value::List(target_values))),
-        );
-    }
-
-    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
-    for target in desc
-        .instrument_modulation_targets
-        .iter()
-        .filter_map(|target| {
-            let depth_desc = desc.params.get(target.depth_param_idx)?;
-            let source_default = if let Some(source_param_idx) = target.source_param_idx {
-                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(source_param_idx)
-                } else {
-                    desc.params.get(source_param_idx)?.default
-                }
-            } else {
-                target.modulator_slot as f32
-            };
-            let depth_default =
-                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(target.depth_param_idx)
-                } else {
-                    depth_desc.default
-                };
-            let source_current = target
-                .source_param_idx
-                .and_then(|source_param_idx| {
-                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
-                })
-                .unwrap_or(source_default);
-            let depth_current = plock_step
-                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
-                .unwrap_or(depth_default);
-            let (depth_min, depth_max) = sampler_modulation_depth_display_range(depth_desc, target);
-            Some((
-                target.base_param_idx,
-                UiModMetadata {
-                    source_param_idx: target.source_param_idx,
-                    depth_param_idx: target.depth_param_idx,
-                    source_slot: target
-                        .source_param_idx
-                        .and_then(|source_param_idx| {
-                            desc.params
-                                .get(source_param_idx)
-                                .map(|source_desc| source_desc.stored_to_user(source_current))
-                        })
-                        .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.map(|source_param_idx| {
-                        let source_desc = &desc.params[source_param_idx];
-                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
-                    }),
-                    depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: Some(instrument_param_value_field(
-                        track,
-                        target.depth_param_idx,
-                        &depth_desc.name,
-                    )),
-                    depth_min,
-                    depth_max,
-                    depth_unit: target.depth_unit.clone(),
-                },
-            ))
-        })
-    {
-        modulation_targets
-            .entry(target.0)
-            .or_default()
-            .push(target.1);
-    }
-
-    let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut source_params_by_slot: HashMap<usize, Vec<Rc<RefCell<Value>>>> = HashMap::new();
-    let mut source_type_param_by_slot: HashMap<usize, Rc<RefCell<Value>>> = HashMap::new();
-    let visible_source_indices: std::collections::HashSet<usize> =
-        selected_voice_mod_source_indices(&desc, slot, plock_step)
-            .into_iter()
-            .collect();
-    let base_note = f32::from_bits(
-        app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
-    );
-    {
-        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        pmap.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String("base".to_string()))),
-        );
-        pmap.insert(
-            "control".to_string(),
-            Rc::new(RefCell::new(Value::String("base-note".to_string()))),
-        );
-        pmap.insert(
-            "value".to_string(),
-            Rc::new(RefCell::new(Value::Number(base_note as f64))),
-        );
-        pmap.insert(
-            "min".to_string(),
-            Rc::new(RefCell::new(Value::Number(-48.0))),
-        );
-        pmap.insert(
-            "max".to_string(),
-            Rc::new(RefCell::new(Value::Number(48.0))),
-        );
-        insert_string_prop(
-            &mut pmap,
-            "value-field",
-            instrument_base_note_value_field(track),
-        );
-        synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
-    }
-    for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-            slot.defaults.get(param_idx)
-        } else {
-            pdesc.default
-        };
-        let current_val = plock_step
-            .and_then(|step| slot.plocks.get(step, param_idx))
-            .unwrap_or(default_val);
-        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        pmap.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(pdesc.name.clone()))),
-        );
-        pmap.insert(
-            "idx".to_string(),
-            Rc::new(RefCell::new(Value::Number(param_idx as f64))),
-        );
-        pmap.insert(
-            "control".to_string(),
-            Rc::new(RefCell::new(Value::String("param".to_string()))),
-        );
-        pmap.insert(
-            "value".to_string(),
-            Rc::new(RefCell::new(Value::Number(
-                pdesc.stored_to_user(current_val) as f64,
-            ))),
-        );
-        pmap.insert(
-            "min".to_string(),
-            Rc::new(RefCell::new(Value::Number(
-                pdesc.stored_to_user(pdesc.min) as f64
-            ))),
-        );
-        pmap.insert(
-            "max".to_string(),
-            Rc::new(RefCell::new(Value::Number(
-                pdesc.stored_to_user(pdesc.max) as f64
-            ))),
-        );
-        match &pdesc.kind {
-            sequencer::effects::ParamKind::Boolean => {
-                pmap.insert(
-                    "boolean".to_string(),
-                    Rc::new(RefCell::new(Value::Bool(true))),
-                );
-                if param_supports_value_binding(pdesc) {
-                    insert_string_prop(
-                        &mut pmap,
-                        "value-field",
-                        instrument_param_value_field(track, param_idx, &pdesc.name),
-                    );
-                }
-            }
-            sequencer::effects::ParamKind::Enum { labels } => {
-                let selected = labels
-                    .get(current_val.round() as usize)
-                    .cloned()
-                    .unwrap_or_default();
-                let option_values = labels
-                    .iter()
-                    .cloned()
-                    .map(|label| Rc::new(RefCell::new(Value::String(label))))
-                    .collect();
-                pmap.insert(
-                    "text-value".to_string(),
-                    Rc::new(RefCell::new(Value::String(selected))),
-                );
-                pmap.insert(
-                    "options".to_string(),
-                    Rc::new(RefCell::new(Value::List(option_values))),
-                );
-                if param_supports_value_binding(pdesc) {
-                    insert_string_prop(
-                        &mut pmap,
-                        "value-field",
-                        instrument_param_value_field(track, param_idx, &pdesc.name),
-                    );
-                }
-            }
-            sequencer::effects::ParamKind::Continuous { .. } => {
-                if param_supports_value_binding(pdesc) {
-                    insert_string_prop(
-                        &mut pmap,
-                        "value-field",
-                        instrument_param_value_field(track, param_idx, &pdesc.name),
-                    );
-                }
-            }
-        }
-        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
-            continue;
-        }
-        if is_source_param(pdesc.node_param_idx) {
-            if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
-                pmap.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String(rename_source_param(&name)))),
-                );
-            }
-            if let Some(slot_number) = sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
-            {
-                let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
-                if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
-                    == Some("source")
-                {
-                    source_type_param_by_slot.insert(slot_number, param_value);
-                } else if visible_source_indices.contains(&param_idx) {
-                    source_params_by_slot
-                        .entry(slot_number)
-                        .or_default()
-                        .push(param_value);
-                }
-            }
-        } else if is_mod_param(&pdesc.name) {
-            if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
-                pmap.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String(
-                        name.strip_prefix("mod ").unwrap_or(&name).to_string(),
-                    ))),
-                );
-            }
-            mod_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
-        } else {
-            if let Some(targets) = modulation_targets.get(&param_idx) {
-                insert_mod_metadata(&mut pmap, targets);
-                // Modulated-value display fields (eseq-hpc), track-keyed like
-                // this panel's value fields: the knob's dot rides the offset,
-                // curve visualizers bind the absolute value.
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-offset-field",
-                    instrument_mod_offset_field(track, param_idx),
-                );
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-value-field",
-                    instrument_mod_value_field(track, param_idx),
-                );
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-scale-field",
-                    instrument_mod_scale_field(track, param_idx),
-                );
-            }
-            synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
-        }
-    }
-
-    annotate_process_bound_params(&mut synth_params, &app.state, &desc, track);
-    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
-        let params = source_params_by_slot
-            .remove(&slot_number)
-            .unwrap_or_default();
-        let source_param = source_type_param_by_slot.remove(&slot_number);
-        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
-        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        section_map.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name))),
-        );
-        section_map.insert(
-            "slot".to_string(),
-            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
-        );
-        if let Some(source_param) = source_param {
-            section_map.insert("source-param".to_string(), source_param);
-        }
-        // The source editor's waveform marker binds this (eseq mods rework).
-        insert_string_prop(
-            &mut section_map,
-            "phase-field",
-            instrument_mod_slot_phase_field(track, slot_number),
-        );
-        section_map.insert(
-            "params".to_string(),
-            Rc::new(RefCell::new(Value::List(params))),
-        );
-        source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
-    }
-
-    let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    panel_map.insert(
-        "type".to_string(),
-        Rc::new(RefCell::new(Value::String("sampler".to_string()))),
-    );
-    panel_map.insert(
-        "track".to_string(),
-        Rc::new(RefCell::new(Value::Number(track as f64))),
-    );
-    if let Some(buf_val) = buffer_value {
-        panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
-    }
-    let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
-    let slice_mode = sampler_slice_param_value(
-        slot,
-        &desc,
-        plock_step,
-        sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
-    )
-    .unwrap_or(0.0)
-    .round();
-    let mut slice_active_values: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let slice_values: Vec<Rc<RefCell<Value>>> = app
-        .sample_analysis
-        .cache()
-        .table(buffer_id)
-        .map(|table| {
-            let frames: Vec<u32> = if slice_mode == 1.0 {
-                let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step)
-                    .unwrap_or(0.5);
-                let edits = slot.sampler_slice_edits.read().unwrap();
-                // Sensitivity deactivates markers rather than removing them, so
-                // the panel renders every candidate and carries a parallel
-                // active flag for colouring.
-                let (frames, active) = table
-                    .with_edits(app.sampler_slice_edits_for_track(track, edits.as_ref()))
-                    .slice_markers(sensitivity);
-                slice_active_values = active
-                    .into_iter()
-                    .map(|active| {
-                        Rc::new(RefCell::new(Value::Number(if active { 1.0 } else { 0.0 })))
-                    })
-                    .collect();
-                frames
-            } else {
-                Vec::new()
-            };
-            frames
-                .into_iter()
-                .map(|frame| {
-                    Rc::new(RefCell::new(Value::Number(
-                        frame as f64 / table.sample_rate.max(1) as f64,
-                    )))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let analysis_entry = app.sample_analysis.cache().get(buffer_id);
-    let mut analysis_status = "none".to_string();
-    let mut analysis_message = String::new();
-    let mut onset_values: Vec<Rc<RefCell<Value>>> = Vec::new();
-    if let Some(entry) = analysis_entry {
-        match entry.as_ref() {
-            sequencer::analysis::AnalysisEntry::Pending => {
-                analysis_status = "pending".to_string();
-                analysis_message = "Analyzing...".to_string();
-            }
-            sequencer::analysis::AnalysisEntry::Ready(result) => {
-                analysis_status = "ready".to_string();
-                analysis_message = format!("{:.1} BPM", result.bpm);
-                panel_map.insert(
-                    "analysis-bpm".to_string(),
-                    Rc::new(RefCell::new(Value::Number(result.bpm as f64))),
-                );
-                panel_map.insert(
-                    "analysis-confidence".to_string(),
-                    Rc::new(RefCell::new(Value::Number(result.bpm_confidence as f64))),
-                );
-                if let Some(frame) = result.downbeat_frame {
-                    let seconds = frame as f64 / app.graph.sample_rate.max(1) as f64;
-                    panel_map.insert(
-                        "downbeat-time".to_string(),
-                        Rc::new(RefCell::new(Value::Number(seconds))),
-                    );
-                }
-                onset_values = result
-                    .onsets_frames
-                    .iter()
-                    .map(|frame| {
-                        Rc::new(RefCell::new(Value::Number(
-                            *frame as f64 / app.graph.sample_rate.max(1) as f64,
-                        )))
-                    })
-                    .collect();
-            }
-            sequencer::analysis::AnalysisEntry::Failed(error) => {
-                analysis_status = "failed".to_string();
-                analysis_message = error.clone();
-            }
-        }
-    }
-    panel_map.insert(
-        "analysis-status".to_string(),
-        Rc::new(RefCell::new(Value::String(analysis_status))),
-    );
-    panel_map.insert(
-        "analysis-message".to_string(),
-        Rc::new(RefCell::new(Value::String(analysis_message))),
-    );
-    panel_map.insert(
-        "onsets".to_string(),
-        Rc::new(RefCell::new(Value::List(onset_values))),
-    );
-    debug_assert_eq!(slice_active_values.len(), slice_values.len());
-    panel_map.insert(
-        "slices".to_string(),
-        Rc::new(RefCell::new(Value::List(slice_values))),
-    );
-    panel_map.insert(
-        "slice-active".to_string(),
-        Rc::new(RefCell::new(Value::List(slice_active_values))),
-    );
-    panel_map.insert(
-        "params".to_string(),
-        Rc::new(RefCell::new(Value::List(synth_params.clone()))),
-    );
-    panel_map.insert(
-        "synth".to_string(),
-        Rc::new(RefCell::new(Value::List(synth_params))),
-    );
-    panel_map.insert(
-        "mod".to_string(),
-        Rc::new(RefCell::new(Value::List(mod_params))),
-    );
-    panel_map.insert(
-        "modulators".to_string(),
-        Rc::new(RefCell::new(Value::List(
-            desc.instrument_modulators
-                .iter()
-                .map(|modulator| {
-                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-                    map.insert(
-                        "slot".to_string(),
-                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
-                    );
-                    map.insert(
-                        "label".to_string(),
-                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
-                    );
-                    Rc::new(RefCell::new(Value::Map(map)))
-                })
-                .collect(),
-        ))),
-    );
-    panel_map.insert(
-        "source-names".to_string(),
-        Rc::new(RefCell::new(Value::List(source_names))),
-    );
-    panel_map.insert(
-        "sources".to_string(),
-        Rc::new(RefCell::new(Value::List(source_sections))),
-    );
-    // Start/end as seconds for the waveform selection overlay.
-    // Raw stored values are 0.0-1.0 normalized; multiply by duration.
-    let start_raw = plock_step
-        .and_then(|step| slot.plocks.get(step, 2))
-        .unwrap_or_else(|| slot.defaults.get(2));
-    let end_raw = plock_step
-        .and_then(|step| slot.plocks.get(step, 3))
-        .unwrap_or_else(|| slot.defaults.get(3));
-    panel_map.insert(
-        "start-time".to_string(),
-        Rc::new(RefCell::new(Value::Number(
-            (start_raw as f64) * sample_duration,
-        ))),
-    );
-    insert_string_prop(
-        &mut panel_map,
-        "start-time-field",
-        sampler_selection_time_field(track, "start"),
-    );
-    panel_map.insert(
-        "end-time".to_string(),
-        Rc::new(RefCell::new(Value::Number(
-            (end_raw as f64) * sample_duration,
-        ))),
-    );
-    insert_string_prop(
-        &mut panel_map,
-        "end-time-field",
-        sampler_selection_time_field(track, "end"),
-    );
-    panel_map.insert(
-        "duration".to_string(),
-        Rc::new(RefCell::new(Value::Number(sample_duration))),
-    );
-    // Sound-binding badge (takes spec 16.6) — sampler tracks are the common
-    // take-recording case, so they carry the badge too.
-    panel_map.insert(
-        "sound-binding".to_string(),
-        Rc::new(RefCell::new(match sound_binding_label(app, track) {
-            Some(label) => Value::String(label),
-            None => Value::Nil,
-        })),
-    );
-
-    Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
-}
-
-/// Mark each param map whose descriptor index an enabled process port writes
-/// to: `process-mapped` for the amber tint, plus the effective-value fields
-/// the knob dot / number-picker bar bind (eseq-p1kg).
-fn annotate_process_bound_params(
-    params: &mut [Rc<RefCell<Value>>],
-    state: &SequencerState,
-    desc: &sequencer::effects::EffectDescriptor,
-    track: usize,
-) {
-    let bound = process_bound_instrument_params(state, desc, track);
-    if bound.is_empty() {
-        return;
-    }
-    for pmap in params.iter_mut() {
-        let mut pmap = pmap.borrow_mut();
-        let Value::Map(map) = &mut *pmap else {
-            continue;
-        };
-        let idx = match map.get("idx").map(|v| v.borrow().clone()) {
-            Some(Value::Number(idx)) => idx as usize,
-            _ => continue,
-        };
-        if !bound.contains(&idx) {
-            continue;
-        }
-        map.insert(
-            "process-mapped".to_string(),
-            Rc::new(RefCell::new(Value::Bool(true))),
-        );
-        insert_string_prop(
-            map,
-            "process-value-field",
-            instrument_proc_value_field(track, idx),
-        );
-        insert_string_prop(
-            map,
-            "process-clamped-field",
-            instrument_proc_clamped_field(track, idx),
-        );
-    }
-}
-
-/// The selected track's instrument panel entries, each stamped with the
-/// instrument's output meter selector (`meter`): the track itself, which the
-/// FX panel's `device-meter` resolves to the panner feeding the insert chain.
-/// Rack-slot entries keep their own `rack-slot` selector.
-pub(crate) fn build_instrument_panel_value(
-    app: &app::App,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> Value {
-    let value = build_instrument_panel_entries(app, track, selected);
-    if let Value::List(entries) = &value {
-        for entry in entries {
-            if let Value::Map(map) = &mut *entry.borrow_mut() {
-                map.entry("meter".to_string())
-                    .or_insert_with(|| device_meter_source("track", &[("index", track as f64)]));
-            }
-        }
-    }
-    value
-}
-
-fn build_instrument_panel_entries(
-    app: &app::App,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> Value {
-    use std::collections::HashMap;
-
-    if app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Rack)
-    {
-        return build_rack_panel_value(app, track, selected);
-    }
-    if app.is_sampler_track(track) {
-        return build_sampler_panel_value(app, track, selected);
-    }
-    let Some(desc) = app.graph.instrument_descriptors.get(track) else {
-        return Value::List(vec![]);
+/// The playback start and end a track sampler shows at `step` (stored,
+/// 0-1 of the sample): the step's p-lock, else its own. Shared by the
+/// sampler panel, its selection-time fields and the host kinds'
+/// `device.start-time` / `end-time`.
+pub(crate) fn sampler_selection(
+    slot: &sequencer::effects::EffectSlotState,
+    step: Option<usize>,
+) -> (f32, f32) {
+    let at = |param| {
+        step.and_then(|step| slot.plocks.get(step, param))
+            .unwrap_or_else(|| slot.defaults.get(param))
     };
-    if desc.params.is_empty() && desc.tensor_params.is_empty() {
-        return Value::List(vec![]);
-    }
+    use sequencer::instruments::sampler::{SLOT_PARAM_END, SLOT_PARAM_START};
+    (at(SLOT_PARAM_START), at(SLOT_PARAM_END))
+}
 
-    let sel = selected.lock().unwrap();
-    let plock_step = sel.iter().copied().min();
-    let slot = &app.state.pattern.instrument_slots[track];
-    let base_note_default = f32::from_bits(
-        app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
-    );
-    let base_note_current = base_note_default;
-
-    struct UiModMetadata {
-        source_param_idx: Option<usize>,
-        depth_param_idx: usize,
-        source_slot: f32,
-        source_value_field: Option<String>,
-        depth_value: f32,
-        depth_value_field: Option<String>,
-        depth_min: f32,
-        depth_max: f32,
-        depth_unit: Option<String>,
-    }
-
-    fn push_param(
-        out: &mut Vec<Rc<RefCell<Value>>>,
-        name: String,
-        control: &str,
-        idx: Option<usize>,
-        value: f32,
-        min: f32,
-        max: f32,
-        options: Option<&Vec<String>>,
-        value_field: Option<String>,
-        mod_targets: Option<&Vec<UiModMetadata>>,
-        ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
-    ) {
-        let is_boolean_name = name == "enabled" || name == "sync";
-        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        pmap.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(name))),
-        );
-        pmap.insert(
-            "control".to_string(),
-            Rc::new(RefCell::new(Value::String(control.to_string()))),
-        );
-        if let Some(idx) = idx {
-            pmap.insert(
-                "idx".to_string(),
-                Rc::new(RefCell::new(Value::Number(idx as f64))),
+/// The registered sample a sampler's waveform draws, loading (and
+/// registering) it on first use; `None` without a path or when it fails to
+/// load (reported). Shared by the sampler panels and the host kinds'
+/// `device.sample-buffer`.
+pub(crate) fn sampler_waveform_sample(
+    path: Option<&Path>,
+    what: &str,
+) -> Option<Arc<eseqlisp::audio::sample::SampleBuffer>> {
+    let path = path?;
+    match load_waveform_sample(path) {
+        Ok(sample) => Some(sample),
+        Err(error) => {
+            eprintln!(
+                "{what}: failed to register sample {}: {error}",
+                path.display()
             );
+            None
         }
-        if value_field.is_none() {
-            pmap.insert(
-                "value".to_string(),
-                Rc::new(RefCell::new(Value::Number(value as f64))),
-            );
-        }
-        pmap.insert(
-            "min".to_string(),
-            Rc::new(RefCell::new(Value::Number(min as f64))),
-        );
-        pmap.insert(
-            "max".to_string(),
-            Rc::new(RefCell::new(Value::Number(max as f64))),
-        );
-        if let Some(labels) = options {
-            let option_values = labels
-                .iter()
-                .cloned()
-                .map(|label| Rc::new(RefCell::new(Value::String(label))))
-                .collect();
-            if value_field.is_none() {
-                let selected = labels
-                    .get(value.round() as usize)
-                    .cloned()
-                    .unwrap_or_default();
-                pmap.insert(
-                    "text-value".to_string(),
-                    Rc::new(RefCell::new(Value::String(selected))),
-                );
-            }
-            pmap.insert(
-                "options".to_string(),
-                Rc::new(RefCell::new(Value::List(option_values))),
-            );
-        }
-        if options.is_none() && is_boolean_name {
-            pmap.insert(
-                "boolean".to_string(),
-                Rc::new(RefCell::new(Value::Bool(true))),
-            );
-        }
-        if let Some(value_field) = value_field {
-            insert_string_prop(&mut pmap, "value-field", value_field);
-        }
-        if let Some(targets) = mod_targets {
-            pmap.insert(
-                "modulatable".to_string(),
-                Rc::new(RefCell::new(Value::Bool(true))),
-            );
-            // Modulated-value display fields (eseq-6mva), sampled off the most
-            // recently triggered voice's modulator: the knob's dot rides the
-            // offset, curve visualizers bind the absolute value. Only declared
-            // destinations get them.
-            if let Some(param_idx) = idx {
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-offset-field",
-                    fx_instrument_mod_offset_field(param_idx),
-                );
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-value-field",
-                    fx_instrument_mod_value_field(param_idx),
-                );
-                insert_string_prop(
-                    &mut pmap,
-                    "mod-scale-field",
-                    fx_instrument_mod_scale_field(param_idx),
-                );
-            }
-            let target_values = targets
-                .iter()
-                .map(|meta| {
-                    let mut target = HashMap::new();
-                    if let Some(source_param_idx) = meta.source_param_idx {
-                        target.insert(
-                            "source-idx".to_string(),
-                            Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
-                        );
-                    }
-                    target.insert(
-                        "depth-idx".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
-                    );
-                    if meta.source_value_field.is_none() {
-                        target.insert(
-                            "source-slot".to_string(),
-                            Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
-                        );
-                    }
-                    if let Some(field) = &meta.source_value_field {
-                        target.insert(
-                            "source-value-field".to_string(),
-                            Rc::new(RefCell::new(Value::String(field.clone()))),
-                        );
-                    }
-                    if meta.depth_value_field.is_none() {
-                        target.insert(
-                            "depth".to_string(),
-                            Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
-                        );
-                    }
-                    if let Some(field) = &meta.depth_value_field {
-                        target.insert(
-                            "depth-value-field".to_string(),
-                            Rc::new(RefCell::new(Value::String(field.clone()))),
-                        );
-                    }
-                    target.insert(
-                        "depth-min".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
-                    );
-                    target.insert(
-                        "depth-max".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
-                    );
-                    if let Some(unit) = &meta.depth_unit {
-                        target.insert(
-                            "depth-unit".to_string(),
-                            Rc::new(RefCell::new(Value::String(unit.clone()))),
-                        );
-                    }
-                    Rc::new(RefCell::new(Value::Map(target)))
-                })
-                .collect();
-            pmap.insert(
-                "mod-targets".to_string(),
-                Rc::new(RefCell::new(Value::List(target_values))),
-            );
-        }
-        insert_param_ui_metadata(&mut pmap, ui_metadata);
-        out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
+}
 
-    fn is_mod_param(name: &str) -> bool {
-        name.starts_with("mod ")
+/// A sampler's slice markers in seconds, every candidate, and whether the
+/// slice `sensitivity` keeps each (1 or 0, as `slice-active` reads them;
+/// with `edits` applied); none outside slice mode (`slice_mode` 1) or
+/// before the sample is analysed. Shared by the sampler panels and the host
+/// kinds' `device.slices` / `slice-active`.
+pub(crate) fn sampler_slices(
+    app: &app::App,
+    buffer_id: i32,
+    slice_mode: f32,
+    sensitivity: f32,
+    edits: Option<&sequencer::analysis::SamplerSliceEdits>,
+) -> (Vec<f64>, Vec<f64>) {
+    if slice_mode.round() != 1.0 {
+        return (Vec::new(), Vec::new());
     }
-
-    fn is_generated_host_mod_param(name: &str) -> bool {
-        name.starts_with("__host_mod__")
-    }
-
-    fn is_hidden_dgen_mod_param(name: &str) -> bool {
-        name.starts_with("__dgen_mod_active__")
-    }
-
-    fn is_source_param(node_param_idx: u32) -> bool {
-        // u32::MAX marks host-only controls; it is not a packed
-        // voice-modulator source index.
-        node_param_idx != u32::MAX
-            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
-    }
-
-    fn rename_source_param(name: &str) -> String {
-        sequencer::instruments::voice_modulator::source_param_display_name(name)
-    }
-
-    let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
-    let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-    let mut key_locks_by_param = vec![Vec::<(u8, f32)>::new(); desc.params.len()];
-    // Ascending notes with at least one visible key lock, so the keys tab can
-    // mark them without scanning every param's rows per key.
-    let mut key_locked_notes = Vec::<u8>::new();
-    for note in 0..sequencer::effects::MAX_MIDI_NOTES {
-        let note = note as u8;
-        if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
-            continue;
-        }
-        for (param_idx, pdesc) in desc.params.iter().enumerate().take(slot_num_params) {
-            let Some(value) = slot.key_locks.get(note, param_idx) else {
-                continue;
-            };
-            if slot.key_locks.get_id(note, param_idx) != slot.param_node_id(param_idx) {
-                continue;
-            }
-            if let Some(rows) = key_locks_by_param.get_mut(param_idx) {
-                rows.push((note, pdesc.stored_to_user(value)));
-                if key_locked_notes.last() != Some(&note) {
-                    key_locked_notes.push(note);
-                }
-            }
-        }
-    }
-    let key_locks = key_locks_by_param
-        .iter()
-        .map(|rows| {
-            let rows = rows
-                .iter()
-                .map(|(note, value)| {
-                    let mut row = HashMap::new();
-                    row.insert(
-                        "note".to_string(),
-                        Rc::new(RefCell::new(Value::Number(*note as f64))),
-                    );
-                    row.insert(
-                        "value".to_string(),
-                        Rc::new(RefCell::new(Value::Number(*value as f64))),
-                    );
-                    Rc::new(RefCell::new(Value::Map(row)))
-                })
-                .collect();
-            Rc::new(RefCell::new(Value::List(rows)))
-        })
+    let Some(table) = app.sample_analysis.cache().table(buffer_id) else {
+        return (Vec::new(), Vec::new());
+    };
+    // Sensitivity deactivates markers rather than removing them, so the
+    // panel renders every candidate and carries a parallel active flag.
+    let (frames, active) = table.with_edits(edits).slice_markers(sensitivity);
+    let rate = table.sample_rate.max(1) as f64;
+    let seconds = frames
+        .into_iter()
+        .map(|frame| frame as f64 / rate)
         .collect();
-    let key_lock_assignments = app
-        .state
-        .reconcile_key_lock_variant_registry_for_track(track);
-    let key_lock_note_variants = key_lock_assignments
-        .iter()
-        .enumerate()
-        .filter_map(|(note, assignment)| {
-            let assignment = assignment.as_ref()?;
-            let mut map = HashMap::new();
-            map.insert(
-                "note".to_string(),
-                Rc::new(RefCell::new(Value::Number(note as f64))),
-            );
-            map.insert(
-                "label".to_string(),
-                Rc::new(RefCell::new(Value::String(assignment.label.clone()))),
-            );
-            map.insert(
-                "count".to_string(),
-                Rc::new(RefCell::new(Value::Number(assignment.param_count as f64))),
-            );
-            let color = super::track_and_mixer::themed_variant_rgb(assignment.color);
-            map.insert(
-                "color-r".to_string(),
-                Rc::new(RefCell::new(Value::Number(color[0] as f64))),
-            );
-            map.insert(
-                "color-g".to_string(),
-                Rc::new(RefCell::new(Value::Number(color[1] as f64))),
-            );
-            map.insert(
-                "color-b".to_string(),
-                Rc::new(RefCell::new(Value::Number(color[2] as f64))),
-            );
-            Some(Rc::new(RefCell::new(Value::Map(map))))
-        })
-        .collect::<Vec<_>>();
-    let mut key_lock_variant_items = Vec::new();
-    let mut def_map = HashMap::new();
-    def_map.insert(
-        "kind".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
-    );
-    def_map.insert(
-        "label".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
-    );
-    def_map.insert(
-        "display".to_string(),
-        Rc::new(RefCell::new(Value::String("base".to_string()))),
-    );
-    def_map.insert(
-        "count".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.0))),
-    );
-    def_map.insert(
-        "color-r".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
-    );
-    def_map.insert(
-        "color-g".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
-    );
-    def_map.insert(
-        "color-b".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.588_235_3))),
-    );
-    key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(def_map))));
-    for entry in app.state.key_lock_variant_registry_snapshot(track).entries {
-        let mut map = HashMap::new();
-        map.insert(
-            "kind".to_string(),
-            Rc::new(RefCell::new(Value::String("variant".to_string()))),
-        );
-        map.insert(
-            "label".to_string(),
-            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
-        );
-        map.insert(
-            "display".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
-            ))),
-        );
-        map.insert(
-            "count".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
-        );
-        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
-        map.insert(
-            "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
-        );
-        map.insert(
-            "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
-        );
-        map.insert(
-            "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
-        );
-        key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(map))));
-    }
+    let active = (active.into_iter())
+        .map(|on| if on { 1.0 } else { 0.0 })
+        .collect();
+    (seconds, active)
+}
 
-    let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
-    for target in desc
-        .instrument_modulation_targets
-        .iter()
-        .filter_map(|target| {
-            let depth_desc = desc.params.get(target.depth_param_idx)?;
-            let source_default = if let Some(source_param_idx) = target.source_param_idx {
-                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(source_param_idx)
-                } else {
-                    desc.params.get(source_param_idx)?.default
-                }
-            } else {
-                target.modulator_slot as f32
-            };
-            let depth_default =
-                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(target.depth_param_idx)
-                } else {
-                    depth_desc.default
-                };
-            let source_current = target
-                .source_param_idx
-                .and_then(|source_param_idx| {
-                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
-                })
-                .unwrap_or(source_default);
-            let depth_current = plock_step
-                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
-                .unwrap_or(depth_default);
-            let (depth_min, depth_max) = instrument_modulation_depth_display_range(target);
-            Some((
-                target.base_param_idx,
-                UiModMetadata {
-                    source_param_idx: target.source_param_idx,
-                    depth_param_idx: target.depth_param_idx,
-                    source_slot: target
-                        .source_param_idx
-                        .and_then(|source_param_idx| {
-                            desc.params
-                                .get(source_param_idx)
-                                .map(|source_desc| source_desc.stored_to_user(source_current))
-                        })
-                        .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.map(|source_param_idx| {
-                        let source_desc = &desc.params[source_param_idx];
-                        fx_instrument_param_value_field(source_param_idx, &source_desc.name)
-                    }),
-                    depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: Some(fx_instrument_param_value_field(
-                        target.depth_param_idx,
-                        &depth_desc.name,
-                    )),
-                    depth_min,
-                    depth_max,
-                    depth_unit: target.depth_unit.clone(),
-                },
-            ))
-        })
-    {
-        modulation_targets
-            .entry(target.0)
-            .or_default()
-            .push(target.1);
-    }
-    push_param(
-        &mut synth_params,
-        "base_note".to_string(),
-        "base-note",
-        None,
-        base_note_current,
-        -48.0,
-        48.0,
-        None,
-        Some(fx_instrument_base_note_value_field().to_string()),
-        None,
-        None,
-    );
+/// A sample's analysis as the sampler panel shows it.
+pub(crate) struct SamplerAnalysis {
+    /// `none`, `pending`, `ready` or `failed`.
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    /// (bpm, confidence) once ready.
+    pub(crate) tempo: Option<(f64, f64)>,
+    /// The first downbeat and the onsets, in seconds.
+    pub(crate) downbeat: Option<f64>,
+    pub(crate) onsets: Vec<f64>,
+}
 
-    for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-            slot.defaults.get(param_idx)
-        } else {
-            pdesc.default
+impl SamplerAnalysis {
+    /// Buffer `buffer_id`'s analysis (the cache's entry). Shared by the
+    /// sampler panel and the host kinds' `device.analysis-*`.
+    pub(crate) fn of(app: &app::App, buffer_id: i32) -> Self {
+        use sequencer::analysis::AnalysisEntry;
+        let rate = app.graph.sample_rate.max(1) as f64;
+        let mut analysis = Self {
+            status: "none",
+            message: String::new(),
+            tempo: None,
+            downbeat: None,
+            onsets: Vec::new(),
         };
-        let current_val = plock_step
-            .and_then(|step| slot.plocks.get(step, param_idx))
-            .unwrap_or(default_val);
-        let options = match &pdesc.kind {
-            sequencer::effects::ParamKind::Enum { labels } => Some(labels),
-            _ => None,
+        let Some(entry) = app.sample_analysis.cache().get(buffer_id) else {
+            return analysis;
         };
-        if is_source_param(pdesc.node_param_idx)
-            || is_generated_host_mod_param(&pdesc.name)
-            || is_hidden_dgen_mod_param(&pdesc.name)
-        {
-            continue;
-        }
-        if is_mod_param(&pdesc.name) {
-            let mod_name = pdesc
-                .name
-                .strip_prefix("mod ")
-                .unwrap_or(&pdesc.name)
-                .to_string();
-            push_param(
-                &mut mod_params,
-                mod_name,
-                "param",
-                Some(param_idx),
-                pdesc.stored_to_user(current_val),
-                pdesc.stored_to_user(pdesc.min),
-                pdesc.stored_to_user(pdesc.max),
-                options,
-                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
-                None,
-                None,
-            );
-        } else {
-            push_param(
-                &mut synth_params,
-                pdesc.name.clone(),
-                "param",
-                Some(param_idx),
-                pdesc.stored_to_user(current_val),
-                pdesc.stored_to_user(pdesc.min),
-                pdesc.stored_to_user(pdesc.max),
-                options,
-                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
-                modulation_targets.get(&param_idx),
-                pdesc.ui_metadata.as_ref(),
-            );
-        }
-    }
-
-    annotate_process_bound_params(&mut synth_params, &app.state, desc, track);
-    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
-        let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
-        let mut source_param: Option<Rc<RefCell<Value>>> = None;
-        for &param_idx in &source_actual {
-            let Some(pdesc) = desc.params.get(param_idx) else {
-                continue;
-            };
-            if sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
-                continue;
+        match entry.as_ref() {
+            AnalysisEntry::Pending => {
+                analysis.status = "pending";
+                analysis.message = "Analyzing...".to_string();
             }
-            let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                slot.defaults.get(param_idx)
-            } else {
-                pdesc.default
-            };
-            let current_val = plock_step
-                .and_then(|step| slot.plocks.get(step, param_idx))
-                .unwrap_or(default_val);
-            let options = match &pdesc.kind {
-                sequencer::effects::ParamKind::Enum { labels } => Some(labels),
-                _ => None,
-            };
-            push_param(
-                &mut params,
-                rename_source_param(&pdesc.name),
-                "param",
-                Some(param_idx),
-                pdesc.stored_to_user(current_val),
-                pdesc.stored_to_user(pdesc.min),
-                pdesc.stored_to_user(pdesc.max),
-                options,
-                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
-                None,
-                None,
-            );
-            if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
-                == Some("source")
-            {
-                source_param = params.pop();
+            AnalysisEntry::Ready(result) => {
+                analysis.status = "ready";
+                analysis.message = format!("{:.1} BPM", result.bpm);
+                analysis.tempo = Some((result.bpm as f64, result.bpm_confidence as f64));
+                analysis.downbeat = result.downbeat_frame.map(|frame| frame as f64 / rate);
+                analysis.onsets = (result.onsets_frames.iter())
+                    .map(|frame| *frame as f64 / rate)
+                    .collect();
+            }
+            AnalysisEntry::Failed(error) => {
+                analysis.status = "failed";
+                analysis.message = error.clone();
             }
         }
-        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
-        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        section_map.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name))),
-        );
-        section_map.insert(
-            "slot".to_string(),
-            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
-        );
-        if let Some(source_param) = source_param {
-            section_map.insert("source-param".to_string(), source_param);
-        }
-        // The source editor's waveform marker binds this (eseq mods rework).
-        insert_string_prop(
-            &mut section_map,
-            "phase-field",
-            fx_instrument_mod_slot_phase_field(slot_number),
-        );
-        section_map.insert(
-            "params".to_string(),
-            Rc::new(RefCell::new(Value::List(params))),
-        );
-        source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
+        analysis
     }
+}
 
-    let mut tensor_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for (tensor_idx, tensor_desc) in desc.tensor_params.iter().enumerate() {
-        let mut tensor_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-        tensor_map.insert(
-            "idx".to_string(),
-            Rc::new(RefCell::new(Value::Number(tensor_idx as f64))),
-        );
-        tensor_map.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(tensor_desc.name.clone()))),
-        );
-        tensor_map.insert(
-            "rows".to_string(),
-            Rc::new(RefCell::new(Value::Number(tensor_desc.rows() as f64))),
-        );
-        tensor_map.insert(
-            "cols".to_string(),
-            Rc::new(RefCell::new(Value::Number(tensor_desc.cols() as f64))),
-        );
-        tensor_map.insert(
-            "min".to_string(),
-            Rc::new(RefCell::new(Value::Number(tensor_desc.min as f64))),
-        );
-        tensor_map.insert(
-            "max".to_string(),
-            Rc::new(RefCell::new(Value::Number(tensor_desc.max as f64))),
-        );
-        tensor_map.insert(
-            "value-field".to_string(),
-            Rc::new(RefCell::new(Value::String(fx_instrument_tensor_value_field(
-                tensor_idx,
-                &tensor_desc.name,
-            )))),
-        );
-        tensor_params.push(Rc::new(RefCell::new(Value::Map(tensor_map))));
-    }
-
-    let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    let instrument_type = app
-        .graph
-        .track_instrument_types
-        .get(track)
-        .copied()
-        .unwrap_or(sequencer::sequencer::InstrumentType::Custom);
-    let instrument_name = current_custom_instrument_name(app, track).unwrap_or_else(|| {
-        if instrument_type == sequencer::sequencer::InstrumentType::Modulator {
+/// The name an instrument panel shows for `track`'s instrument (its
+/// `name`): the engine's, else Modulator or Instrument.
+pub(crate) fn instrument_panel_name(app: &app::App, track: usize) -> String {
+    let modulator = app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Modulator);
+    current_custom_instrument_name(app, track).unwrap_or_else(|| {
+        if modulator {
             "Modulator".to_string()
         } else {
             "Instrument".to_string()
         }
-    });
-    let instrument_type_name = match instrument_type {
-        sequencer::sequencer::InstrumentType::Empty => "empty",
-        sequencer::sequencer::InstrumentType::Sampler => "sampler",
-        sequencer::sequencer::InstrumentType::Custom => "custom",
-        sequencer::sequencer::InstrumentType::Modulator => "modulator",
-        sequencer::sequencer::InstrumentType::Rack => "rack",
-    };
-    panel_map.insert(
-        "type".to_string(),
-        Rc::new(RefCell::new(Value::String(
-            instrument_type_name.to_string(),
-        ))),
-    );
-    panel_map.insert(
-        "track".to_string(),
-        Rc::new(RefCell::new(Value::Number(track as f64))),
-    );
-    panel_map.insert(
-        "phase-field".to_string(),
-        Rc::new(RefCell::new(Value::String(modulator_phase_field(track)))),
-    );
-    panel_map.insert(
-        "level-field".to_string(),
-        Rc::new(RefCell::new(Value::String(modulator_level_field(track)))),
-    );
-    panel_map.insert(
-        "name".to_string(),
-        Rc::new(RefCell::new(Value::String(instrument_name.clone()))),
-    );
-    panel_map.insert(
-        "display-name".to_string(),
-        Rc::new(RefCell::new(Value::String(instrument_display_name(
-            &instrument_name,
-        )))),
-    );
-    // Sound-binding badge (takes spec 16.6): the bound Patch's identity —
-    // "Patch A". Rides the panel map rather than a per-track reactive list
-    // because the FX strip is driven entirely by `inst` — a panel-scope
-    // SEQ.* read breaks the *fx* buffer's evaluation.
-    panel_map.insert(
-        "sound-binding".to_string(),
-        Rc::new(RefCell::new(match sound_binding_label(app, track) {
-            Some(label) => Value::String(label),
-            None => Value::Nil,
-        })),
-    );
-    panel_map.insert(
-        "synth".to_string(),
-        Rc::new(RefCell::new(Value::List(synth_params))),
-    );
-    panel_map.insert(
-        "mod".to_string(),
-        Rc::new(RefCell::new(Value::List(mod_params))),
-    );
-    panel_map.insert(
-        "tensors".to_string(),
-        Rc::new(RefCell::new(Value::List(tensor_params))),
-    );
-    panel_map.insert(
-        "modulators".to_string(),
-        Rc::new(RefCell::new(Value::List(
-            desc.instrument_modulators
-                .iter()
-                .map(|modulator| {
-                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-                    map.insert(
-                        "slot".to_string(),
-                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
-                    );
-                    map.insert(
-                        "label".to_string(),
-                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
-                    );
-                    Rc::new(RefCell::new(Value::Map(map)))
-                })
-                .collect(),
-        ))),
-    );
-    panel_map.insert(
-        "source-names".to_string(),
-        Rc::new(RefCell::new(Value::List(source_names))),
-    );
-    panel_map.insert(
-        "sources".to_string(),
-        Rc::new(RefCell::new(Value::List(source_sections))),
-    );
-    panel_map.insert(
-        "key-locks".to_string(),
-        Rc::new(RefCell::new(Value::List(key_locks))),
-    );
-    panel_map.insert(
-        "key-locked-notes".to_string(),
-        Rc::new(RefCell::new(Value::List(
-            key_locked_notes
-                .iter()
-                .map(|note| Rc::new(RefCell::new(Value::Number(*note as f64))))
-                .collect(),
-        ))),
-    );
-    panel_map.insert(
-        "key-lock-note-variants".to_string(),
-        Rc::new(RefCell::new(Value::List(key_lock_note_variants))),
-    );
-    panel_map.insert(
-        "key-lock-variants".to_string(),
-        Rc::new(RefCell::new(Value::List(key_lock_variant_items))),
-    );
-
-    Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
+    })
 }
+
+/// The instrument panel header's `display-name` for `track`'s instrument:
+/// a drum rack's track name (Rack when none), Sampler for a sampler (whose
+/// panel carries none), else the panel's name without its folder or pin.
+/// Shared with the rack panel and the host kinds' `device.display-name`.
+pub(crate) fn instrument_panel_display_name(app: &app::App, track: usize) -> String {
+    use sequencer::sequencer::InstrumentType;
+    match app.graph.track_instrument_types.get(track) {
+        Some(InstrumentType::Rack) => (app.tracks.get(track))
+            .map(|name| instrument_display_name(name))
+            .unwrap_or_else(|| "Rack".to_string()),
+        Some(InstrumentType::Sampler) => "Sampler".to_string(),
+        _ => instrument_display_name(&instrument_panel_name(app, track)),
+    }
+}
+

@@ -1,400 +1,179 @@
-;; ui/drum-rack-v2.lisp — Track-group and drum-rack lookups over SEQ.groups.
+;; ui/drum-rack-v2.lisp — Track-group and drum-rack lookups over the group
+;; kinds (`(groups)`, `g.tracks`, `g.racks`, `g.clips`, `g.groove`, …).
 ;;
 ;; A drum rack is a track group with a pad map (docs/drum-rack-v2-spec.md).
-;; Shared group topology here determines membership, nesting and grid render
-;; order; rack-only helpers add the pad map and arming behavior. Rendering lives
-;; with the widgets it uses — the grid header/member rows in ui/sequencer.lisp
-;; and the group strip in ui/mixer.lisp.
+;; Shared group topology here determines nesting and the grid's and mixer's
+;; render order; rack-only helpers add the pad geometry and the groove a rack
+;; plays. Rendering lives with the widgets it uses — the grid header/member
+;; rows and the pad grid in ui/sequencer.lisp, the group strip in
+;; ui/mixer.lisp, the groove in ui/rack-groove-buffer.lisp.
+;;
+;; Pure lookups: no state of its own, no buffers, no host calls at import,
+;; so the effects manifest (ui/effects/buffers.lisp) can import it on its
+;; own (`selected-bus-rack` reads eseq.seq-core-state's selected bus, spelled
+;; qualified, when called).
 
 (module eseq.drum-rack-v2)
 
-(import eseq.track-collapse)
+(import eseq.kinds :refer (tracks groups project))
+(import eseq.view-kit :refer (index-of listed?))
 
-(export group-at
-        rack?
-        members
-        collapsed?
-        group-name
-        group-id
-        color
-        anchor
-        group-of-track
+(export rack-of-bus
+        selected-bus-rack
         rack-of-track
-        rack-member?
-        visible-members
-        group-index-by-id
-        nested?
-        child-racks
-        group-anchor
-        bus-index
-        rack-of-bus
-        armed?
-        toggle-armed
-        toggle-collapsed
-        group-anchored-at
-        grid-render-items
+        render-items
+        shown-members
         visible-track-order
         mixer-visible-track-order
         track-relative
-        pads
-        pad-of-track
-        pad-label-of-track
-        choke-of-track
-        nudge-pad-note
-        choke-options
-        choke-value-index
-        set-pad-choke
+        scene-plays-clip?
         pad-role-options
-        pad-role-tag
-        pad-role-explicit?
-        pad-role-standard-label
-        set-pad-role
-        move-pad-to-note
-        trigger-pad
         note-label
-        min-pad-page
-        max-pad-page
-        pad-page-count
+        clamp-pad-note
         clamp-pad-page
-        pad-page-base
         min-grid-pad-note
         max-grid-pad-note
         page-of-note
         cell-note
-        pad-page-label
-        pad-at-note
-        default-pad-page
         pad-map-row-count
         pad-map-row-base
         pad-map-row-on-page?
-        clip-bank
-        clips
-        active-clip
-        scene-clips
-        scene-plays-clip?
-        has-clips?
-        launch-clip
-        silence-clips
-        save-clip-as
-        delete-clip
-        rename-clip
-        convert-to-clips
-        groove-state
-        rack-groove-entry
-        clip-owns-groove?
-        groove-clip-id
-        groove-edit-clip-id
-        groove-active?
+        playing-groove
         groove-of-track
-        groove-active-for-track?
-        groove-picker-labels
-        groove-picker-headers
-        groove-key-for-label
-        set-groove
-        set-groove-amount
-        groove-amount-field
-        extract-groove)
+        groove-off-label
+        groove-extract-label
+        groove-reserved-labels
+        pool-groove-labels
+        pool-groove-label)
 
-(def contains? (xs v)
-  (> (len (filter (lambda (x) (= x v)) xs)) 0))
-
-(def group-at (gidx)
-  (nth SEQ.groups gidx))
-
-;; A rack group is a group carrying a pad map; a plain mixer group is not.
-(def rack? (gidx)
-  (and (>= gidx 0)
-    (< gidx (len SEQ.groups))
-    (get (group-at gidx) :rack)))
-
-(def members (gidx)
-  (get (group-at gidx) :members))
-
-(def collapsed? (gidx)
-  (get (group-at gidx) :collapsed))
-
-(def group-name (gidx)
-  (get (group-at gidx) :name))
-
-(def group-id (gidx)
-  (get (group-at gidx) :id))
-
-(def color (gidx)
-  (let ((c (get (group-at gidx) :color)))
-    (if (>= (len c) 3) c (list 0.5 0.5 0.5))))
-
-;; Lowest direct member index — where the group sits in flat track order. A
-;; group with no direct members reports -1; group-anchor also considers child
-;; racks, while a truly empty lazy rack is rendered after the tracks.
-(def anchor (gidx)
-  (let ((ms (members gidx)))
-    (if (= (len ms) 0) -1 (get (group-at gidx) :anchor))))
-
-;; Index (in SEQ.groups) of the group containing track i, else -1.
-(def group-of-track (i)
-  (reduce |acc gidx|
-    (if (>= acc 0)
-      acc
-      (if (contains? (members gidx) i) gidx acc))
-    -1
-    (range 0 (len SEQ.groups))))
-
-;; Index (in SEQ.groups) of the rack containing track i, else -1.
-(def rack-of-track (i)
-  (let ((gidx (group-of-track i)))
-    (if (and (>= gidx 0) (rack? gidx)) gidx -1)))
-
-(def rack-member? (i)
-  (>= (rack-of-track i) 0))
-
-;; Members the grid draws: collapsed member tracks hide exactly as loose ones do.
-(def visible-members (gidx)
-  (filter
-    (lambda (m) (not (eseq.track-collapse/collapsed? m)))
-    (members gidx)))
-
-;; Group nesting currently permits a regular group to contain drum racks. The
-;; host publishes both directions: :rack-members on the parent and :parent on
-;; the child. Nested racks are rendered by their parent, never at top level.
-(def group-index-by-id (gid)
-  (reduce |acc gidx|
-    (if (>= acc 0)
-      acc
-      (if (= (group-id gidx) gid) gidx acc))
-    -1
-    (range 0 (len SEQ.groups))))
-
-(def nested? (gidx)
-  (let ((parent (get (group-at gidx) :parent)))
-    (if parent (>= parent 0) false)))
-
-(def child-racks (gidx)
-  (filter (lambda (child) (>= child 0))
-    (map (lambda (gid) (group-index-by-id gid))
-      (or (get (group-at gidx) :rack-members) (list)))))
-
-;; Lowest track owned by this group or by a rack nested in it.
-(def group-anchor (gidx)
-  (reduce |acc child|
-    (let ((child-anchor (anchor child)))
-      (if (< acc 0)
-        child-anchor
-        (if (< child-anchor 0) acc (min acc child-anchor))))
-    (anchor gidx)
-    (child-racks gidx)))
-
-;; Storage index of the group's backing bus in the SEQ.bus-* lists, or -1.
-(def bus-index (gidx)
-  (let ((bid (get (group-at gidx) :bus-id)))
-    (reduce |acc i|
-      (if (>= acc 0) acc (if (= (nth SEQ.bus-ids i) bid) i acc))
-      -1
-      (range 0 (len SEQ.bus-ids)))))
-
-;; Index (in SEQ.groups) of the rack backed by bus `bus-idx`, else -1. Selecting
-;; a rack selects its bus (ui/sequencer.lisp, select-rack), so this is how a
-;; bus-driven surface — the *fx* buffer — asks "is this selection a kit?".
+;; The drum rack backed by the bus at position `bus-idx` (what a bus-driven
+;; surface, the *fx* buffer, asks: "is this selection a kit?"), else nil.
+;; Selecting a rack selects its bus (ui/sequencer.lisp, select-group).
 (def rack-of-bus (bus-idx)
-  (if (< bus-idx 0)
-    -1
-    (reduce |acc gidx|
-      (if (>= acc 0)
-        acc
-        (if (and (rack? gidx) (= (bus-index gidx) bus-idx)) gidx acc))
-      -1
-      (range 0 (len SEQ.groups)))))
+  (first (filter (lambda (g) (and g.rack g.bus (= g.bus.index bus-idx))) (groups))))
 
-;; ── Rack arming ─────────────────────────────────────────────────────────
-;; Which rack the live keyboard plays as pads (SEQ.armed-rack-id, -1 = none).
-;; The host owns this: `seq-toggle-rack-arm` flips it, disarms the rack's own
-;; member tracks, and the live-keyboard path routes note->pad->member track.
+;; The drum rack behind the selected bus, else nil (no bus selected: -1).
+(def selected-bus-rack ()
+  (rack-of-bus eseq.seq-core-state/selected-bus))
 
-(def armed? (gidx)
-  (and (>= gidx 0) (= SEQ.armed-rack-id (group-id gidx))))
+;; The drum rack track t is a member of, else nil.
+(def rack-of-track (t)
+  (let ((g t.group))
+    (when (and g g.rack) g)))
 
-(def toggle-armed (gidx)
-  (seq-toggle-rack-arm (group-id gidx)))
-
-(def toggle-collapsed (gidx)
-  (seq-toggle-group-collapsed (group-id gidx)))
-
-;; ── Grid render order ───────────────────────────────────────────────────
+;; ── Render order ────────────────────────────────────────────────────────
 ;; Loose tracks stay in track order. Every top-level group collapses its member
 ;; run into one item anchored at its lowest member, so regular groups and drum
-;; racks use the same nested block model. Unanchored groups follow the tracks;
-;; this keeps empty, lazy drum racks visible.
+;; racks use the same nested block model. Unanchored groups (an empty, lazy
+;; drum rack) follow the tracks. A group drawn inside another's block (a rack
+;; in a plain group, `g.parent`) is its parent's to draw.
 
-(def group-anchored-at (track)
-  (reduce |acc gidx|
-    (if (>= acc 0)
-      acc
-      (if (and (not (nested? gidx)) (= (group-anchor gidx) track)) gidx acc))
-    -1
-    (range 0 (len SEQ.groups))))
+;; The lowest position among tracks, or -1 for none.
+(def lowest-index (ts)
+  (reduce |acc t| (if (or (< acc 0) (< t.index acc)) t.index acc) -1 ts))
 
-(def unanchored-group-items ()
-  (reduce |acc gidx|
-    (if (and (not (nested? gidx)) (< (group-anchor gidx) 0))
-      (append acc (list (dict :kind "group" :gidx gidx)))
-      acc)
-    (list)
-    (range 0 (len SEQ.groups))))
+;; Where a group sits in track order: its lowest member, or that of a rack
+;; drawn inside it; -1 before it claims a track.
+(def group-anchor (g)
+  (reduce |acc child|
+    (let ((a (lowest-index child.tracks)))
+      (if (< acc 0) a (if (< a 0) acc (min a acc))))
+    (lowest-index g.tracks)
+    g.racks))
 
-(def grid-render-items-with-collapsed-tracks (include-collapsed-tracks)
-  (append
-    (reduce |acc i|
-      (let ((gidx (group-anchored-at i)))
-        (if (>= gidx 0)
-          (append acc (list (dict :kind "group" :gidx gidx)))
-          (if (>= (group-of-track i) 0)
-            acc
-            (if (and (not include-collapsed-tracks)
-                     (eseq.track-collapse/collapsed? i))
+;; The top-level rows in order: `(dict :kind "track" :track t)` for a loose
+;; track, `(dict :kind "group" :group g)` for a top-level group. The grid
+;; leaves collapsed loose tracks out; the mixer (`collapsed-tracks` true)
+;; draws them as narrow badges.
+(def render-items (collapsed-tracks)
+  (let ((top (filter (lambda (g) (not g.parent)) (groups)))
+        (anchored (map (lambda (g) (dict :group g :anchor (group-anchor g))) top))
+        (group-item (lambda (ga) (dict :kind "group" :group (get ga :group)))))
+    (append
+      (reduce |acc t|
+        (let ((hit (first (filter (lambda (ga) (= (get ga :anchor) t.index)) anchored))))
+          (if hit
+            (append acc (list (group-item hit)))
+            (if (or t.group (and t.collapsed (not collapsed-tracks)))
               acc
-              (append acc (list (dict :kind "track" :track i)))))))
-      (list)
-      (range 0 SEQ.num-tracks))
-    (unanchored-group-items)))
+              (append acc (list (dict :kind "track" :track t))))))
+        (list)
+        (tracks))
+      (map group-item (filter (lambda (ga) (< (get ga :anchor) 0)) anchored)))))
 
-(def grid-render-items ()
-  (grid-render-items-with-collapsed-tracks false))
+;; Group g's member tracks the grid shows: collapsed ones hide exactly as
+;; loose ones do.
+(def shown-members (g)
+  (filter (lambda (m) (not m.collapsed)) g.tracks))
 
-;; Flatten a group in exactly the order `group-block` draws it: direct members
-;; first, then each nested rack. The structural form includes hidden rows and is
-;; used only to locate a selection that has become invisible.
-(def group-track-order (gidx respect-group-collapse hide-collapsed-tracks)
-  (if (and respect-group-collapse (collapsed? gidx))
+;; Group g's track rows in the order its block draws them: its members, then
+;; each rack drawn inside it. `respect-collapse`: none while g is collapsed;
+;; `hide-collapsed`: collapsed members left out. With neither, the structural
+;; order, hidden rows included (where a hidden selection sits).
+(def group-track-order (g respect-collapse hide-collapsed)
+  (if (and respect-collapse g.collapsed)
     (list)
     (reduce |acc child|
-      (append acc
-        (group-track-order child respect-group-collapse hide-collapsed-tracks))
-      (if hide-collapsed-tracks (visible-members gidx) (members gidx))
-      (child-racks gidx))))
+      (append acc (group-track-order child respect-collapse hide-collapsed))
+      (if hide-collapsed (shown-members g) g.tracks)
+      g.racks)))
 
-(def flatten-track-order (items respect-group-collapse hide-collapsed-tracks)
+(def flatten-track-order (items respect-collapse hide-collapsed)
   (reduce |acc item|
     (append acc
-      (if (= (get item :kind) "track")
-        (list (get item :track))
-        (group-track-order
-          (get item :gidx) respect-group-collapse hide-collapsed-tracks)))
+      (if (= (get item :kind) "group")
+        (group-track-order (get item :group) respect-collapse hide-collapsed)
+        (list (get item :track))))
     (list)
     items))
 
-;; Selectable sequencer track rows in their rendered order. Group headers and
-;; buses are deliberately absent: they retain their click-only selection path.
+;; The grid's selectable track rows in their rendered order (the shift-click
+;; range, the UP / DOWN keys). Group headers and buses are deliberately
+;; absent: they retain their click-only selection path.
 (def visible-track-order ()
-  (flatten-track-order (grid-render-items) true true))
+  (flatten-track-order (render-items false) true true))
 
-;; The mixer shares the same group topology but still draws individually
-;; collapsed tracks as narrow badges. Only a collapsed group removes tracks
-;; from its visible order.
+;; The mixer's: individually collapsed tracks still draw (as narrow badges);
+;; only a collapsed group removes tracks from its visible order.
 (def mixer-visible-track-order ()
-  (flatten-track-order (grid-render-items-with-collapsed-tracks true) true false))
+  (flatten-track-order (render-items true) true false))
 
-(def index-of (xs value)
-  (reduce |found i|
-    (if (>= found 0) found (if (= (nth xs i) value) i found))
-    -1
-    (range 0 (len xs))))
-
-;; Return the adjacent visible track in `delta`'s direction. When `track` is
-;; hidden, walk from its position in the same structural row order until a
-;; visible row is found. This handles collapsed groups, collapsed loose tracks,
-;; and nested racks without reconstructing any ordering in the host.
-(def track-relative (track delta)
-  (let ((visible (visible-track-order)))
-    (if (= (len visible) 0)
+;; The visible track `delta` rows from track t, wrapping, or nil when no row
+;; is visible. When t is hidden, walk from its position in the structural row
+;; order until a visible row is found: collapsed groups, collapsed loose
+;; tracks and nested racks need no ordering of their own.
+(def track-relative (t delta)
+  (let ((visible (visible-track-order))
+        (shown (len visible)))
+    (if (empty? visible)
       nil
-      (let ((visible-pos (index-of visible track)))
-        (if (>= visible-pos 0)
-          (nth visible (mod (+ visible-pos delta (len visible)) (len visible)))
-          (let ((structural
-                  (flatten-track-order
-                    (grid-render-items-with-collapsed-tracks true) false false)))
-            (let ((structural-pos (index-of structural track)))
-              (if (< structural-pos 0)
+      (let ((at (index-of visible t)))
+        (if (>= at 0)
+          (nth visible (mod (+ at delta shown) shown))
+          (let ((structural (flatten-track-order (render-items true) false false))
+                (size (len structural))
+                (from (index-of structural t)))
+            (if (< from 0)
+              nil
+              (reduce |found distance|
+                (or found
+                    (let ((candidate (nth structural (mod (+ from (* delta distance) size) size))))
+                      (when (listed? candidate visible) candidate)))
                 nil
-                (reduce |found distance|
-                  (if (= found nil)
-                    (let ((candidate
-                            (nth structural
-                              (mod (+ structural-pos (* delta distance) (len structural))
-                                   (len structural)))))
-                      (if (contains? visible candidate) candidate found))
-                    found)
-                  nil
-                  (range 1 (+ (len structural) 1)))))))))))
+                (range 1 (+ size 1))))))))))
 
-;; ── Pad map (slice 6 polish) ────────────────────────────────────────────
-;; The pad map is the rack's whole curation layer: an ordered list of pads,
-;; each naming a MIDI note, the member track behind it and its choke group.
-;; Every pad-facing control below reads it and writes back through a host
-;; command keyed by (group id, pad note) — never by track index, which moves
-;; under track delete/reindex.
-
-(def pads (gidx)
-  (get (group-at gidx) :pads))
-
-;; The pad backing a member track. Every member gets a pad when it joins the
-;; rack, so nil is only the defensive case (a project the load repair could not
-;; map because the rack was full).
-(def pad-of-track (gidx track)
-  (reduce |acc pad|
-    (if (= acc nil) (if (= (get pad :track) track) pad acc) acc)
-    nil
-    (pads gidx)))
-
-;; Note-name badge for a member row ("" when the member has no pad).
-(def pad-label-of-track (gidx track)
-  (let ((pad (pad-of-track gidx track)))
-    (if (= pad nil) "" (get pad :label))))
-
-;; Choke group of a member's pad: -1 when unassigned or padless.
-(def choke-of-track (gidx track)
-  (let ((pad (pad-of-track gidx track)))
-    (if (= pad nil) -1 (get pad :choke))))
-
-(def clamp-pad-note (note)
-  (max (min-grid-pad-note) (min (max-grid-pad-note) note)))
-
-;; Move a pad by a semitone. A collision with another pad swaps the two, so a
-;; nudge past a neighbour trades places with it. Nudges clamp to the
-;; note-positional grid's range, not raw MIDI: notes above the top page's last
-;; cell exist but no page can show them, and a nudge must never strand a pad
-;; where the grid cannot render it.
-(def nudge-pad-note (gidx pad delta)
-  (let ((note (clamp-pad-note (+ (get pad :pad-note) delta))))
-    (if (= note (get pad :pad-note))
-      nil
-      (host-command "set-rack-pad-note"
-        (dict :group-id (group-id gidx)
-              :pad-note (get pad :pad-note)
-              :note note)))))
-
-(def choke-options ()
-  (list "Off" "1" "2" "3" "4" "5" "6" "7" "8" "9" "10" "11" "12" "13" "14" "15" "16"))
-
-;; Dropdown index for a pad's choke value: 0 = Off, otherwise the group number.
-(def choke-value-index (choke)
-  (if (< choke 0) 0 choke))
-
-(def choke-value-from-label (label)
-  (let ((opts (choke-options)))
-    (reduce |acc i| (if (= (nth opts i) label) i acc) 0 (range 0 (len opts)))))
-
-(def set-pad-choke (gidx pad label)
-  (host-command "set-rack-pad-choke-group"
-    (dict :group-id (group-id gidx)
-          :pad-note (get pad :pad-note)
-          :value (choke-value-from-label label))))
+;; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────
+;; Whether rack g plays something in scene s: a clip of its bank names the
+;; scene. A LEGACY rack (no bank, `g.legacy`, §4.3) keeps its members in the
+;; project scenes, so it plays in every one (the kit export drops the scenes
+;; it finds empty).
+(def scene-plays-clip? (g s)
+  (or g.legacy
+      (reduce |found rc| (or found (listed? s rc.scenes)) false g.clips)))
 
 ;; ── Pad roles (docs/rack-groove-spec.md, "Pad roles") ──────────────────
-;; What drum a pad IS, independent of its note. The host publishes each pad's
-;; explicit `:role` key ("" = Standard), its effective `:role-tag` / `:role-label`
-;; and the `:standard-role-label` the standard layout (GM drum map on the
-;; rack's home octave, kick on C1) infers from the note. The option list mirrors `PadRole::ALL` in menu order
-;; (keys are the serde names); a test keeps the two in sync.
+;; The role menu's entries: eseq.kinds' `pad-role-options` (the `PadRole::ALL`
+;; keys, in menu order) with their labels; a test keeps the two in sync.
 (def pad-role-options ()
   (list
     (dict :key "kick" :label "Kick")
@@ -412,43 +191,9 @@
     (dict :key "shaker" :label "Shaker")
     (dict :key "perc" :label "Perc")))
 
-;; Short tag drawn on the pad ("" when neither the pad nor the layout names one).
-(def pad-role-tag (pad)
-  (if (= pad nil) "" (or (get pad :role-tag) "")))
-
-(def pad-role-explicit? (pad)
-  (and (not (= pad nil))
-    (not (= (or (get pad :role) "") ""))))
-
-;; "Standard (Snare)": the default entry names what the layout infers.
-(def pad-role-standard-label (pad)
-  (let ((inferred (or (get pad :standard-role-label) "")))
-    (str "Standard (" (if (= inferred "") "none" inferred) ")")))
-
-;; `key` is a role key, or "standard" to clear back to the inferred role.
-(def set-pad-role (gidx pad key)
-  (host-command "set-rack-pad-role"
-    (dict :group-id (group-id gidx)
-          :pad-note (get pad :pad-note)
-          :role key)))
-
-;; A pad-grid hit takes the same live path a pad key takes: the pad's member
-;; track at base pitch, so choke groups and the member's fx chain apply.
-;; Move a pad to an exact note: the pad-grid and octave-map drop targets. An
-;; occupied destination swaps the two pads (see set-rack-pad-note).
-(def move-pad-to-note (gidx pad-note note)
-  (if (= note pad-note)
-    nil
-    (host-command "set-rack-pad-note"
-      (dict :group-id (group-id gidx) :pad-note pad-note :note note))))
-
-(def trigger-pad (gidx pad)
-  (host-command "trigger-rack-pad"
-    (dict :group-id (group-id gidx) :pad-note (get pad :pad-note))))
-
 ;; ── Pad grid geometry (docs/drum-rack-v2-spec.md, "UI") ─────────────────
-;; The 4x4 pad grid is NOT a window onto the pad vec: a cell IS a fixed pad
-;; note, and a pad renders at the cell its `pad_note` names (empty everywhere
+;; The 4x4 pad grid is NOT a window onto the pad list: a cell IS a fixed pad
+;; note, and a pad renders at the cell its `p.note` names (empty everywhere
 ;; else). A page shows sixteen consecutive notes with the LOWEST bottom-left,
 ;; ascending left-to-right then bottom-to-top, the way a drum rack reads
 ;; everywhere else. Pages are octave-aligned — page k starts at note 12k — so
@@ -459,14 +204,6 @@
 
 (def note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
 
-;; Note name as the host writes pad labels (`drum_rack_pad_label`). A pad note
-;; is a TRANSPOSE, the same one the step sequencer and piano roll speak, so 0
-;; is C4 and notes below middle C are negative — hence the euclidean remainder
-;; rather than a bare `mod`, which would index the name table backwards.
-(def note-label (note)
-  (let ((n (clamp-pad-note note)))
-    (str (nth note-names (mod (+ (mod n 12) 12) 12)) (+ 4 (floor (/ n 12))))))
-
 ;; Pages -3..3, mirroring DRUM_RACK_FIRST_PAD_NOTE/DRUM_RACK_LAST_PAD_NOTE: the
 ;; bottom page starts at C1 (-36), the drum rack's home octave, and the top one
 ;; spans C8..D#8 (36..51). C4 — transpose 0 — therefore sits in the MIDDLE of
@@ -474,9 +211,6 @@
 ;; floor.
 (def min-pad-page () -3)
 (def max-pad-page () 3)
-
-(def pad-page-count ()
-  (+ (- (max-pad-page) (min-pad-page)) 1))
 
 (def clamp-pad-page (page)
   (max (min-pad-page) (min (max-pad-page) page)))
@@ -486,14 +220,25 @@
   (* 12 (clamp-pad-page page)))
 
 ;; The notes the grid can name: the bottom page's C (C1) up to the top page's
-;; top-right cell (D#8). Pad-placing UI paths clamp here, which is also the
-;; host's pad-note domain (DRUM_RACK_FIRST_PAD_NOTE..DRUM_RACK_LAST_PAD_NOTE),
-;; so nothing can be placed where no page could render it.
+;; top-right cell (D#8). This is the host's pad-note domain (`p.note`'s range,
+;; DRUM_RACK_FIRST_PAD_NOTE..DRUM_RACK_LAST_PAD_NOTE), so nothing can be
+;; placed where no page could render it.
 (def min-grid-pad-note ()
   (* 12 (min-pad-page)))
 
 (def max-grid-pad-note ()
   (+ (* 12 (max-pad-page)) 15))
+
+(def clamp-pad-note (note)
+  (max (min-grid-pad-note) (min (max-grid-pad-note) note)))
+
+;; Note name as the host writes pad labels (`p.label`). A pad note is a
+;; TRANSPOSE, the same one the step sequencer and piano roll speak, so 0 is C4
+;; and notes below middle C are negative — hence the euclidean remainder
+;; rather than a bare `mod`, which would index the name table backwards.
+(def note-label (note)
+  (let ((n (clamp-pad-note note)))
+    (str (nth note-names (mod (+ (mod n 12) 12) 12)) (+ 4 (floor (/ n 12))))))
 
 ;; The page a note is drawn on. Overlap means a note can also appear in the
 ;; top row of the page below; this names the canonical one.
@@ -505,28 +250,6 @@
 (def cell-note (page cell)
   (+ (pad-page-base page)
     (+ (* 4 (- 3 (floor (/ cell 4)))) (mod cell 4))))
-
-(def pad-page-label (page)
-  (str (note-label (pad-page-base page)) "–" (note-label (+ (pad-page-base page) 15))))
-
-;; The pad answering to a note, or nil — how a grid cell finds what to draw.
-(def pad-at-note (gidx note)
-  (reduce |acc pad| (if (= (get pad :pad-note) note) pad acc)
-    nil
-    (pads gidx)))
-
-;; The page an empty rack opens on: the drum home, C1 — the bottom of the pad
-;; space and where a rack's first pad lands (DRUM_RACK_FIRST_PAD_NOTE).
-(def empty-rack-home-note () (min-grid-pad-note))
-
-;; Where a rack's grid opens: the page holding its lowest pad, so a kit that
-;; lives at C7 does not open onto empty octaves.
-(def default-pad-page (gidx)
-  (let ((ps (pads gidx)))
-    (if (= (len ps) 0)
-      (page-of-note (empty-rack-home-note))
-      (page-of-note (reduce |acc pad| (min acc (get pad :pad-note))
-        (max-grid-pad-note) ps)))))
 
 ;; ── Octave overview geometry (eseq-4b5.15) ──────────────────────────────
 ;; The mini-map beside the pad grid lays the WHOLE grid-addressable note range
@@ -553,188 +276,51 @@
       (page-base (pad-page-base page)))
     (and (>= base page-base) (< base (+ page-base 16)))))
 
-;; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────
-;; A rack carries its own scene axis: a bank of clips plus one pointer per
-;; project scene. The host publishes the bank as SEQ.rack-clips; a rack with no
-;; entry there is a LEGACY rack (§4.3) whose members still live in the project
-;; scenes, which is why "Convert to clips" only shows up for those.
-
-(def clip-bank (gid)
-  (let ((hits (filter (lambda (bank) (= (get bank :group-id) gid))
-                (or SEQ.rack-clips (list)))))
-    (if (> (len hits) 0) (nth hits 0) nil)))
-
-(def clips (gid)
-  ;; The clip roster is independent of scene pointers. A launch must not
-  ;; rebuild every widget that asks whether this rack has clips.
-  (let ((hits (filter (lambda (bank) (= (get bank :group-id) gid))
-                (or SEQ.rack-clip-banks (list)))))
-    (if (> (len hits) 0) (get (nth hits 0) :clips) (list))))
-
-;; Clip id the CURRENT scene points at, or -1 for silence.
-(def active-clip (gid)
-  (let ((bank (clip-bank gid)))
-    (if bank (get bank :active) -1)))
-
-(def has-clips? (gid)
-  (> (len (clips gid)) 0))
-
-;; Clip id per project scene, -1 where the rack is silent. A LEGACY rack has no
-;; bank and answers an empty list, which is why the kit export checklist falls
-;; back to every scene for one (the export drops the scenes it finds empty).
-(def scene-clips (gid)
-  (let ((bank (clip-bank gid)))
-    (if bank (or (get bank :scene-clips) (list)) (list))))
-
-(def scene-plays-clip? (gid scene-idx)
-  (let ((pointers (scene-clips gid)))
-    (if (= (len pointers) 0)
-      true
-      (if (< scene-idx (len pointers))
-        (>= (nth pointers scene-idx) 0)
-        false))))
-
-;; A clip launch is a scene edit plus a relaunch of the current scene, so it
-;; rides the transport's scene-launch quantize exactly as a scene does (§4.4).
-(def launch-clip (gid clip-id)
-  (host-command "launch-rack-clip"
-    (dict :group-id gid
-          :clip-id clip-id
-          :quantize (or SEQ.scene-launch-quantize "off"))))
-
-(def silence-clips (gid)
-  (host-command "launch-rack-clip"
-    (dict :group-id gid
-          :clip-id 0
-          :quantize (or SEQ.scene-launch-quantize "off"))))
-
-(def save-clip-as (gid name)
-  (host-command "save-rack-clip-as" (dict :group-id gid :name name)))
-
-(def delete-clip (gid clip-id)
-  (host-command "delete-rack-clip" (dict :group-id gid :clip-id clip-id)))
-
-(def rename-clip (gid clip-id name)
-  (host-command "rename-rack-clip" (dict :group-id gid :clip-id clip-id :name name)))
-
-(def convert-to-clips (gid)
-  (host-command "convert-rack-to-clips" (dict :group-id gid)))
-
-
 ;; ── Rack grooves (docs/rack-groove-spec.md, "UI") ───────────────────────
 ;; A groove is an extracted feel, applied wherever a trig aimed at a pad
-;; becomes a sample time. Grooves live in the project groove pool; a rack
-;; points at one. The host publishes one SEQ.rack-grooves entry per drum
-;; rack: the picker (labels + parallel keys: `off` first, then section
-;; header rows (`:picker-headers` indices, key "") over the pool's
-;; `pool:<id>` and the library's `factory:<stem>` / `user:<stem>` files,
-;; which copy into the pool when picked), the active groove
-;; (`:active-groove-id`, a pool id or -1), its on/off switch (`:enabled`)
-;; and the per-pad lanes (`:lanes`). The Timing / Velocity / Random amounts
-;; and every pad's share are scalar fields of their own
-;; (`rack-groove-<amount>-<gid>`, `rack-groove-pad-<gid>-<note>`), so a drag
-;; never rebuilds the lanes. The view is the *groove* buffer
+;; becomes a sample time. Grooves live in the project groove pool
+;; (`project.groove-pool`); a rack's groove (`g.groove`, a clip's own
+;; `rc.groove`) points at one. The view is the *groove* buffer
 ;; (ui/rack-groove-buffer.lisp).
 
-;; The rack's entry, whatever clip plays: its own groove at the top level
-;; and each clip's own under :clip-grooves.
-(def rack-groove-entry (gid)
-  (let ((hits (filter (lambda (entry) (= (get entry :group-id) gid))
-                (or SEQ.rack-grooves (list)))))
-    (if (> (len hits) 0) (nth hits 0) nil)))
+;; The groove rack g plays now: the playing clip's own when it has one, else
+;; the rack's.
+(def playing-groove (g)
+  (let ((rc g.rack-clip))
+    (or (and rc rc.groove) g.groove)))
 
-;; The groove the rack plays now: the playing clip's own when it has one,
-;; else the rack's. Its :clip-id (-1 for the rack's) is what edits target.
-(def groove-state (gid)
-  (let ((entry (rack-groove-entry gid)))
-    (if (= entry nil)
-      nil
-      (let ((clip (active-clip gid))
-            (own (filter (lambda (view) (= (get view :clip-id) clip))
-                   (or (get entry :clip-grooves) (list)))))
-        (if (and (>= clip 0) (> (len own) 0)) (nth own 0) entry)))))
+;; The groove member track t plays through: its rack's, or nil when t is
+;; loose or its rack plays straight (no groove picked, or its switch off).
+;; The scheduler replaces the track's swing with it.
+(def groove-of-track (t)
+  (let ((g (rack-of-track t)))
+    (when g
+      (let ((gr (playing-groove g)))
+        (when (and gr gr.pool-groove gr.enabled) gr)))))
 
-;; Whether clip `clip` plays its own groove.
-(def clip-owns-groove? (gid clip)
-  (let ((entry (rack-groove-entry gid)))
-    (and (not (= entry nil))
-         (> (len (filter (lambda (view) (= (get view :clip-id) clip))
-                   (or (get entry :clip-grooves) (list))))
-            0))))
+;; The groove picker's fixed rows: no groove, the section headers and the
+;; footer's action (ui/rack-groove-buffer.lisp).
+(def groove-off-label "No groove")
+(def groove-extract-label "Extract from this rack’s clip…")
+(def groove-reserved-labels
+  (list groove-off-label "This project" "Factory" "Library" groove-extract-label))
 
-;; The view's clip (-1: the rack's own groove is what shows): its amount
-;; fields carry that clip's suffix.
-(def groove-clip-id (gid)
-  (let ((state (groove-state gid)))
-    (if state (get state :clip-id) -1)))
+;; The picker labels of the pool's grooves, in pool order. Labels are unique,
+;; so a picked label names one groove: a pool groove's own name unless it is
+;; empty, taken by an earlier one or spelled like a fixed row, else its name
+;; and id. The library's rows follow the pool's, so these never depend on them.
+(def pool-groove-labels ()
+  (reduce |labels pg|
+    (append labels
+      (list
+        (if (or (empty? pg.name) (listed? pg.name labels)
+                (listed? pg.name groove-reserved-labels))
+          (str pg.name " #" pg.groove-id)
+          pg.name)))
+    (list)
+    project.groove-pool))
 
-;; The clip an edit targets: the playing clip (it gets its own groove on the
-;; first edit, so clips never share edits), -1 for a rack without clips.
-(def groove-edit-clip-id (gid)
-  (active-clip gid))
-
-;; A rack plays a groove when one is picked and its switch is on.
-(def groove-active? (gid)
-  (let ((state (groove-state gid)))
-    (if state
-      (and (not (= (get state :active-key) "off")) (get state :enabled))
-      false)))
-
-;; The rack groove a member track plays through: the rack's groove entry, or
-;; nil when the track is loose or its rack plays straight.
-(def groove-of-track (track)
-  (let ((gidx (rack-of-track track)))
-    (if (< gidx 0)
-      nil
-      (let ((gid (group-id gidx)))
-        (if (groove-active? gid) (groove-state gid) nil)))))
-
-;; A member of a grooved rack: the groove, not the track's swing, sets its
-;; feel (the scheduler replaces swing with the groove), so the track panel
-;; shows swing disabled with a groove hint.
-(def groove-active-for-track? (track)
-  (not (= (groove-of-track track) nil)))
-
-(def groove-picker-labels (gid)
-  (let ((state (groove-state gid)))
-    (if state (get state :picker-labels) (list "No groove"))))
-
-(def groove-key-for-label (gid label)
-  (let ((state (groove-state gid)))
-    (if (= state nil)
-      "off"
-      (let ((labels (get state :picker-labels))
-            (keys (get state :picker-keys)))
-        (reduce |acc i| (if (= (nth labels i) label) (nth keys i) acc)
-          "off"
-          (range 0 (len labels)))))))
-
-(def groove-picker-headers (gid)
-  (let ((state (groove-state gid)))
-    (if state (or (get state :picker-headers) (list)) (list))))
-
-;; A header row has key "" and picks nothing.
-(def set-groove (gid label)
-  (let ((key (groove-key-for-label gid label)))
-    (if (= key "")
-      nil
-      (host-command "set-rack-groove"
-        (dict :group-id gid :clip-id (groove-edit-clip-id gid) :key key)))))
-
-;; `amount` is "timing", "velocity" or "random"; a clip's own groove
-;; publishes its amounts with a "-c<clip>" suffix.
-(def groove-amount-field (amount gid)
-  (let ((clip (groove-clip-id gid)))
-    (str "rack-groove-" amount "-" gid (if (>= clip 0) (str "-c" clip) ""))))
-
-(def set-groove-amount (gid amount value)
-  (host-command "set-rack-groove-amount"
-    (dict :group-id gid :clip-id (groove-edit-clip-id gid) :amount amount :value value)))
-
-;; `bars` 1 or 2, `resolution` "1/16" or "1/32". With `quantize` the source
-;; patterns are straightened and the new groove activated, one undo step.
-(def extract-groove (gid name bars resolution quantize)
-  (host-command "extract-rack-groove"
-    (dict :group-id gid :name name :bars bars
-          :resolution resolution :quantize quantize)))
-
+;; Pool groove pg's picker label ("" when it is not in the pool).
+(def pool-groove-label (pg)
+  (let ((at (index-of project.groove-pool pg)))
+    (if (< at 0) "" (nth (pool-groove-labels) at))))

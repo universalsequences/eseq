@@ -12,6 +12,7 @@ modulation param appenders) and loads the dylib itself (`load_dylib` ->
 */
 
 use super::super::*;
+use eseqlisp::live_audio::ProbeView;
 
 #[cfg(target_os = "macos")]
 pub(crate) const DGEN_SHARED_LIBRARY_EXTENSION: &str = "dylib";
@@ -47,6 +48,10 @@ pub struct DGenManifest {
     /// mixed as audio; lets the engine pool retire a released voice as soon
     /// as its envelope finishes instead of holding the full release tail.
     pub amp_output_channel: Option<usize>,
+    /// `(probe …)` taps: compiler-assigned output channels that carry a
+    /// signal for display only. Never mixed as audio; the channel may or may
+    /// not also appear in the manifest's `outputs[]`.
+    pub probes: Vec<DGenProbe>,
     pub mod_destinations: Vec<DGenModDestination>,
     pub n_inputs: usize,
     pub n_outputs: usize,
@@ -57,6 +62,41 @@ pub struct DGenManifest {
 }
 
 impl DGenManifest {
+    /// Output channels that never carry audio: `@modulator` outputs, the
+    /// `@amp` voice-retirement flag, and probe taps. Sorted, deduplicated,
+    /// and limited to channels the instance actually has buffers for. Every
+    /// live and offline audio route excludes exactly this set.
+    pub fn non_audio_output_channels(&self) -> Vec<usize> {
+        let output_count = self.n_outputs.max(1);
+        let mut channels: Vec<usize> = self
+            .mod_outputs
+            .iter()
+            .map(|output| output.channel)
+            .chain(self.amp_output_channel)
+            .chain(self.probes.iter().map(|probe| probe.channel))
+            .filter(|&channel| channel < output_count)
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        channels
+    }
+
+    /// Output channels that carry audio, in channel order: every buffer the
+    /// instance writes except `non_audio_output_channels`.
+    pub fn audio_output_channels(&self) -> Vec<usize> {
+        let non_audio = self.non_audio_output_channels();
+        (0..self.n_outputs.max(1))
+            .filter(|channel| non_audio.binary_search(channel).is_err())
+            .collect()
+    }
+
+    /// Audio ports an effect presents to its chain neighbours. Equals
+    /// `n_outputs` for a source with no mod/`@amp`/probe outputs; probes are
+    /// compiler-assigned after every user channel, so they never displace audio.
+    pub fn audio_output_count(&self) -> usize {
+        self.audio_output_channels().len().max(1)
+    }
+
     /// Shared by the live graph and offline renderer. Named inputs never
     /// inherit a positional signal; only wholly unnamed manifests use the
     /// original four-port convention. Modulator-owned ports route separately.
@@ -181,6 +221,24 @@ pub struct DGenModOutput {
     pub channel: usize,
     pub name: String,
     pub range: String,
+}
+
+/// One `(probe …)` site. `occurrence` counts repeated `@id`s (a probe inside
+/// a macro that expands several times) in evaluation order; `view` is the
+/// author's display hint (`@view number|scope|meter`), parsed once here. A
+/// view this build does not know reads as [`ProbeView::Number`], so the probe
+/// still shows its value.
+///
+/// An entry with an empty `id` stays in [`DGenManifest::probes`]: its channel
+/// is still a compiler-assigned display tap that must never be mixed as audio
+/// (see `non_audio_output_channels`). Nothing can address it by id, so the
+/// capture layer (`probe_capture::ProbeSet::from_manifest`) skips it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DGenProbe {
+    pub id: String,
+    pub occurrence: u32,
+    pub channel: usize,
+    pub view: ProbeView,
 }
 
 #[derive(Clone)]
@@ -376,6 +434,25 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
 
     let amp_output_channel = v["ampOutput"]["channel"].as_u64().map(|channel| channel as usize);
 
+    let probes: Vec<DGenProbe> = v["probes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|probe| {
+                    Some(DGenProbe {
+                        id: probe["id"].as_str().unwrap_or("").to_string(),
+                        occurrence: probe["occurrence"].as_u64().unwrap_or(0) as u32,
+                        channel: probe["channel"].as_u64()? as usize,
+                        view: probe["view"]
+                            .as_str()
+                            .and_then(ProbeView::parse)
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mod_destinations = v["modDestinations"]
         .as_array()
         .map(|arr| {
@@ -408,7 +485,23 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         .unwrap_or_default();
 
     let n_inputs = inputs.iter().map(|inp| inp.channel + 1).max().unwrap_or(1);
-    let n_outputs = v["outputs"].as_array().map(|a| a.len()).unwrap_or(0).max(1);
+    // Generated code writes each output to its declared channel index, so a
+    // source that skips a channel (mono audio on 1, `@amp` on 3) needs buffers
+    // up to the highest channel, not one per `out` form. Probe channels are
+    // written too, whether or not `outputs[]` also lists them.
+    let n_outputs = v["outputs"]
+        .as_array()
+        .map(|outputs| {
+            outputs
+                .iter()
+                .enumerate()
+                .map(|(idx, output)| output["channel"].as_u64().map_or(idx, |c| c as usize) + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max(probes.iter().map(|probe| probe.channel + 1).max().unwrap_or(0))
+        .max(1);
 
     let tensor_init_data = v["tensorInitData"]
         .as_array()
@@ -468,6 +561,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         modulators,
         mod_outputs,
         amp_output_channel,
+        probes,
         mod_destinations,
         n_inputs,
         n_outputs,
@@ -663,6 +757,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
             scaling: crate::effects::ParamScaling::Linear,
             node_param_idx: (HEADER_SLOTS + dest.active_cell_id) as u32,
             node_param_span: active_span,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
                 group: None,
@@ -707,6 +802,12 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (HEADER_SLOTS + lane.depth_cell_id) as u32,
                 node_param_span: depth_span,
+                // A manifest declares no ratio flag: the range rule.
+                percent_ratio: crate::effects::ParamDescriptor::percent_ratio_by_range(
+                    dest.unit.as_deref(),
+                    depth_min,
+                    depth_max,
+                ),
                 host_control: None,
                 ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
                     group: None,

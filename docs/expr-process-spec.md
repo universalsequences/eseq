@@ -1,5 +1,7 @@
 # Expr processes
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 1, 2026-09-27. eseq-waa9.10 (headless core, nodes) and eseq-waa9.11 (card, edit buffer, overflow; nodes) and eseq-waa9.12 (context
 variables, direct writes, inlet shadowing) and eseq-waa9.13 (state, stateful helpers) and eseq-waa9.15 (presets, shaping helpers, `->`) and eseq-waa9.16 (`*processes*` dock) and eseq-waa9.17 (promote + edit as expr) BUILT uncommitted 2026-09-27; see the "As shipped" notes. Epic: `eseq-waa9` (graph node
 processes); slices are children `eseq-waa9.10`–`eseq-waa9.17` (§11).
@@ -67,7 +69,9 @@ node slot-id)` reads the stored body. The node chain read
 nil) and `:error` (string or nil: the scheduler's last run error for the slot,
 cleared by its next clean run, or "not compiled" when the body's class is
 missing); `:label` is `expr`. The shared lane-patch shape
-(`graph-node-lane-patch` / `SEQ.track-lane-patch`) is unchanged. The removed
+(`graph-node-lane-patch` / `SEQ.track-lane-patch`) is unchanged. (Both are
+gone since: the track one in eseq-0l17.66, the node one in eseq-0l17.67; the
+patchbays read the kinds' `process` fields.) The removed
 inlets also go to the status line (the toast hook for .11). The body's value
 is sent by the internal native `__expr-send!`: a number goes out as is, a bool
 as 1/0, nil sends nothing, anything else is a run error (bypass). Nodes only:
@@ -85,11 +89,12 @@ collapsed by the host (`:expr-line` on the lane-patch entry) and clipped to
 `:expr`, `:expr-line` and `:compile-error` (a stored body with no compiled
 class). The dot is lit by, in order, `:compile-error`, the slot's last
 failed commit (kept per slot by `eseq.expr-buffer`, cleared by a good one)
-and the scheduler's last run error, which reaches the UI as
-`SEQ.process-run-errors` (`{:runtime-id :error}` list, republished by the
-reactive tick when `process_run_errors_version` moves and a reader is live;
-read inside the dot's own subtree). The inspector shows the same message
-above the inlets.
+and the scheduler's last run error, which reaches the UI as the process
+kind's `p.error` (pushed by the kinds' tick when
+`process_run_errors_version` moves and some process observes it; read
+inside the dot's own subtree). Before eseq-0l17.66 it was the
+`SEQ.process-run-errors` list. The inspector shows the same message above
+the inlets.
 
 The edit buffer lives in `content/ui/expr-buffer.lisp`
 (`eseq.expr-buffer/open-node-slot graph node slot-id slot-index`). It is a

@@ -1,5 +1,11 @@
 # UI Performance Tuning
 
+> The dated investigations below name the legacy reactive layer (`SEQ.*`
+> fields, `SEQV`, `reactive-get`, the tracked `graph-*-value` reads): it was
+> removed in eseq-0l17.22 (kind bindings, docs/kind-bindings-spec.md). Read
+> those names as history; a trace filter today names the kind fields a view
+> reads, not `SEQ.*`.
+
 Use this process when a UI action feels slow. The goal is not merely to make a
 function faster; it is to make the exact user-visible interaction faster without
 skipping required state, layout, or render work.
@@ -420,11 +426,13 @@ mixer bus strips — so one selection click re-rendered ~30 subtrees
 (~12 ms group block, ~7 ms mixer group, ~1-2 ms per row) before the
 legitimate owner switch even started. The fix is the `*sel-sync*` projection
 in `ui/seq-core-state.lisp`: one inert named effect owns the churn-prone
-reads and publishes per-row SEQV float fields
-(`sel-track-vis-*`, `sel-group-vis-*`, `sel-bus-vis-*`); rows bind those
-fields (`:selected` + `selected-*` color props), so a selection change
-dirties only the affected retained widgets. The probe asserts the projection
-fields track the selection so the highlight can never silently break.
+reads and publishes per-item highlights (since eseq-0l17 track rows bind
+`track.in-selection`, and since eseq-0l17.77 bus strips and group blocks
+bind a view-local `bus-highlight`'s `selected`, replacing the SEQV
+`sel-*-vis-*` float fields); rows bind those (`:selected` + `selected-*`
+color props), so a selection change dirties only the affected retained
+widgets. The probe asserts the projection tracks the selection so the
+highlight can never silently break.
 
 What remains after the fix is tracked as follow-up beads: the *fx* root's
 full re-evaluation on a genuine owner switch rebuilds every builtin panel

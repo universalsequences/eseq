@@ -1,5 +1,7 @@
 # Track Groups Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Goal
 
 Let a user fold a set of related tracks (e.g. ten drum samples that make up one
@@ -352,6 +354,8 @@ Verifiable: cmd-click several strips, see multiple highlighted at once.
    members, select group. Rebind `C-g`.
 3. Render-order layer + `mixer-v2-group-header-strip`.
 4. `toggle-group-collapsed` + `SEQ.group-collapsed`; collapsed = header only.
+   (Since eseq-0l17.19 the views read `g.collapsed`; `SEQ.groups` and
+   `SEQ.group-collapsed` are gone.)
 
 Verifiable: select tracks, cmd+g, see a group header that collapses/expands and
 hides its members.

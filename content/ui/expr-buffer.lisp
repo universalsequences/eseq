@@ -381,9 +381,6 @@
           (let ((rebind (graph-node-process-rebind-class graph node slot-id (get written :class))))
             (do
               (record-commit-error graph node slot-id nil)
-              ;; The touch also lets the *processes* dock drop the code
-              ;; tile: the card is no longer an expr card.
-              (eseq.sequencer/lane-patch-node-touch)
               rebind))
           (dict :ok false :class (get written :class)
                 :error (str "wrote " (get written :path) " but it did not load: " loaded)))))))
@@ -414,7 +411,6 @@
         (do
           (if (get result :origin) (remember-promote-origin graph node slot-id (get result :origin)) nil)
           (record-commit-error graph node slot-id nil)
-          (eseq.sequencer/lane-patch-node-touch)
           (status "expr: the card is an expr card again; edit its body and C-c C-c to commit"))
         (toast (str "as expr: " (get result :error)) :kind :error))
       result)))

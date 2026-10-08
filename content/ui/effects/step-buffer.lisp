@@ -1,7 +1,7 @@
 ;; *step* buffer root. Loaded by ui/main.lisp after sequencer helpers.
 
 (effect-buffer "*step*"
-  (if (= SEQ.num-tracks 0)
+  (if (eseq.effects.buffers/no-tracks?)
     (eseq.effects.buffers/empty-track-fallback)
     (box :padding 0.5
       (v-stack :gap 0.1

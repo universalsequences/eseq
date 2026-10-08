@@ -6,29 +6,29 @@ use super::*;
 pub(crate) const PROCESS_LANE_MODE_OFFSET: usize = 9;
 
 #[derive(Clone, Debug)]
-pub(super) struct ProcessLaneUiEntry {
-    instance_id: sequencer::process::ProcessInstanceId,
-    slot_index: usize,
-    class_name: String,
-    inlet_name: String,
-    label: String,
-    short_label: String,
-    kind: String,
-    min: f32,
-    max: f32,
-    default: f32,
-    decimals: u8,
-    target: String,
-    map_ports: Vec<Value>,
-    values: Vec<f32>,
-    project: bool,
-    forked: bool,
-    instance_name: Option<String>,
-    default_lane: bool,
+pub(crate) struct ProcessLaneUiEntry {
+    pub(crate) instance_id: sequencer::process::ProcessInstanceId,
+    pub(crate) slot_index: usize,
+    pub(crate) class_name: String,
+    pub(crate) inlet_name: String,
+    pub(crate) label: String,
+    pub(crate) short_label: String,
+    pub(crate) kind: String,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    pub(crate) default: f32,
+    pub(crate) decimals: u8,
+    pub(crate) target: String,
+    pub(crate) map_ports: Vec<Value>,
+    pub(crate) values: Vec<f32>,
+    pub(crate) project: bool,
+    pub(crate) forked: bool,
+    pub(crate) instance_name: Option<String>,
+    pub(crate) default_lane: bool,
     /// A slot the user added to this track through the patch bay's + box
     /// (eseq-53y7): named per track, so the lane dropdown lists it under
     /// that instance name instead of the numbered class/inlet form.
-    roster: bool,
+    pub(crate) roster: bool,
 }
 
 pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -39,7 +39,7 @@ pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral)
     }
 }
 
-pub(super) fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'static str {
+pub(crate) fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKind) -> &'static str {
     match kind {
         sequencer::process::ProcessInletKind::Float => "float",
         sequencer::process::ProcessInletKind::Int => "int",
@@ -75,66 +75,60 @@ pub(super) fn process_target_hint_label(target: Option<&sequencer::process::Proc
     }
 }
 
-pub(super) fn process_param_target_label(target: &sequencer::process::ParamTarget) -> String {
+pub(crate) fn process_param_target_label(target: &sequencer::process::ParamTarget) -> String {
     target.label()
 }
 
-pub(super) fn macro_mapping_current_value(
+/// Where a project macro mapping's target param lives: its owner (the
+/// track's position, or the bus's), the device and the param's index;
+/// `None` when the target is no device param or is gone. The host kinds'
+/// `macro-mapping.target`.
+pub(crate) fn macro_mapping_location(
     app: &app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
-) -> Option<f32> {
+) -> Option<(usize, DeviceSlot, usize)> {
+    use sequencer::macro_engine::ParamScope;
+    use sequencer::process::ParamTarget;
+    let index = |device: &sequencer::effects::EffectDescriptor, param: &str| {
+        device
+            .params
+            .iter()
+            .position(|descriptor| descriptor.has_tag_or_name(param))
+    };
+    let named = |device: &&sequencer::effects::EffectDescriptor, effect: &str| {
+        device.name.eq_ignore_ascii_case(effect)
+    };
     match (mapping.scope, &mapping.target) {
         (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::EffectParam {
+            ParamScope::Track(track),
+            ParamTarget::EffectParam {
                 slot,
                 effect,
                 param,
                 ..
             },
         ) => {
-            let param_idx = app
-                .graph
-                .effect_descriptors
-                .get(track)?
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?
-                .params
-                .iter()
-                .position(|descriptor| descriptor.has_tag_or_name(param))?;
-            app.effective_slot_param_value(track, *slot, param_idx)
+            let device = app.graph.effect_descriptors.get(track)?.get(*slot);
+            let device = device.filter(|device| named(device, effect))?;
+            Some((track, DeviceSlot::Effect(*slot), index(device, param)?))
+        }
+        (ParamScope::Track(track), ParamTarget::InstrumentParam { param, .. }) => {
+            let device = app.graph.instrument_descriptors.get(track)?;
+            Some((track, DeviceSlot::Instrument, index(device, param)?))
         }
         (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::InstrumentParam { param, .. },
-        ) => {
-            let param_idx = app
-                .graph
-                .instrument_descriptors
-                .get(track)?
-                .params
-                .iter()
-                .position(|descriptor| descriptor.has_tag_or_name(param))?;
-            app.effective_instrument_param_value(track, param_idx)
-        }
-        (
-            sequencer::macro_engine::ParamScope::Bus(bus_id),
-            sequencer::process::ParamTarget::EffectParam {
+            ParamScope::Bus(bus_id),
+            ParamTarget::EffectParam {
                 slot,
                 effect,
                 param,
                 ..
             },
         ) => {
-            let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id)?;
-            let param_idx = app.buses[bus_idx]
-                .effect_descriptors
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?
-                .params
-                .iter()
-                .position(|descriptor| descriptor.has_tag_or_name(param))?;
-            app.effective_bus_slot_param_value(bus_idx, *slot, param_idx)
+            let bus = app.buses.iter().position(|bus| bus.id == bus_id)?;
+            let device = app.buses[bus].effect_descriptors.get(*slot);
+            let device = device.filter(|device| named(device, effect))?;
+            Some((bus, DeviceSlot::BusEffect(*slot), index(device, param)?))
         }
         _ => None,
     }
@@ -147,64 +141,17 @@ pub(super) fn macro_mapping_param_descriptor<'a>(
     &'a sequencer::effects::EffectDescriptor,
     &'a sequencer::effects::ParamDescriptor,
 )> {
-    match (mapping.scope, &mapping.target) {
-        (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::EffectParam {
-                slot,
-                effect,
-                param,
-                ..
-            },
-        ) => {
-            let device = app
-                .graph
-                .effect_descriptors
-                .get(track)?
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        (
-            sequencer::macro_engine::ParamScope::Track(track),
-            sequencer::process::ParamTarget::InstrumentParam { param, .. },
-        ) => {
-            let device = app.graph.instrument_descriptors.get(track)?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        (
-            sequencer::macro_engine::ParamScope::Bus(bus_id),
-            sequencer::process::ParamTarget::EffectParam {
-                slot,
-                effect,
-                param,
-                ..
-            },
-        ) => {
-            let bus = app.buses.iter().find(|bus| bus.id == bus_id)?;
-            let device = bus
-                .effect_descriptors
-                .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))?;
-            let param = device
-                .params
-                .iter()
-                .find(|descriptor| descriptor.has_tag_or_name(param))?;
-            Some((device, param))
-        }
-        _ => None,
-    }
+    let (owner, device, param_idx) = macro_mapping_location(app, mapping)?;
+    let device = match device {
+        DeviceSlot::Instrument => app.graph.instrument_descriptors.get(owner)?,
+        DeviceSlot::Effect(slot) => app.graph.effect_descriptors.get(owner)?.get(slot)?,
+        DeviceSlot::BusEffect(slot) => app.buses.get(owner)?.effect_descriptors.get(slot)?,
+        _ => return None,
+    };
+    Some((device, device.params.get(param_idx)?))
 }
 
-pub(super) fn macro_mapping_display_metadata(
+pub(crate) fn macro_mapping_display_metadata(
     app: &app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
@@ -262,203 +209,6 @@ pub(super) fn macro_mapping_display_metadata(
     )
 }
 
-pub(crate) fn build_macros_value(app: &app::App) -> Value {
-    list_value(app.macro_engine.macros().iter().map(|macro_definition| {
-        let kind = match macro_definition.kind {
-            sequencer::macro_engine::MacroKind::Mapped => "mapped",
-            sequencer::macro_engine::MacroKind::Scene(_) => "scene",
-        };
-        let mappings = list_value(macro_definition.mappings.iter().enumerate().map(
-            |(mapping_idx, mapping)| {
-                let (
-                    path_label,
-                    param_label,
-                    display_min,
-                    display_max,
-                    domain_min,
-                    domain_max,
-                    display_scale,
-                    display_decimals,
-                    display_unit,
-                ) = macro_mapping_display_metadata(app, mapping);
-                let curve = match mapping.curve {
-                    sequencer::macro_engine::MacroCurve::Linear => "linear",
-                    sequencer::macro_engine::MacroCurve::Exp => "exp",
-                    sequencer::macro_engine::MacroCurve::Log => "log",
-                    sequencer::macro_engine::MacroCurve::LogDomain => "log-domain",
-                };
-                map_value([
-                    ("mapping-idx", Value::Number(mapping_idx as f64)),
-                    (
-                        "track",
-                        Value::Number(match mapping.scope {
-                            sequencer::macro_engine::ParamScope::Track(track) => track as f64,
-                            sequencer::macro_engine::ParamScope::Bus(_) => -1.0,
-                        }),
-                    ),
-                    (
-                        "scope",
-                        Value::String(match mapping.scope {
-                            sequencer::macro_engine::ParamScope::Track(_) => "track".to_string(),
-                            sequencer::macro_engine::ParamScope::Bus(_) => "bus".to_string(),
-                        }),
-                    ),
-                    ("target", macro_mapping_target_value(&mapping.target)),
-                    (
-                        "target-label",
-                        Value::String(format!(
-                            "{} · {}",
-                            path_label,
-                            process_param_target_label(&mapping.target)
-                        )),
-                    ),
-                    ("min", Value::Number(mapping.range_min as f64)),
-                    ("max", Value::Number(mapping.range_max as f64)),
-                    ("path-label", Value::String(path_label)),
-                    ("param-label", Value::String(param_label)),
-                    ("display-min", Value::Number(display_min as f64)),
-                    ("display-max", Value::Number(display_max as f64)),
-                    ("domain-min", Value::Number(domain_min as f64)),
-                    ("domain-max", Value::Number(domain_max as f64)),
-                    ("display-scale", Value::Number(display_scale as f64)),
-                    ("display-decimals", Value::Number(display_decimals as f64)),
-                    ("display-unit", Value::String(display_unit)),
-                    ("curve", Value::String(curve.to_string())),
-                    (
-                        "current",
-                        macro_mapping_current_value(app, mapping)
-                            .map(|value| Value::Number(value as f64))
-                            .unwrap_or(Value::Nil),
-                    ),
-                    (
-                        "display-current",
-                        macro_mapping_current_value(app, mapping)
-                            .and_then(|value| {
-                                macro_mapping_param_descriptor(app, mapping)
-                                    .map(|(_, param)| param.stored_to_user(value))
-                            })
-                            .map(|value| Value::Number(value as f64))
-                            .unwrap_or(Value::Nil),
-                    ),
-                    ("suspended", Value::Bool(mapping.suspended)),
-                ])
-            },
-        ));
-        let (target_scene, morph_params, steal_patterns, quantize, track_mask, diff_count) =
-            match &macro_definition.kind {
-                sequencer::macro_engine::MacroKind::Mapped => (
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Nil,
-                ),
-                sequencer::macro_engine::MacroKind::Scene(config) => (
-                    Value::Number(config.target_scene as f64),
-                    Value::Bool(config.morph_params),
-                    Value::Bool(config.steal_patterns),
-                    Value::String(
-                        match config.quantize {
-                            sequencer::macro_engine::StealQuantize::Off => "off",
-                            sequencer::macro_engine::StealQuantize::Sixteenth => "sixteenth",
-                            sequencer::macro_engine::StealQuantize::Bar => "bar",
-                        }
-                        .to_string(),
-                    ),
-                    config
-                        .track_mask
-                        .as_ref()
-                        .map(|mask| list_value(mask.iter().copied().map(Value::Bool)))
-                        .unwrap_or(Value::Nil),
-                    Value::Number(app.scene_macro_diff_count(config) as f64),
-                ),
-            };
-        map_value([
-            ("id", Value::Number(macro_definition.id as f64)),
-            (
-                "key",
-                macro_definition
-                    .key
-                    .as_ref()
-                    .map(|key| Value::String(key.clone()))
-                    .unwrap_or(Value::Nil),
-            ),
-            ("name", Value::String(macro_definition.name.clone())),
-            ("kind", Value::String(kind.to_string())),
-            ("value", Value::Number(macro_definition.value as f64)),
-            ("mappings", mappings),
-            ("target-scene", target_scene),
-            ("morph-params", morph_params),
-            ("steal-patterns", steal_patterns),
-            ("quantize", quantize),
-            ("track-mask", track_mask),
-            ("diff-count", diff_count),
-        ])
-    }))
-}
-
-pub(crate) fn sync_macro_state(rt: &mut Runtime, app: &app::App) {
-    rt.set_reactive("SEQ", "macros", build_macros_value(app));
-}
-
-pub(super) fn macro_mapping_target_value(target: &sequencer::process::ParamTarget) -> Value {
-    use sequencer::process::ParamTarget;
-
-    let mut entries = Vec::new();
-    match target {
-        ParamTarget::StepParam { param } => {
-            entries.push(("kind", Value::String("step".to_string())));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::InstrumentParam { param, .. } => {
-            entries.push(("kind", Value::String("instrument".to_string())));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::EffectParam {
-            slot,
-            effect,
-            param,
-            ..
-        } => {
-            entries.push(("kind", Value::String("effect".to_string())));
-            entries.push(("slot-idx", Value::Number(*slot as f64)));
-            entries.push(("effect", Value::String(effect.clone())));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::MidiFxParam { slot, fx, param } => {
-            entries.push(("kind", Value::String("midi-fx".to_string())));
-            entries.push(("slot-idx", Value::Number(*slot as f64)));
-            entries.push(("fx", Value::String(fx.clone())));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::ProcessInlet { process, inlet, .. } => {
-            entries.push(("kind", Value::String("process-inlet".to_string())));
-            entries.push(("process", Value::String(process.clone())));
-            entries.push(("inlet", Value::String(inlet.clone())));
-        }
-        ParamTarget::RackSlotParam { slot, param } => {
-            entries.push(("kind", Value::String("rack-slot".to_string())));
-            entries.push(("slot-idx", Value::Number(*slot as f64)));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::RackSlotInstrumentParam { slot, param, .. } => {
-            entries.push(("kind", Value::String("rack-slot-instrument".to_string())));
-            entries.push(("slot-idx", Value::Number(*slot as f64)));
-            entries.push(("param", Value::String(param.clone())));
-        }
-        ParamTarget::RackMacroParam { macro_id } => {
-            entries.push(("kind", Value::String("rack-macro".to_string())));
-            entries.push(("macro-id", Value::Number(*macro_id as f64)));
-        }
-        ParamTarget::BusSend { bus } => {
-            entries.push(("kind", Value::String("bus-send".to_string())));
-            entries.push(("bus-id", Value::Number(*bus as f64)));
-        }
-    }
-    map_value(entries)
-}
-
 pub(super) fn process_param_target_is_bindable(target: &sequencer::process::ParamTarget) -> bool {
     !matches!(
         target,
@@ -472,7 +222,7 @@ pub(super) fn process_target_kind_label(kind: Option<sequencer::process::Process
         .unwrap_or_default()
 }
 
-pub(super) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
+pub(crate) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) -> String {
     match ports {
         [] => String::new(),
         [port] if port.name == sequencer::process::DEFAULT_PROCESS_PORT => {
@@ -493,10 +243,12 @@ pub(super) fn process_ports_label(ports: &[sequencer::process::ProcessPortDef]) 
     }
 }
 
-pub(super) fn process_slot_ports_value(
+/// A slot's ports: its class's, then any port a binding names that the
+/// class does not declare (a stale or script binding), as fixed ports.
+pub(crate) fn process_slot_port_defs(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
-) -> Value {
+) -> Vec<sequencer::process::ProcessPortDef> {
     let mut ports = def.map(|def| def.ports.clone()).unwrap_or_default();
     for name in slot.bindings.keys() {
         if !ports.iter().any(|port| &port.name == name) {
@@ -508,8 +260,16 @@ pub(super) fn process_slot_ports_value(
             });
         }
     }
+    ports
+}
+
+#[cfg(test)]
+pub(super) fn process_slot_ports_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Value {
     list_value(
-        ports
+        process_slot_port_defs(slot, def)
             .into_iter()
             .map(|port| process_port_value(slot, &port)),
     )
@@ -529,18 +289,48 @@ pub(super) fn process_mappable_port_values(
     .unwrap_or_default()
 }
 
-pub(super) fn process_port_value(
-    slot: &sequencer::process::TrackProcessSlot,
+/// What a slot's port shows (the host kinds' `port`): its binding, status
+/// and capabilities.
+pub(crate) struct ProcessPortView<'a> {
+    pub(crate) hint: String,
+    /// The bound target's label (the hint's when it follows the hint;
+    /// `unbound` when disconnected or without one).
+    pub(crate) target_label: String,
+    /// `bound`, `hint` or `unbound`.
+    pub(crate) status: &'static str,
+    pub(crate) manual: bool,
+    /// Disconnected outright (`unbound_ports`): writes nothing.
+    pub(crate) disconnected: bool,
+    pub(crate) bindable: bool,
+    pub(crate) target_kind: String,
+    /// The manual binding, when there is one.
+    pub(crate) binding: Option<&'a sequencer::process::ParamTarget>,
+    pub(crate) fanout: &'a [sequencer::process::ProcessPortFanout],
+}
+
+impl ProcessPortView<'_> {
+    pub(crate) fn clearable(&self) -> bool {
+        self.manual || self.disconnected
+    }
+
+    /// A port that writes somewhere (manual or hint) can be disconnected.
+    pub(crate) fn disconnectable(&self) -> bool {
+        !self.disconnected && self.status != "unbound"
+    }
+}
+
+pub(crate) fn process_port_view<'a>(
+    slot: &'a sequencer::process::TrackProcessSlot,
     port: &sequencer::process::ProcessPortDef,
-) -> Value {
+) -> ProcessPortView<'a> {
     let binding = slot.bindings.get(&port.name);
     let disconnected = slot.unbound_ports.contains(&port.name);
     let manual = matches!(binding, Some(Some(_)));
-    let hint_label = process_target_hint_label(port.target.as_ref());
+    let hint = process_target_hint_label(port.target.as_ref());
     let target_label = match binding {
         _ if disconnected => "unbound".to_string(),
         Some(Some(target)) => process_param_target_label(target),
-        _ if !hint_label.is_empty() => hint_label.clone(),
+        _ if !hint.is_empty() => hint.clone(),
         _ => "unbound".to_string(),
     };
     let status = match binding {
@@ -554,100 +344,120 @@ pub(super) fn process_port_value(
             .and_then(|binding| binding.as_ref())
             .map(process_param_target_is_bindable)
             .unwrap_or(true);
+    ProcessPortView {
+        hint,
+        target_label,
+        status,
+        manual,
+        disconnected,
+        bindable,
+        target_kind: process_target_kind_label(port.effective_target_kind()),
+        binding: binding.and_then(Option::as_ref),
+        fanout: slot
+            .fanout
+            .get(&port.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    }
+}
+
+/// The wired lane's instance id of a process-inlet target, if any.
+pub(crate) fn param_target_instance_id(
+    target: &sequencer::process::ParamTarget,
+) -> Option<sequencer::process::ProcessInstanceId> {
+    match target {
+        sequencer::process::ParamTarget::ProcessInlet {
+            instance_id: Some(id),
+            ..
+        } => Some(*id),
+        _ => None,
+    }
+}
+
+/// The inlet a process-inlet target names, if it is one.
+pub(crate) fn param_target_inlet(target: &sequencer::process::ParamTarget) -> Option<&str> {
+    match target {
+        sequencer::process::ParamTarget::ProcessInlet { inlet, .. } => Some(inlet),
+        _ => None,
+    }
+}
+
+/// The step param a target names, if it is one.
+pub(crate) fn param_target_step_param(target: &sequencer::process::ParamTarget) -> Option<&str> {
+    match target {
+        sequencer::process::ParamTarget::StepParam { param } => Some(param),
+        _ => None,
+    }
+}
+
+pub(super) fn process_port_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    port: &sequencer::process::ProcessPortDef,
+) -> Value {
+    let view = process_port_view(slot, port);
+    let id_value = |target: Option<&sequencer::process::ParamTarget>| {
+        target
+            .and_then(param_target_instance_id)
+            .map_or(Value::Nil, |id| Value::Number(id.0 as f64))
+    };
+    let step_param_value = |target: Option<&sequencer::process::ParamTarget>| {
+        target
+            .and_then(param_target_step_param)
+            .map_or(Value::Nil, |param| Value::String(param.to_string()))
+    };
     map_value([
         ("name", Value::String(port.name.clone())),
         (
             "label",
-            Value::String(if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
-                "default".to_string()
-            } else {
-                port.name.clone()
-            }),
+            Value::String(process_port_label(&port.name).to_string()),
         ),
-        ("hint", Value::String(hint_label)),
-        ("target", Value::String(target_label)),
-        ("status", Value::String(status.to_string())),
-        ("manual", Value::Bool(manual)),
-        ("clearable", Value::Bool(manual || disconnected)),
-        // A port that writes somewhere (manual or hint) can be disconnected.
-        ("disconnectable", Value::Bool(!disconnected && status != "unbound")),
+        ("hint", Value::String(view.hint.clone())),
+        ("target", Value::String(view.target_label.clone())),
+        ("status", Value::String(view.status.to_string())),
+        ("manual", Value::Bool(view.manual)),
+        ("clearable", Value::Bool(view.clearable())),
+        ("disconnectable", Value::Bool(view.disconnectable())),
         ("mappable", Value::Bool(port.is_mappable())),
         ("connectable", Value::Bool(port.is_connectable())),
-        ("bindable", Value::Bool(bindable)),
-        (
-            "target-kind",
-            Value::String(process_target_kind_label(port.effective_target_kind())),
-        ),
+        ("bindable", Value::Bool(view.bindable)),
+        ("target-kind", Value::String(view.target_kind.clone())),
         // Structured view of a manual binding for UI that names the target
         // itself (the lane strip): the wired lane's instance id and inlet, or
         // the step param name. Nil when the port follows its hint or is unbound.
-        (
-            "target-instance-id",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::ProcessInlet {
-                    instance_id: Some(id),
-                    ..
-                })) => Value::Number(id.0 as f64),
-                _ => Value::Nil,
-            },
-        ),
+        ("target-instance-id", id_value(view.binding)),
         (
             "target-inlet",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::ProcessInlet { inlet, .. })) => {
-                    Value::String(inlet.clone())
-                }
-                _ => Value::Nil,
-            },
+            view.binding
+                .and_then(param_target_inlet)
+                .map_or(Value::Nil, |inlet| Value::String(inlet.to_string())),
         ),
-        (
-            "target-step-param",
-            match binding {
-                Some(Some(sequencer::process::ParamTarget::StepParam { param })) => {
-                    Value::String(param.clone())
-                }
-                _ => Value::Nil,
-            },
-        ),
+        ("target-step-param", step_param_value(view.binding)),
         (
             "fanout",
-            list_value(
-                slot.fanout
-                    .get(&port.name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[])
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        map_value([
-                            ("index", Value::Number(index as f64)),
-                            ("target", Value::String(process_param_target_label(&entry.target))),
-                            (
-                                "target-step-param",
-                                match &entry.target {
-                                    sequencer::process::ParamTarget::StepParam { param } => {
-                                        Value::String(param.clone())
-                                    }
-                                    _ => Value::Nil,
-                                },
-                            ),
-                            (
-                                "target-instance-id",
-                                match &entry.target {
-                                    sequencer::process::ParamTarget::ProcessInlet {
-                                        instance_id: Some(id),
-                                        ..
-                                    } => Value::Number(id.0 as f64),
-                                    _ => Value::Nil,
-                                },
-                            ),
-                            ("lo", Value::Number(entry.lo as f64)),
-                            ("hi", Value::Number(entry.hi as f64)),
-                        ])
-                    }),
-            ),
+            list_value(view.fanout.iter().enumerate().map(|(index, entry)| {
+                map_value([
+                    ("index", Value::Number(index as f64)),
+                    (
+                        "target",
+                        Value::String(process_param_target_label(&entry.target)),
+                    ),
+                    ("target-step-param", step_param_value(Some(&entry.target))),
+                    ("target-instance-id", id_value(Some(&entry.target))),
+                    ("lo", Value::Number(entry.lo as f64)),
+                    ("hi", Value::Number(entry.hi as f64)),
+                ])
+            })),
         ),
     ])
+}
+
+/// A port's label: `default` for the unnamed default port.
+pub(crate) fn process_port_label(name: &str) -> &str {
+    if name == sequencer::process::DEFAULT_PROCESS_PORT {
+        "default"
+    } else {
+        name
+    }
 }
 
 pub(super) fn process_name_initials(name: &str) -> String {
@@ -708,7 +518,7 @@ pub(super) fn process_inlet_range(
     }
 }
 
-pub(super) fn process_lane_entries_for_track(
+pub(crate) fn process_lane_entries_for_track(
     state: &Arc<SequencerState>,
     track: usize,
 ) -> Vec<ProcessLaneUiEntry> {
@@ -716,106 +526,124 @@ pub(super) fn process_lane_entries_for_track(
         return Vec::new();
     };
     let published = state.published_process_authoring();
+    process_lane_entries_for_chain(state, track, &chain, &published)
+}
+
+/// The lane entries of `track`'s composed `chain` (one per lane inlet of
+/// each slot, in chain order): what the host kinds' `lane`s show.
+pub(crate) fn process_lane_entries_for_chain(
+    state: &SequencerState,
+    track: usize,
+    chain: &sequencer::process::TrackProcessChain,
+    published: &sequencer::process::PublishedProcessAuthoringSnapshot,
+) -> Vec<ProcessLaneUiEntry> {
     let mut entries = Vec::new();
     for (slot_index, slot) in chain.slots.iter().enumerate() {
-        let def = published
-            .defs
-            .iter()
-            .find(|def| def.name == slot.class_name);
-        let mut lane_names = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| inlet.lane)
-                    .map(|inlet| inlet.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for name in slot.lanes.keys() {
-            if !lane_names.iter().any(|entry| entry == name) {
-                lane_names.push(name.clone());
-            }
-        }
-        for inlet_name in lane_names {
-            let inlet =
-                def.and_then(|def| def.inlets.iter().find(|entry| entry.name == inlet_name));
-            let default = slot
-                .inlets
-                .get(&inlet_name)
-                .and_then(process_literal_as_f32)
-                .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
-                .unwrap_or(0.0);
-            let (mut min, mut max) = process_inlet_range(def, inlet, default);
-            // A slot with lo/hi knobs (the default accumulators and
-            // generators) ranges its value lane over them, so the sliders
-            // and number picker span what the lane can actually output.
-            let is_gate = inlet
-                .is_some_and(|entry| matches!(entry.kind, sequencer::process::ProcessInletKind::Gate));
-            if !is_gate {
-                if let (Some(lo), Some(hi)) = (
-                    slot.inlets.get("lo").and_then(process_literal_as_f32),
-                    slot.inlets.get("hi").and_then(process_literal_as_f32),
-                ) {
-                    if hi > lo {
-                        min = lo;
-                        max = hi;
-                    }
-                }
-            }
-            let lane = slot.lanes.get(&inlet_name);
-            let values = (0..MAX_STEPS)
-                .map(|step| {
-                    lane.map(|lane| lane.value_at(step, default))
-                        .unwrap_or(default)
-                })
-                .collect::<Vec<_>>();
-            let map_ports = process_mappable_port_values(slot, def);
-            let default_lane = sequencer::process::is_default_lane_slot(slot);
-            let roster = sequencer::process::is_track_roster_slot(slot);
-            // Default lanes read like the builtin step params: the instance
-            // name alone ("prob", "acc A"), never "N class/inlet".
-            let (label, short_label) = match slot.instance_name.as_deref() {
-                Some(name) if default_lane => (name.to_string(), name.to_string()),
-                _ => (
-                    format!("{} / {}", slot.class_name, inlet_name),
-                    process_short_label(&slot.class_name, &inlet_name),
-                ),
-            };
-            entries.push(ProcessLaneUiEntry {
-                instance_id: slot.instance_id,
-                slot_index,
-                class_name: slot.class_name.clone(),
-                inlet_name: inlet_name.clone(),
-                label,
-                short_label,
-                kind: inlet
-                    .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
-                    .unwrap_or_else(|| "float".to_string()),
-                min,
-                max,
-                default,
-                decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
-                target: def
-                    .map(|def| process_ports_label(&def.ports))
-                    .unwrap_or_default(),
-                map_ports,
-                values,
-                project: slot.project_layer,
-                forked: slot.project_layer
-                    && state.has_project_process_lane_override(
-                        track,
-                        slot.instance_id,
-                        &inlet_name,
-                    ),
-                instance_name: slot.instance_name.clone(),
-                default_lane,
-                roster,
-            });
-        }
+        let def = process_slot_def(published, slot);
+        process_slot_lane_entries(state, track, slot_index, slot, def, &mut entries);
     }
     entries
 }
 
+/// The lane entries of one slot (at `slot_index` of `track`'s composed
+/// chain), appended to `entries`: its class's lane inlets, then any lane the
+/// slot holds that the class does not declare.
+pub(crate) fn process_slot_lane_entries(
+    state: &SequencerState,
+    track: usize,
+    slot_index: usize,
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    entries: &mut Vec<ProcessLaneUiEntry>,
+) {
+    let mut lane_names = def
+        .map(|def| {
+            def.inlets
+                .iter()
+                .filter(|inlet| inlet.lane)
+                .map(|inlet| inlet.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in slot.lanes.keys() {
+        if !lane_names.iter().any(|entry| entry == name) {
+            lane_names.push(name.clone());
+        }
+    }
+    for inlet_name in lane_names {
+        let inlet = process_inlet_def(def, &inlet_name);
+        let default = slot
+            .inlets
+            .get(&inlet_name)
+            .and_then(process_literal_as_f32)
+            .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
+            .unwrap_or(0.0);
+        let (mut min, mut max) = process_inlet_range(def, inlet, default);
+        // A slot with lo/hi knobs (the default accumulators and
+        // generators) ranges its value lane over them, so the sliders
+        // and number picker span what the lane can actually output.
+        let is_gate = inlet
+            .is_some_and(|entry| matches!(entry.kind, sequencer::process::ProcessInletKind::Gate));
+        if !is_gate {
+            if let (Some(lo), Some(hi)) = (
+                slot.inlets.get("lo").and_then(process_literal_as_f32),
+                slot.inlets.get("hi").and_then(process_literal_as_f32),
+            ) {
+                if hi > lo {
+                    min = lo;
+                    max = hi;
+                }
+            }
+        }
+        let lane = slot.lanes.get(&inlet_name);
+        let values = (0..MAX_STEPS)
+            .map(|step| {
+                lane.map(|lane| lane.value_at(step, default))
+                    .unwrap_or(default)
+            })
+            .collect::<Vec<_>>();
+        let map_ports = process_mappable_port_values(slot, def);
+        let default_lane = sequencer::process::is_default_lane_slot(slot);
+        let roster = sequencer::process::is_track_roster_slot(slot);
+        // Default lanes read like the builtin step params: the instance
+        // name alone ("prob", "acc A"), never "N class/inlet".
+        let (label, short_label) = match slot.instance_name.as_deref() {
+            Some(name) if default_lane => (name.to_string(), name.to_string()),
+            _ => (
+                format!("{} / {}", slot.class_name, inlet_name),
+                process_short_label(&slot.class_name, &inlet_name),
+            ),
+        };
+        entries.push(ProcessLaneUiEntry {
+            instance_id: slot.instance_id,
+            slot_index,
+            class_name: slot.class_name.clone(),
+            inlet_name: inlet_name.clone(),
+            label,
+            short_label,
+            kind: inlet
+                .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
+                .unwrap_or_else(|| "float".to_string()),
+            min,
+            max,
+            default,
+            decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
+            target: def
+                .map(|def| process_ports_label(&def.ports))
+                .unwrap_or_default(),
+            map_ports,
+            values,
+            project: slot.project_layer,
+            forked: slot.project_layer
+                && state.has_project_process_lane_override(track, slot.instance_id, &inlet_name),
+            instance_name: slot.instance_name.clone(),
+            default_lane,
+            roster,
+        });
+    }
+}
+
+#[cfg(test)]
 pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) -> Value {
     map_value([
         ("mode", Value::Number(mode as f64)),
@@ -853,6 +681,7 @@ pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) 
     ])
 }
 
+#[cfg(test)]
 pub(crate) fn build_process_lanes_value(state: &Arc<SequencerState>, track: usize) -> Value {
     list_value(
         process_lane_entries_for_track(state, track)
@@ -864,21 +693,16 @@ pub(crate) fn build_process_lanes_value(state: &Arc<SequencerState>, track: usiz
     )
 }
 
-pub(crate) fn build_all_track_process_lanes_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_process_lanes_value(state, track)))
-}
-
 /// Numeric lane data is separate from metadata so slider writes do not
 /// invalidate the expanded row's selector, ranges, labels and patchbay.
+#[cfg(test)]
 fn process_lane_values_value(entries: &[ProcessLaneUiEntry]) -> Value {
     list_value(entries.iter().map(|entry| {
         list_value(entry.values.iter().map(|value| Value::Number(*value as f64)))
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn build_all_track_process_lane_values(
     state: &Arc<SequencerState>,
     track_count: usize,
@@ -886,53 +710,6 @@ pub(crate) fn build_all_track_process_lane_values(
     list_value((0..track_count).map(|track| {
         process_lane_values_value(&process_lane_entries_for_track(state, track))
     }))
-}
-
-/// A lane edit changes one track's values and, on its first project-lane
-/// write, its fork marker. It cannot change ports, the library or other tracks.
-pub(crate) fn sync_process_lane_track_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-    current_track: usize,
-    viewports: &[ExpandedStepViewport],
-) -> bool {
-    let entries = process_lane_entries_for_track(state, track);
-    let metadata = list_value(entries.iter().enumerate().map(|(index, entry)| {
-        process_lane_entry_value(entry, PROCESS_LANE_MODE_OFFSET + index)
-    }));
-    let mut dirty = rt.set_reactive_list_index(
-        "SEQ", "track-process-lanes", track, metadata.clone(),
-    ).effects_dirty;
-    dirty |= rt.set_reactive_list_index(
-        "SEQ", "track-process-lane-values", track, process_lane_values_value(&entries),
-    ).effects_dirty;
-    if track == current_track {
-        dirty |= rt.set_reactive("SEQ", "process-lanes", metadata).effects_dirty;
-    }
-    let num_steps = state.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
-    for viewport in viewports {
-        let Some(entry) = viewport.mode.checked_sub(PROCESS_LANE_MODE_OFFSET)
-            .and_then(|index| entries.get(index)) else { continue; };
-        for slot in 0..PAGE_SIZE {
-            let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
-            let value = if step < num_steps { entry.values[step] } else { 0.0 };
-            for field in [
-                expanded_step_slot_param_slider_field(viewport.track_id, viewport.mode, slot),
-                expanded_step_slot_param_haptic_field(viewport.track_id, viewport.mode, slot),
-            ] {
-                dirty |= rt.set_reactive("SEQ", &field, Value::Number(value as f64)).effects_dirty;
-            }
-        }
-        let value = if viewport.cursor_step < num_steps {
-            entry.values[viewport.cursor_step]
-        } else { 0.0 };
-        dirty |= rt.set_reactive(
-            "SEQ", &expanded_step_cursor_param_value_field(viewport.track_id),
-            Value::Number(value as f64),
-        ).effects_dirty;
-    }
-    dirty
 }
 
 pub(super) fn process_lane_value_for_mode(
@@ -1007,12 +784,31 @@ pub(super) fn process_scalar_inlet_value(
         .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
 }
 
-pub(super) fn process_scalar_inlet_entry_value(
+/// What a slot's scalar (non-lane) inlet shows (the host kinds' `inlet`):
+/// its value (the slot's literal, else the class default), range and
+/// options.
+pub(crate) struct ProcessInletView {
+    pub(crate) kind: &'static str,
+    /// An enum inlet's option labels (the value is the option index).
+    pub(crate) options: Vec<String>,
+    pub(crate) value: f32,
+    pub(crate) default: f32,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+    /// Whether the class declares `min`/`max` (else the range is a display
+    /// hint around the value).
+    pub(crate) declared_range: bool,
+    pub(crate) decimals: u8,
+    pub(crate) doc: String,
+}
+
+/// A numeric inlet's view; `None` for an inlet holding no number.
+pub(crate) fn process_scalar_inlet_view(
     slot: &sequencer::process::TrackProcessSlot,
     def: Option<&sequencer::process::PublishedProcessDef>,
     inlet_name: &str,
     inlet: Option<&sequencer::process::PublishedProcessInletDef>,
-) -> Option<Value> {
+) -> Option<ProcessInletView> {
     let value = process_scalar_inlet_value(slot, inlet, inlet_name)?;
     let default = inlet
         .and_then(|entry| process_literal_as_f32(&entry.default))
@@ -1021,72 +817,122 @@ pub(super) fn process_scalar_inlet_entry_value(
     // Enum inlets carry their option labels so the strip can render a
     // dropdown; the value stays the option index.
     let options = match inlet.map(|entry| &entry.kind) {
-        Some(sequencer::process::ProcessInletKind::Enum(options)) => options
-            .iter()
-            .map(|label| Value::String(label.clone()))
-            .collect::<Vec<_>>(),
+        Some(sequencer::process::ProcessInletKind::Enum(options)) => options.clone(),
         _ => Vec::new(),
     };
+    Some(ProcessInletView {
+        kind: inlet
+            .map(|entry| process_inlet_kind_name(&entry.kind))
+            .unwrap_or("float"),
+        options,
+        value,
+        default,
+        min,
+        max,
+        declared_range: inlet.is_some_and(|entry| entry.min.is_some() && entry.max.is_some()),
+        decimals: process_inlet_decimals(inlet.map(|entry| &entry.kind)),
+        doc: inlet
+            .and_then(|entry| entry.doc.clone())
+            .unwrap_or_default(),
+    })
+}
+
+#[cfg(test)]
+pub(super) fn process_scalar_inlet_entry_value(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    inlet_name: &str,
+    inlet: Option<&sequencer::process::PublishedProcessInletDef>,
+) -> Option<Value> {
+    let view = process_scalar_inlet_view(slot, def, inlet_name, inlet)?;
     Some(map_value([
         ("name", Value::String(inlet_name.to_string())),
         ("label", Value::String(inlet_name.to_string())),
-        ("options", list_value(options)),
         (
-            "kind",
-            Value::String(
-                inlet
-                    .map(|entry| process_inlet_kind_name(&entry.kind))
-                    .unwrap_or("float")
-                    .to_string(),
+            "options",
+            list_value(
+                view.options
+                    .iter()
+                    .map(|label| Value::String(label.clone())),
             ),
         ),
-        ("value", Value::Number(value as f64)),
-        ("default", Value::Number(default as f64)),
-        ("min", Value::Number(min as f64)),
-        ("max", Value::Number(max as f64)),
-        (
-            "decimals",
-            Value::Number(process_inlet_decimals(inlet.map(|entry| &entry.kind)) as f64),
-        ),
-        (
-            "doc",
-            Value::String(
-                inlet
-                    .and_then(|entry| entry.doc.clone())
-                    .unwrap_or_default(),
-            ),
-        ),
+        ("kind", Value::String(view.kind.to_string())),
+        ("value", Value::Number(view.value as f64)),
+        ("default", Value::Number(view.default as f64)),
+        ("min", Value::Number(view.min as f64)),
+        ("max", Value::Number(view.max as f64)),
+        ("decimals", Value::Number(view.decimals as f64)),
+        ("doc", Value::String(view.doc)),
     ]))
 }
 
+/// A slot's scalar inlet names: its class's non-lane inlets, then any
+/// literal the slot holds that the class does not declare.
+pub(crate) fn process_scalar_inlet_names(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+) -> Vec<String> {
+    process_inlet_names(slot, def, false)
+}
+
+/// [`process_scalar_inlet_names`], with the class's lane inlets too when
+/// `lanes` (a graph node's slot: nodes have no lanes, so every inlet is a
+/// scalar).
+pub(crate) fn process_inlet_names(
+    slot: &sequencer::process::TrackProcessSlot,
+    def: Option<&sequencer::process::PublishedProcessDef>,
+    lanes: bool,
+) -> Vec<String> {
+    let mut names = def
+        .map(|def| {
+            def.inlets
+                .iter()
+                .filter(|inlet| lanes || !inlet.lane)
+                .map(|inlet| inlet.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in slot.inlets.keys() {
+        if !names.iter().any(|entry| entry == name) && !slot.lanes.contains_key(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// The declaration of inlet `name` on class `def`.
+pub(crate) fn process_inlet_def<'a>(
+    def: Option<&'a sequencer::process::PublishedProcessDef>,
+    name: &str,
+) -> Option<&'a sequencer::process::PublishedProcessInletDef> {
+    def?.inlets.iter().find(|inlet| inlet.name == name)
+}
+
+/// The class definition of `slot` in the published library.
+pub(crate) fn process_slot_def<'a>(
+    published: &'a sequencer::process::PublishedProcessAuthoringSnapshot,
+    slot: &sequencer::process::TrackProcessSlot,
+) -> Option<&'a sequencer::process::PublishedProcessDef> {
+    published
+        .defs
+        .iter()
+        .find(|def| def.name == slot.class_name)
+}
+
+#[cfg(test)]
 pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let Some(chain) = state.composed_track_process_chain(track) else {
         return list_value(Vec::<Value>::new());
     };
     let published = state.published_process_authoring();
     list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
-        let def = published
-            .defs
-            .iter()
-            .find(|def| def.name == slot.class_name);
-        let mut scalar_names = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| !inlet.lane)
-                    .map(|inlet| inlet.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for name in slot.inlets.keys() {
-            if !scalar_names.iter().any(|entry| entry == name) && !slot.lanes.contains_key(name) {
-                scalar_names.push(name.clone());
-            }
-        }
-        let inlet_values = scalar_names.into_iter().filter_map(|name| {
-            let inlet = def.and_then(|def| def.inlets.iter().find(|entry| entry.name == name));
-            process_scalar_inlet_entry_value(slot, def, &name, inlet)
-        });
+        let def = process_slot_def(&published, slot);
+        let inlet_values = process_scalar_inlet_names(slot, def)
+            .into_iter()
+            .filter_map(|name| {
+                let inlet = process_inlet_def(def, &name);
+                process_scalar_inlet_entry_value(slot, def, &name, inlet)
+            });
         map_value([
             ("slot-index", Value::Number(slot_index as f64)),
             ("instance-id", Value::Number(slot.instance_id.0 as f64)),
@@ -1127,244 +973,82 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
     }))
 }
 
-pub(crate) fn build_all_track_process_slots_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_process_slots_value(state, track)))
-}
-
-/// Out ports get cable ids `(track * TRACK_STRIDE + slot-index) * PORT_STRIDE
-/// + ordinal`. The patch-port machinery keys cable sources by a single number
-/// across the whole buffer layout, and two expanded tracks show two
-/// patchbays at once, so the id must be unique per track as well as per
-/// port (a slot-only id drew track 3's cables from track 2's ports).
-pub(crate) const LANE_PATCH_PORT_STRIDE: usize = 16;
-pub(crate) const LANE_PATCH_TRACK_STRIDE: usize = 4096;
-
-pub(crate) fn lane_patch_port_id(track: usize, slot_index: usize, ordinal: usize) -> usize {
-    (track * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
-}
-
-/// `SEQ.track-lane-patch`: per track, one entry per composed chain slot in
-/// fire order, with the cable-level view the lane patchbay draws
-/// (docs/default-process-lanes-spec.md, patchbay). Each slot lists its
-/// connectable out ports with every reader (the primary binding, then the
-/// fan-out entries on that port, each resolved to a chain index), its
-/// wireable in ports (lane inlets, gate inlets, and any inlet a reader entry
-/// on this track already targets) with the cable ids writing into them, and
-/// its mappable ports for the target chip.
-pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let Some(chain) = state.composed_track_process_chain(track) else {
-        return list_value(Vec::<Value>::new());
+/// The chain slot a writer's process-inlet `target` lands on, with the
+/// inlet: wiring stays within a layer, as the scheduler resolves it
+/// (`resolve_process_inlet_target` in the scheduler): a project slot drives
+/// project slots. Shared by the lane patchbay and the host kinds' ports.
+pub(crate) fn resolve_process_inlet_target<'a>(
+    chain: &sequencer::process::TrackProcessChain,
+    writer: &sequencer::process::TrackProcessSlot,
+    target: &'a sequencer::process::ParamTarget,
+) -> Option<(usize, &'a str)> {
+    let sequencer::process::ParamTarget::ProcessInlet {
+        process,
+        inlet,
+        instance_id,
+    } = target
+    else {
+        return None;
     };
-    let published = state.published_process_authoring();
-    let def_for = |slot: &sequencer::process::TrackProcessSlot| {
-        published.defs.iter().find(|def| def.name == slot.class_name)
-    };
-    // Wiring stays within a layer, as the scheduler resolves it
-    // (`resolve_process_inlet_target`): a project slot drives project slots.
-    let resolve = |writer: &sequencer::process::TrackProcessSlot,
-                   target: &sequencer::process::ParamTarget|
-     -> Option<(usize, String)> {
-        let sequencer::process::ParamTarget::ProcessInlet {
-            process,
-            inlet,
-            instance_id,
-        } = target
-        else {
-            return None;
-        };
-        let index = chain.slots.iter().position(|slot| {
-            slot.project_layer == writer.project_layer
-                && slot.class_name == *process
-                && instance_id.is_none_or(|id| slot.instance_id == id)
-        })?;
-        Some((index, inlet.clone()))
-    };
-
-    struct Reader {
-        slot_index: usize,
-        inlet: String,
-        source: &'static str,
-        fanout_index: Option<usize>,
-    }
-    let mut out_ports: Vec<Vec<(String, usize, bool, Vec<Reader>)>> = Vec::new();
-    let mut in_writers: std::collections::BTreeMap<(usize, String), Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for (slot_index, slot) in chain.slots.iter().enumerate() {
-        let mut entries = Vec::new();
-        let connectable = def_for(slot)
-            .map(|def| {
-                def.ports
-                    .iter()
-                    .filter(|port| port.is_connectable())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for (ordinal, port) in connectable.iter().enumerate() {
-            let port_id = lane_patch_port_id(track, slot_index, ordinal);
-            let mut readers = Vec::new();
-            // A new cable fills the primary binding when nothing holds it;
-            // otherwise it becomes a fan-out entry on the port.
-            let primary_free = slot.unbound_ports.contains(&port.name)
-                || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
-            if !slot.unbound_ports.contains(&port.name) {
-                if let Some(Some(target)) = slot.bindings.get(&port.name) {
-                    if let Some((index, inlet)) = resolve(slot, target) {
-                        readers.push(Reader {
-                            slot_index: index,
-                            inlet,
-                            source: "primary",
-                            fanout_index: None,
-                        });
-                    }
-                }
-            }
-            let fanout = slot.fanout.get(&port.name).map(Vec::as_slice).unwrap_or(&[]);
-            for (fanout_index, entry) in fanout.iter().enumerate() {
-                if let Some((index, inlet)) = resolve(slot, &entry.target) {
-                    readers.push(Reader {
-                        slot_index: index,
-                        inlet,
-                        source: "fanout",
-                        fanout_index: Some(fanout_index),
-                    });
-                }
-            }
-            for reader in &readers {
-                in_writers
-                    .entry((reader.slot_index, reader.inlet.clone()))
-                    .or_default()
-                    .push(port_id);
-            }
-            entries.push((port.name.clone(), port_id, primary_free, readers));
-        }
-        out_ports.push(entries);
-    }
-
-    list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
-        let def = def_for(slot);
-        let in_ports = def
-            .map(|def| {
-                def.inlets
-                    .iter()
-                    .filter(|inlet| {
-                        inlet.lane
-                            || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate)
-                            || in_writers.contains_key(&(slot_index, inlet.name.clone()))
-                    })
-                    .enumerate()
-                    .map(|(ordinal, inlet)| {
-                        let writers = in_writers
-                            .get(&(slot_index, inlet.name.clone()))
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        map_value([
-                            ("name", Value::String(inlet.name.clone())),
-                            ("ordinal", Value::Number(ordinal as f64)),
-                            ("lane", Value::Bool(inlet.lane)),
-                            ("kind", Value::String(process_inlet_kind_name(&inlet.kind).to_string())),
-                            (
-                                "writers",
-                                list_value(writers.iter().map(|id| Value::Number(*id as f64))),
-                            ),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let param_ports = def
-            .map(|def| {
-                def.ports
-                    .iter()
-                    .filter(|port| port.is_mappable())
-                    .map(|port| process_port_value(slot, port))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let display_name = slot
-            .instance_name
-            .clone()
-            .unwrap_or_else(|| slot.class_name.clone());
-        map_value([
-            ("slot-index", Value::Number(slot_index as f64)),
-            ("instance-id", Value::Number(slot.instance_id.0 as f64)),
-            ("name", Value::String(display_name)),
-            ("class", Value::String(slot.class_name.clone())),
-            ("project", Value::Bool(slot.project_layer)),
-            ("enabled", Value::Bool(slot.enabled)),
-            ("default-lane", Value::Bool(sequencer::process::is_default_lane_slot(slot))),
-            (
-                "out-ports",
-                list_value(out_ports[slot_index].iter().enumerate().map(
-                    |(ordinal, (name, port_id, primary_free, readers))| {
-                        map_value([
-                            ("name", Value::String(name.clone())),
-                            ("ordinal", Value::Number(ordinal as f64)),
-                            ("port-id", Value::Number(*port_id as f64)),
-                            ("primary-free", Value::Bool(*primary_free)),
-                            (
-                                "readers",
-                                list_value(readers.iter().map(|reader| {
-                                    map_value([
-                                        ("slot-index", Value::Number(reader.slot_index as f64)),
-                                        (
-                                            "instance-id",
-                                            Value::Number(
-                                                chain.slots[reader.slot_index].instance_id.0 as f64,
-                                            ),
-                                        ),
-                                        ("inlet", Value::String(reader.inlet.clone())),
-                                        ("source", Value::String(reader.source.to_string())),
-                                        (
-                                            "fanout-index",
-                                            reader
-                                                .fanout_index
-                                                .map(|index| Value::Number(index as f64))
-                                                .unwrap_or(Value::Nil),
-                                        ),
-                                    ])
-                                })),
-                            ),
-                        ])
-                    },
-                )),
-            ),
-            ("in-ports", list_value(in_ports)),
-            ("param-ports", list_value(param_ports)),
-            // Expr cards (docs/expr-process-spec.md §2); same keys as the
-            // node patch (`graph_node_lane_patch_value`).
-            ("expr", Value::Bool(slot.is_expr_card())),
-            (
-                "expr-line",
-                slot.expr_preview_line().map(Value::String).unwrap_or(Value::Nil),
-            ),
-            (
-                "compile-error",
-                slot.expr_compile_error(def.is_some()).map(Value::String).unwrap_or(Value::Nil),
-            ),
-        ])
-    }))
+    let index = chain.slots.iter().position(|slot| {
+        slot.project_layer == writer.project_layer
+            && slot.class_name == *process
+            && instance_id.is_none_or(|id| slot.instance_id == id)
+    })?;
+    Some((index, inlet))
 }
 
-pub(crate) fn build_all_track_lane_patch_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| build_track_lane_patch_value(state, track)))
+/// The process inlets `slot`'s port `port` writes (the patchbay's cables):
+/// its primary binding unless disconnected (fan-out index `None`), then its
+/// fan-out entries, each resolved on `chain` (within the writer's layer) to
+/// (fan-out index, chain index, inlet).
+pub(crate) fn process_port_readers<'a>(
+    chain: &sequencer::process::TrackProcessChain,
+    slot: &'a sequencer::process::TrackProcessSlot,
+    port: &str,
+) -> Vec<(Option<usize>, usize, &'a str)> {
+    let primary = (!slot.unbound_ports.contains(port))
+        .then(|| slot.bindings.get(port).and_then(Option::as_ref))
+        .flatten();
+    let fanout = slot.fanout.get(port).into_iter().flatten();
+    let targets = (primary.map(|target| (None, target)).into_iter()).chain(
+        fanout
+            .enumerate()
+            .map(|(index, entry)| (Some(index), &entry.target)),
+    );
+    targets
+        .filter_map(|(fanout_index, target)| {
+            let (index, inlet) = resolve_process_inlet_target(chain, slot, target)?;
+            Some((fanout_index, index, inlet))
+        })
+        .collect()
 }
 
-pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
-    let published = state.published_process_authoring();
-    // Compiled expr bodies (`expr#<hash>`) are reached through the plain
-    // `expr` card, never offered as classes (docs/expr-process-spec.md §2.1).
-    let defs: Vec<&sequencer::process::PublishedProcessDef> = published
+/// Whether the patchbay shows `inlet` as an in port: a lane, a gate, or an
+/// inlet a cable already writes (`wired`).
+pub(crate) fn lane_patch_in_port(
+    inlet: &sequencer::process::PublishedProcessInletDef,
+    wired: bool,
+) -> bool {
+    inlet.lane || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate) || wired
+}
+
+/// The library's classes (the host kinds' `process-class`): compiled expr bodies (`expr#<hash>`) are reached
+/// through the plain `expr` card, never offered as classes
+/// (docs/expr-process-spec.md §2.1).
+pub(crate) fn process_library_defs(
+    published: &sequencer::process::PublishedProcessAuthoringSnapshot,
+) -> impl Iterator<Item = &sequencer::process::PublishedProcessDef> {
+    published
         .defs
         .iter()
         .filter(|def| !sequencer::process::is_expr_process_class(&def.name))
-        .collect();
-    list_value(defs.into_iter().map(|def| {
+}
+
+#[cfg(test)]
+pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
+    let published = state.published_process_authoring();
+    list_value(process_library_defs(&published).map(|def| {
         map_value([
             ("name", Value::String(def.name.clone())),
             ("label", Value::String(def.name.clone())),
@@ -1381,13 +1065,7 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
                         ("name", Value::String(port.name.clone())),
                         (
                             "label",
-                            Value::String(
-                                if port.name == sequencer::process::DEFAULT_PROCESS_PORT {
-                                    "default".to_string()
-                                } else {
-                                    port.name.clone()
-                                },
-                            ),
+                            Value::String(process_port_label(&port.name).to_string()),
                         ),
                         (
                             "hint",
@@ -1408,43 +1086,6 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ),
         ])
     }))
-}
-
-/// `SEQ.track-process-scopes`: per track, one entry per composed chain slot
-/// with that slot's state history on this track (project slots have
-/// per-track runtime state, so the same lane scopes differently per track).
-/// `values` is the first declared state cell's history, `cells` the rest.
-pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> Value {
-    let scopes = state.process_scope_values();
-    let published = state.published_process_authoring();
-    let tracks = (0..state.active_track_count()).map(|track| {
-        let Some(chain) = state.composed_track_process_chain(track) else {
-            return list_value(std::iter::empty());
-        };
-        let entries = chain.slots.iter().filter_map(|slot| {
-            let runtime_id =
-                sequencer::process::track_process_slot_runtime_id(slot, track).0;
-            let cells = scopes.get(&runtime_id)?;
-            let def = published.defs.iter().find(|def| def.name == slot.class_name);
-            let primary = def
-                .and_then(|def| def.state.first().map(|cell| cell.name.clone()))
-                .or_else(|| cells.keys().next().cloned())?;
-            let values = cells.get(&primary).cloned().unwrap_or_default();
-            let current = values.last().copied().unwrap_or(0.0);
-            Some(map_value([
-                ("instance-id", Value::Number(slot.instance_id.0 as f64)),
-                ("state", Value::String(primary)),
-                ("current", Value::Number(current as f64)),
-                (
-                    "values",
-                    list_value(values.iter().map(|value| Value::Number(*value as f64))),
-                ),
-                ("cells", process_scope_cells_value(cells)),
-            ]))
-        });
-        list_value(entries.collect::<Vec<_>>())
-    });
-    list_value(tracks.collect::<Vec<_>>())
 }
 
 /// Descriptor indices of `track`'s instrument params that an *enabled*
@@ -1503,99 +1144,3 @@ pub(crate) fn process_bound_bus_sends(state: &SequencerState, track: usize) -> H
     bound
 }
 
-/// Every numeric state cell's history of one process instance, by cell
-/// name: `{:snap (0 -1 ...) :root (...)}`.
-fn process_scope_cells_value(cells: &HashMap<String, Vec<f32>>) -> Value {
-    let mut map = HashMap::new();
-    for (name, values) in cells {
-        map.insert(
-            name.clone(),
-            value_cell(list_value(values.iter().map(|value| Value::Number(*value as f64)))),
-        );
-    }
-    Value::Map(map)
-}
-
-/// `SEQ.process-scope-cells`: one `{:runtime-id :cells}` entry per process
-/// instance that has fired, for scopes a track chain does not reach — a
-/// graph node's patch slots, whose runtime id is their instance id.
-pub(crate) fn build_process_scope_cells_value(state: &Arc<SequencerState>) -> Value {
-    let scopes = state.process_scope_values();
-    let mut ids = scopes.keys().copied().collect::<Vec<_>>();
-    ids.sort_unstable();
-    list_value(ids.into_iter().map(|id| {
-        map_value([
-            ("runtime-id", Value::Number(id as f64)),
-            ("cells", process_scope_cells_value(&scopes[&id])),
-        ])
-    }))
-}
-
-/// `SEQ.process-run-errors`: one `{:runtime-id :error}` entry per process
-/// runtime whose latest run failed (an expr card's body raised or ran out of
-/// step budget; docs/expr-process-spec.md §2/§10). Node slots run under
-/// their instance id, so the node bay's error dot matches on `:instance-id`.
-pub(crate) fn build_process_run_errors_value(state: &Arc<SequencerState>) -> Value {
-    list_value(state.process_run_errors().into_iter().map(|(id, error)| {
-        map_value([
-            ("runtime-id", Value::Number(id as f64)),
-            ("error", Value::String(error)),
-        ])
-    }))
-}
-
-pub(crate) fn sync_process_scope_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_scopes: bool,
-    scope_cells: bool,
-) {
-    if track_scopes {
-        rt.set_reactive(
-            "SEQ",
-            "track-process-scopes",
-            build_track_process_scopes_value(state),
-        );
-    }
-    if scope_cells {
-        rt.set_reactive("SEQ", "process-scope-cells", build_process_scope_cells_value(state));
-    }
-}
-
-pub(crate) fn sync_process_chain_state(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_count: usize,
-    current_track: usize,
-) {
-    rt.set_reactive(
-        "SEQ", "track-process-lane-values",
-        build_all_track_process_lane_values(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-process-lanes",
-        build_all_track_process_lanes_value(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "process-lanes",
-        build_process_lanes_value(state, current_track),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "process-slots",
-        build_process_slots_value(state, current_track),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-process-slots",
-        build_all_track_process_slots_value(state, track_count),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-lane-patch",
-        build_all_track_lane_patch_value(state, track_count),
-    );
-    rt.set_reactive("SEQ", "process-library", build_process_library_value(state));
-}

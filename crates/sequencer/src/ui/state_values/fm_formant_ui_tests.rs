@@ -29,24 +29,16 @@ fn fm_formant_pages_expose_bound_visible_controls() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(fm_formant_inst)])),
-            ("bus-effects", test_list(vec![])),
-        ],
-        true,
-    );
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(fm_formant_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()
@@ -54,7 +46,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -68,6 +60,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
         .eval_str(&custom_ui_source)
         .expect("load fm_formant custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("fm_formant fx lisp status after refresh: {status}");
@@ -93,7 +86,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
                 && node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width + 0.01,
                 "{} clipped: {:?} in {:?}", node.widget_type, node.rect, panel.rect);
             for value in node.props.values() {
-                if let Value::ReactiveRef { field, .. } = value {
+                if let Some(field) = bound_field(Some(value)) {
                     if let Some(name) = field.strip_prefix("fm_formant-test-") { seen.insert(name.to_string()); }
                 }
             }
@@ -102,7 +95,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
     }
     for section in 0..24 {
         editor.runtime_mut().eval_str(&format!(r#"
-            (do (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+            (do (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                 ((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false))
         "#)).unwrap();
         editor.refresh_runtime_side_effects();
@@ -149,7 +142,7 @@ fn fm_formant_pages_expose_bound_visible_controls() {
                 }
             }
             editor.runtime_mut().register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
-            editor.runtime_mut().set_reactive("SEQ", "fm_formant-test-pm_1_to_2", Value::Number(0.25));
+            set_panel_param(&mut editor, &kinds, "fm_formant-test-pm_1_to_2", Value::Number(0.25));
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let custom_layout = editor.widget_layout().unwrap();
@@ -157,7 +150,12 @@ fn fm_formant_pages_expose_bound_visible_controls() {
                 let diagram = find_layout_node_by_debug_name(&custom_layout, &format!("ff-algorithm-{mode}")).unwrap();
                 assert_eq!(diagram.props.get("selected"), Some(&Value::Number(0.0)), "custom route must not claim a preset");
             }
-            editor.runtime_mut().set_reactive("SEQ", "fm_formant-test-pm_1_to_2", Value::Number(0.0));
+            set_panel_param(
+                &mut editor,
+                &kinds,
+                "fm_formant-test-pm_1_to_2",
+                Value::Number(0.0),
+            );
             editor.runtime_mut().run_reactive_cycle();
         }
         if section > 0 && section < 17 && section % 4 == 0 {

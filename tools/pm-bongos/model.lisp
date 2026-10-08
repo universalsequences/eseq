@@ -379,5 +379,12 @@
   (def driven (mix signal (/ (tanh (* signal (+ 1 (* drive_v 8)))) (+ 1 (* drive_v 2))) drive_v))
   (def filtered (svf driven cutoff 0.707 0))
   (* filtered gain_v))
-(out (bongo-output (+ left skin_noise) drive_v cutoff output_gain) 1 @name left)
-(out (bongo-output (+ right skin_noise) drive_v cutoff output_gain) 2 @name right)
+(def voice_left (bongo-output (+ left skin_noise) drive_v cutoff output_gain))
+(def voice_right (bongo-output (+ right skin_noise) drive_v cutoff output_gain))
+(out voice_left 1 @name left)
+(out voice_right 2 @name right)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring.
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_left voice_right) 3 @name amp @amp true)

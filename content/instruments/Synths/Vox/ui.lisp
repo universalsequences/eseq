@@ -9,7 +9,7 @@
     (* (+ (* (nth values v) (- 1 m)) (* (nth values (if (>= v 9) 0 (+ v 1))) m))
       (eseq.effects.mnm-surface/mnm-value "formant_shift"))))
 (defwidget vox-formants
-  :width 35.2 :height 4.2 :state (f1 f2 f3 f4 q) :bindable (f1 f2 f3 f4 q)
+  :width 35.2 :height 4.2 :state (f1 f2 f3 f4 q)
   :shader
   (let ((hz (max 1 (* 9000 (pow (/ (+ (/ x aspect) 1) 2) 2))))
         (r1 (/ hz (clamp f1 60 9000))) (r2 (/ hz (clamp f2 60 9000)))

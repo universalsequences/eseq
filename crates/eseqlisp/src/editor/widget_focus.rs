@@ -155,33 +155,8 @@ impl Editor {
             }
             return;
         };
-        let remapped = previous
-            .stable_widget_id
-            .and_then(|stable_id| find_focusable_node_by_stable_widget_id(&layout, stable_id))
-            .or_else(|| {
-                previous.stable_key.as_deref().and_then(|stable_key| {
-                    find_focusable_node_by_stable_key_and_type(
-                        &layout,
-                        stable_key,
-                        &previous.widget_type,
-                    )
-                })
-            })
-            .or_else(|| {
-                previous.subtree_root_id.and_then(|subtree_root_id| {
-                    find_focusable_node_by_subtree_root_and_type(
-                        &layout,
-                        subtree_root_id,
-                        &previous.widget_type,
-                    )
-                })
-            })
-            .or_else(|| {
-                self.active_leaf()
-                    .focused_widget_id
-                    .and_then(|id| find_node_by_id(&layout, id))
-                    .filter(|node| same_focus_identity(&previous, node))
-            });
+        let remapped =
+            remapped_focus_node(&layout, &previous, self.active_leaf().focused_widget_id);
         // A failed remap means the widget the user was on is gone: leave focus
         // cleared rather than redirecting it into an unrelated `:auto-focus`
         // widget that happens to be on screen.
@@ -1141,6 +1116,61 @@ impl Editor {
             }
         }
     }
+}
+
+/// The node of `layout` that is the widget `previous` (the focused node of
+/// an earlier layout, whose id was `previous_id`): by stable widget id, by
+/// stable key and type, by subtree root and type, else by the old id when
+/// it still names the same widget. A relayout may renumber widget ids.
+fn remapped_focus_node(
+    layout: &LayoutNode,
+    previous: &LayoutNode,
+    previous_id: Option<u64>,
+) -> Option<LayoutNode> {
+    previous
+        .stable_widget_id
+        .and_then(|stable_id| find_focusable_node_by_stable_widget_id(layout, stable_id))
+        .or_else(|| {
+            previous.stable_key.as_deref().and_then(|stable_key| {
+                find_focusable_node_by_stable_key_and_type(
+                    layout,
+                    stable_key,
+                    &previous.widget_type,
+                )
+            })
+        })
+        .or_else(|| {
+            previous.subtree_root_id.and_then(|subtree_root_id| {
+                find_focusable_node_by_subtree_root_and_type(
+                    layout,
+                    subtree_root_id,
+                    &previous.widget_type,
+                )
+            })
+        })
+        .or_else(|| {
+            previous_id
+                .and_then(|id| find_node_by_id(layout, id))
+                .filter(|node| same_focus_identity(previous, node))
+        })
+}
+
+/// Follow an inactive tile's widget focus into its freshly built layout
+/// (eseq-0l17.27): a relayout renumbers widget ids, and only the active
+/// tile's focus is remapped after its layout changes, so an inactive tile
+/// kept an id its new layout no longer had and painted no focus (a context
+/// menu opened by a script showed no highlighted first item once another
+/// tile became active). A widget that is gone leaves the tile unfocused.
+pub(super) fn remap_leaf_focus_to_layout(leaf: &mut crate::tile::TileLeaf) {
+    let Some(previous) = leaf.focused_widget_node.clone() else {
+        return;
+    };
+    let remapped = leaf
+        .cached_layout
+        .as_deref()
+        .and_then(|layout| remapped_focus_node(layout, &previous, leaf.focused_widget_id));
+    leaf.focused_widget_id = remapped.as_ref().map(|node| node.widget_id);
+    leaf.focused_widget_node = remapped;
 }
 
 fn same_focus_identity(a: &LayoutNode, b: &LayoutNode) -> bool {

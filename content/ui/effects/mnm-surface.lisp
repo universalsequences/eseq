@@ -3,10 +3,8 @@
 (export mnm-accent mnm-section mnm-bind mnm-value mnm-knob mnm-panel mnm-num mnm-write mnm-caption mnm-ahd mnm-release mnm-amp-page mnm-filter-band mnm-filter-curve mnm-filter-page mnm-color-page)
 (def mnm-accent () (eseq.effects.custom-ui-lego/ui-accent-orange))
 (def mnm-section () eseq.vanilla/custom-ui-selected-section)
-(def mnm-bind (name)
-  (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
-(def mnm-value (name) (reactive-value (mnm-bind name)))
+(def mnm-bind (name) (eseq.effects.custom-ui-controls/ui-param-bound-value name 0))
+(def mnm-value (name) (eseq.effects.custom-ui-controls/ui-param-value name 0))
 (def mnm-knob (section name title width decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.55 2.6
     (mnm-accent) decimals taper :widget-knob-track 8.5 8 :center))
@@ -34,7 +32,7 @@
           :text-align :left
           :text-color (mnm-ink p) :edit-color (mnm-ink p) :cursor-color (mnm-ink p)
           :plock-style :underline
-          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))
 (def mnm-write (scope name value)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))
@@ -110,8 +108,8 @@
                 (mnm-write scope "flt_res_hi" (get event :q)))
             (do (mnm-write scope "flt_width"
                   (/ (log (/ (max 30 (get event :freq))
-                    (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-                      (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "flt_base"))))) (log 2)))
+                    (eseq.effects.custom-ui-runtime/custom-ui-param-value
+                      (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "flt_base")))) (log 2)))
                 (mnm-write scope "flt_res_lo" (get event :q)))) false)))))
 (def mnm-filter-page ()
   (v-stack :gap 0.15
@@ -165,7 +163,7 @@
 ;; Ideal oscillator shape, before sync, ring modulation and the track chain.
 ;; Noise is intentionally omitted: there is no deterministic per-note waveform.
 (defwidget mnm-source-wave
-  :width 35.2 :height 4.2 :state (wave pw) :bindable (wave pw)
+  :width 35.2 :height 4.2 :state (wave pw)
   :shader
   (let ((u (fract (* 2 (/ (+ (/ x aspect) 1) 2))))
         (saw (- (* u 2) 1))

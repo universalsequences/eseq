@@ -7,7 +7,7 @@
 use crate::*;
 
 use sequencer::sequencer::{
-    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, TakeId,
+    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, TakeId, TrackId,
 };
 use sequencer::app::song_edit::SongRowSpec;
 
@@ -27,7 +27,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-clip-move",
     "arrangement-clip-resize",
     "arrangement-clip-split",
-    "arrangement-clip-set-source",
     "song-set-end",
     "song-set-loop",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
@@ -44,6 +43,7 @@ pub(super) const COMMANDS: &[&str] = &[
     // Transport authority (docs/song-mode-spec.md 12/13): routed through the
     // state machine in app/song_transport.rs.
     "song-transport-toggle-play",
+    "song-transport-set-playing",
     "song-transport-play",
     "song-capture-arm",
     "song-capture-cancel",
@@ -51,15 +51,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-back-to-song-track",
     "song-toggle-record",
     "song-status",
-    // Sound binding (takes spec 16): timeline clip selection is the explicit
-    // binding gesture, plus the two explicit propagation gestures.
-    "song-select-clip",
-    "song-deselect-clip",
-    // Region selection (docs/arrangement-region-editing-spec.md 4.1): pure
-    // selection state — no song mutation, no undo entry, and legal while
-    // song editing is locked.
-    "song-set-region",
-    "song-clear-region",
+    // The arrangement edit cursor mirror (region spec 5.3). The clip binding
+    // and the region selection are the arrangement kinds' setters (`set-song`
+    // :bound-clip, `set-song-region`; host_commands/arrangement.rs).
     "song-set-arr-cursor",
     // Region copy/paste/delete (region spec 5.2). Copy and paste need the
     // clipboard handle, so all three are applied in `handle` below where the
@@ -85,7 +79,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "sound-apply-to-all-takes",
     // Sound palette (takes spec §17.6/§18.3). Apply/fork route through the
     // single repoint seam (`after_sound_repoint`); open/close drive the
-    // `SEQ.sound-palette` read surface.
+    // `sound-palette` kind.
     "sound-palette-open",
     "sound-palette-close",
     "sound-apply",
@@ -94,6 +88,19 @@ pub(super) const COMMANDS: &[&str] = &[
     "sound-rename",
     "sound-cleanup-unused",
 ];
+
+/// The track a palette command names: by its stable `:track-id` (resolved
+/// now, so a reorder before the command landed cannot retarget it; the
+/// `sound` kind's actions send it), else by its `:track` position.
+fn palette_track(
+    app: &app::App,
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<usize, String> {
+    if map.contains_key("track-id") {
+        return super::track_settings::command_track(app, map);
+    }
+    map_usize(map, "track").ok_or_else(|| "missing or invalid :track".to_string())
+}
 
 /// Palette gesture target from a payload's `:target-kind`/`:target-id`
 /// (§17.6): `take`/`pattern` with an id, `cell` for the track's effective
@@ -381,10 +388,10 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         "arrangement-pattern-place" => {
             let map = payload_map(payload)?;
             let track = require_track(map)?;
-            let track_id = map_entity_id(map, "track-id")?;
-            // SEQ.track-ids uses the graph's persistent pan node identity,
-            // the same identity used by arrangement subtrees and mixer drags.
-            if app.graph.track_node_ids.get(track).map(|ids| ids.pan_id as u64) != Some(track_id) {
+            // `:track-id` is the stable `TrackId` (`track.tid`) the pattern
+            // was picked on, as the mixer's pattern drags carry it.
+            let track_id = TrackId(map_entity_id(map, "track-id")?);
+            if live_track_index(app, track_id) != Some(track) {
                 return Err("The target track changed; select the pattern again".to_string());
             }
             let pattern = PatternId(map_entity_id(map, "pattern-id")?);
@@ -514,13 +521,6 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 clip_id.0, right.0
             ))
         }
-        "arrangement-clip-set-source" => {
-            let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map)?;
-            let source = parse_source(map)?;
-            app.arr_clip_set_source(clip_id, source)?;
-            Ok(format!("Set clip {} source", clip_id.0))
-        }
         "song-set-end" => {
             let map = payload_map(payload)?;
             let end_beat = require_number(map, "end-beat")?;
@@ -628,6 +628,12 @@ fn run_transport(
             let record = transport_record_signal(app, ctx);
             app.song_transport_toggle_play(record)
         }
+        // Absolute Play/Stop (`seq-set-playing`): a no-op when the transport
+        // already is where the caller wants it.
+        "song-transport-set-playing" => {
+            let record = transport_record_signal(app, ctx);
+            app.song_transport_set_playing(matches!(payload, Value::Bool(true)), record)
+        }
         "song-transport-play" => {
             let record = transport_record_signal(app, ctx);
             app.song_transport_play(record).map(|mode| match mode {
@@ -668,55 +674,6 @@ fn run_transport(
             app.set_song_record_engaged(engaged)
         }
         "song-status" => Ok(Some(song_status_summary(app))),
-        // Selecting a clip re-binds the track's device panel, monitor sound
-        // and record-clone template in one move (takes spec 16.2/16.6), so
-        // it lives with the transport commands: it changes what is sounding.
-        "song-select-clip" => {
-            let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
-            let clip_id = resolve_clip(map)?;
-            // The timeline sends the clip's drawn span alongside its id so
-            // the selection is also a one-clip region (region spec 4.1,
-            // amended): selecting a clip lights its body and gives
-            // copy/delete a target. Absent span = clear the region.
-            let span = match (map_number(map, "start"), map_number(map, "end")) {
-                (Some(start), Some(end)) if start.is_finite() && end.is_finite() => {
-                    Some((start, end))
-                }
-                _ => None,
-            };
-            app.select_song_clip_span(track, clip_id, span)?;
-            Ok(app.track_binding_label(track).map(|label| format!("Bound: {label}")))
-        }
-        "song-deselect-clip" => {
-            app.set_song_clip_selection(None);
-            Ok(None)
-        }
-        // Region selection (region spec 4.1). It rides with the transport
-        // commands because setting it releases the sound binding, i.e. it
-        // changes what the device panel and monitor are pointed at.
-        "song-set-region" => {
-            let map = payload_map(payload)?;
-            let track_a = map_usize(map, "track-a").ok_or("missing or invalid :track-a")?;
-            let track_b = map_usize(map, "track-b").ok_or("missing or invalid :track-b")?;
-            let start = require_number(map, "start")?;
-            let end = require_number(map, "end")?;
-            if !start.is_finite() || !end.is_finite() {
-                return Err("region bounds must be finite".to_string());
-            }
-            // `:scene-lane` marks a marquee swept in the SCENE lane (region
-            // spec 4.2, lane spec 8): the same rectangle, but copy/paste/
-            // delete carry the scene EVENTS inside it as well as the clips.
-            let scene_lane = map_bool(map, "scene-lane");
-            app.set_song_region(app::song_region::SongRegionSelection::new_in_lane(
-                track_a, track_b, start, end, scene_lane,
-            ));
-            Ok(None)
-        }
-        "song-clear-region" => {
-            app.clear_song_region();
-            Ok(None)
-        }
         // Arrangement edit-cursor mirror (region spec 5.3): the paste target
         // for the Rust-side Cmd-V seam. Pure state, no undo entry.
         "song-set-arr-cursor" => {
@@ -741,7 +698,7 @@ fn run_transport(
         // list itself diffs by value each tick and needs no push.
         "sound-palette-open" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?;
             let target = app.palette_target_or_binding(track, target);
             app.sound_palette_open = Some((track, target));
@@ -753,7 +710,7 @@ fn run_transport(
         }
         "sound-apply" | "sound-apply-with-mix" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?.or_else(|| {
                 app.sound_palette_open
                     .filter(|(open_track, _)| *open_track == track)
@@ -772,7 +729,7 @@ fn run_transport(
         }
         "sound-fork" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let target = parse_palette_target(map)?.or_else(|| {
                 app.sound_palette_open
                     .filter(|(open_track, _)| *open_track == track)
@@ -785,7 +742,7 @@ fn run_transport(
         }
         "sound-rename" => {
             let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let track = palette_track(app, map)?;
             let kind = map_string(map, "kind").unwrap_or_else(|| "patch".to_string());
             let id = map_entity_id(map, "entity")?;
             let name_arg =
@@ -870,6 +827,7 @@ pub(crate) fn apply_sound_palette_view_command(
 
 const TRANSPORT_COMMANDS: &[&str] = &[
     "song-transport-toggle-play",
+    "song-transport-set-playing",
     "song-transport-play",
     "song-capture-arm",
     "song-capture-cancel",
@@ -877,10 +835,6 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-back-to-song-track",
     "song-toggle-record",
     "song-status",
-    "song-select-clip",
-    "song-deselect-clip",
-    "song-set-region",
-    "song-clear-region",
     "song-set-arr-cursor",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
@@ -976,25 +930,40 @@ pub(super) fn handle(
         }
         return;
     }
-    match run(name, &payload, app) {
+    let result = run(name, &payload, app).map(Some);
+    song_edit_landed(app, editor, ctx, name, result);
+}
+
+/// After a song edit landed (`run`'s primitives, the arrangement kinds'
+/// setters): a success clears the latched rejection and resyncs the piano
+/// roll's clip-shaped surfaces, showing `status` when there is one; a
+/// failure is latched for `song.edit-error`.
+pub(super) fn song_edit_landed(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &LoopCtx<'_>,
+    name: &str,
+    result: Result<Option<String>, String>,
+) {
+    match result {
         Ok(status) => {
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
             app.song_edit_error = None;
-            // Every command here can move what the piano roll's clip-shaped
-            // surfaces read (focus-num-steps, the window overlay, the clip
-            // panel's Start/End/Offset) without moving the FOCUS itself —
-            // a clip resize/move/region edit changes the pinned clip's span
-            // and offset. These are one-shot edits, so an unconditional
-            // resync is cheap and keeps the overlay from going stale.
+            // Every command here can move the pinned clip's span and offset
+            // without moving the FOCUS itself (a clip resize/move/region
+            // edit): resync the current track. These are one-shot edits, so
+            // an unconditional resync is cheap.
             ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
                 track: ctx.shared.current_track.load(Ordering::Relaxed),
                 change: PianoRollInvalidation::Items,
             });
-            editor.handle_host_event(HostEvent::Status(status));
+            if let Some(status) = status {
+                editor.handle_host_event(HostEvent::Status(status));
+            }
         }
         Err(error) => {
-            // Latch the rejection for SEQ.song-edit-error: the step tile
+            // Latch the rejection for song.edit-error: the step tile
             // hides the status line, so the arrangement view surfaces it.
             app.song_edit_error = Some(error.clone());
             editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")));

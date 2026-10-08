@@ -157,4 +157,11 @@
 (def linn (/ (floor (+ (* (clip linn_raw -1 1) qbits) 0.5)) qbits))
 
 (def voice (selector eng c808 c909 linn))
-(out (* (md-out voice) vel hit_lvl (clip (mod level) 0 1)) 1 @name audio)
+(def voice_out (* (md-out voice) vel hit_lvl (clip (mod level) 0 1)))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)

@@ -109,6 +109,22 @@ pub struct UiWorkCounters {
     pub relayout_subtree: u64,
 }
 
+impl UiWorkCounters {
+    /// The work done since the `before` snapshot.
+    pub fn since(&self, before: &Self) -> Self {
+        Self {
+            full_buffer_reruns: self.full_buffer_reruns.saturating_sub(before.full_buffer_reruns),
+            subtree_reruns: self.subtree_reruns.saturating_sub(before.subtree_reruns),
+            reevaluated_subtree_roots: self
+                .reevaluated_subtree_roots
+                .saturating_sub(before.reevaluated_subtree_roots),
+            relayout_reused: self.relayout_reused.saturating_sub(before.relayout_reused),
+            relayout_full: self.relayout_full.saturating_sub(before.relayout_full),
+            relayout_subtree: self.relayout_subtree.saturating_sub(before.relayout_subtree),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
     pub changed: bool,
@@ -498,24 +514,96 @@ fn compile_sdf_for_platform_backend(
     }
 }
 
-fn compile_sdf_value(
-    value: &Value,
+/// Fill an SDF widget's `shader-state-*` props at construction
+/// (`defwidget` constructors and `:material` sliders): bindings for the
+/// instance fields its shader reads (kind-bindings spec §7.3), then each
+/// scalar state from the prop of that name or the captured `defstate`.
+fn fill_sdf_state_props(
     vm: &mut VM,
-    state_bindings: &std::collections::HashSet<String>,
-) -> Result<SdfCompileResult, String> {
+    widget: &str,
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<(), crate::vm::VMError> {
+    let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(widget) else {
+        return Ok(());
+    };
+    vm.bind_sdf_widget_instance_fields(&def, map)?;
+    // Scalars come first in slot order, so their prop names lead.
+    for (state_name, prop_name) in def.state.plan.scalars.iter().zip(&def.state.prop_names) {
+        let explicit_value = map.get(state_name).map(|cell| cell.borrow().clone());
+        if let Some(value) = explicit_value.or_else(|| vm.read_tracked_state_value(state_name)) {
+            map.insert(prop_name.clone(), Rc::new(RefCell::new(value)));
+        }
+    }
+    Ok(())
+}
+
+/// Compile a macro-expanded shader over its state uniforms for the
+/// platform's backend, with the environment's shader options.
+fn compile_expanded_sdf(
+    expanded: &crate::parser::Expression,
+    state_symbols: &[String],
+) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    compile_sdf_for_platform_backend(expanded, state_symbols, options).map_err(|e| e.to_string())
+}
+
+/// Plan a shader's state (kind-bindings spec §7.3) and hold it to the
+/// uniform budget; errors are prefixed with `who`.
+fn plan_sdf_state(
+    who: &str,
+    vm: &VM,
+    state_names: &[String],
+    expanded: &crate::parser::Expression,
+) -> Result<crate::vm::SdfStatePlan, String> {
+    let plan = vm.plan_sdf_widget_state(who, state_names, expanded)?;
+    match plan.budget_error(who) {
+        Some(error) => Err(error),
+        None => Ok(plan),
+    }
+}
+
+/// `sdf->metal`: compile a quoted SDF expression. Singleton fields
+/// (`transport.playing`) and captured `defstate`s read as uniforms, as in
+/// a `defwidget` with no `:state`.
+fn compile_sdf_value(value: &Value, vm: &mut VM) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, vm)?;
-    let mut state_symbols =
-        crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
-    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
-    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
-        .map_err(|e| e.to_string())?;
+    let state_symbols = plan_sdf_state("sdf->metal", vm, &[], &expanded)?.uniforms();
+    let output = compile_expanded_sdf(&expanded, &state_symbols)?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
         state_symbols,
     })
+}
+
+/// Compile a `defwidget` shader against its `:state` names (kind-bindings
+/// spec §7.3): scalar states and the instance fields the shader reads become
+/// uniforms ([`VM::plan_sdf_widget_state`]). Over the uniform budget is an
+/// error listing the allocation; so is a bad instance field, and so is a
+/// shader that does not compile (`<widget>: shader error: …`, e.g. a call to
+/// a material macro whose module is not imported).
+fn compile_defwidget_shader(
+    widget: &str,
+    value: &Value,
+    vm: &mut VM,
+    state_names: &[String],
+) -> Result<(SdfCompileResult, crate::vm::SdfStatePlan), String> {
+    let shader_error = |e: String| format!("{widget}: shader error: {e}");
+    let expr = crate::lang::sdf_codegen::value_to_expression(value)
+        .map_err(|e| shader_error(e.to_string()))?;
+    let expanded = expand_sdf_expression(&expr, vm).map_err(shader_error)?;
+    let plan = plan_sdf_state(widget, vm, state_names, &expanded)?;
+    let state_symbols = plan.uniforms();
+    let output = compile_expanded_sdf(&expanded, &state_symbols).map_err(shader_error)?;
+    Ok((
+        SdfCompileResult {
+            output,
+            expanded_expr: expanded,
+            state_symbols,
+        },
+        plan,
+    ))
 }
 
 use std::collections::hash_map::DefaultHasher;
@@ -710,7 +798,6 @@ fn compile_widget_material(
     widget_type: &str,
     material_val: &Value,
     vm: &mut VM,
-    state_binding_keys: &[String],
     prop_binding_keys: &[String],
 ) -> Result<String, String> {
     let material_expr =
@@ -718,20 +805,26 @@ fn compile_widget_material(
 
     let shader_expr = build_material_shader_expr(widget_type, &material_expr)?;
 
-    // For vslider, add origin_t so it gets a uniform slot.
-    let mut bindings: std::collections::HashSet<String> =
-        state_binding_keys.iter().cloned().collect();
-    bindings.extend(prop_binding_keys.iter().cloned());
+    // The material's state names: the widget's props (plus origin_t for a
+    // vslider, so it gets a uniform slot); captured defstates read too.
+    let mut state_names: Vec<String> = prop_binding_keys.to_vec();
     if widget_type == "vslider" {
-        bindings.insert("origin_t".to_string());
+        state_names.push("origin_t".to_string());
     }
+    state_names.sort();
+    state_names.dedup();
     let expanded = expand_sdf_expression(&shader_expr, vm)?;
+    let plan = plan_sdf_state("material", vm, &state_names, &expanded)?;
+    let state_symbols = plan.uniforms();
     let mut hasher = DefaultHasher::new();
     widget_type.hash(&mut hasher);
     expr_to_source(&expanded).hash(&mut hasher);
-    let mut binding_keys = bindings.iter().cloned().collect::<Vec<_>>();
-    binding_keys.sort();
-    binding_keys.hash(&mut hasher);
+    state_names.hash(&mut hasher);
+    // The plan: a kind reload that changes the fields read recompiles.
+    state_symbols.hash(&mut hasher);
+    for field in &plan.fields {
+        (&field.kind, &field.field, field.rgb).hash(&mut hasher);
+    }
     let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
     options.hash(&mut hasher);
     let cache_key = hasher.finish();
@@ -740,8 +833,6 @@ fn compile_widget_material(
         return Ok(name);
     }
 
-    let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
-    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
     let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
         .map_err(|e| e.to_string())?;
 
@@ -754,6 +845,12 @@ fn compile_widget_material(
         output.shader_source,
         expanded,
         state_symbols,
+        crate::widget_render::sdf_widget::SdfWidgetState {
+            names: state_names,
+            plan,
+            kind_generation: std::cell::Cell::new(vm.instance_kind_schema_generation()),
+            prop_names: Vec::new(),
+        },
         paint_margin,
     );
 
@@ -953,15 +1050,10 @@ pub(crate) struct RuntimeBridgeState {
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
 
-/// Generation callback for [`NativeContext::invalidate_subscribed_reactive_fields`]:
-/// `Some(generation)` advances the field, `None` leaves it alone.
-pub type ReactiveFieldGeneration = Box<dyn FnMut(&str) -> Option<Value>>;
-
 pub struct NativeContext {
     shared: SharedBridgeState,
-    reactive_reads: Vec<(ReactiveFieldKey, Option<Value>)>,
+    reactive_reads: Vec<ReactiveFieldKey>,
     reactive_invalidations: Vec<(ReactiveFieldKey, Value)>,
-    namespace_invalidations: Vec<(String, ReactiveFieldGeneration)>,
     reactive_sets: Vec<(String, String, Value)>,
     instance_kinds: Vec<crate::vm::InstanceKindSchema>,
 }
@@ -972,7 +1064,6 @@ impl NativeContext {
             shared,
             reactive_reads: Vec::new(),
             reactive_invalidations: Vec::new(),
-            namespace_invalidations: Vec::new(),
             reactive_sets: Vec::new(),
             instance_kinds: Vec::new(),
         }
@@ -989,39 +1080,10 @@ impl NativeContext {
     /// Inject a reactive dependency for the currently rendering effect.
     /// Calls made outside reactive rendering are intentionally inert.
     pub fn track_reactive_read(&mut self, namespace: impl Into<String>, field: impl Into<String>) {
-        self.reactive_reads
-            .push((ReactiveFieldKey::new(namespace, field), None));
+        self.reactive_reads.push(ReactiveFieldKey::new(namespace, field));
     }
 
-    /// Like [`Self::track_reactive_read`], but also states the generation the
-    /// read observed. When the host-owned source has no other reader yet, the
-    /// source adopts that generation, so the first later invalidation that
-    /// hands over the same generation dirties nothing. Hosts whose
-    /// generation is the resolved value itself get value-equality
-    /// suppression for free.
-    pub fn track_reactive_read_with_generation(
-        &mut self,
-        namespace: impl Into<String>,
-        field: impl Into<String>,
-        generation: Value,
-    ) {
-        self.reactive_reads
-            .push((ReactiveFieldKey::new(namespace, field), Some(generation)));
-    }
-
-    /// After the native returns, advance every currently subscribed field of a
-    /// host-owned namespace for which `generation` returns `Some`. Fields
-    /// whose generation is unchanged dirty nothing.
-    pub fn invalidate_subscribed_reactive_fields(
-        &mut self,
-        namespace: impl Into<String>,
-        generation: impl FnMut(&str) -> Option<Value> + 'static,
-    ) {
-        self.namespace_invalidations
-            .push((namespace.into(), Box::new(generation)));
-    }
-
-    /// The host-side equivalent of `(reactive-set namespace field value)`,
+    /// The host-side equivalent of `(set! NS.field value)`,
     /// applied after the native returns. Only writable namespaces accept it.
     pub fn reactive_set(
         &mut self,
@@ -1071,6 +1133,16 @@ impl NativeContext {
 
     pub fn enqueue_command(&mut self, command: HostCommand) {
         self.shared.borrow_mut().queued_commands.push(command);
+    }
+
+    /// Run `extend` on the newest command queued that the host has not
+    /// drained yet (`None` when the queue is empty): a native batching its
+    /// writes of one pass into the command it queued for an earlier one.
+    pub fn with_last_queued_command<R>(
+        &mut self,
+        extend: impl FnOnce(Option<&mut HostCommand>) -> R,
+    ) -> R {
+        extend(self.shared.borrow_mut().queued_commands.last_mut())
     }
 
     /// The declared module of the chunk executing this native call, if
@@ -1444,6 +1516,9 @@ pub struct Runtime {
     pub(crate) shared: SharedBridgeState,
     sync_theme_to_global: bool,
     symbol_metadata: HashMap<String, SymbolMetadata>,
+    /// Names registered as removed natives ([`Self::register_removed_native`]):
+    /// still callable (to fail with a migration hint), never completed.
+    removed_names: std::collections::HashSet<String>,
     symbol_revision: u64,
     cached_completion_symbols: Option<Rc<Vec<String>>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
@@ -1519,6 +1594,7 @@ impl Runtime {
             shared,
             sync_theme_to_global: true,
             symbol_metadata: HashMap::new(),
+            removed_names: std::collections::HashSet::new(),
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
@@ -1571,15 +1647,22 @@ impl Runtime {
                 Ok(loaded) => loaded,
                 Err(error) => {
                     let message = format!("load: {error}");
+                    crate::vm::log_source_load_error("load", &message, &[]);
                     vm.source_load_errors.push(message.clone());
                     return Value::String(message);
                 }
             };
             let loaded_path_display = loaded.path.display().to_string();
+            let queued = vm.source_load_errors.len();
             match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
                 Ok(v) => v.unwrap_or(Value::Bool(true)),
                 Err(e) => {
                     let message = format!("load: {loaded_path_display}: eval error: {e:?}");
+                    crate::vm::log_source_load_error(
+                        "load",
+                        &message,
+                        vm.source_load_errors.get(queued..).unwrap_or_default(),
+                    );
                     vm.source_load_errors.push(message.clone());
                     Value::String(message)
                 }
@@ -1591,13 +1674,9 @@ impl Runtime {
         // Note: vec2 is already registered in vm.rs with numeric semantics — don't override it.
         for name in &["vec3", "vec4", "rgba", "material", "lighting", "shadow"] {
             let tag = name.to_string();
-            runtime.vm.register_native(name, move |args| {
-                let mut items = vec![Rc::new(RefCell::new(Value::Symbol(tag.clone())))];
-                for a in args {
-                    items.push(Rc::new(RefCell::new(a)));
-                }
-                Value::List(items)
-            });
+            runtime
+                .vm
+                .register_native(name, move |args| crate::vm::tagged_list(&tag, args));
         }
         // Load SDF standard library (macros for SDF primitives)
         let sdf_src = include_str!("../../../content/core/sdf-stdlib.lisp");
@@ -1605,15 +1684,17 @@ impl Runtime {
             let _ = runtime.eval_str(sdf_src);
         }
         // Register sdf->metal: takes a quoted SDF expression, returns Metal shader string
-        runtime.vm.register_native_with_vm("sdf->metal", move |args, vm| {
-            let Some(val) = args.first() else {
-                return Value::String("error: sdf->metal requires 1 argument".into());
-            };
-            match compile_sdf_value(val, vm, &std::collections::HashSet::new()) {
-                Ok(result) => Value::String(result.output.shader_source),
-                Err(e) => Value::String(format!("error: {}", e)),
-            }
-        });
+        runtime
+            .vm
+            .register_native_with_vm("sdf->metal", move |args, vm| {
+                let Some(val) = args.first() else {
+                    return Value::String("error: sdf->metal requires 1 argument".into());
+                };
+                match compile_sdf_value(val, vm) {
+                    Ok(result) => Value::String(result.output.shader_source),
+                    Err(e) => Value::String(format!("error: {}", e)),
+                }
+            });
         // Register defwidget: defines a new SDF widget type
         runtime
             .vm
@@ -1634,7 +1715,6 @@ impl Runtime {
                 let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
-                let mut bindable_props: Vec<String> = Vec::new();
                 let mut animates = false;
 
                 let mut i = 1;
@@ -1672,18 +1752,12 @@ impl Runtime {
                                     }
                                 }
                             }
-                            "bindable" => {
-                                if let Value::List(items) = &args[i + 1] {
-                                    for item in items {
-                                        match &*item.borrow() {
-                                            Value::Symbol(s)
-                                            | Value::Keyword(s)
-                                            | Value::String(s) => bindable_props.push(s.clone()),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
+                            // Every state accepts refs (kind-bindings spec
+                            // §7.3); `:bindable` is deprecated and ignored.
+                            "bindable" => vm.warn_deprecated(
+                                "defwidget :bindable",
+                                crate::vm::BINDABLE_DEPRECATION,
+                            ),
                             _ => {}
                         }
                         i += 2;
@@ -1696,16 +1770,14 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                // Combine VM state bindings with widget-declared state names
-                let mut state_bindings: std::collections::HashSet<String> =
-                    vm.state_bindings.keys().cloned().collect();
-                for name in &widget_state_names {
-                    state_bindings.insert(name.clone());
-                }
-                let compiled = match compile_sdf_value(&shader_val, vm, &state_bindings) {
-                    Ok(o) => o,
-                    Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
-                };
+                let (compiled, plan) =
+                    match compile_defwidget_shader(&name, &shader_val, vm, &widget_state_names) {
+                        Ok(compiled) => compiled,
+                        Err(error) => {
+                            vm.fail_native_call(crate::vm::VMError::Instance(error));
+                            return Value::Nil;
+                        }
+                    };
                 let paint_margin = paint_margin.max(estimate_shadow_paint_margin(
                     &compiled.expanded_expr,
                     width,
@@ -1715,8 +1787,13 @@ impl Runtime {
                     name: name.clone(),
                     shader_source: compiled.output.shader_source,
                     sdf_expr: compiled.expanded_expr,
-                    state_uniforms: compiled.state_symbols.clone(),
-                    bindable_props,
+                    state_uniforms: compiled.state_symbols,
+                    state: crate::widget_render::sdf_widget::SdfWidgetState {
+                        names: widget_state_names,
+                        plan,
+                        kind_generation: std::cell::Cell::new(vm.instance_kind_schema_generation()),
+                        prop_names: Vec::new(),
+                    },
                     region_count: compiled.output.region_count,
                     width,
                     height,
@@ -1725,25 +1802,23 @@ impl Runtime {
                 });
 
                 let widget_type = name.clone();
-                let state_uniforms = compiled.state_symbols;
-                vm.register_native_with_vm(&name, move |args, vm| {
+                vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
+                    if let Some(message) =
+                        crate::widgets::undeclared_sdf_binding_error(&widget_type, &args)
+                    {
+                        // Logged too: a view re-run's error is otherwise
+                        // only traced (ESEQLISP_TRACE_UI).
+                        crate::vm::log_native_misuse(&widget_type, &message);
+                        vm.fail_native_call(crate::vm::VMError::Instance(message));
+                        return Value::Nil;
+                    }
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
-                    if let Value::Map(map) = &mut widget {
-                        for state_name in &state_uniforms {
-                            let explicit_value =
-                                map.get(state_name).map(|cell| cell.borrow().clone());
-                            if let Some(value) =
-                                explicit_value.or_else(|| vm.read_tracked_state_value(state_name))
-                            {
-                                map.insert(
-                                    crate::widget_render::sdf_widget::shader_state_prop_name(
-                                        state_name,
-                                    ),
-                                    Rc::new(RefCell::new(value)),
-                                );
-                            }
-                        }
+                    if let Value::Map(map) = &mut widget
+                        && let Err(error) = fill_sdf_state_props(vm, &widget_type, map)
+                    {
+                        vm.fail_native_call(error);
+                        return Value::Nil;
                     }
                     widget
                 });
@@ -1757,38 +1832,21 @@ impl Runtime {
             let wtype = widget_name.to_string();
             runtime
                 .vm
-                .register_native_with_vm(widget_name, move |args, vm| {
+                .register_ref_aware_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
                     vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
                             if !matches!(material_val, Value::Nil) {
-                                let keys: Vec<String> =
-                                    vm.state_bindings.keys().cloned().collect();
                                 let prop_keys = map.keys().cloned().collect::<Vec<_>>();
-                                match compile_widget_material(
-                                    &wtype,
-                                    &material_val,
-                                    vm,
-                                    &keys,
-                                    &prop_keys,
-                                ) {
+                                match compile_widget_material(&wtype, &material_val, vm, &prop_keys) {
                                     Ok(shader_name) => {
-                                        if let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(&shader_name) {
-                                            for state_name in &def.state_uniforms {
-                                                let explicit_value = map
-                                                    .get(state_name)
-                                                    .map(|cell| cell.borrow().clone());
-                                                if let Some(value) = explicit_value
-                                                    .or_else(|| vm.read_tracked_state_value(state_name))
-                                                {
-                                                    map.insert(
-                                                        crate::widget_render::sdf_widget::shader_state_prop_name(state_name),
-                                                        Rc::new(RefCell::new(value)),
-                                                    );
-                                                }
-                                            }
+                                        if let Err(error) =
+                                            fill_sdf_state_props(vm, &shader_name, map)
+                                        {
+                                            vm.fail_native_call(error);
+                                            return Value::Nil;
                                         }
                                         if wtype == "vslider" {
                                             let origin_t = compute_origin_t(map);
@@ -1838,6 +1896,32 @@ impl Runtime {
         F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
     {
         self.register_native_impl(name, None, None, f);
+    }
+
+    /// Register `name` as a removed native: a call fails with `message` (a
+    /// migration hint), it has no docs, and completion leaves it out. An
+    /// old script then learns what replaced the name instead of hitting an
+    /// unbound symbol.
+    pub fn register_removed_native(&mut self, name: &str, message: impl Into<String>) {
+        let message = message.into();
+        self.register_native(name, move |_args, _ctx| Err(message.clone()));
+        self.removed_names.insert(name.to_string());
+        self.invalidate_symbol_cache();
+    }
+
+    /// [`Self::register_removed_native`] for each `(name, message)`.
+    pub fn register_removed_natives<'a>(
+        &mut self,
+        removed: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) {
+        for (name, message) in removed {
+            self.register_removed_native(name, message);
+        }
+    }
+
+    /// Whether `name` was registered as a removed native.
+    pub fn is_removed_native(&self, name: &str) -> bool {
+        self.removed_names.contains(name)
     }
 
     pub fn register_native_with_docs<F>(
@@ -1914,6 +1998,13 @@ impl Runtime {
             },
         );
         self.invalidate_symbol_cache();
+    }
+
+    /// Flag registered natives (e.g. from [`Self::register_vm_native_with_docs`])
+    /// as taking binding refs as they are (kind-bindings spec §8); see
+    /// [`crate::vm::VM::mark_natives_ref_aware`].
+    pub fn mark_natives_ref_aware(&mut self, names: &[&str]) {
+        self.vm.mark_natives_ref_aware(names);
     }
 
     pub fn add_global_store_hook(&mut self, hook: crate::vm::GlobalStoreHook) {
@@ -2016,14 +2107,9 @@ impl Runtime {
                 "Return a value from a map or keyword/value list, or nil when missing.",
             ),
             (
-                "reactive-get",
-                "(reactive-get namespace field)",
-                "Read a reactive namespace field and track it as a dependency.",
-            ),
-            (
-                "reactive-set",
-                "(reactive-set namespace field value)",
-                "Write a field in a writable reactive namespace and rerun dependent effects.",
+                "reactive-value",
+                "(reactive-value x)",
+                "Deprecated: returns x (a value position reads a binding already). Warns once; will be removed.",
             ),
             (
                 "subtree-owner",
@@ -2041,6 +2127,7 @@ impl Runtime {
             ("empty?", "(empty? value)", "Return whether a list, string, map, or nil is empty."),
             ("set-nth", "(set-nth list index value)", "Return a copy of list with the 0-based item replaced."),
             ("each", "(each list owner-path callback)", "Map over a list with item index and optional widget ownership metadata."),
+            ("apply", "(apply callback arg ... list)", "Call callback with the args followed by the items of list."),
             ("map", "(map callback list)", "Return a list containing callback applied to each item."),
             ("filter", "(filter callback list)", "Return list items for which callback is truthy."),
             ("find-by-key", "(find-by-key list :key value)", "Return the first map in list whose :key field equals value, or nil."),
@@ -2098,6 +2185,7 @@ impl Runtime {
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
             ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
             ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),
+            ("rgb", "(rgb r g b)", "Return the color (rgb r g b): the value of an :rgb kind field, usable wherever a color is."),
             // Shader-native forms are interpreted by sdf_codegen, so they have
             // no VM global or macro entry for completion to discover.
             ("sdf/layer", "(sdf/layer shape ...)", "Composite SDF colors in order, with later shapes painted over earlier ones."),
@@ -2113,9 +2201,9 @@ impl Runtime {
 
         self.document_symbol_with_keywords(
             "defwidget",
-            "(defwidget name :width w :height h :state (name ...) :bindable (prop ...) :paint-margin margin :animates bool :shader expr)",
-            "Register an SDF-backed widget constructor. The shader, state names, and bindable props are automatically quoted.",
-            ["width", "height", "state", "bindable", "paint-margin", "animates", "shader"],
+            "(defwidget name :width w :height h :state (name ...) :paint-margin margin :animates bool :shader expr)",
+            "Register an SDF-backed widget constructor. The shader and state names are automatically quoted; every state accepts a binding (#'t.volume). (:bindable is deprecated and ignored.)",
+            ["width", "height", "state", "paint-margin", "animates", "shader"],
         );
         self.document_symbol_with_keywords(
             "material",
@@ -2184,15 +2272,8 @@ impl Runtime {
             let result = f(args, &mut ctx);
             // A read that failed still depended on its source: when the
             // source changes, the failing reader must get another chance.
-            for (field, generation) in std::mem::take(&mut ctx.reactive_reads) {
-                match generation {
-                    Some(generation) => vm.inject_reactive_read_with_generation(
-                        &field.namespace,
-                        &field.field,
-                        generation,
-                    ),
-                    None => vm.inject_reactive_read(&field.namespace, &field.field),
-                }
+            for field in std::mem::take(&mut ctx.reactive_reads) {
+                vm.inject_reactive_read(&field.namespace, &field.field);
             }
             let result = result.and_then(|value| {
                 for schema in std::mem::take(&mut ctx.instance_kinds) {
@@ -2211,17 +2292,6 @@ impl Runtime {
                             &field.field,
                             generation,
                         );
-                    }
-                    for (namespace, mut generation_for_field) in ctx.namespace_invalidations {
-                        for field in vm.subscribed_injected_reactive_fields(&namespace) {
-                            if let Some(generation) = generation_for_field(&field) {
-                                vm.invalidate_injected_reactive_source(
-                                    &namespace,
-                                    &field,
-                                    generation,
-                                );
-                            }
-                        }
                     }
                     value
                 }
@@ -2251,6 +2321,16 @@ impl Runtime {
         expr: &crate::parser::Expression,
     ) -> Result<crate::parser::Expression, String> {
         self.vm.expand_macros_expression(expr)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plan_sdf_widget_state(
+        &self,
+        widget: &str,
+        state_names: &[String],
+        shader: &crate::parser::Expression,
+    ) -> Result<crate::vm::SdfStatePlan, String> {
+        self.vm.plan_sdf_widget_state(widget, state_names, shader)
     }
 
     /// Modules declared via `(module NAME)` → declaring file, if any
@@ -2327,6 +2407,15 @@ impl Runtime {
         self.vm.take_source_load_errors()
     }
 
+    /// Path-based evals judge a source by the load errors its own `import` /
+    /// `load` forms raise. Anything already queued came from an earlier
+    /// `eval_str` (an interactive `(import …)` that failed and returned its
+    /// message as the value); left in place it failed every later reload, and
+    /// the rollback snapshot re-queued it, so it never cleared (eseq-750i).
+    fn discard_stale_source_load_errors(&mut self) {
+        let _ = self.vm.take_source_load_errors();
+    }
+
     pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
         self.set_scoped_module_load_path(
             roots
@@ -2398,6 +2487,7 @@ impl Runtime {
         path: PathBuf,
         source: &str,
     ) -> Result<Option<Value>, crate::vm::VMError> {
+        self.discard_stale_source_load_errors();
         let source_buffer_id = self.source_buffer_id_for_path(Some(&path));
         self.vm.set_current_effect_context(source_buffer_id);
         self.vm.begin_inline_widget_capture();
@@ -2430,6 +2520,7 @@ impl Runtime {
         source: &str,
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
+        self.discard_stale_source_load_errors();
         let snapshot = self.snapshot_state();
         let source_buffer_id = self.source_buffer_id_for_path(path.as_deref());
         self.vm.set_current_effect_context(source_buffer_id);
@@ -2618,6 +2709,7 @@ impl Runtime {
         paths: Vec<PathBuf>,
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
+        self.discard_stale_source_load_errors();
         let snapshot = self.snapshot_state();
         self.vm.set_current_effect_context(None);
         self.vm.begin_import_pass();
@@ -2864,8 +2956,8 @@ impl Runtime {
         self.vm.live_instances()
     }
 
-    pub fn instance_kind(&self, id: crate::vm::InstanceId) -> Option<String> {
-        self.vm.instance_kind(id).map(str::to_string)
+    pub fn instance_kind(&self, id: crate::vm::InstanceId) -> Option<&str> {
+        self.vm.instance_kind(id)
     }
 
     pub fn instance_field(
@@ -2885,19 +2977,130 @@ impl Runtime {
         self.vm.set_instance_field(id, field, value)
     }
 
-    pub fn set_instance_host_field(
+    pub fn set_instance_builtin_field(
         &mut self,
         id: crate::vm::InstanceId,
-        field: crate::vm::InstanceHostField,
+        field: crate::vm::InstanceBuiltinField,
         value: Value,
     ) -> Result<(), crate::vm::InstanceError> {
-        self.vm.set_instance_host_field(id, field, value)
+        self.vm.set_instance_builtin_field(id, field, value)
+    }
+
+    /// Register the instance of a keyed kind under `key`, or return the one
+    /// already there (kind-bindings spec §4, §9); see
+    /// [`crate::vm::VM::register_keyed_instance`].
+    pub fn register_keyed_instance(
+        &mut self,
+        kind: &str,
+        key: &[u64],
+    ) -> Result<crate::vm::InstanceId, crate::vm::InstanceError> {
+        self.vm.register_keyed_instance(kind, key)
+    }
+
+    /// The live instance of a keyed kind under `key`.
+    pub fn keyed_instance(&self, kind: &str, key: &[u64]) -> Option<crate::vm::InstanceId> {
+        self.vm.keyed_instance(kind, key)
+    }
+
+    /// Drop the instance of a keyed kind under `key` (and its children).
+    pub fn drop_keyed_instance(&mut self, kind: &str, key: &[u64]) -> bool {
+        self.vm.drop_keyed_instance(kind, key)
+    }
+
+    /// Re-key one keyed instance; its id stays.
+    pub fn rekey_instance(
+        &mut self,
+        id: crate::vm::InstanceId,
+        key: &[u64],
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.rekey_instance(id, key)
+    }
+
+    /// Re-key several keyed instances at once (a reorder that swaps keys).
+    pub fn rekey_instances(
+        &mut self,
+        moves: &[(crate::vm::InstanceId, crate::vm::InstanceKey)],
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.rekey_instances(moves)
+    }
+
+    /// Whether anything observes `field` of instance `id`: a DAG reader or
+    /// a held `#'` binding (kind-bindings spec §9, D3). See
+    /// [`crate::vm::VM::host_field_observed`].
+    pub fn host_field_observed(&self, id: crate::vm::InstanceId, field: &str) -> bool {
+        self.vm.host_field_observed(id, field)
+    }
+
+    /// [`Self::host_field_observed`] for several fields at once: bit `i` is
+    /// `fields[i]` ([`crate::vm::VM::host_fields_observed`]).
+    pub fn host_fields_observed(
+        &self,
+        id: crate::vm::InstanceId,
+        fields: &[&str],
+    ) -> crate::vm::ObservedMask {
+        self.vm.host_fields_observed(id, fields)
+    }
+
+    /// Bumped whenever a kind schema is registered, changed or rolled back
+    /// ([`crate::vm::VM::instance_kind_schema_generation`]).
+    pub fn instance_kind_schema_generation(&self) -> u64 {
+        self.vm.instance_kind_schema_generation()
+    }
+
+    /// Bumped whenever an instance field may have gained an observer
+    /// ([`crate::vm::VM::instance_observer_epoch`]).
+    pub fn instance_observer_epoch(&self) -> u64 {
+        self.vm.instance_observer_epoch()
+    }
+
+    /// Install the host's answer to reads of unobserved `:host` fields
+    /// ([`crate::vm::HostFieldReader`]).
+    pub fn set_host_field_reader(&mut self, reader: Option<crate::vm::HostFieldReader>) {
+        self.vm.set_host_field_reader(reader);
+    }
+
+    /// Reserve kind names for the module that declares them
+    /// ([`crate::vm::VM::reserve_kind_names`]).
+    pub fn reserve_kind_names(&mut self, module: &str, names: &[&str]) {
+        self.vm.reserve_kind_names(module, names);
+    }
+
+    /// The one instance of a singleton kind (its kind id).
+    pub fn singleton_instance(&self, kind: &str) -> Option<crate::vm::InstanceId> {
+        self.vm.singleton_instance(kind)
+    }
+
+    /// The current key of a live keyed instance.
+    pub fn instance_key(&self, id: crate::vm::InstanceId) -> Option<&[u64]> {
+        self.vm.instance_key(id)
+    }
+
+    /// The live instance ids of a keyed kind's children under `parent`
+    /// (steps of a track), sorted.
+    pub fn keyed_children(&self, parent: crate::vm::InstanceId) -> Vec<crate::vm::InstanceId> {
+        self.vm.keyed_children(parent)
+    }
+
+    /// The live children of `parent` of kind `kind` with their keys,
+    /// unordered and without allocating.
+    pub fn keyed_children_of_kind<'s>(
+        &'s self,
+        parent: crate::vm::InstanceId,
+        kind: &'s str,
+    ) -> impl Iterator<Item = (crate::vm::InstanceId, &'s [u64])> + 's {
+        self.vm.keyed_children_of_kind(parent, kind)
+    }
+
+    /// [`crate::vm::format_lisp_value`], printing instances of kinds with a
+    /// `:key` by kind and key (`<track#41 [3]>`).
+    pub fn format_value(&self, value: &Value) -> String {
+        self.vm.format_value(value)
     }
 
     /// Route Lisp `(set! x.label v)` to the host as a queued
     /// `HostCommand::Custom { name: command, payload: {:id :label} }`, so a
     /// rename is the host's (undoable) edit; the host pushes the accepted
-    /// label back with [`Self::set_instance_host_field`].
+    /// label back with [`Self::set_instance_builtin_field`].
     pub fn route_instance_labels_to_host_command(&mut self, command: &str) {
         let shared = self.shared.clone();
         let command = command.to_string();
@@ -2955,6 +3158,12 @@ impl Runtime {
             return base;
         }
         handler
+    }
+
+    /// The deprecation warnings this runtime's VM has issued, once each
+    /// (`:bindable`, `reactive-value`; eseq-0l17.80).
+    pub fn deprecation_warnings(&self) -> &[String] {
+        self.vm.deprecation_warnings()
     }
 
     /// Borrows one field of a reactive namespace without cloning the whole
@@ -3101,11 +3310,7 @@ impl Runtime {
                 widget_ids.len(),
             );
         }
-        for widget_id in widget_ids {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(widget_ids);
         // Reactive bindings dirtied specific widgets, but they do not mutate
         // widget-local state such as hover, scroll, focus, or animation state.
         // Keep the global widget primitive cache generation stable so high-rate
@@ -3193,11 +3398,7 @@ impl Runtime {
         }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
-        for widget_id in widget_ids {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(widget_ids);
         ReactiveSetResult {
             changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
@@ -3420,9 +3621,12 @@ impl Runtime {
         self.vm.set_hidden_effect_buffer_names(names);
     }
 
-    /// True when an effect deferred while its target buffer was hidden is now
-    /// visible and waiting for a reactive cycle to resume it.
-    pub fn has_resumable_hidden_effect_work(&self) -> bool {
+    /// True when a dirty effect on a visible target waits for a reactive
+    /// cycle: one deferred while its buffer was hidden that is visible again,
+    /// or one dirtied outside the reactive registry (a kind field write).
+    /// Effects whose last run failed are not pending: they wait for an input
+    /// change.
+    pub fn has_pending_visible_effect_work(&self) -> bool {
         self.vm.has_visible_deferred_effects()
     }
 
@@ -3435,8 +3639,10 @@ impl Runtime {
         // Deferred effects for hidden buffers stay in the DAG's dirty set
         // indefinitely, so `process_dirty_reactive` would pay a full
         // `topo_sort_dirty` every idle cycle to produce no work. Skip that
-        // unless a deferred effect's target has become visible, which is the
-        // only other reason an empty-dirty cycle has anything to do.
+        // unless a dirty effect targets something visible: a deferred effect
+        // whose buffer became visible, or one a kind field write dirtied
+        // outside the registry. Those are the only other reasons an
+        // empty-dirty cycle has anything to do.
         if dirty.is_empty() && injected.is_empty() && !self.vm.has_visible_deferred_effects() {
             if trace_ui_enabled() {
                 eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
@@ -3544,10 +3750,29 @@ impl Runtime {
     fn flush_vm_reactive_sets(&mut self) {
         for (namespace, field, value) in self.vm.take_pending_reactive_sets() {
             let outcome = self.reactive_registry.set(&namespace, &field, value, false);
-            for widget_id in outcome.widget_ids {
-                if !self.dirty_widget_ids.contains(&widget_id) {
-                    self.dirty_widget_ids.push(widget_id);
-                }
+            self.mark_widgets_dirty(outcome.widget_ids);
+        }
+        self.flush_binding_repaints();
+    }
+
+    /// Instance field bindings (`#'x.field`): the VM already wrote the slots,
+    /// so only the bound widgets repaint. Flushed lazily, wherever the dirty
+    /// widget ids are read, so every VM entry point (Lisp `set!`, host
+    /// `set_instance_field`, `drop_instance`) is covered without its own flush.
+    fn flush_binding_repaints(&mut self) {
+        for (namespace, field) in self.vm.take_pending_binding_repaints() {
+            let widget_ids: Vec<u64> = self
+                .reactive_registry
+                .bound_widget_ids(&namespace, &field)
+                .collect();
+            self.mark_widgets_dirty(widget_ids);
+        }
+    }
+
+    fn mark_widgets_dirty(&mut self, ids: impl IntoIterator<Item = u64>) {
+        for widget_id in ids {
+            if !self.dirty_widget_ids.contains(&widget_id) {
+                self.dirty_widget_ids.push(widget_id);
             }
         }
     }
@@ -3615,6 +3840,7 @@ impl Runtime {
                 symbols.extend(keys.into_iter().map(|key| format!("{display}.{key}")));
             }
         }
+        symbols.retain(|symbol| !self.removed_names.contains(symbol));
         symbols.sort();
         symbols.dedup();
         let symbols = Rc::new(symbols);
@@ -3694,6 +3920,7 @@ impl Runtime {
     }
 
     pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
+        self.flush_binding_repaints();
         std::mem::take(&mut self.dirty_widget_ids)
     }
 
@@ -3706,15 +3933,13 @@ impl Runtime {
             self.dirty_widget_ids
                 .retain(|widget_id| !layout_contains_widget_id(previous_layout, *widget_id));
         }
-        for widget_id in replacement {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(replacement);
     }
 
+    /// Also true while binding repaints wait for their lazy flush (which
+    /// [`Self::take_dirty_widget_ids`] does), even if no widget is bound.
     pub fn has_dirty_widget_ids(&self) -> bool {
-        !self.dirty_widget_ids.is_empty()
+        !self.dirty_widget_ids.is_empty() || self.vm.has_pending_binding_repaints()
     }
 
     pub fn replace_widget_bindings_from_layouts<'a>(
@@ -3765,6 +3990,12 @@ impl Runtime {
 
     pub(crate) fn lisp_bindings(&self) -> HashMap<String, String> {
         self.shared.borrow().lisp_bindings.clone()
+    }
+
+    /// The handler a global `bind-key` gave `key` (as stored: module
+    /// qualified), if any.
+    pub fn global_key_binding(&self, key: &str) -> Option<String> {
+        self.shared.borrow().lisp_bindings.get(key).cloned()
     }
 
     pub(crate) fn take_pending_eval_buffer(&mut self) -> Option<BufferId> {
@@ -5027,7 +5258,7 @@ mod theme_shader_recompile_tests {
             shader_source: baked.shader_source.clone(),
             sdf_expr: expr,
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: baked.region_count,
             width: 1.0,
             height: 1.0,
@@ -5101,8 +5332,7 @@ mod observer_tests {
 
     #[test]
     fn resubscribed_reader_observes_return_to_value_before_unobserved_write() {
-        for (read, indexed) in [("INPUT.value", false),
-            ("(reactive-get \"INPUT\" \"value\")", false), ("(nth INPUT.value 0)", true)]
+        for (read, indexed) in [("INPUT.value", false), ("(nth INPUT.value 0)", true)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let writes = seen.clone();
@@ -5132,6 +5362,97 @@ mod observer_tests {
             runtime.run_reactive_cycle();
             assert_eq!(*seen.borrow(), vec![Value::Number(1.0), Value::Number(2.0), Value::Number(1.0)], "{read}");
         }
+    }
+
+    /// A host kind field the host pushes (no reactive registry write) still
+    /// re-runs an observer that read it at the next reactive cycle.
+    #[test]
+    fn a_host_pushed_kind_field_reruns_its_observer_in_the_next_cycle() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-value", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            Ok(Value::Nil)
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (observe (record-value probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(2.0)]);
+    }
+
+    /// An observer whose run fails clears its dirty bit: it does not re-run
+    /// (or keep forcing reactive cycles) until an input it read changes.
+    #[test]
+    fn a_failing_observer_waits_for_an_input_change_before_rerunning() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-or-fail", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            if args[0] == Value::Number(1.0) {
+                Err("boom".to_string())
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (observe (record-or-fail probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(1.0))
+            .unwrap();
+        assert!(runtime.has_pending_visible_effect_work());
+        runtime.run_reactive_cycle();
+        assert!(
+            !runtime.has_pending_visible_effect_work(),
+            "a failed observer must not keep forcing cycles"
+        );
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(1.0)]);
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            *seen.borrow(),
+            vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)]
+        );
+    }
+
+    /// A buffer effect (not only observers and named buffers) dirtied by a
+    /// host-pushed kind field runs in the next reactive cycle.
+    #[test]
+    fn a_host_pushed_kind_field_reruns_a_buffer_effect_in_the_next_cycle() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("record-value", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            Ok(Value::Nil)
+        });
+        runtime
+            .eval_str(
+                "(def-kind probe :key () :host ((n :number))) (effect (record-value probe.n))",
+            )
+            .unwrap();
+        let probe = runtime.singleton_instance("scratch:probe").expect("probe");
+        runtime
+            .set_instance_field(probe, "n", Value::Number(2.0))
+            .unwrap();
+        assert!(runtime.has_pending_visible_effect_work());
+        runtime.run_reactive_cycle();
+        assert_eq!(*seen.borrow(), vec![Value::Number(0.0), Value::Number(2.0)]);
     }
 
     #[test]

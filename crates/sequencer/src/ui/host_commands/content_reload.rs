@@ -49,10 +49,7 @@ pub(super) fn handle(
                         &mut *ctx.track_names,
                         &ctx.shared.track_pan_ids,
                         &ctx.shared.record_armed,
-                        &ctx.shared.selected_steps,
                         &ctx.shared.accumulator_names,
-                        &ctx.meters.cached_track_peak_levels,
-                        &ctx.meters.cached_bus_peak_levels,
                         &ui_epoch,
                         ctx.shared.lg_raw,
                         true,
@@ -84,9 +81,6 @@ pub(super) fn handle(
                     // whose name survived (`apply_effect_to_slot`).
                     app.ui.cursor_track = track;
                     app.start_effect_compile(&effect, slot);
-                    editor
-                        .runtime_mut()
-                        .set_reactive("SEQ", "compiling", Value::Bool(true));
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Reloading effect from disk: {effect}"
                     )));

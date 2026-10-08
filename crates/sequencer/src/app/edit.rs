@@ -25,7 +25,8 @@ use super::history::{
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
-    BarTransposePatch, GraphNodeProcessChainPatch,
+    BarTransposePatch, GraphNodeProcessChainPatch, GraphOverridePatch, NeuralNetworkPatch,
+    RackMacroPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -53,6 +54,16 @@ pub enum EditOutcome {
     NoOp,
     Applied(HistoryMove),
     AppliedUnrecorded,
+}
+
+impl EditOutcome {
+    /// Whether the edit changed the model (recorded or not).
+    pub fn changed(&self) -> bool {
+        match self {
+            Self::NoOp => false,
+            Self::Applied(_) | Self::AppliedUnrecorded => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2259,6 +2270,272 @@ impl App {
         Ok(EditOutcome::Applied(history_move))
     }
 
+    /// A host kind setter's graph override edit (kind-bindings spec
+    /// §14.2k): write `after` (one field of graph `manifest`'s overrides, a
+    /// [`crate::graph::GraphOverrideSlot`]) into the current scene's
+    /// overrides and record it. Every edit stages a coalescing gesture keyed
+    /// by the field, as a bar transpose does: the script edit's end finishes
+    /// it at once unless a drag holds it open (`ScriptEdit`), so a drag's
+    /// `set!`s on one field join one entry, which keeps the value from
+    /// before the drag's first (a drag over two fields records two).
+    pub fn apply_graph_override_edit(
+        &mut self,
+        manifest: &crate::graph::GraphManifest,
+        after: crate::graph::GraphOverrideSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let scene = current_scene(self)?;
+        let before = (self.state.edit_current_graph_overrides(|graphs| {
+            let graph = crate::lisp_host::ensure_graph_overrides(graphs, manifest);
+            let current = graph.slot(&after);
+            graph.set_slot(&after);
+            Ok(current)
+        }))
+        .map_err(EditError::ReplayFailed)?;
+        self.record_graph_override_edit(scene, manifest.id, before, after)
+    }
+
+    /// Record a graph override field edit already applied (`before` its
+    /// value before, `after` now) in scene `scene` of graph `sequencer_id`:
+    /// the staging of [`Self::apply_graph_override_edit`], shared with the
+    /// legacy `graph-*` natives' recorded edits (eseq-0l17.53), so a native
+    /// write and a kind drag on one field join one entry (merge key
+    /// `graph:{id}:{address}`).
+    pub fn record_graph_override_edit(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        sequencer_id: u64,
+        before: crate::graph::GraphOverrideSlot,
+        after: crate::graph::GraphOverrideSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let merge_key = MergeKey::new(format!("graph:{sequencer_id}:{}", after.address()));
+        stage_field_edit(
+            self,
+            ("Edit graph", merge_key),
+            (scene, after),
+            |staged, scene| match staged {
+                EditPatch::GraphOverride(staged)
+                    if staged.scene == scene && staged.sequencer_id == sequencer_id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |_, _| Ok(before),
+            |scene, before, after| {
+                EditPatch::GraphOverride(GraphOverridePatch {
+                    scene,
+                    sequencer_id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// Record several graph override field edits already applied (a legacy
+    /// `graph-*` batch, `(before, after)` per field) as one entry: one
+    /// field stages as [`Self::record_graph_override_edit`]; more stage a
+    /// composite keyed by every field's address, so a drag repeating the
+    /// batch (a slider moving every node's param) joins one entry, which
+    /// keeps each field's value from before the drag's first edit.
+    pub fn record_graph_override_edits(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        sequencer_id: u64,
+        mut edits: Vec<(
+            crate::graph::GraphOverrideSlot,
+            crate::graph::GraphOverrideSlot,
+        )>,
+    ) -> Result<EditOutcome, EditError> {
+        if edits.len() <= 1 {
+            let Some((before, after)) = edits.pop() else {
+                return Ok(EditOutcome::NoOp);
+            };
+            return self.record_graph_override_edit(scene, sequencer_id, before, after);
+        }
+        let addresses: Vec<String> = edits.iter().map(|(_, after)| after.address()).collect();
+        let merge_key = MergeKey::new(format!(
+            "graph:{sequencer_id}:batch:{}",
+            addresses.join(",")
+        ));
+        let (before, after): (Vec<_>, Vec<_>) = edits.into_iter().unzip();
+        stage_field_edit(
+            self,
+            ("Edit graph", merge_key),
+            (scene, after),
+            |staged, scene| {
+                let EditPatch::Composite(staged) = staged else {
+                    return None;
+                };
+                (staged.iter())
+                    .map(|patch| match patch {
+                        EditPatch::GraphOverride(staged)
+                            if staged.scene == scene && staged.sequencer_id == sequencer_id =>
+                        {
+                            Some(staged.before.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            },
+            |_, _| Ok(before),
+            |scene, before, after| {
+                EditPatch::Composite(
+                    (before.into_iter().zip(after))
+                        .map(|(before, after)| {
+                            EditPatch::GraphOverride(GraphOverridePatch {
+                                scene,
+                                sequencer_id,
+                                before,
+                                after,
+                            })
+                        })
+                        .collect(),
+                )
+            },
+        )
+    }
+
+    /// A host kind setter's neural network edit (kind-bindings spec
+    /// §14.2q): write `after` (one field of the current scene's network
+    /// `network_id`, a [`crate::neural::NeuralSlot`]) and record it, as
+    /// [`Self::apply_graph_override_edit`] records a graph field: a
+    /// coalescing gesture keyed by the field, so a drag's `set!`s on one
+    /// field join one entry, which keeps the value from before the drag's
+    /// first. A network the current scene no longer holds is an error.
+    pub fn apply_neural_network_edit(
+        &mut self,
+        network_id: u64,
+        after: crate::neural::NeuralSlot,
+    ) -> Result<EditOutcome, EditError> {
+        let merge_key = MergeKey::new(format!("neural:{network_id}:{}", after.address()));
+        let scene = current_scene(self)?;
+        stage_field_edit(
+            self,
+            ("Edit neural network", merge_key),
+            (scene, after),
+            |staged, scene| match staged {
+                EditPatch::NeuralNetwork(staged)
+                    if staged.scene == scene && staged.network_id == network_id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |app, after| {
+                app.state.edit_current_neural_networks(|networks| {
+                    let network = (networks.iter_mut())
+                        .find(|network| network.id == network_id)
+                        .ok_or_else(|| "the network is gone".to_string())?;
+                    let current = after.read(network);
+                    after.write(network)?;
+                    Ok(current)
+                })
+            },
+            |scene, before, after| {
+                EditPatch::NeuralNetwork(NeuralNetworkPatch {
+                    scene,
+                    network_id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// A drum rack macro edit (eseq-0l17.44): write `after` (one field of
+    /// rack macro `id` of `track`, a [`crate::sequencer::RackMacroField`])
+    /// into the rack macros of the pattern the live rack mirrors (and the
+    /// live rack), and record it, as [`Self::apply_graph_override_edit`] records
+    /// a graph field: a coalescing gesture keyed by the field, so a drag's
+    /// writes on one field (the rack panel's knob, or a script's `set!`s
+    /// under `ScriptEdit`) join one entry, which keeps the value from
+    /// before the drag's first. Shared by the rack panel's commands and the
+    /// host kinds' `set-rack-macro` / `set-macro-mapping`.
+    pub fn apply_rack_macro_edit(
+        &mut self,
+        track: usize,
+        id: crate::sequencer::RackMacroId,
+        after: crate::sequencer::RackMacroField,
+    ) -> Result<EditOutcome, EditError> {
+        let track_id =
+            (self.track_registry.id_at(track)).ok_or(EditError::TrackOutOfRange { track })?;
+        let pattern = self
+            .rack_macro_pattern(track)
+            .ok_or(EditError::MissingTrackPattern)?;
+        let merge_key = MergeKey::new(format!(
+            "rack-macro:{}:{}:{}",
+            track_id.0,
+            id.index(),
+            after.address()
+        ));
+        stage_field_edit(
+            self,
+            (after.label(), merge_key),
+            (pattern, after),
+            |staged, pattern| match staged {
+                EditPatch::RackMacro(staged)
+                    if staged.track == track_id
+                        && staged.pattern == pattern
+                        && staged.macro_id == id =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            },
+            |app, after| app.write_rack_macro_field(track, pattern, id, after),
+            |pattern, before, after| {
+                EditPatch::RackMacro(RackMacroPatch {
+                    track: track_id,
+                    pattern,
+                    macro_id: id,
+                    before,
+                    after,
+                })
+            },
+        )
+    }
+
+    /// The pattern a rack macro edit of `track` writes: the one the live
+    /// rack mirrors (a bound take's while the binding borrows the lane, as
+    /// step and track param edits resolve it).
+    pub(crate) fn rack_macro_pattern(&self, track: usize) -> Option<crate::sequencer::PatternId> {
+        (self.state)
+            .with_project_scenes(|scenes| self.state.mirror_device_pattern_id(track, scenes))
+    }
+
+    /// Write `field` of rack macro `id` into the Patch `track`'s pattern
+    /// `pattern` plays (and the live rack while it mirrors that Patch),
+    /// with the rack panel's side effects when the live rack changed: a
+    /// value reaches the macro's runtime default and its targets at once,
+    /// a mapping edit publishes the scheduler. Returns the field before. A
+    /// recorded edit's write, its replay and the unrecorded value reset.
+    pub(crate) fn write_rack_macro_field(
+        &mut self,
+        track: usize,
+        pattern: crate::sequencer::PatternId,
+        id: crate::sequencer::RackMacroId,
+        field: &crate::sequencer::RackMacroField,
+    ) -> Result<crate::sequencer::RackMacroField, String> {
+        use crate::sequencer::RackMacroField;
+        let (before, live) = self
+            .state
+            .write_rack_macro_field(track, pattern, id, field)?;
+        if live && before != *field {
+            match field {
+                RackMacroField::Name(_) => {}
+                RackMacroField::Value(value) => {
+                    self.state.set_live_rack_macro_default(track, id, *value);
+                    self.send_transient_rack_macro_value(track, id, *value);
+                }
+                RackMacroField::Range { .. } | RackMacroField::Curve { .. } => {
+                    self.state.publish_scheduler_snapshot();
+                }
+            }
+        }
+        Ok(before)
+    }
+
     pub fn apply_scene_transpose_to_bank(
         &mut self,
         bank: Option<crate::sequencer::SceneBankId>,
@@ -2896,9 +3173,7 @@ impl App {
 
     /// Index (in `groups`) of the plain group holding this rack, if any.
     pub fn rack_parent_group(&self, rack_id: u64) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|group| group.rack_members.contains(&rack_id))
+        crate::project::rack_parent(&self.groups, rack_id)
     }
 
     /// Points a rack's backing bus at `parent` (or back at the master mix with
@@ -4540,24 +4815,30 @@ impl StepGestureTransaction {
         Ok(())
     }
 
-    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
-        let track = app
-            .track_registry
-            .index_of(self.target.track)
-            .ok_or(EditError::MissingStableTrack {
+    /// Put the captured steps back as the gesture found them, keeping the
+    /// gesture open (a script note drag rebuilds every frame from there).
+    /// Returns whether the scheduler needs a full publish.
+    fn restore_before(&self, app: &App) -> Result<bool, EditError> {
+        let track = app.track_registry.index_of(self.target.track).ok_or(
+            EditError::MissingStableTrack {
                 track: self.target.track,
-            })?;
-        let cells = self.before.into_iter().collect::<Vec<_>>();
-        let publish = app
-            .state
+            },
+        )?;
+        let cells = (self.before.iter())
+            .map(|(step, cell)| (*step, cell.clone()))
+            .collect::<Vec<_>>();
+        app.state
             .restore_pattern_step_cells_no_publish(
                 track,
                 self.target.pattern,
                 &cells,
                 &self.variant_registry_before,
             )
-            .map_err(EditError::ReplayFailed)?;
-        if publish {
+            .map_err(EditError::ReplayFailed)
+    }
+
+    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        if self.restore_before(app)? {
             app.state.publish_scheduler_snapshot();
         }
         Ok(())
@@ -4844,7 +5125,18 @@ impl FocusStepGesture {
         Ok(())
     }
 
+    /// Put every captured step back as the gesture found it, keeping the
+    /// gesture open. Returns whether the scheduler needs a full publish.
+    pub fn restore_before(&self, app: &App) -> Result<bool, EditError> {
+        let mut publish = false;
+        for part in &self.parts {
+            publish |= part.restore_before(app)?;
+        }
+        Ok(publish)
+    }
+
     pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        app.focus_step_edits += 1;
         let mut first_error = None;
         for part in self.parts {
             if let Err(error) = part.rollback(app) {
@@ -4860,6 +5152,7 @@ impl FocusStepGesture {
     /// Commit every touched pattern as ONE history entry: a plain step-cells
     /// patch for a single target, a composite for a multi-chunk take gesture.
     pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        app.focus_step_edits += 1;
         let label = self.label;
         let focus = self.focus;
         let track = focus.track();
@@ -5535,6 +5828,12 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
             slot_idx,
             param_idx,
             ..
+        }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti {
+            track,
+            slot_idx,
+            param_idx,
+            ..
         } => {
             let rack = app
                 .state
@@ -5885,6 +6184,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotParamPlockMulti { .. }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti { .. }
         | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
     }
 }
@@ -6271,6 +6571,9 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                 if !added {
                     match pattern.chord_data[track].count(*step) {
                         0 => pattern.patterns[track].set_step_active(*step, false),
+                        // The last note stays a chord entry, so it keeps
+                        // its id (its handle survives); the step's
+                        // transpose follows it.
                         1 => {
                             let remaining = pattern.chord_data[track].get(*step, 0);
                             pattern.step_data[track].set(
@@ -6278,7 +6581,6 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                                 crate::sequencer::StepParam::Transpose,
                                 remaining,
                             );
-                            pattern.chord_data[track].clear_step(*step);
                         }
                         _ => {}
                     }
@@ -6374,6 +6676,7 @@ fn device_plock_command_target(cmd: &AppCommand) -> Option<(usize, Vec<usize>)> 
         | AppCommand::ClearInstrumentTensorPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotParamPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotInstrumentPlockMulti { track, steps, .. }
+        | AppCommand::ClearRackSlotInstrumentPlockMulti { track, steps, .. }
         | AppCommand::SetRackMacroPlockMulti { track, steps, .. }
         | AppCommand::ClearRackMacroPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotEffectPlockMulti { track, steps, .. }
@@ -6415,6 +6718,7 @@ fn device_plock_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetRackSlotEffectPlockMulti { .. } => "Set rack effect p-lock",
         AppCommand::ClearRackSlotEffectPlockMulti { .. } => "Clear rack effect p-lock",
         AppCommand::ClearRackSlotParamPlockMulti { .. } => "Clear rack strip p-lock",
+        AppCommand::ClearRackSlotInstrumentPlockMulti { .. } => "Clear rack instrument p-lock",
         _ => "Set device p-lock",
     }
 }
@@ -6734,6 +7038,409 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
     }
 }
 
+/// The device a device-value snapshot covers: a track's instrument, one of
+/// its effect or MIDI-FX slots, or one rack slot (its instrument, strip,
+/// p-locks and effects together).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceScope {
+    Instrument(crate::sequencer::TrackId),
+    AudioEffect(crate::sequencer::TrackId, usize),
+    MidiEffect(crate::sequencer::TrackId, usize),
+    RackSlot(crate::sequencer::TrackId, usize),
+}
+
+impl DeviceScope {
+    fn of_device(app: &App, id: DeviceId) -> Option<Self> {
+        let registry = &app.device_registry;
+        Some(match id {
+            DeviceId::TrackInstrument(track) => Self::Instrument(track),
+            DeviceId::AudioEffect(id) => {
+                let (track, slot) = registry.audio_effect_location(id)?;
+                Self::AudioEffect(track, slot)
+            }
+            DeviceId::MidiEffect(id) => {
+                let (track, slot) = registry.midi_effect_location(id)?;
+                Self::MidiEffect(track, slot)
+            }
+            DeviceId::RackSlot(id) | DeviceId::RackInstrument(id) => {
+                let (track, slot) = registry.rack_slot_location(id)?;
+                Self::RackSlot(track, slot)
+            }
+        })
+    }
+
+    /// The scope a device-value command snapshots (as
+    /// `resolve_device_value_target` resolves it, without allocating).
+    fn of_command(app: &App, cmd: &AppCommand) -> Option<Self> {
+        let track = app.track_registry.id_at(device_value_command_track(cmd)?)?;
+        Some(match cmd {
+            AppCommand::SetEffectParam { slot_idx, .. }
+            | AppCommand::SetEffectTensorCell { slot_idx, .. } => {
+                Self::AudioEffect(track, *slot_idx)
+            }
+            AppCommand::SetMidiFxParam { slot_idx, .. }
+            | AppCommand::SetMidiFxTensorCell { slot_idx, .. } => {
+                Self::MidiEffect(track, *slot_idx)
+            }
+            AppCommand::SetRackSlotGain { slot_idx, .. }
+            | AppCommand::SetRackSlotPan { slot_idx, .. }
+            | AppCommand::SetRackSlotMute { slot_idx, .. }
+            | AppCommand::SetRackSlotEnabled { slot_idx, .. }
+            | AppCommand::SetRackSlotSolo { slot_idx, .. }
+            | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
+            | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
+            | AppCommand::SetRackSlotBaseNoteOffset { slot_idx, .. }
+            | AppCommand::SetRackSlotInstrumentParam { slot_idx, .. } => {
+                Self::RackSlot(track, *slot_idx)
+            }
+            AppCommand::SetRackSlotEffectParam { rack_slot_idx, .. } => {
+                Self::RackSlot(track, *rack_slot_idx)
+            }
+            _ => Self::Instrument(track),
+        })
+    }
+
+    /// The track the device is on.
+    fn track(self) -> crate::sequencer::TrackId {
+        match self {
+            Self::Instrument(track)
+            | Self::AudioEffect(track, _)
+            | Self::MidiEffect(track, _)
+            | Self::RackSlot(track, _) => track,
+        }
+    }
+
+    /// Whether the two snapshots may share state. A track instrument's is
+    /// taken to cover its whole track (a rack track's instrument is the rack).
+    fn overlaps(self, other: Self) -> bool {
+        let track = |scope| match scope {
+            Self::Instrument(track)
+            | Self::AudioEffect(track, _)
+            | Self::MidiEffect(track, _)
+            | Self::RackSlot(track, _) => track,
+        };
+        track(self) == track(other)
+            && (self == other
+                || matches!(self, Self::Instrument(_))
+                || matches!(other, Self::Instrument(_)))
+    }
+}
+
+/// Whether `cmd` can be recorded as an undo entry beside the active gesture
+/// (eseq-0l17.55, .72): the gesture's pending entry is a device-value drag
+/// (a param or strip drag) and `cmd` a device-value edit of another device
+/// (eseq-0l17.55) or of the dragged device itself (eseq-0l17.72: the
+/// beside entry and the drag's are rebased by [`apply_beside_gesture`], so
+/// each undoes only what it changed). Device values are recorded as
+/// whole-device snapshots, so an edit whose snapshot covers the dragged one
+/// without being it (a track instrument's beside a rack slot's) is not
+/// known to be safe beside the drag.
+pub fn command_can_land_beside_active_gesture(app: &App, cmd: &AppCommand) -> bool {
+    let Some(gesture) = app.history.active_gesture() else {
+        return false;
+    };
+    let patch = match app.history.active_gesture_patch(&gesture.merge_key) {
+        Some(EditPatch::DeviceValues(patch)) => patch,
+        // A step p-lock drag: a device-value edit of another track is
+        // disjoint, one of its own track is rebased around the drag's cells
+        // ([`rebase_step_drag_beside`], eseq-0l17.75).
+        Some(EditPatch::StepCells(_)) => return DeviceScope::of_command(app, cmd).is_some(),
+        _ => return false,
+    };
+    match (
+        DeviceScope::of_device(app, patch.target),
+        DeviceScope::of_command(app, cmd),
+    ) {
+        (Some(drag), Some(edit)) => drag == edit || !drag.overlaps(edit),
+        _ => false,
+    }
+}
+
+/// The device-value target `id` resolves to in `pattern` (its track index
+/// and slot), while the device is still where the registry says.
+fn resolved_device_target_of(
+    app: &App,
+    id: DeviceId,
+    pattern: crate::sequencer::PatternId,
+) -> Option<ResolvedDeviceTarget> {
+    let (track_id, slot_idx) = match DeviceScope::of_device(app, id)? {
+        DeviceScope::Instrument(track) => (track, None),
+        DeviceScope::AudioEffect(track, slot)
+        | DeviceScope::MidiEffect(track, slot)
+        | DeviceScope::RackSlot(track, slot) => (track, Some(slot)),
+    };
+    Some(ResolvedDeviceTarget {
+        id,
+        track: app.track_registry.index_of(track_id)?,
+        pattern,
+        slot_idx,
+    })
+}
+
+/// Keep a step p-lock drag's open entry (a step-cell patch) and a
+/// device-value entry committed beside it (since `revision`) on the drag's
+/// track and pattern consistent (eseq-0l17.75). The device snapshot covers
+/// the device's p-lock rows, so left alone it would hold the mid-drag locks:
+/// undoing it after the drag would bring them back. Instead its `before` and
+/// `after` are rebased onto the state without the drag's cells (the cells
+/// are set back to the drag's `before` for one capture, then restored): the
+/// drag's undo restores the locks and keeps the edit, the edit's undo then
+/// lands on the state before both. When the edit moved a cell the drag
+/// moved too, or several device entries landed, the drag's entry is split
+/// at the edit instead ([`split_device_drag_beside`]).
+fn rebase_step_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    revision: u64,
+) -> BesideDrag {
+    let Some(EditPatch::StepCells(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let Some(first) = app.history.undo_index_since(revision) else {
+        return BesideDrag::Resume;
+    };
+    let Some(track) = app.track_registry.index_of(drag.target.track) else {
+        return BesideDrag::Resume;
+    };
+    let pattern = drag.target.pattern;
+    let on_drag_track = |patch: &DeviceValuesPatch| {
+        patch.pattern == pattern
+            && DeviceScope::of_device(app, patch.target)
+                .is_none_or(|scope| scope.track() == drag.target.track)
+    };
+    let beside: Vec<usize> = (first..app.history.undo_len())
+        .filter(|index| {
+            matches!(app.history.undo_patch_at(*index),
+                Some(EditPatch::DeviceValues(patch)) if on_drag_track(patch))
+        })
+        .collect();
+    let index = match beside.as_slice() {
+        [] => return BesideDrag::Resume,
+        [index] => *index,
+        _ => return split_device_drag_beside(app, suspended, first),
+    };
+    let Some(EditPatch::DeviceValues(edit)) = app.history.undo_patch_at(index).cloned() else {
+        return BesideDrag::Resume;
+    };
+    let Some(target) = resolved_device_target_of(app, edit.target, edit.pattern) else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let drag_before: Vec<(usize, StepCellSnapshot)> = drag
+        .cells
+        .iter()
+        .map(|cell| (cell.step, cell.before.clone()))
+        .collect();
+    let registry_before = drag.variant_registry_before.clone();
+    let steps: Vec<usize> = drag_before.iter().map(|(step, _)| *step).collect();
+    let Ok((current, current_registry)) =
+        app.state.capture_pattern_step_cells(track, pattern, &steps)
+    else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let current: Vec<(usize, StepCellSnapshot)> = steps.iter().copied().zip(current).collect();
+    // The device as it would be without the drag's cells, then the cells
+    // put back as they are.
+    let mut publish = false;
+    let without_drag = app
+        .state
+        .restore_pattern_step_cells_no_publish(track, pattern, &drag_before, &registry_before)
+        .map_err(EditError::ReplayFailed)
+        .and_then(|published| {
+            publish |= published;
+            capture_device_value_snapshot(app, target)
+        });
+    match app.state.restore_pattern_step_cells_no_publish(
+        track,
+        pattern,
+        &current,
+        &current_registry,
+    ) {
+        Ok(published) => publish |= published,
+        Err(error) => eprintln!("[history] restoring a step drag's cells failed: {error}"),
+    }
+    if publish {
+        app.state.publish_scheduler_track(track);
+    }
+    // The edit's `before` rebased the same way: the components it moved
+    // (from its `after` to its `before`) onto the state without the drag.
+    let rebased = without_drag.ok().and_then(|after| {
+        DeviceValueSnapshot::rebase_edit(&after, &edit.after, &edit.before)
+            .map(|before| (before, after))
+    });
+    let Some((before, after)) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let patch = DeviceValuesPatch {
+        before,
+        after,
+        ..edit
+    };
+    let bytes = patch.retained_bytes();
+    app.history
+        .replace_undo_patch(index, EditPatch::DeviceValues(patch), bytes);
+    BesideDrag::Resume
+}
+
+/// Keep a device-value drag's open entry and an entry committed beside it
+/// (since `revision`) consistent when the beside entry snapshots the same
+/// device (eseq-0l17.72). Both are whole-device snapshots, so left alone
+/// the drag's undo would drop the beside edit and the beside entry's undo
+/// would restore mid-drag values. Instead the beside entry is rebased to
+/// apply to the drag's starting state (`before` = the drag's `before`,
+/// `after` = that plus the components the edit moved) and the drag's entry
+/// to start there: undoing the drag then keeps the edit, and undoing the
+/// edit lands on the state before both. When the edit moved a component
+/// the drag moved too (a script setting the dragged param), or the beside
+/// entries are not one same-device snapshot, the drag's entry is split at
+/// the edit instead (committed below it; the drag's later frames stage a
+/// new one), as before eseq-0l17.72.
+fn rebase_device_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    revision: u64,
+) -> BesideDrag {
+    let Some(EditPatch::DeviceValues(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let Some(first) = app.history.undo_index_since(revision) else {
+        return BesideDrag::Resume;
+    };
+    let Some(drag_scope) = DeviceScope::of_device(app, drag.target) else {
+        return BesideDrag::Resume;
+    };
+    let scope_of = |patch: &DeviceValuesPatch| DeviceScope::of_device(app, patch.target);
+    let beside: Vec<usize> = (first..app.history.undo_len())
+        .filter(|index| match app.history.undo_patch_at(*index) {
+            Some(EditPatch::DeviceValues(patch)) => {
+                patch.pattern == drag.pattern
+                    && scope_of(patch).is_none_or(|scope| scope.overlaps(drag_scope))
+            }
+            _ => false,
+        })
+        .collect();
+    // Step-cell entries (script locks) of the drag's track and pattern: the
+    // drag's snapshot covers its device's lock rows.
+    let step_beside = (first..app.history.undo_len()).any(|index| {
+        matches!(app.history.undo_patch_at(index),
+            Some(EditPatch::StepCells(patch))
+                if patch.target.track == drag_scope.track() && patch.target.pattern == drag.pattern)
+    });
+    let index = match (beside.as_slice(), step_beside) {
+        ([], false) => return BesideDrag::Resume,
+        ([], true) => return rebase_device_drag_around_cells(app, suspended, first),
+        ([index], false) => *index,
+        _ => return split_device_drag_beside(app, suspended, first),
+    };
+    let Some(EditPatch::DeviceValues(edit)) = app.history.undo_patch_at(index) else {
+        return BesideDrag::Resume;
+    };
+    let rebased = (scope_of(edit) == Some(drag_scope) && drag.after.bit_exact_eq(&edit.before))
+        .then(|| DeviceValueSnapshot::rebase_edit(&drag.before, &edit.before, &edit.after))
+        .flatten();
+    let Some(rebased) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let edit_patch = DeviceValuesPatch {
+        target: edit.target,
+        pattern: edit.pattern,
+        before: drag.before.clone(),
+        after: rebased.clone(),
+    };
+    let drag_patch = DeviceValuesPatch {
+        target: drag.target,
+        pattern: drag.pattern,
+        before: rebased,
+        after: edit.after.clone(),
+    };
+    let (edit_bytes, drag_bytes) = (edit_patch.retained_bytes(), drag_patch.retained_bytes());
+    app.history
+        .replace_undo_patch(index, EditPatch::DeviceValues(edit_patch), edit_bytes);
+    suspended.replace_pending_patch(EditPatch::DeviceValues(drag_patch), drag_bytes);
+    BesideDrag::Resume
+}
+
+/// What becomes of a gesture an edit landed beside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BesideDrag {
+    /// It resumes (its entry rebased, split, or untouched).
+    Resume,
+    /// It ends: a split sampler slice drag, whose frames reapply the
+    /// gesture-start marker index to the gesture's original snapshot.
+    End,
+}
+
+/// [`rebase_device_drag_beside`] for step-cell entries (script locks:
+/// `lock-param!`, `lock-strip!`, `lock-rack-macro!`) beside a device-value
+/// drag on its track and pattern (eseq-0l17.75). The drag's snapshot covers
+/// its device's lock rows, so left alone its undo would drop the beside
+/// lock. Its snapshot is rebased instead: with the drag at `B → C` and the
+/// device now at `C′` (the locks landed), the drag becomes
+/// `B′ → C′` where `B′` is `B` with the components the locks moved
+/// ([`DeviceValueSnapshot::rebase_edit`]). The step-cell entries hold only
+/// their cells, so the drag's undo keeps the lock and the lock's undo then
+/// removes only it. A lock of a cell the drag moved too (or a device that
+/// no longer resolves) splits the drag at the locks instead.
+fn rebase_device_drag_around_cells(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    first: usize,
+) -> BesideDrag {
+    let Some(EditPatch::DeviceValues(drag)) = suspended.pending_patch() else {
+        return BesideDrag::Resume;
+    };
+    let rebased = resolved_device_target_of(app, drag.target, drag.pattern)
+        .and_then(|target| capture_device_value_snapshot(app, target).ok())
+        .and_then(|now| {
+            DeviceValueSnapshot::rebase_edit(&drag.before, &drag.after, &now)
+                .map(|before| (before, now))
+        });
+    let Some((before, after)) = rebased else {
+        return split_device_drag_beside(app, suspended, first);
+    };
+    let patch = DeviceValuesPatch {
+        target: drag.target,
+        pattern: drag.pattern,
+        before,
+        after,
+    };
+    let bytes = patch.retained_bytes();
+    suspended.replace_pending_patch(EditPatch::DeviceValues(patch), bytes);
+    BesideDrag::Resume
+}
+
+/// [`rebase_device_drag_beside`]'s fallback: commit the drag's entry so far
+/// below the beside entries (from undo index `first`), as if the edit had
+/// ended it; the resumed drag stages a fresh entry on its next frame. A
+/// sampler slice drag is ended instead: its frames reapply the marker index
+/// it started from to the gesture's original snapshot, which a fresh entry
+/// under the same gesture would no longer hold, so its next frame starts a
+/// new gesture on the list as the edit left it.
+fn split_device_drag_beside(
+    app: &mut App,
+    suspended: &mut super::history::SuspendedGesture<EditPatch>,
+    first: usize,
+) -> BesideDrag {
+    let end = if suspended
+        .merge_key()
+        .as_str()
+        .starts_with(SAMPLER_SLICE_KEY_PREFIX)
+    {
+        BesideDrag::End
+    } else {
+        BesideDrag::Resume
+    };
+    let Some((label, merge_key, patch, retained_bytes)) = suspended.take_pending() else {
+        return end;
+    };
+    let unchanged =
+        matches!(&patch, EditPatch::DeviceValues(drag) if drag.before.bit_exact_eq(&drag.after));
+    if !unchanged {
+        app.history
+            .insert_undo_entry_before(first, label, Some(merge_key), patch, retained_bytes);
+    }
+    end
+}
+
 /// Effective pattern id for `track`, lazily materializing one when the
 /// current scene is bare for the track (takes spec 11.1): device edits are
 /// keyed per-pattern, so the first edit in a bare scene creates the pattern
@@ -6768,6 +7475,9 @@ fn ensure_effective_track_pattern(
     }
     for delays in &mut data.chord_snapshot.delays {
         delays.clear();
+    }
+    for ids in &mut data.chord_snapshot.ids {
+        ids.clear();
     }
     app.state.materialize_current_scene_pattern(track, data)
 }
@@ -7297,6 +8007,22 @@ pub fn apply_coalesced_device_value_batch(
     )
 }
 
+/// Sampler slice gestures' merge keys carry this prefix, so a slice drag is
+/// recognised when an edit lands beside it ([`rebase_device_drag_beside`]).
+const SAMPLER_SLICE_KEY_PREFIX: &str = "sampler-slice-gesture:";
+
+fn sampler_slice_merge_key(
+    gesture: &str,
+    id: DeviceId,
+    pattern: crate::sequencer::PatternId,
+) -> MergeKey {
+    MergeKey::new(format!(
+        "{SAMPLER_SLICE_KEY_PREFIX}{gesture}:{}:{}",
+        device_id_merge_component(id),
+        pattern.0,
+    ))
+}
+
 pub fn finish_sampler_slice_gesture(
     app: &mut App,
     track: usize,
@@ -7318,11 +8044,7 @@ pub fn finish_sampler_slice_gesture(
     let id = rack_slot.map_or(DeviceId::TrackInstrument(track_id), |slot| {
         DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot))
     });
-    let key = MergeKey::new(format!(
-        "{gesture}:{}:{}",
-        device_id_merge_component(id),
-        pattern.0,
-    ));
+    let key = sampler_slice_merge_key(gesture, id, pattern);
     if app.history.active_gesture().map(|active| &active.merge_key) == Some(&key) {
         finish_active_gesture(app);
     }
@@ -7363,11 +8085,7 @@ pub fn apply_coalesced_sampler_slice_mutation(
         slot_idx: rack_slot,
     };
     let current_before = capture_device_value_snapshot(app, target)?;
-    let key = MergeKey::new(format!(
-        "{gesture}:{}:{}",
-        device_id_merge_component(id),
-        pattern.0,
-    ));
+    let key = sampler_slice_merge_key(gesture, id, pattern);
     if app.history.active_gesture().map(|active| &active.merge_key) != Some(&key) {
         finish_active_gesture(app);
     }
@@ -8133,6 +8851,62 @@ fn app_bus_effect_gesture_before(
 }
 
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The current scene, which a scene-keyed field edit is made in.
+fn current_scene(app: &App) -> Result<crate::sequencer::SceneId, EditError> {
+    (app.state.current_scene_id())
+        .ok_or_else(|| EditError::ReplayFailed("no current scene".to_string()))
+}
+
+/// A one-field edit at `site` (the scene or pattern the field lives in),
+/// recorded as the coalescing gesture `merge_key` (labelled `label`):
+/// `write` writes `after` and returns the field's value before the write;
+/// a gesture already staged under the key for this site and target keeps
+/// its `before` (`staged` reads it from the staged entry), so a drag's
+/// writes join one entry; one staged for another site (a scene or pattern
+/// switched mid-drag) is finished first; a write back to where the gesture
+/// started discards it. `patch` builds the entry from (site, before, after).
+fn stage_field_edit<K: Copy, S: PartialEq>(
+    app: &mut App,
+    (label, merge_key): (&'static str, MergeKey),
+    (site, after): (K, S),
+    staged: impl FnOnce(&EditPatch, K) -> Option<S>,
+    write: impl FnOnce(&mut App, &S) -> Result<S, String>,
+    patch: impl FnOnce(K, S, S) -> EditPatch,
+) -> Result<EditOutcome, EditError> {
+    let staged_entry =
+        (app.history.active_gesture_patch(&merge_key)).map(|patch| staged(patch, site));
+    let staged_before = match staged_entry {
+        Some(None) => {
+            // The gesture's entry names another site (a scene or pattern
+            // switched mid-drag): keep it as an entry of its own.
+            finish_active_gesture(app);
+            None
+        }
+        Some(before) => before,
+        None => None,
+    };
+    let current = write(app, &after).map_err(EditError::ReplayFailed)?;
+    let unchanged = current == after;
+    let before = staged_before.unwrap_or(current);
+    if before == after {
+        // A drag back to where it started: nothing to record.
+        app.history.discard_active_gesture_entry(&merge_key);
+        return Ok(if unchanged {
+            EditOutcome::NoOp
+        } else {
+            EditOutcome::AppliedUnrecorded
+        });
+    }
+    let patch = patch(site, before, after);
+    let retained_bytes = edit_patch_retained_bytes(&patch);
+    ensure_coalescing_gesture(app, &merge_key);
+    let history_move = app
+        .history
+        .stage_active_gesture(label, &merge_key, patch, retained_bytes)
+        .ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
+}
 
 pub(crate) fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) == Some(merge_key) {
@@ -10239,6 +11013,61 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             )
             .map_err(EditError::ReplayFailed)
         }
+        EditPatch::GraphOverride(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "graph override replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            crate::lisp_host::restore_graph_override(
+                &app.state,
+                patch.scene,
+                patch.sequencer_id,
+                target,
+            )
+            .map_err(EditError::ReplayFailed)
+        }
+        EditPatch::RackMacro(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack macro replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            let track = (app.track_registry.index_of(patch.track))
+                .ok_or(EditError::MissingStableTrack { track: patch.track })?;
+            (app.write_rack_macro_field(track, patch.pattern, patch.macro_id, target))
+                .map(|_| ())
+                .map_err(EditError::ReplayFailed)
+        }
+        EditPatch::NeuralNetwork(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "neural network replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            (app.state)
+                .edit_scene_neural_networks(patch.scene, |networks| {
+                    let network = (networks.iter_mut())
+                        .find(|network| network.id == patch.network_id)
+                        .ok_or_else(|| {
+                            format!("neural network {} no longer exists", patch.network_id)
+                        })?;
+                    target.write(network)
+                })
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneSlots(patches) => {
             let writes = patches.iter().map(|patch| {
                 let target = match mode {
@@ -10411,7 +11240,12 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
-        EditPatch::GraphNodeProcessChain(_) => true,
+        EditPatch::GraphNodeProcessChain(_)
+        | EditPatch::GraphOverride(_)
+        | EditPatch::NeuralNetwork(_) => true,
+        // Its writes publish what the scheduler reads (a mapping edit) or
+        // reach the runtime values directly (a value).
+        EditPatch::RackMacro(_) => false,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -10475,7 +11309,10 @@ pub fn apply_process_lane_drag_steps(
                 merge_key: merge_key.clone(),
             })
             .map_err(|_| "Another edit gesture is still active".to_string())?;
-        app.process_lane_drag = Some(ProcessLaneDrag { merge_key, before });
+        app.pending_drag = Some(PendingDrag::ProcessLane(ProcessLaneDrag {
+            merge_key,
+            before,
+        }));
     } else {
         app.history.touch_active_gesture();
     }
@@ -10516,28 +11353,15 @@ pub fn apply_rack_groove_amount_drag(
     clip: Option<crate::sequencer::RackClipId>,
     mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
 ) -> Result<bool, String> {
-    let current = app
-        .groups
-        .iter()
-        .find(|group| group.id == group_id)
-        .and_then(|group| group.rack.as_ref())
-        .map(|rack| rack.groove_for_clip(clip).clone())
-        .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
-    let mut next = current.clone();
-    mutate(&mut next);
-    next.sanitize();
-    if next == current {
+    let Some(next) = app.next_rack_groove(group_id, clip, mutate)? else {
         return Ok(false);
-    }
+    };
     let merge_key = MergeKey::new(format!("rack-groove-amounts:{group_id}:{clip:?}"));
     let continuing = app
         .history
         .active_gesture()
         .is_some_and(|gesture| gesture.merge_key == merge_key)
-        && app
-            .rack_groove_drag
-            .as_ref()
-            .is_some_and(|drag| drag.merge_key == merge_key);
+        && matches!(&app.pending_drag, Some(PendingDrag::RackGroove(drag)) if drag.merge_key == merge_key);
     if continuing {
         app.history.touch_active_gesture();
     } else {
@@ -10551,7 +11375,10 @@ pub fn apply_rack_groove_amount_drag(
                 merge_key: merge_key.clone(),
             })
             .map_err(|_| "Another edit gesture is still active".to_string())?;
-        app.rack_groove_drag = Some(RackGrooveDrag { merge_key, before });
+        app.pending_drag = Some(PendingDrag::RackGroove(RackGrooveDrag {
+            merge_key,
+            before,
+        }));
     }
     if let Some(rack) = app
         .groups
@@ -10591,25 +11418,261 @@ fn commit_rack_groove_drag(app: &mut App, drag: RackGrooveDrag) {
     );
 }
 
-pub fn finish_active_gesture(app: &mut App) -> bool {
+/// One script drag of the piano roll's source in flight (kind-bindings spec
+/// §14): the focus steps it touched, captured before its first write, land
+/// as ONE undo entry when the gesture finishes (pointer release, idle
+/// timeout, the next edit), the same shape as [`ProcessLaneDrag`]. A note
+/// drag (stage 7e, [`note_drag_frame`]) restores them every frame and
+/// rebuilds from there; a focus step param drag (7e-2,
+/// [`focus_step_param_drag`]) writes over them.
+pub(crate) struct FocusStepDrag {
+    pub(crate) merge_key: MergeKey,
+    pub(crate) gesture: FocusStepGesture,
+}
+
+/// A drag whose writes go straight to state while its gesture is open and
+/// that lands as one history entry when the gesture finishes
+/// ([`finish_active_gesture`]'s hook); `App::pending_drag`.
+pub(crate) enum PendingDrag {
+    ProcessLane(ProcessLaneDrag),
+    RackGroove(RackGrooveDrag),
+    Note(FocusStepDrag),
+    FocusSteps(FocusStepDrag),
+}
+
+impl PendingDrag {
+    fn merge_key(&self) -> &MergeKey {
+        match self {
+            Self::ProcessLane(drag) => &drag.merge_key,
+            Self::RackGroove(drag) => &drag.merge_key,
+            Self::Note(drag) | Self::FocusSteps(drag) => &drag.merge_key,
+        }
+    }
+
+    /// Commit the finished drag as one history entry.
+    fn commit(self, app: &mut App) {
+        match self {
+            Self::ProcessLane(drag) => {
+                app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane")
+            }
+            Self::RackGroove(drag) => commit_rack_groove_drag(app, drag),
+            Self::Note(drag) => commit_focus_step_drag(app, drag, "Note drag"),
+            Self::FocusSteps(drag) => commit_focus_step_drag(app, drag, "Step drag"),
+        }
+    }
+}
+
+/// The merge key every script note drag shares.
+pub const NOTE_DRAG_KEY: &str = "kinds-notes";
+/// The merge key every script focus step param drag shares.
+pub const FOCUS_STEP_DRAG_KEY: &str = "kinds-focus-steps";
+
+/// A fresh history gesture id (a script drag mints its own before it opens).
+pub fn next_gesture_id() -> GestureId {
+    GestureId(NEXT_HISTORY_GESTURE_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+impl App {
+    /// The open script note drag's gesture id, while it is the active
+    /// gesture (a drag's frames are tied to it).
+    pub fn active_note_drag(&self) -> Option<GestureId> {
+        let Some(PendingDrag::Note(drag)) = &self.pending_drag else {
+            return None;
+        };
+        let active = self.history.active_gesture()?;
+        (active.merge_key == drag.merge_key).then_some(active.id)
+    }
+}
+
+/// A script note drag's frame on `focus`: opens drag `id` (closing any
+/// other gesture) unless it is the active one, captures the `steps` it has
+/// not yet (as they are: the drag has not written them), puts every
+/// captured step back as the drag found it and runs `rebuild` (which writes
+/// the drag's whole result), then publishes the scheduler once. A failed
+/// `rebuild` leaves the steps as the drag found them.
+pub fn note_drag_frame(
+    app: &mut App,
+    id: GestureId,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    rebuild: impl FnOnce(&mut App) -> Result<(), String>,
+) -> Result<(), String> {
+    let merge_key = MergeKey::new(NOTE_DRAG_KEY);
+    if app.active_note_drag() == Some(id) {
+        app.history.touch_active_gesture();
+    } else {
+        // Closes any other gesture (an earlier note drag, of another source,
+        // commits through the hook in `finish_active_gesture`).
+        finish_active_gesture(app);
+        let gesture = FocusStepGesture::begin(app, focus, steps, "Edit notes")
+            .map_err(|error| format!("could not begin the note drag: {error:?}"))?;
+        app.history
+            .begin_gesture(ActiveGesture {
+                id,
+                merge_key: merge_key.clone(),
+            })
+            .map_err(|_| "Another edit gesture is still active".to_string())?;
+        app.pending_drag = Some(PendingDrag::Note(FocusStepDrag { merge_key, gesture }));
+    }
+    let Some(PendingDrag::Note(mut drag)) = app.pending_drag.take() else {
+        unreachable!("the note drag was just opened");
+    };
+    let restored = (drag.gesture.capture_additional_steps(app, steps))
+        .and_then(|()| drag.gesture.restore_before(app))
+        .map_err(|error| format!("could not extend the note drag: {error:?}"));
+    let result = restored.and_then(|publish| {
+        rebuild(app).map(|()| publish).or_else(|error| {
+            drag.gesture
+                .restore_before(app)
+                .map_err(|undo| format!("{error}; restoring failed: {undo:?}"))?;
+            Err(error)
+        })
+    });
+    let focus = drag.gesture.focus();
+    app.pending_drag = Some(PendingDrag::Note(drag));
+    app.focus_step_edits += 1;
+    if result? {
+        app.state.publish_scheduler_snapshot();
+    } else if focus.is_live() {
+        app.state.publish_scheduler_track(focus.track());
+    }
+    Ok(())
+}
+
+/// A script drag of focus step params on `focus` (kind-bindings spec §14,
+/// stage 7e-2): continues the open one on the same focus (else closes any
+/// other gesture and opens one), captures the `steps` it has not yet (as
+/// they are: the drag has not written them), runs `write` and publishes a
+/// live focus's track; `label` names its undo entry. A drag whose focus
+/// moved under it (a scene launched in follow mode) is committed with what
+/// it wrote, and a new one opens. An error (the steps cannot be captured)
+/// leaves `write` unrun.
+pub fn focus_step_param_drag(
+    app: &mut App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    label: &'static str,
+    write: impl FnOnce(&mut App),
+) -> Result<(), String> {
+    let merge_key = MergeKey::new(FOCUS_STEP_DRAG_KEY);
+    let open = app
+        .history
+        .active_gesture()
+        .is_some_and(|active| active.merge_key == merge_key);
+    let mut drag = match app.pending_drag.take() {
+        Some(PendingDrag::FocusSteps(drag)) if open && drag.gesture.focus() == focus => Some(drag),
+        other => {
+            app.pending_drag = other;
+            None
+        }
+    };
+    if let Some(mut open) = drag.take() {
+        app.history.touch_active_gesture();
+        match open.gesture.capture_additional_steps(app, steps) {
+            Ok(()) => drag = Some(open),
+            Err(_) => {
+                // Another source under the same focus: the open drag ends
+                // with every write it made.
+                app.pending_drag = Some(PendingDrag::FocusSteps(open));
+                finish_active_gesture(app);
+            }
+        }
+    }
+    let drag = match drag {
+        Some(drag) => drag,
+        None => {
+            // Closes any other gesture (an earlier focus step drag commits
+            // through the hook in `finish_active_gesture`).
+            finish_active_gesture(app);
+            let gesture = FocusStepGesture::begin(app, focus, steps, label)
+                .map_err(|error| format!("could not begin the step drag: {error:?}"))?;
+            let id = next_gesture_id();
+            app.history
+                .begin_gesture(ActiveGesture {
+                    id,
+                    merge_key: merge_key.clone(),
+                })
+                .map_err(|_| "Another edit gesture is still active".to_string())?;
+            FocusStepDrag { merge_key, gesture }
+        }
+    };
+    app.pending_drag = Some(PendingDrag::FocusSteps(drag));
+    write(app);
+    app.focus_step_edits += 1;
+    if focus.is_live() {
+        app.state.publish_scheduler_track(focus.track());
+    }
+    Ok(())
+}
+
+/// Commits a finished focus step drag (a note or a focus step param drag,
+/// `what` in the status a failure shows) as one history entry.
+fn commit_focus_step_drag(app: &mut App, drag: FocusStepDrag, what: &str) {
+    if let Err(error) = drag.gesture.commit(app) {
+        app.editor.status_message = Some((
+            format!("{what} could not be recorded: {error:?}"),
+            Instant::now(),
+        ));
+    }
+}
+
+/// Commit the active gesture's staged entry (publishing the scheduler when
+/// it needs it); the gesture's drag bookkeeping is the caller's.
+fn finish_gesture_entry(app: &mut App) -> Option<super::history::ActiveGesture> {
     let publish_scheduler = app
         .history
         .active_gesture()
         .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
         .is_some_and(pending_gesture_publishes_scheduler);
     let finished_gesture = app.history.finish_active_gesture();
-    let finished = finished_gesture.is_some();
-    if finished && publish_scheduler {
+    if finished_gesture.is_some() && publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
-    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.process_lane_drag.take()) {
-        if gesture.merge_key == drag.merge_key {
-            app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane");
+    finished_gesture
+}
+
+/// Apply `cmd` as an undo entry of its own while leaving the active gesture
+/// (a user's knob drag) open, unsplit and unjoined: the gesture and its
+/// drag bookkeeping are set aside, `cmd` applies and its own entry (staged
+/// or committed) is finished, then the gesture resumes. For script edits
+/// that land mid-drag.
+pub fn apply_command_beside_gesture(
+    app: &mut App,
+    cmd: AppCommand,
+) -> Result<EditOutcome, EditError> {
+    apply_beside_gesture(app, |app| try_apply_command(app, cmd))
+}
+
+/// [`apply_command_beside_gesture`] for an edit `apply` makes (one that is
+/// not a single `AppCommand`, such as a bar transpose).
+///
+/// An edit of the device a device-value drag is dragging is rebased against
+/// the drag's open entry ([`rebase_device_drag_beside`], eseq-0l17.72); a
+/// device edit on a step p-lock drag's track around the drag's cells
+/// ([`rebase_step_drag_beside`], eseq-0l17.75).
+pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T) -> T {
+    let suspended = app.history.suspend_gesture();
+    let pending_drag = app.pending_drag.take();
+    let revision = app.history.current_revision();
+    let outcome = apply(app);
+    finish_gesture_entry(app);
+    app.pending_drag = pending_drag;
+    if let Some(mut suspended) = suspended {
+        let resume = rebase_device_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume
+            && rebase_step_drag_beside(app, &mut suspended, revision) == BesideDrag::Resume;
+        if resume {
+            app.history.resume_gesture(suspended);
         }
     }
-    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.rack_groove_drag.take()) {
-        if gesture.merge_key == drag.merge_key {
-            commit_rack_groove_drag(app, drag);
+    outcome
+}
+
+pub fn finish_active_gesture(app: &mut App) -> bool {
+    let finished_gesture = finish_gesture_entry(app);
+    let finished = finished_gesture.is_some();
+    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.pending_drag.take()) {
+        if gesture.merge_key == *drag.merge_key() {
+            drag.commit(app);
         }
     }
     if finished {
@@ -10695,6 +11758,9 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
         EditPatch::BarTranspose(patch) => patch.retained_bytes(),
         EditPatch::GraphNodeProcessChain(patch) => patch.retained_bytes(),
+        EditPatch::GraphOverride(patch) => patch.retained_bytes(),
+        EditPatch::NeuralNetwork(patch) => patch.retained_bytes(),
+        EditPatch::RackMacro(patch) => patch.retained_bytes(),
     }
 }
 
@@ -10725,6 +11791,9 @@ pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
     let mut history = std::mem::take(&mut app.history);
     let result = history.undo(|patch| replay_patch(app, patch, ApplyMode::Undo));
     app.history = history;
+    if matches!(result, HistoryReplay::Applied(_)) {
+        app.history_replays += 1;
+    }
     if let Some(request) = topology_request {
         app.state.complete_topology_edit(request);
         app.state.publish_scheduler_snapshot();
@@ -10749,6 +11818,9 @@ pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
     let mut history = std::mem::take(&mut app.history);
     let result = history.redo(|patch| replay_patch(app, patch, ApplyMode::Redo));
     app.history = history;
+    if matches!(result, HistoryReplay::Applied(_)) {
+        app.history_replays += 1;
+    }
     if let Some(request) = topology_request {
         app.state.complete_topology_edit(request);
         app.state.publish_scheduler_snapshot();
@@ -10789,6 +11861,22 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
     let Some(gesture) = app.history.active_gesture().cloned() else {
         return Ok(false);
     };
+    match app.pending_drag.take() {
+        Some(PendingDrag::Note(drag) | PendingDrag::FocusSteps(drag))
+            if drag.merge_key == gesture.merge_key =>
+        {
+            // A script note or focus step drag: put its steps back, record
+            // nothing.
+            let focus = drag.gesture.focus();
+            drag.gesture.rollback(app)?;
+            app.history.finish_active_gesture();
+            if focus.is_live() {
+                app.state.publish_scheduler_track(focus.track());
+            }
+            return Ok(true);
+        }
+        drag => app.pending_drag = drag,
+    }
     let Some(patch) = app.history.active_gesture_patch(&gesture.merge_key).cloned() else {
         finish_active_gesture(app);
         return Ok(false);
@@ -10828,7 +11916,12 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackPresentation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) | EditPatch::GraphNodeProcessChain(_) => {
+        EditPatch::SceneSlot(_)
+        | EditPatch::SceneSlots(_)
+        | EditPatch::GraphNodeProcessChain(_)
+        | EditPatch::GraphOverride(_)
+        | EditPatch::NeuralNetwork(_)
+        | EditPatch::RackMacro(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {
@@ -13275,6 +14368,8 @@ mod tests {
         ));
         assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
         assert_eq!(app.history.undo_len(), 2);
+        let kept = app.state.pattern.chord_data[0].get_id(step, 1);
+        assert_ne!(kept, 0);
 
         assert!(matches!(
             try_apply_command(
@@ -13287,7 +14382,10 @@ mod tests {
             ),
             Ok(EditOutcome::Applied(_))
         ));
-        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+        // The remaining note stays a chord entry with its id.
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 1);
+        assert_eq!(app.state.pattern.chord_data[0].get(step, 0), 7.0);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 0), kept);
         assert_eq!(
             app.state.pattern.step_data[0]
                 .get(step, crate::sequencer::StepParam::Transpose),
@@ -13299,8 +14397,10 @@ mod tests {
         assert_eq!(app.state.pattern.chord_data[0].count(step), 2);
         assert_eq!(app.state.pattern.chord_data[0].get(step, 0), 4.0);
         assert_eq!(app.state.pattern.chord_data[0].get(step, 1), 7.0);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 1), kept);
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
-        assert_eq!(app.state.pattern.chord_data[0].count(step), 0);
+        assert_eq!(app.state.pattern.chord_data[0].count(step), 1);
+        assert_eq!(app.state.pattern.chord_data[0].get_id(step, 0), kept);
     }
 
     #[test]

@@ -405,6 +405,17 @@ pub(crate) fn invoke_action(node: &MenuNode, editor: &mut Editor) {
     editor.mark_needs_redraw();
 }
 
+/// A Lisp expression reading `prop` (`:enabled-when`, `:on-select`, …) of the
+/// item `id` in the registered menu `menu` (`eseq.menus/definition`), for
+/// tests that call a menu's predicates and actions.
+#[cfg(test)]
+pub(crate) fn menu_item_prop(menu: &str, id: &str, prop: &str) -> String {
+    format!(
+        "(let ((menu (first (filter (lambda (m) (= (get m :id) \"{menu}\")) (eseq.menus/definition))))) \
+           (get (first (filter (lambda (i) (and i (= (get i :id) \"{id}\"))) (get menu :items))) :{prop}))"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

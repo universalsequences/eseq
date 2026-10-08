@@ -132,6 +132,8 @@ mod live_input_tests;
 mod live_params_tests;
 #[cfg(test)]
 mod node_meter_tests;
+#[cfg(test)]
+mod unconnected_output_tests;
 
 #[cfg(test)]
 pub(crate) fn resolve_snapshot_instrument_defaults_for_test(

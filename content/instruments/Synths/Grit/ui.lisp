@@ -9,7 +9,7 @@
           (eseq.effects.mnm-surface/mnm-caption "The noise clock follows the note at eight times its frequency."))))
     (eseq.effects.mnm-surface/mnm-option "osc_wave" '("Triangle" "Saw" "Pulse" "Saw x Pulse" "Clocked noise"))))
 (defwidget grit-interlace-view
-  :width 35.2 :height 3.5 :state (rate depth) :bindable (rate depth)
+  :width 35.2 :height 3.5 :state (rate depth)
   :shader
   (let ((u (/ (+ (/ x aspect) 1) 2))
         (level (if (< (fract (* u rate 0.25)) 0.5) 1 (- 1 depth)))

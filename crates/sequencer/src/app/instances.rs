@@ -2001,9 +2001,10 @@ mod tests {
             "pad for pad; pad 1 is kept although kit 2 lacks it"
         );
         assert_eq!(published_owner(&app, a), Some(2));
+        let memberships = app.state.rack_memberships();
         assert_eq!(
-            runtime.eval_str("(len (graph-route-tracks a))").unwrap(),
-            Some(Value::Number(1.0)),
+            crate::graph::rack_members(&memberships, 2).map(<[usize]>::len),
+            Some(1),
             "kit 2 offers one route, so pad 1 reads as off in the panel"
         );
 

@@ -1,50 +1,5 @@
 use super::*;
 
-/// Build a Lisp Value::List of bools indicating which steps are selected.
-pub(crate) fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
-    let set = selected.lock().unwrap();
-    build_selection_value_from_set(&set)
-}
-
-/// Build a Lisp Value::List of bools from an already-held selection snapshot.
-pub(crate) fn build_selection_value_from_set(set: &HashSet<usize>) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
-        .collect();
-    Value::List(items)
-}
-
-/// Build list of available effect names from the effects/ directory.
-pub(crate) fn build_available_effects() -> Value {
-    let names = sequencer::lisp_host::list_saved_effects();
-    let items: Vec<Rc<RefCell<Value>>> = names
-        .into_iter()
-        .map(|n| Rc::new(RefCell::new(Value::String(n))))
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_available_builtin_effects() -> Value {
-    let items = sequencer::effects::builtin_effect_names()
-        .into_iter()
-        .map(|name| Rc::new(RefCell::new(Value::String(name.to_string()))))
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_available_midi_effects() -> Value {
-    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
-        .into_iter()
-        .map(|desc| desc.name)
-        .collect();
-    names.sort();
-    let items: Vec<Rc<RefCell<Value>>> = names
-        .into_iter()
-        .map(|name| Rc::new(RefCell::new(Value::String(name))))
-        .collect();
-    Value::List(items)
-}
-
 pub(crate) fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str) -> Option<usize> {
     sequencer::lisp_host::load_midi_fx_descriptor(fx_name)
         .and_then(|desc| desc.params.get(param_idx).cloned())
@@ -75,61 +30,57 @@ pub(crate) fn meter_display_level(peak: f32) -> f64 {
     quantize_meter_level(master_meter_level(peak))
 }
 
-/// Publish the loaded scene and its bank topology before resetting presentation
-/// state. This is a project replacement boundary, not a playback update.
-pub(crate) fn sync_project_scene_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
-    sync_pattern_state(rt, state);
-    // Load completion renders before the next sync_song_state pass. The bank
-    // reset must resolve against this project's spans, not the previous ones.
-    let banks = state.with_project_scenes(|scenes| {
-        super::song_state::build_scene_banks_value(scenes.scene_banks())
-    });
-    rt.set_reactive("SEQ", "scene-banks", banks);
-    for field in ["scene-bank-view-generation", "rack-panel-view-generation"] {
-        let generation = match rt.reactive_field_value("SEQ", field) {
-            Some(Value::Number(value)) => *value,
-            _ => 0.0,
-        };
-        rt.set_reactive("SEQ", field, Value::Number(generation + 1.0));
+/// The rack panel's view state reset on a project replacement
+/// (`content/ui/effects/state.lisp`).
+const RESET_RACK_PANEL_VIEWS: &str = "eseq.effects.state/reset-rack-panel-views!";
+
+/// A project replaced the previous one (a load, a new project): publish its
+/// patterns and forget the rack panels' views (they are keyed by track ids,
+/// which restart with every project). Not a playback update. The scene bank
+/// view resets through the host kinds: a load replaces every bank instance.
+pub(crate) fn sync_project_replacement(rt: &mut Runtime, state: &Arc<SequencerState>) {
+    sync_scene_slot_state(rt, state);
+    if rt.has_global(RESET_RACK_PANEL_VIEWS) {
+        if let Err(error) = rt.invoke_global(RESET_RACK_PANEL_VIEWS, Vec::new()) {
+            eprintln!("[project] could not reset the rack panel views: {error:?}");
+        }
     }
 }
 
-pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {
-    rt.set_reactive(
-        "SEQ",
-        "current-project-name",
-        Value::String(app.current_project_name.clone().unwrap_or_default()),
-    );
-    rt.set_reactive("SEQ", "sound-presets", build_sound_presets_value());
-    rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
+/// Re-list the saved Sounds and kits into the presented record (the
+/// `browser.sound-presets` / `kit-presets` source).
+pub(crate) fn record_preset_listings() {
+    record_sound_presets();
+    record_kit_presets();
 }
 
-/// Builds `SEQ.kit-presets`: the drum-rack kits the browser's Kits tab lists
-/// (docs/drum-rack-v2-spec.md, "Polish"). One entry per `.kit` file, with the
-/// pad count so a kit reads as a kit and not as another Sound.
-pub(crate) fn build_kit_presets_value() -> Value {
+/// Lists the drum-rack kits the browser's Kits tab shows
+/// (docs/drum-rack-v2-spec.md, "Polish") into the presented record, the
+/// `browser.kit-presets` source. One entry per `.kit` file, with the pad
+/// count so a kit reads as a kit and not as another Sound.
+pub(crate) fn record_kit_presets() {
     let kits = sequencer::project::list_kit_presets().unwrap_or_default();
-    list_value(kits.into_iter().filter_map(|path| {
-        let kit = sequencer::project::load_kit_preset(&path).ok()?;
-        let label = if kit.metadata.name.trim().is_empty() {
-            path.file_stem()?.to_str()?.to_string()
-        } else {
-            kit.metadata.name
-        };
-        Some(map_value([
-            ("kind", Value::String("kit".to_string())),
-            ("icon", Value::Keyword("sampler".to_string())),
-            ("label", Value::String(label.clone())),
-            ("name", Value::String(label)),
-            ("path", Value::String(path.to_string_lossy().to_string())),
-            ("pads", Value::Number(kit.pads.len() as f64)),
-            ("author", Value::String(kit.metadata.author)),
-            (
-                "tags",
-                list_value(kit.metadata.tags.into_iter().map(Value::String)),
-            ),
-        ]))
-    }))
+    let files = kits
+        .into_iter()
+        .filter_map(|path| {
+            let kit = sequencer::project::load_kit_preset(&path).ok()?;
+            let name = if kit.metadata.name.trim().is_empty() {
+                path.file_stem()?.to_str()?.to_string()
+            } else {
+                kit.metadata.name
+            };
+            Some(crate::presented::PresetFile {
+                file_type: "kit",
+                icon: "sampler",
+                name,
+                path: path.to_string_lossy().to_string(),
+                pads: kit.pads.len(),
+                author: kit.metadata.author,
+                tags: kit.metadata.tags,
+            })
+        })
+        .collect();
+    crate::presented::present_kit_presets(files);
 }
 
 /// Browser icon for a saved Sound. Every Sound is serialized as a rack track,
@@ -153,29 +104,32 @@ pub(crate) fn sound_preset_icon(preset: &sequencer::project::ProjectSoundPreset)
     }
 }
 
-pub(crate) fn build_sound_presets_value() -> Value {
+/// Lists the saved Sounds the browser's Sounds tab shows into the presented
+/// record, the `browser.sound-presets` source.
+pub(crate) fn record_sound_presets() {
     let sounds = sequencer::project::list_sound_presets().unwrap_or_default();
-    list_value(sounds.into_iter().filter_map(|path| {
-        let preset = sequencer::project::load_sound_preset(&path).ok()?;
-        let icon = sound_preset_icon(&preset);
-        let label = if preset.metadata.name.trim().is_empty() {
-            path.file_stem()?.to_str()?.to_string()
-        } else {
-            preset.metadata.name
-        };
-        Some(map_value([
-            ("kind", Value::String("sound".to_string())),
-            ("icon", Value::Keyword(icon.to_string())),
-            ("label", Value::String(label.clone())),
-            ("name", Value::String(label)),
-            ("path", Value::String(path.to_string_lossy().to_string())),
-            ("author", Value::String(preset.metadata.author)),
-            (
-                "tags",
-                list_value(preset.metadata.tags.into_iter().map(Value::String)),
-            ),
-        ]))
-    }))
+    let files = sounds
+        .into_iter()
+        .filter_map(|path| {
+            let preset = sequencer::project::load_sound_preset(&path).ok()?;
+            let icon = sound_preset_icon(&preset);
+            let name = if preset.metadata.name.trim().is_empty() {
+                path.file_stem()?.to_str()?.to_string()
+            } else {
+                preset.metadata.name
+            };
+            Some(crate::presented::PresetFile {
+                file_type: "sound",
+                icon,
+                name,
+                path: path.to_string_lossy().to_string(),
+                pads: 0,
+                author: preset.metadata.author,
+                tags: preset.metadata.tags,
+            })
+        })
+        .collect();
+    crate::presented::present_sound_presets(files);
 }
 
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
@@ -403,85 +357,105 @@ pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Op
     }
 }
 
-pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usize) {
-    // Publish each slot independently of the edit cursor: only the explicit
+/// The loaded preset name of the first `count` tracks ("" when none):
+/// the `track` host kind's `preset`.
+pub(crate) fn track_loaded_presets(app: &app::App, count: usize) -> Vec<String> {
+    let sound = app.state.pattern.track_sound_state.lock().unwrap();
+    (0..count)
+        .map(|t| {
+            sound
+                .get(t)
+                .and_then(|meta| meta.loaded_preset.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Record what the browser sidebar shows for `track` (the `browser` host
+/// kind reads it through `presented`).
+pub(crate) fn sync_sidebar_browser(app: &app::App, track: usize) {
+    crate::presented::present_sidebar(sidebar_browser(app, track));
+}
+
+/// What the browser sidebar shows for `track`: its instrument (a sampler's
+/// sample), the presets it can load, a drum rack's slots' presets, and the
+/// project's instrument engines. The `browser` host kind's source (through
+/// `presented`).
+fn sidebar_browser(app: &app::App, track: usize) -> crate::presented::Sidebar {
+    use crate::presented::{Sidebar, SlotPresets};
+    // Each slot independently of the edit cursor: only the explicit
     // delete-target selection opts the browser into slot presets.
     let slots = {
         let racks = app.state.pattern.rack_tracks.lock().unwrap();
-        racks.get(track).and_then(Option::as_ref).map(|rack| {
-            rack.slots.iter().enumerate().map(|(slot_idx, slot)| (
-                slot_idx,
-                slot.instrument_type,
-                rack_slot_raw_name(app, slot_idx, slot),
-                slot.track_sound_state.loaded_preset.clone().unwrap_or_default(),
-            )).collect::<Vec<_>>()
-        }).unwrap_or_default()
+        racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| {
+                rack.slots
+                    .iter()
+                    .enumerate()
+                    .map(|(slot_idx, slot)| {
+                        (
+                            slot_idx,
+                            slot.instrument_type,
+                            rack_slot_raw_name(app, slot_idx, slot),
+                            slot.track_sound_state
+                                .loaded_preset
+                                .clone()
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     };
-    let slot_contexts = slots.into_iter().map(|(slot_idx, kind, name, loaded_preset)| {
-        let (mut presets, user_presets) = if kind == sequencer::sequencer::InstrumentType::Custom {
-            (
-                sequencer::lisp_host::load_instrument_preset_names(&name).unwrap_or_default(),
-                sequencer::lisp_host::load_user_instrument_preset_names(&name).unwrap_or_default(),
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        presets.sort();
-        map_value([
-            ("track", Value::Number(track as f64)),
-            ("slot", Value::Number(slot_idx as f64)),
-            ("instrument", Value::String(name.clone())),
-            ("display-name", Value::String(instrument_display_name(&name))),
-            ("presets", build_string_list(&presets)),
-            ("user-presets", build_string_list(&user_presets)),
-            ("loaded-preset", Value::String(loaded_preset)),
-        ])
-    }).collect::<Vec<_>>();
-    rt.set_reactive("SEQ", "sidebar-rack-slot-presets", list_value(slot_contexts));
-    rt.set_reactive(
-        "SEQ",
-        "project-instrument-engines",
-        build_string_list(&project_instrument_engine_names(app)),
-    );
-    if app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Sampler)
-    {
-        let selected_sample = app
+    let slots = slots
+        .into_iter()
+        .map(|(slot, kind, name, preset)| {
+            let (mut presets, user_presets) = if kind
+                == sequencer::sequencer::InstrumentType::Custom
+            {
+                (
+                    sequencer::lisp_host::load_instrument_preset_names(&name).unwrap_or_default(),
+                    sequencer::lisp_host::load_user_instrument_preset_names(&name)
+                        .unwrap_or_default(),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            presets.sort();
+            SlotPresets {
+                track,
+                slot,
+                instrument_label: instrument_display_name(&name),
+                instrument: name,
+                presets,
+                user_presets,
+                preset,
+            }
+        })
+        .collect();
+    let engines = project_instrument_engine_names(app);
+    let instrument_type = app.graph.track_instrument_types.get(track);
+    if instrument_type == Some(&sequencer::sequencer::InstrumentType::Sampler) {
+        let sample = app
             .sampler_path_for_track(track)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default();
-        rt.set_reactive("SEQ", "sidebar-kind", Value::String("sampler".to_string()));
-        rt.set_reactive(
-            "SEQ",
-            "sidebar-instrument-name",
-            Value::String(String::new()),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "sidebar-instrument-display-name",
-            Value::String(String::new()),
-        );
-        rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(String::new()));
-        rt.set_reactive("SEQ", "sidebar-track-index", Value::Number(track as f64));
-        rt.set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String(selected_sample),
-        );
-        rt.set_reactive("SEQ", "sidebar-presets", Value::List(vec![]));
-        rt.set_reactive("SEQ", "sidebar-user-presets", Value::List(vec![]));
-        rt.set_reactive("SEQ", "sidebar-preset-tree", Value::List(vec![]));
-        return;
+        return Sidebar {
+            track,
+            sample,
+            engines,
+            slots,
+            ..Sidebar::default()
+        };
     }
-
-    let is_rack = app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Rack);
-    let instrument_name = if is_rack {
+    let instrument = if instrument_type == Some(&sequencer::sequencer::InstrumentType::Rack) {
         app.tracks.get(track).cloned().unwrap_or_default()
     } else {
         current_custom_instrument_name(app, track).unwrap_or_default()
     };
-    let loaded_preset = app
+    let preset = app
         .state
         .pattern
         .track_sound_state
@@ -490,48 +464,22 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         .get(track)
         .and_then(|meta| meta.loaded_preset.clone())
         .unwrap_or_default();
-    let preset_items = visible_preset_items_for_track(app, track);
-    let user_preset_items = visible_user_preset_items_for_track(app, track);
-
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-kind",
-        Value::String(if app.graph.track_instrument_types.get(track)
-            == Some(&sequencer::sequencer::InstrumentType::Empty)
-        { "empty" } else { "instrument" }.to_string()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-instrument-name",
-        Value::String(instrument_name.clone()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-instrument-display-name",
-        Value::String(instrument_display_name(&instrument_name)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-loaded-preset",
-        Value::String(loaded_preset.clone()),
-    );
-    rt.set_reactive("SEQ", "sidebar-track-index", Value::Number(track as f64));
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-selected-sample",
-        Value::String(String::new()),
-    );
-    rt.set_reactive("SEQ", "sidebar-presets", build_string_list(&preset_items));
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-user-presets",
-        build_string_list(&user_preset_items),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-preset-tree",
-        build_flat_tree_items(&preset_items),
-    );
+    Sidebar {
+        track,
+        instrument_kind: if instrument_type == Some(&sequencer::sequencer::InstrumentType::Empty) {
+            "empty"
+        } else {
+            "instrument"
+        },
+        instrument_label: instrument_display_name(&instrument),
+        instrument,
+        preset,
+        presets: visible_preset_items_for_track(app, track),
+        user_presets: visible_user_preset_items_for_track(app, track),
+        sample: String::new(),
+        engines,
+        slots,
+    }
 }
 
 pub(crate) fn load_instrument_preset_into_track(
@@ -748,247 +696,37 @@ pub(crate) fn extract_usize_list_from_payload(payload: &Value, key: &str) -> Vec
     out
 }
 
-/// Publish the poly/voices fields the *track* panel, mixer strip and
-/// instrument header read. Split out so a rack-slot voice edit can republish
-/// them: for a rack those fields show the selected slot, and a stale value
-/// left the *track* voices picker pinned at its old number while dragging.
-pub(crate) fn sync_track_polyphony_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-) -> bool {
-    let mut dirty = false;
-    let tp = &state.pattern.track_params[track];
-    // For a Rack track, playback polyphony is governed per-slot
-    // (RackSlotSnapshot::max_polyphony, read by fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) — the track-level TrackParams poly/voices
-    // fields below are never consulted for Sampler/Custom rack slots. Surface
-    // the *selected slot's* values here (and which slot they'd be writing to)
-    // so this panel's poly/voices controls can be routed to the right place
-    // instead of silently editing a value playback ignores.
-    let rack_slot_poly = (app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Rack))
-    .then(|| {
-        let rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .cloned()
-            .flatten()?;
-        let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
-        let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
-        Some((selected_slot, max_polyphony))
-    })
-    .flatten();
-    dirty |= changed(rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some())));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-rack-slot-idx",
-        Value::Number(rack_slot_poly.map(|(slot_idx, _)| slot_idx).unwrap_or(0) as f64),
-    ));
-    let (tp_poly, max_polyphony) = match rack_slot_poly {
-        Some((_, max_polyphony)) => (max_polyphony > 1, max_polyphony),
-        // Non-rack tracks: `is_polyphonic` is its own independently-toggled
-        // flag, distinct from the voice-count value — don't derive it from
-        // max_polyphony or the toggle button's state gets stomped every
-        // render.
-        None => (tp.is_polyphonic(), tp.get_max_polyphony()),
-    };
-    dirty |= changed(rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly)));
-    // Rack tracks: every slot's note-on path (fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
-    // voice priority, with "mono" decided per slot by its max_polyphony. So a
-    // rack slot at 1 voice gets legato from this same track-level control.
-    dirty |= changed(rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(matches!(
+/// A drum rack track's selected slot and that slot's voice count; `None`
+/// for any other track (`selection.rack-slot`).
+pub(crate) fn rack_slot_selection(app: &app::App, track: usize) -> Option<(usize, usize)> {
+    if app.graph.track_instrument_types.get(track)
+        != Some(&sequencer::sequencer::InstrumentType::Rack)
+    {
+        return None;
+    }
+    let rack = app
+        .state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .flatten()?;
+    let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
+    let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
+    Some((selected_slot, max_polyphony))
+}
+
+/// Whether the track's instrument honours voice priority and mono trigger
+/// (`track.supports-mono-trigger`): rack
+/// slots read the parent track's.
+pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool {
+    matches!(
         app.graph.track_instrument_types.get(track),
         Some(sequencer::sequencer::InstrumentType::Custom)
             | Some(sequencer::sequencer::InstrumentType::Rack)
-    ))));
-    dirty |= changed(rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
-        match tp.get_voice_priority() {
-            sequencer::sequencer::VoicePriority::Last => "Last",
-            sequencer::sequencer::VoicePriority::High => "High",
-            sequencer::sequencer::VoicePriority::Low => "Low",
-        }.to_string(),
-    )));
-    dirty |= changed(rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
-        match tp.get_mono_trigger() {
-            sequencer::sequencer::MonoTrigger::Retrig => "retrig",
-            sequencer::sequencer::MonoTrigger::Legato => "legato",
-        }.to_string(),
-    )));
-    dirty |= changed(rt.set_reactive(
-        "SEQ",
-        "tp-max-polyphony",
-        Value::Number(max_polyphony as f64),
-    ));
-    dirty
-}
-
-fn changed(result: ReactiveSetResult) -> bool {
-    result.effects_dirty || result.widgets_dirty
-}
-
-/// Push individual tp-* reactive fields for the current track.
-fn sync_track_param_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) {
-    let tp = &state.pattern.track_params[track];
-    rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
-    rt.set_reactive(
-        "SEQ",
-        "tp-release",
-        Value::Number(tp.get_release_ms() as f64),
-    );
-    rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
-    rt.set_reactive("SEQ", "tp-output", build_track_output_label(app, tp));
-    rt.set_reactive(
-        "SEQ",
-        "track-output-options",
-        build_track_output_options(app),
-    );
-    rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
-    sync_current_track_bus_send_binding_fields(rt, app, state, track);
-    rt.set_reactive(
-        "SEQ",
-        "tp-num-steps",
-        Value::Number(tp.get_num_steps() as f64),
-    );
-    rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
-    let _ = sync_track_polyphony_fields(rt, app, state, track);
-    let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "tp-fts",
-        Value::String(fts_scale_label(tp)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-mute-group",
-        Value::String(mute_group_label(tp.get_mute_group())),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accumulator",
-        Value::String(selected_accumulator_name(app, track)),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accum-limit",
-        Value::Number(tp.get_accum_limit() as f64),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "tp-accum-mode",
-        Value::String(accum_mode_label(tp.get_accum_mode()).to_string()),
-    );
-    rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
-    rt.set_reactive("SEQ", "fts-options", build_fts_options());
-    for (key, value) in tuning_reactive_fields(tp) {
-        rt.set_reactive("SEQ", key, value);
-    }
-    rt.set_reactive("SEQ", "tuning-root-options", build_tuning_root_options());
-    rt.set_reactive("SEQ", "mute-group-options", build_mute_group_options());
-    rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
-}
-
-pub(crate) fn sync_track_params(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) {
-    sync_track_param_fields(rt, app, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "track-plocks",
-        build_track_plocks_value(app, state, track, selected),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-plock-variants",
-        build_track_plock_variants_value(state, track, selected),
-    );
-}
-
-/// Refreshes only track-parameter fields whose displayed value follows the
-/// selected step's p-lock. Selection changes should use this instead of
-/// rebuilding every track parameter and option list.
-pub(crate) fn sync_track_selection_param_binding_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> bool {
-    let tp = &state.pattern.track_params[track];
-    let selected_step = selected_plock_step(selected);
-    let display_step = displayed_plock_step(state, track, selected_step);
-    let swing = display_step
-        .and_then(|step| state.pattern.swing_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing());
-    let timebase = display_step
-        .and_then(|step| state.pattern.timebase_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_timebase());
-    let swing_resolution = display_step
-        .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
-        .unwrap_or_else(|| tp.get_swing_resolution());
-
-    let mut dirty = rt
-        .set_reactive("SEQ", "tp-swing", Value::Number(swing as f64))
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "tp-timebase",
-            Value::String(timebase.label().to_string()),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "tp-swing-resolution",
-            Value::String(swing_resolution.label().to_string()),
-        )
-        .effects_dirty;
-    dirty
-}
-
-pub(crate) fn sync_track_params_with_neural_selection(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-    selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
-    >,
-) {
-    sync_track_param_fields(rt, app, state, track, selected);
-    rt.set_reactive(
-        "SEQ",
-        "track-plocks",
-        build_track_plocks_value_with_neural_selection(
-            app,
-            state,
-            track,
-            selected,
-            selected_neural_neurons,
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-plock-variants",
-        build_track_plock_variants_value(state, track, selected),
-    );
+    )
 }
 
 #[cfg(test)]

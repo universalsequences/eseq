@@ -6,9 +6,9 @@
 ;; load-once (declared_modules) terminates the cycle — the
 ;; panel-widgets <-> process-panel precedent (spec §10, S3b wave 2).
 (import eseq.effects.custom-ui-runtime :as rt)
+(import eseq.effects.state :refer (section-of select-section!))
 
-(export custom-ui-selected-sections
-        custom-ui-set-active-adsr
+(export custom-ui-set-active-adsr
         custom-ui-adsr-stage-active?
         custom-ui-adsr-stage-active-binding
         custom-ui-selected-section-for-current-scope
@@ -24,38 +24,56 @@
 ;; per-instrument generated ui.lisp files (content/instruments/**),
 ;; and Rust-embedded lisp (custom_ui.rs codegen calls
 ;; `custom-ui-selected-section-for-current-scope`; state_values/tests.rs
-;; eval-reads `custom-ui-selected-sections` and renders `ui-panel` /
-;; `ui-section-select-callback`). Bare callers cannot see qualified names, so
+;; renders `ui-panel` / `ui-section-select-callback`). The section selected
+;; in each scope is eseq.effects.state's (section-of, select-section!). Bare callers cannot see qualified names, so
 ;; the spellings stay put and the alias is the flat->qualified bridge.
 ;; `ui-select-section` has no in-repo caller but is part of the generated-UI
 ;; vocabulary (two Rust harnesses stub it), so it keeps its public alias.
 
-(defstate custom-ui-selected-sections '())
+;; The ADSR stage a drag holds (an adsr-editor's :active), for the
+;; editor's readouts. Every micro-num / adsr-number readout of a custom UI
+;; shows the active stage, so a gesture must not re-render them (eseq-eeng:
+;; a multi-second first-drag stall on core/triton): a readout binds its
+;; editor's stage flags and reads nothing by value, so a drag only repaints
+;; the readouts it lights. An editor's flags are a view-local instance keyed
+;; by its custom UI's scope name and its section (sections are numbered from
+;; -1, the panel's own envelope; spec §3.1, eseq-0l17.73), so two custom UIs
+;; on screen sharing a section number keep their own flags. A readout's
+;; render creates its editor's instance (the constructor depends only on its
+;; key, which moves when the instance is created or dropped), so a drag
+;; finds it and re-renders nothing. Equal writes are no-ops, so mid-gesture
+;; drag events change nothing. Instances live as long as the session: a
+;; scope is a stable name (an instrument's, an effect slot's), and nothing
+;; tells this module when one goes away (section-choice keeps its entries
+;; the same way).
+(def-kind adsr-gesture
+  :key (scope section)
+  :state ((attack false) (decay false) (sustain false) (release false)))
 
-;; Gesture-only ADSR stage highlight. Deliberately NOT a defstate: every
-;; micro-num / adsr-number subtree in a custom UI shows the active stage, so
-;; a reactive write here re-rendered every one of those subtrees on the
-;; first drag event of each gesture (eseq-eeng: a multi-second first-drag
-;; stall on core/triton). The active stage is published as per-stage SEQV
-;; float fields instead (the *sel-sync* precedent in ui/seq-core-state.lisp:
-;; gesture-scoped state rides bound widget float channels, never
-;; effect-read state). Value-equal reactive-set writes short-circuit, so
-;; mid-gesture drag events publish nothing.
-(def active-adsr false)
+;; The stage flags of the editor in `section` of the custom UI named
+;; `scope-name` (nil, an unnamed harness scope, keys as "").
+(def adsr-gesture-of (scope-name section)
+  (adsr-gesture (or scope-name "") section))
 
-(def adsr-stage-active-field (scope-name section stage)
-  (str "custom-ui-adsr-active-" scope-name "-" section "-" stage))
+;; The gesture whose flags the last drag set (cleared when a drag elsewhere
+;; starts). Written by the drag handler only; nothing renders from it.
+(def held-gesture nil)
+
+;; The stage table: each stage's flag as a binding (a readout's :active) or
+;; read now (`binding` false).
+(def stage-flag (g stage binding)
+  (match stage
+    :attack (if binding #'g.attack g.attack)
+    :decay (if binding #'g.decay g.decay)
+    :sustain (if binding #'g.sustain g.sustain)
+    :release (if binding #'g.release g.release)
+    _ false))
 
 (def custom-ui-adsr-stage-active-binding (section stage)
-  (bind "SEQV" (adsr-stage-active-field (rt/custom-ui-scope-name) section stage)))
+  (stage-flag (adsr-gesture-of (rt/custom-ui-scope-name) section) stage true))
 
-(def adsr-active-same? (a b)
-  (if (and a b)
-    (and
-      (= (get a :scope) (get b :scope))
-      (= (get a :section) (get b :section))
-      (= (get a :stage) (get b :stage)))
-    (and (not a) (not b))))
+(def custom-ui-adsr-stage-active? (section stage)
+  (stage-flag (adsr-gesture-of (rt/custom-ui-scope-name) section) stage false))
 
 ;; Pinned to eseq.vanilla (spec §3 escape hatch, hazard i):
 ;; src/ui/custom_ui.rs:425,682 GENERATES lisp that writes this by bare name
@@ -66,55 +84,28 @@
 ;; writes (a bare read would intern this module's own slot and freeze — hazard m).
 (def eseq.vanilla/custom-ui-selected-section 0)
 
+;; A drag of scope's ADSR editor in `section` holds stage `active` (false: the
+;; drag ended).
 (def custom-ui-set-active-adsr (scope section active)
-  (let ((next
-          (if active
-            (dict :scope (get scope :name) :section section :stage active)
-            false)))
-    (if (adsr-active-same? active-adsr next)
-      false
-      (do
-        (if active-adsr
-          (reactive-set "SEQV"
-            (adsr-stage-active-field
-              (get active-adsr :scope) (get active-adsr :section) (get active-adsr :stage))
-            0)
-          false)
-        (if next
-          (reactive-set "SEQV"
-            (adsr-stage-active-field
-              (get next :scope) (get next :section) (get next :stage))
-            1)
-          false)
-        (set! active-adsr next)))))
+  (let ((g (adsr-gesture-of (get scope :name) section)))
+    (do
+      (when (and held-gesture (not (= held-gesture g)))
+        (set-stage-flags! held-gesture false))
+      (set-stage-flags! g active)
+      (set! held-gesture g))))
 
-(def custom-ui-adsr-stage-active? (section stage)
-  (if active-adsr
-    (and
-      (= (get active-adsr :scope) (rt/custom-ui-scope-name))
-      (= (get active-adsr :section) section)
-      (= (get active-adsr :stage) stage))
-    false))
-
-(def selected-section-for-scope (scope-name)
-  (let ((entry
-          (nth
-            (filter |item| (= (get item :scope) scope-name)
-              custom-ui-selected-sections)
-            0)))
-    (if entry (get entry :section) 0)))
+(def set-stage-flags! (g active)
+  (do
+    (set! g.attack (= active :attack))
+    (set! g.decay (= active :decay))
+    (set! g.sustain (= active :sustain))
+    (set! g.release (= active :release))))
 
 (def custom-ui-selected-section-for-current-scope ()
-  (selected-section-for-scope (rt/custom-ui-scope-name)))
+  (section-of (rt/custom-ui-scope-name) 0))
 
 (def set-selected-section-for-scope (scope-name section)
-  (if (= (selected-section-for-scope scope-name) section)
-    false
-    (set! custom-ui-selected-sections
-      (cons
-        (dict :scope scope-name :section section)
-        (filter |item| (not (= (get item :scope) scope-name))
-          custom-ui-selected-sections)))))
+  (select-section! scope-name section 0))
 
 (def custom-ui-select-section-in-scope (scope section)
   (set-selected-section-for-scope (get scope :name) section))

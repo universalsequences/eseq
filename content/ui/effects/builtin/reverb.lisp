@@ -28,12 +28,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 
@@ -83,9 +81,9 @@
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
         :track-color :mixer-strip-selected-bg
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -99,7 +97,7 @@
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p)
-        :value-scale 100 :decimals 0
+        :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
         :mod-offset (eseq.effects.param-controls/param-mod-offset p)
         :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -111,9 +109,9 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :text-color :dim
         :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :track-color :mixer-strip-selected-bg
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -139,7 +137,7 @@
           :noui true :font-size 10.2
           :text-color :accent
           :edit-color :yellow
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -152,10 +150,7 @@
 ;; Write several params at once. Rack/bus/midi chains go through the
 ;; per-param path; track chains use one batch host command so a drag lands
 ;; as a single undo step (`:commit` on release). `pairs` is a list of
-;; (param value) lists.
-(def update-dict (pair)
-  (dict :param-idx (get (nth pair 0) :idx) :value (nth pair 1)))
-
+;; (param value) lists, in display units.
 (def write-params (fx pairs commit?)
   (do
     (fx-clear-selected-effect)
@@ -165,10 +160,8 @@
       (host-command
         (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
         (dict :slot-idx (get fx :slot-idx)
-              :target-node-id (get fx :target-node-id)
-              :updates (if (nth pairs 1)
-                         (list (update-dict (nth pairs 0)) (update-dict (nth pairs 1)))
-                         (list (update-dict (nth pairs 0))))
+              :target-node-id (eseq.effects.devices/fx-node-id fx)
+              :updates (eseq.effects.param-controls/effect-param-updates fx pairs)
               :commit commit?)))))
 
 (def curve-drag? (event)
@@ -241,11 +234,12 @@
 
 (def mode-dropdown (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mode")
-    (dropdown :value (get p :text-value)
+    (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
       :options (get p :options)
       :debug-name "reverb-mode-dropdown"
       :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p v))
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :chevron-color :accent
       :badge-color :none

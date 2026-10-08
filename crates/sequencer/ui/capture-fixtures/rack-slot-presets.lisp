@@ -4,5 +4,5 @@
     :instruments ("factory:Synths/Digi Drift" "factory:Drums/808 Kick")))
 
 (def capture-after-sync ()
-  (set! eseq.vanilla/sbrowser-tab "presets")
+  (let ((v eseq.browser/browser-view)) (set! v.tab "presets"))
   (seq-set-delete-target :rack-slot (dict :track 0 :slot 0)))

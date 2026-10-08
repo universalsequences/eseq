@@ -20,30 +20,9 @@ fn custom_controls_keep_owners_across_step_selection() {
     )));
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-    editor.runtime_mut().register_reactive("SEQV", vec![], true);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("track-plocks", test_list(vec![])),
-            ("track-plock-variants", test_list(vec![])),
-            (
-                "available-effects",
-                test_list(vec![
-                    Value::String("dimension-d-chorus".to_string()),
-                    Value::String("lexilush".to_string()),
-                ]),
-            ),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            (
-                "bus-names",
-                test_list(vec![Value::String("Mix".to_string())]),
-            ),
-            (
-                "effects",
-                test_list(vec![
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(test_instrument_map())]),
+        effects: test_list(vec![
                     Value::Map(test_fx_map(
                         "dimension-d-chorus",
                         0,
@@ -51,23 +30,20 @@ fn custom_controls_keep_owners_across_step_selection() {
                     )),
                     Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
                 ]),
-            ),
-            ("midi-effects", test_list(vec![])),
-            (
-                "instrument-panel",
-                test_list(vec![Value::Map(test_instrument_map())]),
-            ),
-            ("bus-effects", test_list(vec![test_list(vec![])])),
-        ],
-        true,
-    );
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![test_list(vec![])]),
+    };
+    seed_values(vec![
+        ("track-plocks", test_list(vec![])),
+        ("track-plock-variants", test_list(vec![])),
+    ]);
     editor
             .runtime_mut()
             .eval_str(
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
@@ -84,6 +60,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         .eval_str(&custom_audio_ui_source)
         .expect("load initial custom audio FX UI");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor
         .runtime_mut()
         .eval_str(&custom_instrument_ui_source)
@@ -211,9 +188,8 @@ fn custom_controls_keep_owners_across_step_selection() {
         } else {
             vec![]
         };
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plocks", test_list(rows));
+        seed_value("track-plocks", test_list(rows));
+        seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("selected control layout");
@@ -253,19 +229,19 @@ fn custom_controls_keep_owners_across_step_selection() {
                 "{key}"
             );
             assert_eq!(value_map_number(payload, "value"), Some(value), "{key}");
+            // A knob binds its lock state (param.locked): read the binding.
             assert_eq!(
-                control.props.get("plock-active"),
-                Some(&Value::Number(
-                    if is_selected && (!effect_only || target == "effect") {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                )),
+                eseqlisp::widget_render::get_f32_prop(&control.props, "plock-active", f32::NAN),
+                if is_selected && (!effect_only || target == "effect") {
+                    1.0
+                } else {
+                    0.0
+                },
                 "{key} must follow its own lock projection"
             );
             assert!(
-                matches!(control.props.get("value"), Some(Value::Number(value)) if value.is_finite()),
+                eseqlisp::widget_render::get_f32_prop(&control.props, "value", f32::NAN)
+                    .is_finite(),
                 "{key} must retain its value binding after selection changes"
             );
             if target == "effect" {

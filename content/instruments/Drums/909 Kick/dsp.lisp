@@ -725,3 +725,9 @@
 (def faded (fade-stage toned triggered fade_v))
 
 (out faded 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 faded faded) 2 @name amp @amp true)

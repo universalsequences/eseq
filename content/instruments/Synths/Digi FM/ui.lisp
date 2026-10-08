@@ -33,7 +33,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
@@ -53,7 +53,7 @@
             :value-index-offset (get p :min) :options options
             :text-color ink :chevron-color ink :badge-color :transparent
             :bg-color surface :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -65,7 +65,7 @@
 (def df-switch (section name title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :width 4.3 :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (df-ink) :dim)
         :background-color (if on (df-accent) :instrument-control-bg)
@@ -84,7 +84,7 @@
 
 (defwidget df-routing
   :width 7.8 :height 1.65
-  :state (mode selected) :bindable (selected)
+  :state (mode selected)
   :shader
   (let ((ink (if (> selected .5) :control-on-bg :control-on-fg)))
     (sdf/layer
@@ -162,7 +162,7 @@
 )))
 (defwidget df-spectrum
   :width 32 :height 4.7
-  :state (harm) :bindable (harm)
+  :state (harm)
   :shader
   (let ((position (abs harm)))
     (sdf/layer
@@ -266,7 +266,7 @@
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "df-algorithm-" index)
       (v-stack :gap 0.05
         (label (str index) :width 7.8 :height 0.55 :font-size 7.5 :v-align :center :color (df-ink) :bg :transparent)
-        (df-routing :mode index :selected (= (reactive-value (df-bound "algorithm" 2)) index)
+        (df-routing :mode index :selected (= (eseq.effects.custom-ui-runtime/custom-ui-param-value p) index)
         :width 7.8 :height 1.65 :debug-name (str "df-algorithm-" index)
         :on-click (lambda (x y r)
           (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p index)))))))

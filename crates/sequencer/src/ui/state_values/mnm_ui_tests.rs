@@ -34,24 +34,16 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(melt_inst)])),
-            ("bus-effects", test_list(vec![])),
-        ],
-        true,
-    );
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(melt_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()
@@ -59,7 +51,7 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -73,6 +65,7 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
         .eval_str(&custom_ui_source)
         .expect("load melt custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("melt fx lisp status after refresh: {status}");
@@ -100,11 +93,14 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
             controls.push(node);
         }
         for value in node.props.values() {
-            if let Value::ReactiveRef { field, .. } = value { fields.insert(field.clone()); }
+            if let Some(field) = bound_field(Some(value)) {
+                fields.insert(field);
+            }
         }
         for child in &node.children { visit(child, panel, controls, fields); }
     }
     let mut seen = std::collections::HashSet::new();
+    let mut base_notes = 0;
     for section in 0..pages {
         editor.runtime_mut().eval_str(&format!(
             "((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false)")).unwrap();
@@ -116,6 +112,7 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
         assert_finite_nonzero_rect(display, "context display");
         let mut controls = Vec::new();
         visit(panel, panel, &mut controls, &mut seen);
+        base_notes += check_base_note_controls(&mut editor, &controls, &format!("page {section}"));
         for control in controls {
             if control.widget_type == "adsr-editor" && (section == 2 || section == 3) {
                 let release = control.props.get("debug-name") == Some(&Value::String("mnm-release".into()));
@@ -183,7 +180,7 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
                 }
             }
             if matches!(control.widget_type.as_str(), "knob-number" | "number-picker")
-                && control.props.get("debug-name") != Some(&Value::String("mnm-base-note".into())) {
+                && !binds_base_note(control.props.get("value")) {
                 assert!(matches!(control.props.get("value"), Some(Value::ReactiveRef { .. })));
                 for locked in [false, true] {
                     editor.runtime_mut().register_native("seq-has-selection?", move |_args, _ctx| Ok(Value::Bool(locked)));
@@ -196,6 +193,7 @@ fn check_mnm_surface(instrument: &str, pages: usize) {
             }
         }
     }
+    assert!(base_notes >= 1, "a page shows the base-note row");
     for line in dsp.lines().map(str::trim).filter(|line| line.starts_with("(param ")) {
         let name = line.split_whitespace().nth(1).unwrap();
         assert!(seen.contains(&format!("mnm-test-{name}")), "unreachable parameter {name}");

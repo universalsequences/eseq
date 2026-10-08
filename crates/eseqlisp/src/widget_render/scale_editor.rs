@@ -355,6 +355,7 @@ impl WidgetDefinition for ScaleEditorWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         let degrees = degrees(&node.props);
         let bands = bands(node.rect, shows_labels(&node.props));
@@ -746,11 +747,16 @@ mod tests {
         assert_eq!(press(mid, KeyModifiers::ALT).0, "clear");
         let shifted = press(bands.bars.row + bands.bars.height * 0.36, KeyModifiers::SHIFT);
         assert_eq!(shifted.2 % 5.0, 0.0);
-        let Some(WidgetEvent::Custom(_)) = ScaleEditorWidget.double_click_event(&node, 0.5, mid)
+        let Some(WidgetEvent::Custom(_)) =
+            ScaleEditorWidget.double_click_event(&node, 0.5, mid, KeyModifiers::empty())
         else {
             panic!("double-click in the bars clears");
         };
-        assert!(ScaleEditorWidget.double_click_event(&node, 0.5, bands.stair.row).is_none());
+        assert!(
+            ScaleEditorWidget
+                .double_click_event(&node, 0.5, bands.stair.row, KeyModifiers::empty())
+                .is_none()
+        );
     }
 
     #[test]

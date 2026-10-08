@@ -386,9 +386,8 @@ impl App {
                 data.step_data[step][StepParam::Duration.index()] = notes[0].duration;
                 data.step_data[step][StepParam::Velocity.index()] = notes[0].velocity;
                 for note in notes {
-                    data.chord_snapshot.steps[step].push(note.transpose);
-                    data.chord_snapshot.durations[step].push(note.duration);
-                    data.chord_snapshot.delays[step].push(note.delay);
+                    data.chord_snapshot
+                        .push_note(step, note.transpose, note.duration, note.delay);
                 }
             }
             let pool = &mut scenes.track_pools[track];
@@ -427,7 +426,7 @@ impl App {
             current.scene_slots.clone(), Default::default());
         snapshot.transport.bpm = prepared.bpm;
         self.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
-            snapshot, steps: prepared.steps,
+            snapshot, steps: prepared.steps, span: (start, end),
         });
         Ok(())
     }

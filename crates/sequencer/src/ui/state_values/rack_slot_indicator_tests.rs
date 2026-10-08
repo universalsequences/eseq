@@ -8,33 +8,16 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
         let rack = racks[0].as_mut().unwrap();
         rack.slots.push(rack.slots[0].clone());
     }
-    let selected = Arc::new(Mutex::new(HashSet::new()));
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(160, 20);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("tp-gate", Value::Bool(false)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", build_instrument_panel_value(&app, 0, &selected)),
-            ("bus-effects", test_list(vec![])),
-            ("delete-target-version", Value::Number(0.0)),
-            ("track-plock-any", test_list(vec![])),
-        ],
-        true,
-    );
-    editor.runtime_mut().register_reactive("SEQV", vec![], true);
+    seed_values(vec![
+        ("tp-gate", Value::Bool(false)),
+        ("track-plock-any", test_list(vec![])),
+    ]);
     editor.runtime_mut().eval_str(r#"
         (def eseq.seq-core-state/selected-bus-name () "Mix")
         (def seq-has-selection? () false)
-        (def eseq.browser/sbrowser-editor-name "")
+        (def eseq.browser/clear-editor-name! () nil)
         (def eseq.browser/sample-selected-path () "")
         (def eseq.browser/add-selected-rack-layer () false)
         (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
@@ -45,6 +28,7 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
     register_test_delete_target_natives(&mut editor, 1);
     editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap())
         .expect("load rack panel");
+    seed_app_panels(&mut editor, &app, 0);
     editor.refresh_runtime_side_effects();
     let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
     editor.set_active_buffer(fx_id);
@@ -54,8 +38,8 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
 #[test]
 fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
     let (app, mut editor) = rack_slot_indicator_editor();
-    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
-    editor.runtime_mut().set_reactive("SEQ", "selected-steps", test_list(vec![]));
+    seed_value("current-track", Value::Number(0.0));
+    seed_value("selected-steps", test_list(vec![]));
     for locked_param in RackSlotParam::ALL {
         for locked in [true, false] {
             {
@@ -67,8 +51,9 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
                     slot.param_plocks.clear(9, locked_param);
                 }
             }
-            editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
-                build_track_plock_any_value(&app, &app.state, 0));
+            seed_value("track-plock-any", build_track_plock_any_value(&app, &app.state, 0));
+            // The slots' strip-locks, as the host kinds push them.
+            seed_app_panels(&mut editor, &app, 0);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("rack lock layout");
@@ -100,7 +85,7 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
                         }, 0, 0, 160, 20, col, row);
                     }
                     assert_eq!(editor.runtime_mut().eval_str(
-                        "(not (= eseq.effects.param-controls/param-plock-menu nil))"),
+                        "(let ((m eseq.effects.param-controls/plock-menu)) m.open)"),
                         Ok(Some(Value::Bool(expected))), "right-click {key}");
                     if expected {
                         editor.drain_host_commands();
@@ -128,7 +113,6 @@ fn rack_slot_plock_indicators_and_menus_follow_each_parameter() {
 #[test]
 fn rack_slot_macro_indicators_follow_mapping_changes() {
     let (mut app, mut editor) = rack_slot_indicator_editor();
-    let selected = Arc::new(Mutex::new(HashSet::new()));
     let macro_id = RackMacroId::from_index(0).unwrap();
     for mapped_param in RackSlotParam::ALL {
         app.map_rack_macro(0, macro_id, RackMacroMapping {
@@ -144,8 +128,7 @@ fn rack_slot_macro_indicators_follow_mapping_changes() {
             if !mapped {
                 assert!(app.unmap_rack_macro(0, macro_id, 0));
             }
-            editor.runtime_mut().set_reactive(
-                "SEQ", "instrument-panel", build_instrument_panel_value(&app, 0, &selected));
+            seed_app_panels(&mut editor, &app, 0);
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let layout = editor.widget_layout().expect("rack slot indicator layout");

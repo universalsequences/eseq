@@ -188,7 +188,9 @@ when the last graph disappears, push the empty values one final time so stale UI
 clears, then stay skipped. (A simple `was_live: bool` in `ctx.meters` handles this.)
 Also confirm whether `track-events` / `track-event-current-beat` are consumed by
 non-neural graph features (graph engine `:event` nodes) — if so, gate those two on
-their own liveness, not on neural liveness.
+their own liveness, not on neural liveness. (Both are gone since eseq-0l17.64: views
+read the observed-only `transport.track-events` / `track-events-beat`,
+kind-bindings spec §14.2s.)
 
 ### 5b. `sync_track_params_with_neural_selection` (114 ms) + `sync_fx_param_binding_fields_with_neural_selection` (73 ms) — change-gate
 

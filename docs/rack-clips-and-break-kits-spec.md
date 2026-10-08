@@ -1,5 +1,7 @@
 # Rack Clips and Break Kits
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 **Status:** rev 4. All four phases built: §7.1 kit bus chain, §5 rack-owned
 sequencers, §2–4 + §6 rack clips, §7 break kits.
 **Epic:** `bd show eseq-172r` (children .1 bus chain, .2 rack-owned sequencers,
@@ -365,9 +367,9 @@ or nil, and `(graph-route-tracks handle)` → the member track index behind
 each route option (nil when project-owned). Route option *n* is always route
 value *n* with "Off" last, and `bind-graph … :route options` indexes by that
 value rather than by label, so the demo builds pad labels and colours from
-the member tracks and the rest of its route code is unchanged. The UI also
-publishes `SEQ.graph-sequencers` (`{id name owner-rack}` per instance) for
-UI that lists instances, such as the rack menu.
+the member tracks and the rest of its route code is unchanged. UI that
+lists instances, such as the rack menu, reads them as the `graph` kind
+(`project.graphs`: `gid`, `name`, `owner`; kind-bindings spec §14.2k).
 
 ### 5.4 Route semantics (built)
 
@@ -392,18 +394,19 @@ instead of adding a second project-owned instance under the same name.
 ## 6. UI — BUILT (eseq-172r.3)
 
 Built as described, with two exceptions called out in §6.1. The bank reaches the
-UI as one reactive field, `SEQ.rack-clips`
-(`{group-id, active, clips: [{id name}]}` per rack, published by
-`build_rack_clips_value` from `sync_pattern_state` and `sync_rack_pad_map`), and
-the Lisp side reads it through `eseq.drum-rack-v2/{clip-bank, clips, active-clip,
-has-clips?, launch-clip, save-clip-as, delete-clip, rename-clip,
-convert-to-clips}`. A rack absent from that field is legacy, which is how the UI
-decides between "Convert to clips" and the per-clip actions.
+UI as the `rack-clip` kind (kind-bindings spec §14.2e): `g.clips` (each clip's
+`cid`, `name`, `active` and `scenes`), `g.rack-clip` (the clip the current
+scene plays) and `g.legacy` (a rack without a bank), with the actions
+`launch-rack-clip!`, `silence-rack!`, `save-rack-clip-as!`, `delete-rack-clip!`
+and `convert-rack-to-clips!`. A legacy rack is how the UI decides between
+"Convert to clips" and the per-clip actions. (The legacy `SEQ.rack-clips` /
+`SEQ.rack-clip-banks` fields and the `eseq.drum-rack-v2` clip lookups were
+removed by eseq-0l17.19.)
 
 ### 6.1 Collapsed rack row in the sequencer
 
-Today a collapsed rack (`eseq.drum-rack-v2/collapsed?` in
-`content/ui/sequencer.lisp`, `group-block`) renders only the header row.
+Today a collapsed rack (`g.collapsed` in `content/ui/sequencer.lisp`,
+`group-block`) renders only the header row.
 Collapsed becomes useful: the row shows the rack's clip bank as a horizontal
 run of clip cells, one per clip, plus a `+` cell. The cell for the clip the
 current scene points at is lit; `None` shows no lit cell. Clicking a cell
@@ -438,7 +441,8 @@ unchanged, so nothing else in the UI moves.
 **Not built:** drag reorder of clip cells (the run renders from a reactive field
 with no drop target; `ProjectScenes::reorder_rack_clip` exists for when it is
 wired). The activity strip is built and reuses the per-track
-`rack-pad-trigger-<track>` bindings the pad map already reads, so it needed no
+`rack-pad-trigger-<track>` bindings the pad map already reads (since
+eseq-0l17.66 `pad.triggered`), so it needed no
 new host feed.
 
 ### 6.2 Mixer
@@ -510,10 +514,10 @@ a kit's group processing is part of the kit.
 
 "Export as kit…" in the rack's mixer menu opens the existing kit save panel
 (`content/ui/browser.lisp`), now carrying a scene checklist. The default
-selection is every scene the rack actually plays, read from the per-scene
-pointers `SEQ.rack-clips` publishes (`scene-clips`); a LEGACY rack has no
-bank to read, so its checklist defaults to every scene and the export drops
-the ones it finds empty. Unticking everything saves the old kind of kit.
+selection is every scene the rack actually plays, read from its clips'
+scenes (`rc.scenes`, `eseq.drum-rack-v2/scene-plays-clip?`); a LEGACY rack
+has no bank to read, so its checklist defaults to every scene and the export
+drops the ones it finds empty. Unticking everything saves the old kind of kit.
 
 Each chosen scene becomes clip 1..n, in scene order, named after the scene and
 carrying that scene's rack-owned overrides. A legacy rack is converted to clips

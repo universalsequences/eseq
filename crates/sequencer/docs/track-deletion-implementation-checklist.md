@@ -1,5 +1,7 @@
 # Track Deletion Implementation Checklist
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 This checklist breaks track deletion into implementation phases with exact files, target functions, order of operations, and required verification.
 
 ## Goal

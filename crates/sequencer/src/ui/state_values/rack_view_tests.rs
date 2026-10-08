@@ -2,13 +2,8 @@ use super::*;
 use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget};
 
 fn show_track(editor: &mut Editor, app: &app::App, track: usize) {
-    let selected = Arc::new(Mutex::new(HashSet::new()));
-    let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "current-track", Value::Number(track as f64));
-    rt.set_reactive("SEQ", "instrument-panel", build_instrument_panel_value(app, track, &selected));
-    sync_rack_macro_value_fields(rt, app, track, None);
-    sync_rack_panel_param_value_fields(rt, app, track, None);
-    rt.run_reactive_cycle();
+    // The rack's devices and macros, as the host kinds push them.
+    seed_app_panels(editor, app, track);
     editor.refresh_runtime_side_effects();
 }
 
@@ -60,7 +55,6 @@ fn rack_views_follow_stable_tracks_and_reset_on_project_replacement() {
         racks.resize(2, None);
         racks[1] = racks[0].clone();
     }
-    editor.runtime_mut().set_reactive("SEQ", "num-tracks", Value::Number(2.0));
     show_track(&mut editor, &app, 0);
     assert_view(&mut editor, true, false, true);
     click_toggle(&mut editor, "rack-slot-list-view-toggle");
@@ -82,7 +76,7 @@ fn rack_views_follow_stable_tracks_and_reset_on_project_replacement() {
     show_track(&mut editor, &app, 0);
     assert_view(&mut editor, true, true, true);
 
-    sync_project_scene_state(editor.runtime_mut(), &app.state);
+    sync_project_replacement(editor.runtime_mut(), &app.state);
     editor.runtime_mut().run_reactive_cycle();
     assert_view(&mut editor, true, false, true);
     show_track(&mut editor, &app, 1);

@@ -511,10 +511,9 @@ pub fn render_loaded_instrument_for_test(
         manifest.host_signal_output_for_input(input).map(|output| (input.channel, output))
     }).collect();
     let mut rendered = Vec::with_capacity(options.frames);
-    let audio_channels: Vec<usize> = (0..n_outputs)
-        .filter(|&channel| manifest.amp_output_channel != Some(channel))
-        .filter(|&channel| !manifest.mod_outputs.iter().any(|m| m.channel == channel))
-        .collect();
+    // Mod outputs, the `@amp` flag and probe taps are never audio.
+    let audio_channels = manifest.audio_output_channels();
+    let rendered_channel = audio_channels.first().copied().unwrap_or(0);
     let mut audio_peaks = Vec::with_capacity(options.frames);
     let mut amp_flags = Vec::with_capacity(options.frames);
     let mut frames_done = 0usize;
@@ -585,7 +584,7 @@ pub fn render_loaded_instrument_for_test(
                 dgen_host_services_v1(),
             );
         }
-        rendered.extend_from_slice(&output_buffers[0]);
+        rendered.extend_from_slice(&output_buffers[rendered_channel]);
         for frame in 0..block {
             audio_peaks.push(
                 audio_channels
@@ -766,6 +765,12 @@ pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
 
     let n_inputs = manifest.n_inputs.max(2);
     let n_outputs = manifest.n_outputs.max(2);
+    // Stereo from the audio channels only: a probe tap on channel 1 of a mono
+    // effect must not become its right channel. A mono effect keeps a silent
+    // right channel, as before.
+    let audio_channels = manifest.audio_output_channels();
+    let left_channel = audio_channels.first().copied().unwrap_or(0);
+    let right_channel = audio_channels.get(1).copied();
     let mut rendered = Vec::with_capacity(options.frames * 2);
     let mut input_reference = Vec::with_capacity(options.frames * 2);
     let mut frames_done = 0usize;
@@ -851,8 +856,8 @@ pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
             );
         }
         for frame in 0..block {
-            rendered.push(output_buffers[0][frame]);
-            rendered.push(output_buffers[1][frame]);
+            rendered.push(output_buffers[left_channel][frame]);
+            rendered.push(right_channel.map_or(0.0, |channel| output_buffers[channel][frame]));
         }
         frames_done += block;
     }

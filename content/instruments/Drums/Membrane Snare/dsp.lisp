@@ -607,4 +607,11 @@
 (def dcy (+ (- dcin (read-history dcx1)) (* 0.998 (read-history dcy1))))
 (write-history dcx1 dcin)
 (write-history dcy1 dcy)
-(out (* dcy level-v vel-gain) 1 @name audio)
+(def voice_out (* dcy level-v vel-gain))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)

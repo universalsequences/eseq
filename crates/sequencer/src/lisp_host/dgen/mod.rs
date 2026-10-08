@@ -19,6 +19,7 @@ pub mod effect_compile;
 pub(crate) mod effect_latency;
 pub mod instrument_compile;
 pub mod instrument_storage;
+pub mod probe_capture;
 
 #[cfg(test)]
 mod dgen_host_services_tests;

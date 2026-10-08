@@ -7,40 +7,34 @@
 ;; transport UI into every VM that loads the importer (the wave-2 lesson that
 ;; broke 60 tests). Callers reach the names below through the identity compat
 ;; aliases instead — which is also why `pattern-control-style`, used by the
-;; converted `eseq.step-grid` and `eseq.sequencer`, is aliased rather than
-;; requalified at those call sites.
+;; converted `eseq.sequencer`, is aliased rather than requalified at its call
+;; sites.
 ;;
-;; Exactly one `import` (below). Every OTHER outbound reference is left bare:
-;; a Rust native (`seq-toggle-play`, `seq-set-bpm`, `seq-toggle-record`,
-;; `seq-toggle-master-recording`, `seq-song-back-to-song`, `host-command`,
-;; `bind-seq`), a function in ui/seq-panels.lisp (the panel toggles and the two
-;; view switches), or a name owned by a UI ROOT module reached through that
-;; root's own compat alias (`set-arrangement-cursor` → eseq.arrangement,
-;; `sbrowser-*` → eseq.browser). All of those are reached only from `on-click`
-;; lambdas — i.e. at event time, long after main.lisp has loaded everything —
-;; so the stage-3 late-binding heal covers them even though main.lisp loads
-;; this file (line 25) BEFORE seq-panels.lisp, sequencer.lisp and
-;; arrangement.lisp. A reference evaluated during the RENDER cannot rely on
-;; that; see the import note below.
+;; Every other outbound reference evaluated at event time is left bare: a
+;; Rust native (`host-command`), a function in ui/seq-panels.lisp (the panel
+;; toggles and the two view switches), or a name owned by a UI ROOT module
+;; reached through that root's own compat alias (`set-arrangement-cursor` →
+;; eseq.arrangement, `sbrowser-*` → eseq.browser). All of those are reached
+;; only from `on-click` lambdas — i.e. at event time, long after main.lisp has
+;; loaded everything. A reference evaluated during the RENDER cannot rely on
+;; that; see the eseq.seq-step-tabs import note below.
+;;
+;; Host state comes from eseq.kinds (docs/kind-bindings-spec.md): `transport`,
+;; `master`, `engine`, `song`, the banks and their scenes. A field read by
+;; value (`transport.sequence-rolling`) re-renders its subtree; a `#'` binding
+;; (`#'transport.playing` on an icon, `#'engine.cpu-load` on the readout)
+;; only repaints. The menus, the bank rename and the scene push are this
+;; view's own state: `:key ()` singletons below.
 ;;
 ;; The three panel-visibility reads (`samples-sidebar-visible`,
-;; `mixer-panel-visible`, `lower-panel-visible`) stay BARE. They are
-;; `defstate`s owned by `eseq.seq-core-state`, which main.lisp loads first;
-;; a bare read resolves through that module's identity alias into the *same*
-;; state node (compiler.rs `state_binding_for`'s compat-alias rung), so the
-;; reads stay reactive and hazard (m) does not apply.
-;;
-;; Hazard (n): no Rust harness slices this file's source — the single
-;; `crates/sequencer/src` mention of "ui/transport.lisp" is the
-;; `metal_seq_core_lisp_files_parse` file list, a whole-file parse — so the
-;; `:as` alias below is safe (a fragment eval would need the full dotted
-;; `eseq.seq-step-tabs/…` spelling instead).
+;; `mixer-panel-visible`, `lower-panel-visible`) are qualified reads of
+;; `defstate`s owned by `eseq.seq-core-state`, which main.lisp loads first.
 (module eseq.transport)
 ;; Compile-time edge (spec §4): the shared defstate keyspace + compat
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
 
-;; The ONE import, and it is load-bearing rather than cosmetic. The two view
+;; This import is load-bearing rather than cosmetic. The two view
 ;; buttons at the right edge call `seq-arrangement-view?` at RENDER time, and
 ;; main.lisp loads ui/seq-step-tabs.lisp (its owner) at line 41 — sixteen lines
 ;; AFTER this file. The transport's effect body runs once at load, so that call
@@ -54,10 +48,13 @@
 ;; state/accessor hub with no `effect-buffer`, not one of the four UI roots.
 (import eseq.seq-step-tabs :as tabs)
 
-;; Shared scene-bank view state (see the module header). A state/accessor
+;; Shared scene-bank view state (see that module's header). A state/accessor
 ;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
 ;; before the transport body runs.
-(import eseq.scene-banks)
+(import eseq.scene-banks :refer (scene-viewed-bank view-scene-bank! view-new-scene-bank!))
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed?))
+(import eseq.kinds :refer (transport master engine song project scenes banks launch!
+                           delete-scene! launch-quantize-options record-quantize-options))
 (import eseq.menus :as menus)
 (import eseq.application-menus)
 
@@ -67,10 +64,8 @@
         seq-switch-pattern
         seq-switch-relative
         seq-clone-pattern
-        seq-delete-pattern
         seq-reorder-scene-drop
-        scene-push-target
-        scene-push-value
+        scene-push
         scene-push-begin
         scene-push-drag
         scene-push-end
@@ -81,20 +76,19 @@
         transport-trailing)
 
 ;; Identity compat aliases (spec §10 slice 3). Each covers a flat caller that
-;; cannot see a qualified name; every one is a function or a `defstate`, both
-;; immune to hazard (m):
+;; cannot see a qualified name; every one is a function or a singleton
+;; instance, both immune to hazard (m):
 ;;   transport-stop, seq-set-scene-launch-quantize, seq-set-record-quantize,
 ;;   seq-switch-pattern, seq-reorder-scene-drop, scene-push-begin,
 ;;   scene-push-drag — evaluated by name from Rust tests in
 ;;   src/ui/state_values/tests.rs.
-;;   scene-push-target, scene-push-value — `defstate`s that flat callers WRITE:
-;;   ui/capture-fixtures/scene-push-transport.lisp and the
-;;   `(set! scene-push-target 1)` eval in state_values/tests.rs. The alias
-;;   covers the `state_bindings` keyspace too, so those writes still land on
-;;   this module's state node (no eseq.vanilla pin needed).
+;;   scene-push — the push gesture's view singleton, which
+;;   ui/capture-fixtures/scene-push-transport.lisp and state_values/tests.rs
+;;   write through a local (`(let ((p eseq.transport/scene-push)) (set!
+;;   p.target 1))`: a qualified name takes no dotted field).
 ;;   pattern-control-style — a write-once style `def` read bare by
-;;   ui/step-grid.lisp (eseq.step-grid) and ui/sequencer.lisp (eseq.sequencer).
-;;   Neither may import a UI root, so the alias is the supported edge.
+;;   ui/sequencer.lisp (eseq.sequencer), which may not import a UI root, so
+;;   the alias is the supported edge.
 
 ;; ── Shared container backgrounds ──
 ;; `defwidget` names live in their own flat keyspace (hazard e) and are left
@@ -158,7 +152,6 @@
   :width 10.5 :height 0.34
   :paint-margin 0.012
   :state (level)
-  :bindable (level)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
         (track (sdf/rounded-rect width height height))
@@ -216,7 +209,6 @@
 (defwidget pattern-pill-bg
   :width 1 :height 1
   :state (active push push-target scene)
-  :bindable (active)
   :paint-margin 0.3
   :shader
   (let ((push-amount (if (= scene push-target) push 0.0)))
@@ -526,9 +518,8 @@
 ;; when playback is already stopped. The cursor mirror makes the next Play
 ;; start at beat zero; -1 leaves no track-specific cursor line behind.
 (def transport-stop ()
-  (do
-    (if SEQ.playing (seq-toggle-play) nil)
-    (eseq.arrangement/set-cursor 0 -1)))
+  (when transport.playing (set! transport.playing false))
+  (eseq.arrangement/set-cursor 0 -1))
 
 (defwidget play-icon
   :width 2.5 :height 1.8
@@ -612,144 +603,112 @@
       (sdf/fill (sdf/circle 0.4)
         (material :color fg-col)))))
 
-(def scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
-
-(def record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+;; A label field the host has not published yet reads "": show its default.
+(def label-or (text default) (if (= text "") default text))
+(def launch-quantize () (label-or transport.launch-quantize "off"))
 
 (def seq-set-scene-launch-quantize (value)
-  (host-command "set-scene-launch-quantize" value))
+  (set! transport.launch-quantize value))
 
 (def seq-set-record-quantize (value)
-  (host-command "set-record-quantize" value))
+  (set! transport.record-quantize value))
 
 (def seq-switch-pattern (idx)
-  (host-command "switch-pattern"
-    (dict :idx idx :quantize (or SEQ.scene-launch-quantize "off"))))
+  (host-command "switch-pattern" (dict :idx idx :quantize (launch-quantize))))
 
 ;; Resolve relative movement in the host when commands are drained. Several
 ;; button presses in one MIDI batch must advance from each other's targets.
 (def seq-switch-relative (delta)
-  (host-command "switch-pattern-relative"
-    (dict :delta delta :quantize (or SEQ.scene-launch-quantize "off"))))
+  (host-command "switch-pattern-relative" (dict :delta delta :quantize (launch-quantize))))
 
-;; Scene-bank view state lives in eseq.scene-banks so the mixer clip grid
-;; (scene-banks spec 10.1) shares one viewed bank with this strip. These four
-;; are thin local spellings of that module's accessors; the writes below name
-;; the module's state directly.
-(def scene-banks ()
-  (eseq.scene-banks/scene-banks))
+;; ── Menus ──
+;; Each context menu is a `:key ()` singleton with `open`, `at` (where it
+;; opens) and what it targets (eseq.view-kit's open-menu! and menu-of).
 
-(def scene-bank-index-containing (scene)
-  (eseq.scene-banks/scene-bank-index-containing scene))
+;; ── Scene banks ──
+;; The viewed bank lives in eseq.scene-banks so the mixer clip grid
+;; (scene-banks spec 10.1) shares it with this strip. A bank or scene a menu
+;; or the rename holds can go stale (a project load, an undo, an edit from
+;; elsewhere) while it is open: the actions check it is still listed before
+;; sending its id.
 
-(def scene-viewed-bank-index ()
-  (eseq.scene-banks/scene-viewed-bank-index))
+(def scene-bank-labels () (map (lambda (b) b.label) (banks)))
 
-(def scene-viewed-bank ()
-  (eseq.scene-banks/scene-viewed-bank))
+(def bank-labelled (text) (first (filter (lambda (b) (= b.label text)) (banks))))
 
-(def scene-bank-labels ()
-  (reduce |labels bank|
-    (append labels (list (get bank :label)))
-    (list)
-    (scene-banks)))
+;; A bank's size, and the index its first scene has (or would have: banks
+;; are consecutive spans of the scene list, and a bank can be empty).
+(def bank-size (b) (len b.scenes))
+(def bank-offset (b)
+  (reduce |n x| (if (< x.index b.index) (+ n (bank-size x)) n) 0 (banks)))
+(def bank-full? (b) (>= (bank-size b) 24))
 
-(def scene-bank-index-for-label (label)
-  (let ((banks (scene-banks)))
-    (let ((matches (filter
-            (lambda (i) (= (get (nth banks i) :label) label))
-            (range 0 (len banks)))))
-      (if (> (len matches) 0) (nth matches 0) -1))))
-
-(def select-scene-bank (label)
-  (if (= label "New bank")
+(def select-scene-bank (text)
+  (if (= text "New bank")
     (do
-      ;; create-scene-bank appends. Keep the pending index unclamped until the
-      ;; host publishes the new SEQ.scene-banks entry, then the view lands on it.
-      (set! eseq.scene-banks/viewed-scene-bank-index (len (scene-banks)))
-      (set! eseq.scene-banks/viewed-scene-bank-pending-new true)
+      ;; create-scene-bank appends; the view lands on it once the host lists it.
+      (view-new-scene-bank!)
       (host-command "create-scene-bank" (dict)))
-    (let ((index (scene-bank-index-for-label label)))
-      (if (>= index 0)
-        (do
-          (set! eseq.scene-banks/viewed-scene-bank-pending-new false)
-          (set! eseq.scene-banks/viewed-scene-bank-index index))
-        nil))))
+    (let ((b (bank-labelled text)))
+      (when b (view-scene-bank! b)))))
 
-(def scene-playing-in-other-bank? ()
-  (not (= (scene-bank-index-containing SEQ.current-pattern)
-    (scene-viewed-bank-index))))
+;; The viewed bank's Rename / Delete menu, and its inline rename (`bank` is
+;; the bank being renamed, nil when none is).
+(def-kind bank-ops-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)))
 
-(defstate scene-bank-ops-menu-open false)
-(defstate scene-bank-ops-menu-col 0)
-(defstate scene-bank-ops-menu-row 0)
-(defstate scene-bank-renaming false)
-(defstate scene-bank-rename-id 0)
-(defstate scene-bank-rename-draft "")
+(def-kind bank-rename
+  :key ()
+  :state ((bank bank :default nil)
+          (draft "")))
 
 (def open-scene-bank-ops-menu (event)
-  (do
-    (set! scene-bank-ops-menu-col (get event :col))
-    (set! scene-bank-ops-menu-row (get event :row))
-    (set! scene-bank-ops-menu-open true)))
+  (open-menu! bank-ops-menu event))
 
 (def begin-scene-bank-rename ()
-  (let ((bank (scene-viewed-bank)))
-    (do
-      (set! scene-bank-ops-menu-open false)
-      (set! scene-bank-rename-id (get bank :id))
-      (set! scene-bank-rename-draft (or (get bank :name) ""))
-      (set! scene-bank-renaming true))))
+  (let ((b (scene-viewed-bank)))
+    (set! bank-ops-menu.open false)
+    (set! bank-rename.draft b.name)
+    (set! bank-rename.bank b)))
 
+;; Stored names are trimmed host-side, so compare against the trimmed draft;
+;; a no-op commit would otherwise surface a host error status.
 (def scene-bank-rename-changed? ()
-  (let ((matches (filter
-          (lambda (bank) (= (get bank :id) scene-bank-rename-id))
-          (scene-banks))))
-    (if (> (len matches) 0)
-      ;; Stored names are trimmed host-side, so compare against the trimmed
-      ;; draft; a no-op commit would otherwise surface a host error status.
-      (not (= (string-trim scene-bank-rename-draft)
-          (or (get (nth matches 0) :name) "")))
-      false)))
+  (let ((b bank-rename.bank))
+    (and b (listed? b (banks)) (not (= (string-trim bank-rename.draft) b.name)))))
 
 (def finish-scene-bank-rename (commit)
-  (if scene-bank-renaming
-    (do
-      (if (and commit (scene-bank-rename-changed?))
-        (host-command "rename-scene-bank"
-          (dict :bank-id scene-bank-rename-id :name scene-bank-rename-draft))
-        nil)
-      (set! scene-bank-renaming false)
-      (set! scene-bank-rename-id 0)
-      (set! scene-bank-rename-draft ""))
-    nil))
+  (let ((b bank-rename.bank))
+    (when b
+      (when (and commit (scene-bank-rename-changed?))
+        (host-command "rename-scene-bank" (dict :bank-id b.bid :name bank-rename.draft)))
+      (set! bank-rename.bank nil)
+      (set! bank-rename.draft ""))))
+
+;; Deleting a bank moves its scenes into its neighbor (the next bank for the
+;; first one, else the previous), which must have room for them.
+(def scene-bank-neighbor (b)
+  (let ((all (banks)))
+    (if (<= (len all) 1)
+      nil
+      (nth all (if (= b.index 0) 1 (- b.index 1))))))
 
 (def scene-viewed-bank-deletable? ()
-  (let ((banks (scene-banks))
-        (index (scene-viewed-bank-index)))
-    (if (<= (len banks) 1)
-      false
-      (let ((target-index (if (= index 0) 1 (- index 1))))
-        (<= (+ (get (nth banks index) :len)
-            (get (nth banks target-index) :len))
-          24)))))
+  (let ((b (scene-viewed-bank)))
+    (let ((target (if b (scene-bank-neighbor b) nil)))
+      (and target (<= (+ (bank-size b) (bank-size target)) 24)))))
 
 (def delete-viewed-scene-bank ()
-  (if (scene-viewed-bank-deletable?)
-    (let ((bank (scene-viewed-bank))
-          (fallback-index (max 0 (- (scene-viewed-bank-index) 1))))
-      (do
-        (set! scene-bank-ops-menu-open false)
-        (set! eseq.scene-banks/viewed-scene-bank-pending-new false)
-        (set! eseq.scene-banks/viewed-scene-bank-index fallback-index)
-        (host-command "delete-scene-bank" (dict :bank-id (get bank :id)))))
-    nil))
+  (when (scene-viewed-bank-deletable?)
+    (let ((b (scene-viewed-bank)))
+      (set! bank-ops-menu.open false)
+      (view-scene-bank! (scene-bank-neighbor b))
+      (host-command "delete-scene-bank" (dict :bank-id b.bid)))))
 
 (def scene-bank-ops-context-menu ()
-  (context-menu :is-open scene-bank-ops-menu-open
-    :anchor-col scene-bank-ops-menu-col
-    :anchor-row scene-bank-ops-menu-row
-    :on-close (lambda () (set! scene-bank-ops-menu-open false))
+  (menu-of bank-ops-menu
     (menu-item "Rename bank"
       :key "scene-bank-rename-action"
       :on-select (lambda (event) (begin-scene-bank-rename)))
@@ -758,22 +717,22 @@
       :disabled (not (scene-viewed-bank-deletable?))
       :on-select (lambda (event) (delete-viewed-scene-bank)))))
 
-(def scene-bank-selector (bank)
+(def scene-bank-selector (b)
   (box :key "scene-bank-selector"
     :width 4.2 :height 0.8
     :on-right-click (lambda (event) (open-scene-bank-ops-menu event))
-    (if scene-bank-renaming
+    (if bank-rename.bank
       (text-input :key "scene-bank-rename-input"
         :width 4.2 :height 0.8 :font-size 8
-        :value scene-bank-rename-draft
+        :value bank-rename.draft
         :auto-focus true
         :select-all-on-focus true
-        :on-change (lambda (name) (set! scene-bank-rename-draft name))
+        :on-change (lambda (name) (set! bank-rename.draft name))
         :on-submit (lambda () (finish-scene-bank-rename true))
         :on-cancel (lambda () (finish-scene-bank-rename false))
         :on-blur (lambda () (finish-scene-bank-rename true)))
       (dropdown :key "scene-bank-dropdown"
-        :value (get bank :label)
+        :value b.label
         :options (append (scene-bank-labels) (list "New bank"))
         :on-change select-scene-bank
         :bg-color :mixer-strip-bg
@@ -781,94 +740,88 @@
         :badge-color :transparent
         :width 4.2 :height 0.5 :font-size 10))))
 
+;; A new scene at the end of the viewed bank.
 (def seq-clone-pattern ()
-  (let ((bank (scene-viewed-bank)))
+  (let ((b (scene-viewed-bank)))
     (host-command "clone-pattern"
-      (dict :bank-id (get bank :id)
-        :insert-position (+ (get bank :offset) (get bank :len))))))
+      (dict :bank-id b.bid :insert-position (+ (bank-offset b) (bank-size b))))))
 
-(def seq-delete-pattern ()
-  (host-command "delete-pattern" (dict)))
+;; A scene's "Move to bank" menu.
+(def-kind scene-bank-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (scene scene :default nil)))
 
-(defstate scene-bank-menu-open false)
-(defstate scene-bank-menu-col 0)
-(defstate scene-bank-menu-row 0)
-(defstate scene-bank-menu-scene -1)
+(def open-scene-bank-menu (event s)
+  (set! scene-bank-menu.scene s)
+  (open-menu! scene-bank-menu event))
 
-(def open-scene-bank-menu (event scene)
-  (do
-    (set! scene-bank-menu-scene scene)
-    (set! scene-bank-menu-col (get event :col))
-    (set! scene-bank-menu-row (get event :row))
-    (set! scene-bank-menu-open true)))
+(def scene-bank-is-source? (b)
+  (let ((s scene-bank-menu.scene))
+    (and s (= s.bank b))))
 
-(def scene-bank-is-source? (bank)
-  (= (scene-bank-index-containing scene-bank-menu-scene)
-    (scene-bank-index-for-label (get bank :label))))
-
-(def move-scene-to-scene-bank (bank)
-  (if (or (scene-bank-is-source? bank) (>= (get bank :len) 24))
-    nil
-    (do
-      (set! scene-bank-menu-open false)
-      (host-command "move-scene-to-scene-bank"
-        (dict :scene scene-bank-menu-scene :bank-id (get bank :id))))))
+(def move-scene-to-scene-bank (b)
+  (let ((s scene-bank-menu.scene))
+    (unless (or (scene-bank-is-source? b) (bank-full? b))
+      (set! scene-bank-menu.open false)
+      (when (and (listed? s (scenes)) (listed? b (banks)))
+        (host-command "move-scene-to-scene-bank" (dict :scene s.index :bank-id b.bid))))))
 
 (def scene-bank-context-menu ()
-  (context-menu :is-open scene-bank-menu-open
-    :anchor-col scene-bank-menu-col
-    :anchor-row scene-bank-menu-row
-    :on-close (lambda () (set! scene-bank-menu-open false))
-    (each (scene-banks) |bank|
-      (menu-item (str "Move to bank " (get bank :label))
-        :key (str "scene-bank-move-" (get bank :id))
-        :disabled (or (scene-bank-is-source? bank) (>= (get bank :len) 24))
-        :on-select (lambda (event) (move-scene-to-scene-bank bank))))))
+  (apply menu-of scene-bank-menu
+    (each (banks) |b|
+      (menu-item (str "Move to bank " b.label)
+        :key (str "scene-bank-move-" b.bid)
+        :disabled (or (scene-bank-is-source? b) (bank-full? b))
+        :on-select (lambda (event) (move-scene-to-scene-bank b))))))
 
 (def seq-reorder-scene-drop (event)
-  (let ((source (get (get event :payload) :scene))
-        (target (get (get event :target) :scene)))
-    (if (= source target)
-      nil
+  (let ((source event.payload.scene)
+        (target event.target.scene))
+    (unless (= source target)
       (host-command "reorder-scene" (dict :source source :target target)))))
 
 ;; Shift gesture state is UI-local and intentionally ephemeral. The modifier
 ;; is sampled only on pointer-down; releasing Shift while still holding the
-;; mouse cannot turn the gesture into a reorder operation.
-(def scene-push-target (state -1))
-(def scene-push-value (state 1.0))
-(def scene-push-start-y (state 0.0))
-(def scene-push-from-source (state false))
+;; mouse cannot turn the gesture into a reorder operation. `target` is the
+;; pushed scene's index (-1: none).
+(def-kind scene-push
+  :key ()
+  :state ((target -1)
+          (value 1.0)
+          (start-y 0.0)
+          (from-source false)))
 
-(def scene-push-begin (scene event)
-  (let ((from-source (or (get event :cmd) (get event :meta) (get event :super))))
-  (if (or (get event :shift) from-source)
-    (do
-      (set! scene-push-target scene)
-      (set! scene-push-from-source from-source)
-      (set! scene-push-value (if from-source 0.0 1.0))
-      (set! scene-push-start-y (get event :y))
-      (host-command "scene-push-begin"
-        (dict :target-scene scene :value (if from-source 0.0 1.0))))
-    (seq-switch-pattern scene))))
+(def reset-scene-push! ()
+  (set! scene-push.target -1)
+  (set! scene-push.from-source false)
+  (set! scene-push.value 1.0))
 
-(def scene-push-drag (scene event)
-  (if (= scene-push-target scene)
-    (let ((value (if scene-push-from-source
-          (clamp (* 0.14 (- (get event :y) scene-push-start-y)) 0.0 1.0)
-          (clamp (+ 1.0 (* 0.14 (- scene-push-start-y (get event :y)))) 0.0 1.0))))
-      (set! scene-push-value value)
-      (host-command "scene-push-set-value" (dict :value value)))
-    nil))
+;; Pointer-down on scene s's pill: Shift pushes toward it, Command pushes
+;; from it; a plain press launches it.
+(def scene-push-begin (s event)
+  (if (or event.shift event.cmd)
+    (let ((value (if event.cmd 0.0 1.0)))
+      (set! scene-push.target s.index)
+      (set! scene-push.from-source (if event.cmd true false))
+      (set! scene-push.value value)
+      (set! scene-push.start-y event.y)
+      (host-command "scene-push-begin" (dict :target-scene s.index :value value)))
+    (launch! s)))
 
-(def scene-push-end (scene event)
-  (if (= scene-push-target scene)
-    (do
-      (host-command "scene-push-end" (dict))
-      (set! scene-push-target -1)
-      (set! scene-push-from-source false)
-      (set! scene-push-value 1.0))
-    nil))
+(def scene-push-drag (s event)
+  (when (= scene-push.target s.index)
+    (let ((value (if scene-push.from-source
+          (clamp (* 0.14 (- event.y scene-push.start-y)) 0.0 1.0)
+          (clamp (+ 1.0 (* 0.14 (- scene-push.start-y event.y))) 0.0 1.0))))
+      (set! scene-push.value value)
+      (host-command "scene-push-set-value" (dict :value value)))))
+
+(def scene-push-end (s event)
+  (when (= scene-push.target s.index)
+    (host-command "scene-push-end" (dict))
+    (reset-scene-push!)))
 
 (def transport-icon-style
   (ui/style
@@ -891,30 +844,28 @@
 ;; Saved per scene; defscene supplies persistence, targeted repaint, and undo.
 (defscene scene-transpose 0)
 
-(defstate transpose-menu-open false)
-(defstate transpose-menu-col 0)
-(defstate transpose-menu-row 0)
-(defstate transpose-menu-value 0)
-(defstate transpose-menu-bank 0)
+;; The transpose picker's "apply to" menu: the value and bank it opened on.
+(def-kind transpose-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (value 0)
+          (bank bank :default nil)))
 
 (def open-transpose-menu (event)
-  (do
-    (set! transpose-menu-value scene-transpose)
-    (set! transpose-menu-bank (get (scene-viewed-bank) :id))
-    (set! transpose-menu-col (get event :col))
-    (set! transpose-menu-row (get event :row))
-    (set! transpose-menu-open true)))
+  (set! transpose-menu.value scene-transpose)
+  (set! transpose-menu.bank (scene-viewed-bank))
+  (open-menu! transpose-menu event))
 
 (def apply-transpose-menu (scope)
-  (do
-    (set! transpose-menu-open false)
-    (host-command "apply-scene-transpose"
-      (dict :scope scope :bank-id transpose-menu-bank :value transpose-menu-value))))
+  (let ((b transpose-menu.bank))
+    (set! transpose-menu.open false)
+    (when (listed? b (banks))
+      (host-command "apply-scene-transpose"
+        (dict :scope scope :bank-id b.bid :value transpose-menu.value)))))
 
 (def transpose-context-menu ()
-  (context-menu :is-open transpose-menu-open
-    :anchor-col transpose-menu-col :anchor-row transpose-menu-row
-    :on-close (lambda () (set! transpose-menu-open false))
+  (menu-of transpose-menu
     (menu-item "Apply to all scenes in this bank"
       :key "transpose-apply-bank"
       :on-select (lambda (event) (apply-transpose-menu "bank")))
@@ -924,24 +875,22 @@
 
 ;; One command catalog feeds the native macOS menu and the toolbar fallback.
 ;; Native availability is published only after the application installs a menu;
-;; headless captures and other platforms retain the toolbar menus.
-(defstate file-menu-open false)
-(defstate file-menu-col 0)
-(defstate file-menu-row 0)
-(defstate application-menu-open "")
+;; headless captures and other platforms retain the toolbar menus. `open` is
+;; the open menu's id ("" for none).
+(def-kind app-menu
+  :key ()
+  :state ((open "")
+          (at :point :default nil)))
 
 (def open-file-menu (event)
   (open-application-menu "File" event))
 
 (def open-application-menu (name event)
-  (set! file-menu-col (get event :col))
-  (set! file-menu-row (get event :row))
-  (set! application-menu-open name)
-  (set! file-menu-open (= name "File")))
+  (set! app-menu.at event.at)
+  (set! app-menu.open name))
 
 (def close-application-menu ()
-  (set! application-menu-open "")
-  (set! file-menu-open false))
+  (set! app-menu.open ""))
 
 ;; Save follows the buffer in front: one whose mode saves itself (an expr
 ;; card's edit buffer commits its body) takes the chord; everything else
@@ -981,10 +930,10 @@
       :on-select (lambda (event) (menus/activate (get item :id)))
       (if (get item :items) (map application-menu-row (get item :items)) (list)))
     (menu-separator)))
-
+ 
 (def application-context-menu (name)
-  (context-menu :is-open (= application-menu-open name)
-    :anchor-col file-menu-col :anchor-row file-menu-row
+  (context-menu :is-open (= app-menu.open name)
+    :anchor app-menu.at
     :on-close (lambda () (close-application-menu))
     (map application-menu-row (application-menu-items name))))
 
@@ -992,13 +941,18 @@
 
 (def application-menu-button (name)
   (box :height 1.4 :padding 0.35 :corner-radius 12
-    :background-color (if (= application-menu-open name) :mixer-strip-selected-bg :mixer-strip-bg)
+    :background-color (if (= app-menu.open name) :mixer-strip-selected-bg :mixer-strip-bg)
     :style transport-icon-style
     :on-click (lambda (event) (if (get (application-menu name) :enabled) (open-application-menu name event) nil))
     (v-stack :align :center :height :fill
       (label (get (application-menu name) :label) :font-size 11 :color :white :bg :transparent))))
 
 ;; ── Transport layout ──
+
+;; A label on a pill: white while on (a value or a #' binding), else gray.
+(def pill-label (text on &key (font 9))
+  (label text :font-size font :color :dimmer :active on :active-color :white
+    :hover-color :white :bg :transparent))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
@@ -1035,7 +989,7 @@
     ;; |x y r| args, while a box passes the event map the menu anchors on.
     (subtree :key "transport-application-menus"
       (if (native-menu-installed?)
-        (box :width 0 :height 0)
+        (nothing)
         (h-stack :gap 0.2 :align :center
           (map (lambda (name)
               (subtree :key (str "transport-" name "-menu-button")
@@ -1050,38 +1004,33 @@
             :on-click |x y r| (transport-stop)
             (stop-icon)))
         (box :width 2.5
-          :on-click |x y r| (seq-toggle-play)
-          (play-icon :active (if SEQ.playing 1 0)))
+          :on-click |x y r| (toggle! transport.playing)
+          (play-icon :active #'transport.playing))
         (box :width 2.5
-          :on-click |x y r| (seq-toggle-record)
-          (rec-icon :active (if SEQ.recording 1 0)))
+          :on-click |x y r| (toggle! transport.recording)
+          (rec-icon :active #'transport.recording))
         (subtree :key "transport-master-record-button"
           (box :debug-name "transport-master-record-button"
             :width 4.2 :height 1.1
             :background "pattern-pill-bg"
-            :active (if SEQ.master-recording 1 0)
+            :active #'master.recording
             :style transport-icon-style
-            :on-click |x y r| (seq-toggle-master-recording)
+            :on-click |x y r| (toggle! master.recording)
             (v-stack :align :center
-              (label "WAV"
-                :font-size 10
-                :color (if SEQ.master-recording :white :gray)
-                :hover-color :white
-                :bg :transparent))))
+              (pill-label "WAV" #'master.recording :font 10))))
         ;; Back to Arrangement (unified-transport spec; Ableton semantics):
         ;; lights the moment a manual launch overrides the arrangement,
         ;; SURVIVES transport stop, and clicking hands the latched lanes
-        ;; back to the arrangement. The box is ALWAYS laid out (state flips
-        ;; repaint reactively; conditional layout is a re-layout per flip
-        ;; and misses reruns from nil); the icon is transparent while
-        ;; nothing is latched, and the click guards at event time.
+        ;; back to the arrangement. The box is ALWAYS laid out (the icon
+        ;; binds the latch, so a flip only repaints); the icon is
+        ;; transparent while nothing is latched, and the click guards at
+        ;; event time.
         (subtree :key "transport-back-to-arrangement"
           (box :debug-name "transport-back-to-arrangement"
             :width 2.5 :height 1.4
             :style transport-icon-style
-            :on-click |x y r| (if SEQ.song-manual-latch (seq-song-back-to-song) nil)
-            (back-to-arrangement-icon
-              :active (if SEQ.song-manual-latch 1 0))))))
+            :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
+            (back-to-arrangement-icon :active #'song.manual-latch)))))
     
     ;; Single continuous LED panel
     (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 77
@@ -1092,22 +1041,20 @@
               ;; One transport (docs/unified-transport-spec.md 4/8): the
               ;; parked arrangement cursor while stopped, the live absolute
               ;; arrangement clock during playback/capture.
-              :playhead (bind-seq "transport-playhead")
+              :playhead #'transport.position
               :song-position-beats
-              (if (= SEQ.song-mode "stopped")
-                (bind-seq "song-cursor-beats")
-                (bind-seq "song-position-beats"))
+              (if (= song.mode "stopped") #'song.cursor #'song.position)
               :use-song-position true
               :font-size 15 :width 10 :height 1.2
               :color :clock-fg
               :bg :transparent)
             (label "" :width 1 :bg :transparent)
-            (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
+            (number-picker :value transport.bpm :min 20 :max 300 :decimals 1
               :key "transport-bpm"
               :noui true
               :font-size 15
               :text-color :clock-fg
-              :on-change (lambda (v) (seq-set-bpm v))
+              :on-change (lambda (v) (set! transport.bpm (floor v)))
               :width 7 :height 1.2)
             (subtree :key "transport-scene-transpose"
               (number-picker :value scene-transpose
@@ -1125,8 +1072,8 @@
                 :badge-color :transparent
                 :key "transport-scene-launch-quantize-dropdown"
                 :debug-name "transport-scene-launch-quantize"
-                :value (or SEQ.scene-launch-quantize "off")
-                :options scene-launch-quantize-options
+                :value (launch-quantize)
+                :options launch-quantize-options
                 :on-change seq-set-scene-launch-quantize
                 :width 5.2 :height 1.15 :font-size 9))
             (box :width 1.0)
@@ -1137,7 +1084,7 @@
                 :badge-color :transparent
                 :key "transport-record-quantize-dropdown"
                 :debug-name "transport-record-quantize"
-                :value (or SEQ.record-quantize "1/16")
+                :value (label-or transport.record-quantize "1/16")
                 :options record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
@@ -1146,30 +1093,22 @@
               (box :debug-name "transport-metronome-toggle"
                 :width 3.4 :height 1.1
                 :background "pattern-pill-bg"
-                :on-click |x y r| (host-command "toggle-metronome")
+                :on-click |x y r| (toggle! transport.metronome)
                 (v-stack :align :center
-                  (label "MET"
-                    :font-size 9
-                    :color (if SEQ.metronome :white :gray)
-                    :hover-color :white
-                    :bg :transparent))))
+                  (pill-label "MET" #'transport.metronome))))
             ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
             ;; display. Rate keys 1-8 switch the rate while roll mode is on.
             (subtree :key "transport-roll-toggle"
               (box :debug-name "transport-roll-toggle"
                 :width 5.5 :height 1.1
-                :background-color (if SEQ.sequence-rolling
+                :background-color (if transport.sequence-rolling
                   '(rgba 0.72 0.10 0.12 1)
                   "pattern-pill-bg")
-                :on-click |x y r| (host-command "toggle-roll-mode")
+                :on-click |x y r| (toggle! transport.roll-mode)
                 (h-stack :align :baseline :gap 0.3
                   (box :width 0.2)
-                  (label "ROLL"
-                    :font-size 9
-                    :color (if SEQ.roll-mode :white :gray)
-                    :hover-color :white
-                    :bg :transparent)
-                  (label (if SEQ.roll-mode SEQ.roll-rate "")
+                  (pill-label "ROLL" #'transport.roll-mode)
+                  (label (if transport.roll-mode transport.roll-rate "")
                     :font-size 9
                     :color '(rgba 0.63 0.88 0.41 1)
                     :bg :transparent))))))
@@ -1193,32 +1132,32 @@
             (v-stack
               (box :height 0.0)
               (subtree :key "master-meter-l"
-                (transport-master-meter :level (bind-seq "master-peak-l")))))
+                (transport-master-meter :level #'master.peak-l))))
           (h-stack :gap 0.25 :align :center
             
             (v-stack (box :height 0.1)
               (subtree :key "master-meter-r"
-                (transport-master-meter :level (bind-seq "master-peak-r"))))))
+                (transport-master-meter :level #'master.peak-r)))))
         (subtree :key "transport-cpu"
           (h-stack :gap 0 :align :center :padding 0.4
             (box :height 2.7
               (label "cpu"
                 :v-align :center
                 :font-size 12 :width 3.0
-                :color (if SEQ.cpu-overloaded :red :gray)
+                :color :gray :active #'engine.overloaded :active-color :red
                 :bg :transparent))
             (number-label :key "transport-cpu-value"
-              :value (bind-seq "cpu-load-pct")
+              :value #'engine.cpu-load
               :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 2.0 :height 1
-              :color (if SEQ.cpu-overloaded :red :dim)
+              :color :dim :active #'engine.overloaded :active-color :red
               :bg :transparent)))
         ;; The latency planner aligns every route to this delay. A latent FX
         ;; therefore delays the whole project, not only the track holding it.
         (subtree :key "transport-output-latency"
           (h-stack :gap 0 :align :baseline :padding 0.5
             (number-label :key "transport-output-latency-value"
-              :value (bind-seq "output-latency-ms")
+              :value #'engine.latency-ms
               :decimals 1 :min-integer-digits 2 :suffix "ms"
               :font-size 12 :width 3.5 :height 1
               :color :gray
@@ -1226,99 +1165,96 @@
     
   ))
 
+;; One scene's pill: lit while it plays (bindings: launches only repaint),
+;; pulsing while queued. Its index addresses the host's commands.
+(def scene-pill (s)
+  (let ((scene s.index))
+    (box :key (str "transport-scene-pill-" scene)
+      :width 2.5 :height 1.1
+      ;; queued-scene-pill-bg has no `active` state, so it takes no binding.
+      :background (if s.queued "queued-scene-pill-bg" "pattern-pill-bg")
+      :active (if s.queued (if s.active 1 0) #'s.active)
+      :push #'scene-push.value
+      :push-target scene-push.target
+      :scene scene
+      :style pattern-control-style
+      :capture-pointer true
+      :drag-type "transport-scene"
+      :drag-modifier :none
+      :drag-payload (dict :scene scene)
+      :drop-types (list "transport-scene")
+      :drop-meta (dict :scene scene)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :on-drop seq-reorder-scene-drop
+      :on-right-click (lambda (event) (open-scene-bank-menu event s))
+      :on-mouse-down (lambda (event) (scene-push-begin s event))
+      :on-drag (lambda (event) (scene-push-drag s event))
+      :on-mouse-up (lambda (event) (scene-push-end s event))
+      (v-stack :align :center
+        (label (fmt " {} " s.number)
+          :font-size 11
+          :color (if s.queued :scene-active-fg :dimmer)
+          :active #'s.active :active-color :scene-active-fg
+          :hover-color :white
+          :bg :transparent)))))
+
+;; A "+" / "-" button of the strip; `enabled` lights it and lets it click.
+(def scene-strip-button (key text enabled action)
+  (box :key key :background "pattern-pill-btn-bg"
+    :width 2.5 :height 1.1 :active true
+    :style (if enabled pattern-control-style nil)
+    :on-click |x y r| (action)
+    (v-stack :align :center
+      (label text
+        :font-size 12
+        :color (if enabled :white :dark-gray)
+        :bg :transparent))))
+
+;; The playing scene is in another bank than b.
+(def scene-playing-in-other-bank? (b) (not b.playing))
+
+(def scene-strip (b)
+  (let ((offset (bank-offset b))
+        (size (bank-size b))
+        (deletable (and (> (len project.scenes) 1) b.playing)))
+    (box :background "transport-scene-strip-bg"
+      :corner-radius 64
+      :key "transport-scene-strip"
+      :debug-name "transport-scene-strip"
+      :push #'scene-push.value
+      :push-target (if (and (>= scene-push.target offset)
+                            (< scene-push.target (+ offset size)))
+                     (- scene-push.target offset)
+                     -1)
+      :scene-count size
+      :padding 0.2 :height 1.4
+      (h-stack :gap 0.1 :align :center
+        (each b.scenes |s| (scene-pill s))
+        (label "" :width 0.2 :bg :transparent)
+        (scene-strip-button "scene-bank-add" "+" (not (bank-full? b))
+          (lambda ()
+            (if (bank-full? b)
+              (status "This scene bank is full (24 scenes maximum)")
+              (seq-clone-pattern))))
+        (scene-strip-button "scene-bank-delete" "-" deletable
+          (lambda () (when deletable (delete-scene! transport.scene))))
+        (h-stack :gap 0.12 :align :center
+          (box :width 0.5)
+          (scene-bank-selector b)
+          (if (scene-playing-in-other-bank? b)
+            (scene-bank-playing-indicator
+              :debug-name "scene-bank-playing-other-indicator")
+            (box :width 0.45 :height 0.45 :bg :transparent)))
+        (scene-bank-context-menu)
+        (scene-bank-ops-context-menu)))))
+
+;; Pattern pills in their own subtree: scene/bank changes rerun just this
+;; bar, not the whole transport. Nothing shows before the host has published
+;; the banks.
 (def transport-scene-strip ()
-    ;; Pattern pills in their own subtree: scene/bank changes rerun just this
-    ;; bar, not the whole transport. Widget children stay in `each`; the bank
-    ;; offset is applied before every launch, drag, and context-menu command.
-    (subtree :key "transport-pattern-pills"
-      (let ((bank (scene-viewed-bank)))
-        (let ((bank-offset (get bank :offset))
-            (bank-len (get bank :len))
-            (current-in-bank (= (scene-bank-index-containing SEQ.current-pattern)
-                (scene-viewed-bank-index))))
-          (box :background "transport-scene-strip-bg"
-            :corner-radius 64
-            :key "transport-scene-strip"
-            :debug-name "transport-scene-strip"
-            :push scene-push-value
-            :push-target (if (and (>= scene-push-target bank-offset)
-                (< scene-push-target (+ bank-offset bank-len)))
-              (- scene-push-target bank-offset)
-              -1)
-            :scene-count bank-len
-            :padding 0.2 :height 1.4
-            (h-stack :gap 0.1 :align :center
-              (each (range 0 bank-len) |i|
-                (let ((scene (+ bank-offset i)))
-                  (box :key (str "transport-scene-pill-" scene)
-                    :width 2.5 :height 1.1
-                    :background (if (= scene SEQ.queued-scene)
-                      "queued-scene-pill-bg"
-                      "pattern-pill-bg")
-                    :active (if (= scene SEQ.current-pattern) 1 0)
-                    :push scene-push-value
-                    :push-target scene-push-target
-                    :scene scene
-                    :style pattern-control-style
-                    :capture-pointer true
-                    :drag-type "transport-scene"
-                    :drag-modifier :none
-                    :drag-payload (dict :scene scene)
-                    :drop-types (list "transport-scene")
-                    :drop-meta (dict :scene scene)
-                    :drop-hover-border-color :mixer-strip-selected-border
-                    :on-drop seq-reorder-scene-drop
-                    :on-right-click (lambda (event) (open-scene-bank-menu event scene))
-                    :on-mouse-down (lambda (event) (scene-push-begin scene event))
-                    :on-drag (lambda (event) (scene-push-drag scene event))
-                    :on-mouse-up (lambda (event) (scene-push-end scene event))
-                    (v-stack :align :center
-                      (label (fmt " {} " (+ i 1))
-                        :font-size 11
-                        :color (if (or (= scene SEQ.current-pattern) (= scene SEQ.queued-scene))
-                          :scene-active-fg
-                          :gray)
-                        :hover-color :white
-                        :bg :transparent)))))
-              (label "" :width 0.2 :bg :transparent)
-              (box :key "scene-bank-add" :background "pattern-pill-btn-bg"
-                :width 2.5 :height 1.1 :active true
-                :style (if (< bank-len 24) pattern-control-style nil)
-                :on-click |x y r|
-                (if (< bank-len 24)
-                  (seq-clone-pattern)
-                  (status "This scene bank is full (24 scenes maximum)"))
-                (v-stack :align :center
-                  (label "+"
-                    :font-size 12
-                    :color (if (< bank-len 24) :white :dark-gray)
-                    :bg :transparent)))
-              (box :key "scene-bank-delete" :background "pattern-pill-btn-bg"
-                :width 2.5 :height 1.1 :active true
-                :style (if (and (> SEQ.num-patterns 1) current-in-bank)
-                  pattern-control-style
-                  nil)
-                :on-click |x y r|
-                (if (and (> SEQ.num-patterns 1) current-in-bank)
-                  (seq-delete-pattern)
-                  nil)
-                (v-stack :align :center
-                  (label "-"
-                    :font-size 12
-                    :color (if (and (> SEQ.num-patterns 1) current-in-bank)
-                      :white
-                      :dark-gray)
-                    :bg :transparent)))
-              (h-stack :gap 0.12 :align :center
-                (box :width 0.5)
-                (scene-bank-selector bank)
-                (if (scene-playing-in-other-bank?)
-                  (scene-bank-playing-indicator
-                    :debug-name "scene-bank-playing-other-indicator")
-                  (box :width 0.45 :height 0.45 :bg :transparent)))
-              (scene-bank-context-menu)
-              (scene-bank-ops-context-menu))))))
-)
+  (subtree :key "transport-pattern-pills"
+    (let ((b (scene-viewed-bank)))
+      (if b (scene-strip b) (nothing)))))
 
 (def transport-trailing ()
   (list

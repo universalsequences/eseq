@@ -32,8 +32,7 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         eng.keyboard_tx,
     );
 
-    let mut runtime = Runtime::new();
-    runtime.register_reactive("SEQ", Vec::new(), true);
+    let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
 
     let selected_steps = Arc::new(Mutex::new(HashSet::new()));
@@ -44,7 +43,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
     let record_armed = Arc::new(Mutex::new(vec![false]));
     let active_delete_target = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
     let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db");
@@ -61,9 +59,7 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         step_clipboard: Arc::new(Mutex::new(None)),
         ui_epoch: ui_epoch.clone(),
         fx_epoch: Arc::new(AtomicUsize::new(0)),
-        fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations: ui_invalidations.clone(),
-        expanded_step_projection: expanded_step_projection.clone(),
         active_delete_target: active_delete_target.clone(),
         active_delete_target_version: active_delete_target_version.clone(),
         auto_follow_override_until: Arc::new(Mutex::new(None)),
@@ -97,7 +93,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         cached_peak_l_level: 0.0,
         cached_peak_r_level: 0.0,
         cached_track_peak_levels: vec![0.0],
-        cached_rack_slot_peak_levels: Vec::new(),
         cached_bus_peak_levels: Vec::new(),
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
@@ -109,8 +104,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
         cached_cpu_load_bits: 0.0f32.to_bits(),
         last_meter_poll_at: Instant::now(),
         last_cpu_ui_poll_at: Instant::now(),
-        last_neural_visualization_poll_at: Instant::now(),
-        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now(),
     };
     let mut track_names = app.tracks.clone();
@@ -131,22 +124,6 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
             shared.track_pan_ids.lock().unwrap().len(),
             app.graph.track_node_ids.len()
         );
-        assert!(
-            matches!(editor.runtime().reactive_field_value("SEQ", "num-tracks"),
-    Some(Value::Number(n)) if *n == 2.0)
-        );
-        for field in [
-            "track-ids",
-            "track-names",
-            "record-armed",
-            "track-num-steps",
-        ] {
-            assert!(
-                matches!(editor.runtime().reactive_field_value("SEQ", field),
-        Some(Value::List(items)) if items.len() == 2),
-                "SEQ.{field}"
-            );
-        }
         for track in 0..2 {
             assert_eq!(
                 natives::toggle_track_record_arm(

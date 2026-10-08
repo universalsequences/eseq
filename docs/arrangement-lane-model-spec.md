@@ -1,5 +1,7 @@
 # Arrangement Lane Model — Author in Lanes, Compile to Rows
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft (rev 3, 2026-09-05 — scene state is independent of clip placement; see 6.2)
 Supersedes: the *authoring/storage* portions of docs/song-mode-spec.md §5
 (`ProjectSong` as the stored model, §5.6 row primitives). Playback (§7-§9),
@@ -428,6 +430,10 @@ Direct ports of the row versions, simpler on lanes:
   (`track_delete_remap.rs` ports 1:1, minus the normalize call).
 
 ## 12. UI read surfaces
+
+Since eseq-0l17.15 the view reads these as the host kinds (kind-bindings
+spec §14.2d): `t.clips` (`clip`), `song.spans` (`scene-span`) and the clip's
+`events` / `num-steps` / `length`; the `SEQ` surfaces below are gone.
 
 - **`SEQ.song-lanes`** now serializes the stored clips directly:
   `{clip-id, start-beat, end-beat, pattern-id, take-id, offset-steps}` —

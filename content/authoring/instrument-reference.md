@@ -270,6 +270,35 @@ operator; these are the idioms that come up most:
   Pitch sweeps are the same shape: `(* base_hz (+ 1 (* bend (exp (/ (- age) 0.03)))))`,
   integrated with a `phasor`. Host modulation (`@mod true`) is optional for
   drums; leave it off unless the user wants their knobs modulated.
+- Voice lifetime (optional `@amp` output): without it the host keeps every
+  released voice running for 20 s. Declare one more output on the next free
+  channel with `@amp true`; the host stops a released voice once that output
+  reads 0. Build it with the shared `voice-amp` macro, and `def` the audio
+  signals so it reads exactly what the outs send:
+
+  ```dgenlisp
+  (use-defmacro voice-amp)
+  (def voice_left (* filtered env velocity gain))
+  (def voice_right voice_left)
+  (out voice_left 1 @name left)
+  (out voice_right 2 @name right)
+  (out (voice-amp env voice_left voice_right) 3 @name amp @amp true)
+  ```
+
+  `(voice-amp env left right)` is 1 while `env` is above -80 dB or either
+  output's peak (falling over 50 ms) is above -100 dBFS, so delays, reverbs
+  and ringing filters after the envelope are kept. For a mono instrument pass
+  the signal twice and use channel 2: output channels must not leave a gap.
+  - `env` is the top-level amp envelope (the `adsr` that scales the output).
+  - When that envelope lives inside a per-copy macro, or there is none
+    (physical models), use `(use-defmacro release-window)` and pass
+    `(release-window gate release_ms)`: 1 while the gate is held and for
+    `release_ms` after it falls.
+  - One-shot drums may never see note-off, so pass `0`: the output level
+    alone ends the voice, whatever the gate does.
+  - If a sounding voice can stay silent for more than about 0.5 s (a
+    free-running looped contour, a long delayed onset), keep `env` at 1 for
+    that case, for example `(max (release-window gate release_ms) looping)`.
 
 All `ui-*` panel helpers named below are exported by the module
 `eseq.effects.custom-ui-lego`. Always call them module-qualified, e.g.

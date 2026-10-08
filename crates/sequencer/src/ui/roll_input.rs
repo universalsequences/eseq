@@ -58,11 +58,22 @@ pub(crate) fn register_natives(runtime: &mut Runtime, state: Arc<SequencerState>
     );
     runtime.register_native_with_docs(
         "seq-set-roll-rate",
-        "(seq-set-roll-rate index)",
-        "Set roll rate 0–7: 1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t.",
+        "(seq-set-roll-rate rate)",
+        "Set roll rate by index 0–7 (1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t) or by label (4, 4T, 8, …, 32T; any case).",
         move |args, _ctx| {
-            let Some(rate) = args.first().and_then(|arg| index(arg, Timebase::ROLL_RATES.len())) else {
-                return Err("seq-set-roll-rate expects a rate index from 0 to 7".into());
+            let rate = match args.first() {
+                Some(Value::String(label)) => Timebase::ROLL_RATES
+                    .iter()
+                    .position(|rate| rate.label().eq_ignore_ascii_case(label)),
+                Some(arg) => index(arg, Timebase::ROLL_RATES.len()),
+                None => None,
+            };
+            let Some(rate) = rate else {
+                return Err(format!(
+                    "seq-set-roll-rate expects a rate index from 0 to 7 or a roll rate label, not {:?}",
+                    args.first()
+                )
+                .into());
             };
             state.set_roll_rate(Timebase::ROLL_RATES[rate]);
             Ok(Value::Bool(true))

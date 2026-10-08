@@ -21,12 +21,10 @@
    param-knob-mod-depth-prop
    param-knob-mod-slot-prop
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
@@ -51,8 +49,8 @@
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :taper (if (eseq.effects.param-controls/param-mods-open? fx) "linear" taper)
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -61,8 +59,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -75,10 +73,10 @@
     (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
-        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
-        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset-for fx p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale-for fx p)
         :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
@@ -87,8 +85,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -103,7 +101,7 @@
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :effect-mode-on-bg :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :control-on-fg :dim)
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -115,7 +113,7 @@
     :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
     :color (if (= current label-text) :control-on-fg :dim)
     :border-color :transparent
-    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -162,14 +160,14 @@
 ;; ── Mode selector ──
 
 (def mode-button (fx p index short-label)
-  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value-for fx p)) index))
         (reverb-mode (> index 5)))
     (button short-label
       :width 3.0 :height 1.30 :padding 0 :font-size 8.5
       :background-color (if selected (if reverb-mode :delay-reverb-mode-on-bg :effect-mode-on-bg) :mixer-control-bg)
       :color (if selected :control-on-fg :dim)
       :border-color :transparent
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -201,7 +199,7 @@
       (label "MODE SELECTOR" :font-size 8.0 :width 8.2 :color :dim :bg :transparent)
       (box :height 0.25)
       (mode-grid fx mode-p)
-      (label (get mode-p :text-value)
+      (label (eseq.effects.param-controls/fx-param-text-value-for fx mode-p)
         :font-size 8.5 :width 8.2 :color :delay-mode-readout-fg :bg :transparent))))
 
 ;; ── Echo section ──
@@ -227,13 +225,13 @@
 
 ;; Spring type selector (which physical tank the model is tuned to).
 (def spring-button (fx p index short-label)
-  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value-for fx p)) index)))
     (button short-label
       :width 4.35 :height 0.92 :padding 0 :font-size 8.0
       :background-color (if selected :delay-reverb-mode-on-bg :mixer-control-bg)
       :border-color :transparent
       :color (if selected :control-on-fg :dim)
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

@@ -67,6 +67,9 @@ pub enum EditPatch {
     TransportParams(TransportParamsPatch),
     BarTranspose(BarTransposePatch),
     GraphNodeProcessChain(GraphNodeProcessChainPatch),
+    GraphOverride(GraphOverridePatch),
+    NeuralNetwork(NeuralNetworkPatch),
+    RackMacro(RackMacroPatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -192,7 +195,8 @@ impl InstanceOverridesState {
 
 /// One graph node's process chain (docs/graph-node-processes-spec.md) before
 /// and after an edit made through a `graph-node-process-*` native
-/// (eseq-waa9.23). The native applies the edit; the host records this patch.
+/// (eseq-waa9.23) or the host kinds' `edit-process`. The native or the
+/// setter applies the edit; the host records this patch.
 /// Replay writes the recorded chain back into the scene the edit was made in
 /// and leaves every other override of the graph alone.
 #[derive(Clone, Debug, PartialEq)]
@@ -222,6 +226,64 @@ impl GraphNodeProcessChainPatch {
             })
         }
         std::mem::size_of::<Self>() + chain_bytes(&self.before) + chain_bytes(&self.after)
+    }
+}
+
+/// One graph override field (a node intrinsic, a node or edge param, a
+/// sequencer-level config field or a group matrix cell) before and after a
+/// host kind setter's edit (kind-bindings spec §14.2k). Replay writes the
+/// recorded value back into the scene the edit was made in and leaves every
+/// other field of the graph alone (a node's process chain included).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphOverridePatch {
+    pub scene: SceneId,
+    pub sequencer_id: u64,
+    pub before: crate::graph::GraphOverrideSlot,
+    pub after: crate::graph::GraphOverrideSlot,
+}
+
+impl GraphOverridePatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
+    }
+}
+
+/// One field of a native neural network (a network setting, a weight cell
+/// or the matrix, a neuron's field) before and after a host kind setter's
+/// edit (kind-bindings spec §14.2q). Replay writes the recorded value back
+/// into the network in the scene the edit was made in and leaves every other
+/// field alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeuralNetworkPatch {
+    pub scene: SceneId,
+    pub network_id: u64,
+    pub before: crate::neural::NeuralSlot,
+    pub after: crate::neural::NeuralSlot,
+}
+
+impl NeuralNetworkPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
+    }
+}
+
+/// One field of a drum rack macro (its name, value, or a mapping's range or
+/// curve) before and after a rack panel or host kind edit (eseq-0l17.44).
+/// Replay writes the recorded field back into the rack macros of the
+/// pattern the edit was made in (and the live rack while that pattern
+/// plays) and leaves the rest of the macro alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackMacroPatch {
+    pub track: TrackId,
+    pub pattern: PatternId,
+    pub macro_id: crate::sequencer::RackMacroId,
+    pub before: crate::sequencer::RackMacroField,
+    pub after: crate::sequencer::RackMacroField,
+}
+
+impl RackMacroPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.before.retained_bytes() + self.after.retained_bytes()
     }
 }
 
@@ -868,6 +930,25 @@ impl DeviceValueSnapshot {
         }
     }
 
+    /// `base` with the components an edit of the same device moved from
+    /// `from` to `to` (eseq-0l17.72): how an open drag's entry absorbs an
+    /// edit landing beside it. `None` when the snapshots are of different
+    /// kinds or the edit moved a component the drag moved too.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        Some(match (base, from, to) {
+            (Self::Instrument(base), Self::Instrument(from), Self::Instrument(to)) => {
+                Self::Instrument(InstrumentDeviceValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            (Self::Slot(base), Self::Slot(from), Self::Slot(to)) => {
+                Self::Slot(EffectSlotValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            (Self::RackSlot(base), Self::RackSlot(from), Self::RackSlot(to)) => {
+                Self::RackSlot(RackSlotValuesSnapshot::rebase_edit(base, from, to)?)
+            }
+            _ => return None,
+        })
+    }
+
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + match self {
@@ -1043,6 +1124,10 @@ impl MergeKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1060,6 +1145,47 @@ struct PendingGesture<P> {
     merge_key: MergeKey,
     patch: P,
     retained_bytes: usize,
+}
+
+/// An active gesture set aside by [`UndoManager::suspend_gesture`], with its
+/// staged entry, until [`UndoManager::resume_gesture`] puts it back.
+pub struct SuspendedGesture<P> {
+    gesture: ActiveGesture,
+    updated_at: Option<Instant>,
+    pending: Option<PendingGesture<P>>,
+}
+
+impl<P> SuspendedGesture<P> {
+    /// The suspended gesture's merge key.
+    pub fn merge_key(&self) -> &MergeKey {
+        &self.gesture.merge_key
+    }
+
+    /// The suspended gesture's staged entry, if it staged one.
+    pub fn pending_patch(&self) -> Option<&P> {
+        self.pending.as_ref().map(|pending| &pending.patch)
+    }
+
+    /// Replace the staged entry's patch (and its retained bytes).
+    pub fn replace_pending_patch(&mut self, patch: P, retained_bytes: usize) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.patch = patch;
+            pending.retained_bytes = retained_bytes;
+        }
+    }
+
+    /// Take the staged entry (label, merge key, patch, retained bytes): the
+    /// gesture resumes with nothing staged, so its next edit stages afresh.
+    pub fn take_pending(&mut self) -> Option<(String, MergeKey, P, usize)> {
+        self.pending.take().map(|pending| {
+            (
+                pending.label,
+                pending.merge_key,
+                pending.patch,
+                pending.retained_bytes,
+            )
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1247,6 +1373,85 @@ impl<P> UndoManager<P> {
         if self.active_gesture.is_some() {
             self.active_gesture_updated_at = Some(Instant::now());
         }
+    }
+
+    /// Set the active gesture (and its staged entry) aside, so another edit
+    /// can commit an entry of its own without finishing or joining it.
+    pub fn suspend_gesture(&mut self) -> Option<SuspendedGesture<P>> {
+        let gesture = self.active_gesture.take()?;
+        Some(SuspendedGesture {
+            gesture,
+            updated_at: self.active_gesture_updated_at.take(),
+            pending: self.pending_gesture.take(),
+        })
+    }
+
+    /// Make a suspended gesture active again. Any gesture begun meanwhile
+    /// is finished first.
+    pub fn resume_gesture(&mut self, suspended: SuspendedGesture<P>) {
+        self.finish_active_gesture();
+        self.active_gesture = Some(suspended.gesture);
+        self.active_gesture_updated_at = suspended.updated_at;
+        self.pending_gesture = suspended.pending;
+    }
+
+    /// The index of the oldest undo entry committed since `revision` was
+    /// current (its `revision_before`), if one is still held.
+    pub fn undo_index_since(&self, revision: u64) -> Option<usize> {
+        self.undo
+            .iter()
+            .position(|entry| entry.revision_before == revision)
+    }
+
+    pub fn undo_patch_at(&self, index: usize) -> Option<&P> {
+        self.undo.get(index).map(|entry| &entry.patch)
+    }
+
+    /// Replace the patch of undo entry `index` (and its retained bytes).
+    pub fn replace_undo_patch(&mut self, index: usize, patch: P, retained_bytes: usize) {
+        let Some(entry) = self.undo.get_mut(index) else {
+            return;
+        };
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(entry.retained_bytes)
+            .saturating_add(retained_bytes);
+        entry.patch = patch;
+        entry.retained_bytes = retained_bytes;
+        self.enforce_budget(Some(self.current_revision));
+    }
+
+    /// Insert an entry just below undo entry `index`: it takes that entry's
+    /// `revision_before` and a fresh revision becomes the boundary between
+    /// them, so undoing walks back through the inserted entry after it.
+    pub fn insert_undo_entry_before(
+        &mut self,
+        index: usize,
+        label: impl Into<String>,
+        merge_key: Option<MergeKey>,
+        patch: P,
+        retained_bytes: usize,
+    ) -> bool {
+        if index >= self.undo.len() {
+            return false;
+        }
+        let between = self.take_revision();
+        let entry = &mut self.undo[index];
+        let revision_before = std::mem::replace(&mut entry.revision_before, between);
+        self.undo.insert(
+            index,
+            HistoryEntry {
+                revision_before,
+                revision_after: between,
+                label: label.into(),
+                merge_key,
+                patch,
+                retained_bytes,
+            },
+        );
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.enforce_budget(Some(self.current_revision));
+        true
     }
 
     pub fn finish_gesture(&mut self, id: GestureId) -> Option<ActiveGesture> {
@@ -1451,18 +1656,20 @@ impl<P> UndoManager<P> {
         while self.undo.len() + self.redo.len() > self.budget.max_entries
             || self.retained_bytes > self.budget.max_bytes
         {
-            let undo_revision = self.undo.front().map(|entry| entry.revision_after);
-            let redo_revision = self.redo.last().map(|entry| entry.revision_after);
-            let remove_undo = match (undo_revision, redo_revision) {
-                (Some(undo_revision), Some(redo_revision)) => undo_revision <= redo_revision,
-                (Some(_), None) => true,
+            // The oldest entry goes first: the undo stack's front while it
+            // holds any (every redo entry was committed after it), by
+            // position rather than revision number, since revisions need not
+            // increase along the stack (`insert_undo_entry_before` gives the
+            // inserted entry a fresh one).
+            let remove_undo = match (self.undo.front(), self.redo.last()) {
+                (Some(_), _) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
             let candidate_revision = if remove_undo {
-                undo_revision
+                self.undo.front().map(|entry| entry.revision_after)
             } else {
-                redo_revision
+                self.redo.last().map(|entry| entry.revision_after)
             };
             if candidate_revision == protected_revision {
                 break;
@@ -1535,6 +1742,9 @@ pub fn step_snapshot_bit_exact_eq(
         chord: left_chord,
         chord_durations: left_chord_durations,
         chord_delays: left_chord_delays,
+        // Identity, not content: a step whose notes only got other ids is
+        // unchanged.
+        chord_ids: _,
         timebase: left_timebase,
         swing: left_swing,
         swing_resolution: left_swing_resolution,
@@ -1554,6 +1764,9 @@ pub fn step_snapshot_bit_exact_eq(
         chord: right_chord,
         chord_durations: right_chord_durations,
         chord_delays: right_chord_delays,
+        // Identity, not content: a step whose notes only got other ids is
+        // unchanged.
+        chord_ids: _,
         timebase: right_timebase,
         swing: right_swing,
         swing_resolution: right_swing_resolution,
@@ -1657,7 +1870,7 @@ fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
 
 fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
     let crate::sequencer::StepSnapshot {
-        active: _, neural_reset: _, params: _, chord, chord_durations, chord_delays,
+        active: _, neural_reset: _, params: _, chord, chord_durations, chord_delays, chord_ids,
         timebase: _, swing: _, swing_resolution: _, track_send_plocks, midi_fx_plocks,
         effect_plocks, instrument_plocks, rack_macro_plocks, rack_slot_param_plocks,
         rack_slot_instrument_plocks, rack_slot_effect_plocks,
@@ -1669,6 +1882,7 @@ fn step_snapshot_heap_bytes(snapshot: &StepCellSnapshot) -> usize {
     chord.capacity() * std::mem::size_of::<f32>()
         + chord_durations.capacity() * std::mem::size_of::<f32>()
         + chord_delays.capacity() * std::mem::size_of::<f32>()
+        + chord_ids.capacity() * std::mem::size_of::<crate::sequencer::NoteId>()
         + track_send_plocks.capacity()
             * std::mem::size_of::<crate::sequencer::TrackSendSnapshot>()
         + slot_slice_bytes(midi_fx_plocks)
@@ -1742,6 +1956,58 @@ mod tests {
         assert_eq!((history.undo_len(), history.redo_len()), (2, 0));
         assert_eq!(history.retained_bytes(), 40);
         assert_eq!(history.redo(|_| Ok::<_, ()>(())), HistoryReplay::Unavailable);
+    }
+
+    /// eseq-0l17.72: an entry inserted below a newer one undoes after it
+    /// and keeps the revision chain (the saved revision included) intact;
+    /// replacing a patch moves the retained bytes.
+    #[test]
+    fn inserted_and_replaced_entries_keep_the_revision_chain() {
+        let mut history = manager(8, 1024);
+        history.commit("one", None, 1, 10);
+        history.mark_saved();
+        let since = history.current_revision();
+        history.commit("beside", None, 3, 30);
+        let index = history.undo_index_since(since).expect("the beside entry");
+        assert_eq!(history.undo_patch_at(index), Some(&3));
+        assert!(history.insert_undo_entry_before(index, "drag", None, 2, 20));
+        history.replace_undo_patch(index + 1, 4, 40);
+        assert_eq!(history.retained_bytes(), 70);
+        let mut undone = Vec::new();
+        while let HistoryReplay::Applied(_) = history.undo(|patch| {
+            undone.push(*patch);
+            Ok::<_, ()>(())
+        }) {}
+        assert_eq!(undone, vec![4, 2, 1]);
+        assert_eq!(history.current_revision(), 0);
+        history.redo(|_| Ok::<_, ()>(()));
+        assert!(history.is_at_saved_revision());
+        history.redo(|_| Ok::<_, ()>(()));
+        history.redo(|_| Ok::<_, ()>(()));
+        assert_eq!(history.undo_len(), 3);
+        assert!(!history.is_at_saved_revision());
+    }
+
+    /// The budget evicts the undo stack's oldest entry by position, even
+    /// when an inserted entry there has a newer revision number than the
+    /// redo stack's next entry.
+    #[test]
+    fn budget_eviction_takes_the_undo_front_whatever_its_revision() {
+        let mut history = manager(8, 100);
+        history.commit("a", None, 1, 10);
+        history.commit("b", None, 2, 10);
+        assert!(history.insert_undo_entry_before(0, "inserted", None, 3, 10));
+        assert!(matches!(
+            history.undo(|_| Ok::<_, ()>(())),
+            HistoryReplay::Applied(_)
+        ));
+        assert_eq!((history.undo_len(), history.redo_len()), (2, 1));
+        // Grow `a` past the byte budget: the inserted front entry goes, the
+        // redo entry stays.
+        history.replace_undo_patch(1, 4, 85);
+        assert_eq!((history.undo_len(), history.redo_len()), (1, 1));
+        assert_eq!(history.next_undo_patch(), Some(&4));
+        assert_eq!(history.next_redo_patch(), Some(&2));
     }
 
     #[test]

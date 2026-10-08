@@ -4,4 +4,4 @@
   (track :instrument "core/wavetable"))
 
 (def capture-after-sync ()
-  (set! sbrowser-tab "presets"))
+  (let ((v eseq.browser/browser-view)) (set! v.tab "presets")))

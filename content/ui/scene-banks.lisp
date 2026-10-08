@@ -4,92 +4,91 @@
 ;; switching it never calls the host. It lives here rather than in
 ;; ui/transport.lisp because two render roots read it — the transport scene
 ;; strip and the mixer's per-track clip grid (spec §10.1) — and ui/main.lisp
-;; loads ui/mixer.lisp BEFORE ui/transport.lisp, so a transport-owned
-;; `defstate` would not exist when the mixer's readers compile. Both roots
-;; import this module and share one bank view.
+;; loads ui/mixer.lisp BEFORE ui/transport.lisp. Both roots import this module
+;; and share one bank view.
 ;;
 ;; State/accessor hub only: no `effect-buffer` here, so importing it from a
 ;; render root is safe.
 
 (module eseq.scene-banks)
-;; Compile-time edge (spec §4): the shared defstate keyspace + compat
-;; aliases must exist before this unit's readers compile.
-(import eseq.seq-core-state)
+(import eseq.kinds :refer (banks transport))
+(import eseq.view-kit :as kit)
 
-(export scene-banks
-        scene-bank-index-containing
-        viewed-scene-bank-index
-        viewed-scene-bank-pending-new
-        scene-viewed-bank-index
+(export scene-bank-view
         scene-viewed-bank
+        scene-viewed-bank-index
+        view-scene-bank!
+        view-new-scene-bank!
         clip-in-viewed-bank?)
 
-;; UI source evaluation can precede the first song-state publication. Keep the
-;; strip renderable during that interval; the reactive SEQ.scene-banks read
-;; replaces this model-consistent single-bank value as soon as sync arrives.
-(def scene-banks ()
-  (if (> (len SEQ.scene-banks) 0)
-    SEQ.scene-banks
-    (list (dict :id 0 :label "A" :name nil :len SEQ.num-patterns :offset 0))))
+;; The bank the strip shows (a bank instance), the index it last had, and
+;; another bank listed beside it. A shown bank no longer listed falls back
+;; (scene-banks spec §4):
+;; - a structural edit (delete bank, undo) removes it but not `other`: the
+;;   bank now at its last index, clamped (the previous one when it was last);
+;; - a project load replaces every bank instance, `other` too, and nil is the
+;;   first view: the bank of the playing scene.
+;; `pending` is the bank count when "New bank" was picked (-1: none):
+;; create-scene-bank appends, and the view lands on the new bank once the
+;; host lists it.
+(def-kind scene-bank-view
+  :key ()
+  :state ((bank bank :default nil)
+          (index -1)
+          (other bank :default nil)
+          (pending -1)))
 
-(def scene-bank-index-containing (scene)
-  (let ((banks (scene-banks)))
-    (let ((matches (filter
-            (lambda (i)
-              (let ((bank (nth banks i)))
-                (and (>= scene (get bank :offset))
-                  (< scene (+ (get bank :offset) (get bank :len))))))
-            (range 0 (len banks)))))
-      (if (> (len matches) 0) (nth matches 0) 0))))
+(def view-scene-bank! (b)
+  (let ((other (first (filter (lambda (x) (not (= x b))) (banks))))
+        (index (if b b.index -1)))
+    (unless (= scene-bank-view.pending -1) (set! scene-bank-view.pending -1))
+    (unless (= scene-bank-view.bank b) (set! scene-bank-view.bank b))
+    (unless (= scene-bank-view.other other) (set! scene-bank-view.other other))
+    (unless (= scene-bank-view.index index) (set! scene-bank-view.index index))
+    b))
 
-;; Pure presentation state: switching this index never calls the host. The -1
-;; sentinel initializes the first rendered view to the bank containing the
-;; current scene. Structural edits clamp a stale index to the nearest survivor.
-(defstate viewed-scene-bank-index -1)
-(defstate viewed-scene-bank-pending-new false)
-(defstate viewed-scene-bank-generation 0)
+;; Show the bank create-scene-bank is about to append.
+(def view-new-scene-bank! ()
+  (set! scene-bank-view.pending (len (banks))))
+
+(def playing-bank (all)
+  (if transport.scene transport.scene.bank (first all)))
+
+;; Where a shown bank that is no longer listed falls back to.
+(def fallback-bank (all)
+  (if (and (>= scene-bank-view.index 0) (kit/listed? scene-bank-view.other all))
+    (nth all (min scene-bank-view.index (- (len all) 1)))
+    (playing-bank all)))
+
+;; The shown bank, or nil before the host has published any.
+(def scene-viewed-bank ()
+  (let ((all (banks))
+        (pending scene-bank-view.pending)
+        (b scene-bank-view.bank))
+    (if (>= pending 0)
+      (if (< pending (len all))
+        (view-scene-bank! (nth all pending))
+        ;; The host has not published the appended bank yet: show the last.
+        (nth all (- (len all) 1)))
+      (if (kit/listed? b all)
+        (do
+          ;; Keep the fallback current: b's index and a bank beside it.
+          (unless (and (= scene-bank-view.index b.index)
+                       (or (= (len all) 1) (kit/listed? scene-bank-view.other all)))
+            (view-scene-bank! b))
+          b)
+        (view-scene-bank! (fallback-bank all))))))
 
 (def scene-viewed-bank-index ()
-  ;; Project replacement resets browsing even when reloading the same file.
-  ;; Ordinary scene changes leave the user's chosen bank alone.
-  (let ((generation (or SEQ.scene-bank-view-generation 0)))
-    (if (not (= generation viewed-scene-bank-generation))
-      (do
-        (set! viewed-scene-bank-generation generation)
-        (set! viewed-scene-bank-pending-new false)
-        (set! viewed-scene-bank-index -1))
-      nil))
-  (let ((count (len (scene-banks))))
-    (if (= count 0)
-      0
-      (if viewed-scene-bank-pending-new
-        (if (< viewed-scene-bank-index count)
-          (do
-            (set! viewed-scene-bank-pending-new false)
-            viewed-scene-bank-index)
-          ;; The host has not published the appended bank yet. Keep the pending
-          ;; index intact while rendering the old last bank in the meantime.
-          (- count 1))
-        (let ((index (if (< viewed-scene-bank-index 0)
-                (scene-bank-index-containing SEQ.current-pattern)
-                (min viewed-scene-bank-index (- count 1)))))
-          (do
-            (if (not (= viewed-scene-bank-index index))
-              (set! viewed-scene-bank-index index)
-              nil)
-            index))))))
+  (let ((b (scene-viewed-bank)))
+    (if b b.index 0)))
 
-(def scene-viewed-bank ()
-  (nth (scene-banks) (scene-viewed-bank-index)))
-
-;; Clip-grid membership (spec §10.1). `:banks` is the host-published list of
-;; bank indices whose scenes reference this clip on its track. An empty list
-;; means no scene in any bank references it: those orphans (a freshly cloned
-;; clip, a clip whose only scene was deleted) stay visible in every bank so
-;; they are never stranded behind a bank the user cannot guess.
-(def clip-in-viewed-bank? (cell)
-  (let ((banks (or (get cell :banks) (list)))
-        (viewed (scene-viewed-bank-index)))
-    (if (= (len banks) 0)
-      true
-      (> (len (filter (lambda (index) (= index viewed)) banks)) 0))))
+;; Clip-grid membership (spec §10.1): cell c (a track's pattern) belongs to
+;; the viewed bank `viewed` (a bank instance, (scene-viewed-bank), read once
+;; per render) when a scene of that bank uses it. A cell no scene uses yet
+;; (`c.banks` empty: a freshly cloned clip, a clip whose only scene was
+;; deleted) stays visible in every bank so it is never stranded behind a bank
+;; the user cannot guess.
+(def clip-in-viewed-bank? (c viewed)
+  (let ((in c.banks))
+    (or (= (len in) 0) (kit/listed? viewed in))))

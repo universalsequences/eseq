@@ -1,5 +1,7 @@
 # FX value-delta publishing (scene-switch re-eval elimination)
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Problem
 
 Scene switch measured on kacrotest (2 rack tracks, fx panel open): one reactive

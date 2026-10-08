@@ -689,6 +689,7 @@ impl WidgetDefinition for Eq8EditorWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         let id = nearest_band(node, local_col, local_row)?;
         let band = prop_bands(&node.props)
@@ -1038,7 +1039,8 @@ mod tests {
         let x = node.rect.col
             + node.rect.width * freq_to_t(1_000.0, DEFAULT_FREQ_MIN, DEFAULT_FREQ_MAX);
         let y = node.rect.row + node.rect.height * 0.5;
-        let Some(WidgetEvent::Custom(value)) = EQ8_EDITOR_WIDGET.double_click_event(&node, x, y)
+        let Some(WidgetEvent::Custom(value)) =
+            EQ8_EDITOR_WIDGET.double_click_event(&node, x, y, KeyModifiers::empty())
         else {
             panic!("expected toggle event");
         };

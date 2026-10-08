@@ -481,6 +481,28 @@ pub struct SelectedNeuralNeuron {
 
 pub type SharedSelectedNeuralNeurons = Arc<Mutex<BTreeSet<SelectedNeuralNeuron>>>;
 
+/// Neuron `neuron_idx` of the current scene's network `network_id` as a
+/// selection entry; a network the scene does not hold or a neuron past its
+/// count is an error.
+pub fn resolve_selected_neuron(
+    state: &crate::sequencer::SequencerState,
+    network_id: u64,
+    neuron_idx: usize,
+) -> Result<SelectedNeuralNeuron, String> {
+    let networks = state.current_neural_networks();
+    let network = (networks.iter())
+        .find(|network| network.id == network_id)
+        .ok_or_else(|| "the network is gone".to_string())?;
+    if neuron_idx >= network.num_neurons {
+        return Err("neuron index out of range".to_string());
+    }
+    Ok(SelectedNeuralNeuron {
+        pattern_idx: state.current_scene_index(),
+        network_id,
+        neuron_idx,
+    })
+}
+
 pub fn register_neural_authoring_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -520,9 +542,10 @@ pub fn register_neural_authoring_natives_with_selection(
         "Create a neural network in the current pattern and return its structured description.",
         move |args, ctx| {
             let options = parse_neural_create_args(&args)?;
+            let id = state_for_neural_create.mint_neural_network_id();
             let created = state_for_neural_create.edit_current_neural_networks(|networks| {
                 let mut network = ProjectNeuralNetwork {
-                    id: next_neural_network_id(networks),
+                    id,
                     name: options.name.clone(),
                     enabled: options.enabled,
                     num_neurons: options.num_neurons,
@@ -572,22 +595,14 @@ pub fn register_neural_authoring_natives_with_selection(
             let reference = parse_neural_network_ref(&args[0])?;
             let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
             let networks = state_for_neural_select.current_neural_networks();
-            let network_idx = neural_network_index(&networks, &reference)?;
-            let network = &networks[network_idx];
-            if neuron_idx >= network.num_neurons {
-                return Err("neuron index out of range".to_string());
-            }
-            let pattern_idx = state_for_neural_select.current_scene_index();
+            let network_id = networks[neural_network_index(&networks, &reference)?].id;
+            let neuron = resolve_selected_neuron(&state_for_neural_select, network_id, neuron_idx)?;
             let mut selection = selection_for_neural_select.lock().unwrap();
             selection.clear();
-            selection.insert(SelectedNeuralNeuron {
-                pattern_idx,
-                network_id: network.id,
-                neuron_idx,
-            });
+            selection.insert(neuron);
             ctx.set_status(format!(
                 "selected neural neuron {}:{}:{}",
-                pattern_idx, network.id, neuron_idx
+                neuron.pattern_idx, network_id, neuron_idx
             ));
             Ok(selected_neural_neurons_to_value(&selection))
         },
@@ -633,13 +648,50 @@ pub fn register_neural_authoring_natives_with_selection(
                 _ => return Err("network id must be a non-negative number".to_string()),
             };
             let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
-            let pattern_idx = state_for_neural_selected_predicate.current_scene_index();
-            let selection = selection_for_neural_selected_predicate.lock().unwrap();
-            Ok(EValue::Bool(selection.contains(&SelectedNeuralNeuron {
-                pattern_idx,
+            // A network or neuron the scene does not hold is not selected.
+            let neuron = resolve_selected_neuron(
+                &state_for_neural_selected_predicate,
                 network_id,
                 neuron_idx,
-            })))
+            );
+            let selection = selection_for_neural_selected_predicate.lock().unwrap();
+            Ok(EValue::Bool(
+                neuron.is_ok_and(|neuron| selection.contains(&neuron)),
+            ))
+        },
+    );
+
+    let selection_for_neural_set_selected = Arc::clone(&selected_neural_neurons);
+    let state_for_neural_set_selected = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-set-neuron-selected",
+        "(neural-set-neuron-selected network-id neuron-index on)",
+        "Select one neuron of the current pattern alone (on true, as neural-select-neuron) or deselect it (false); the setter of the host kind neuron.selected.",
+        move |args, _ctx| {
+            let [network_id, neuron_idx, on] = args.as_slice() else {
+                return Err(
+                    "neural-set-neuron-selected expects network id, neuron index and a bool"
+                        .to_string(),
+                );
+            };
+            let network_id = match network_id {
+                EValue::Number(id) if *id >= 0.0 && id.fract() == 0.0 => *id as u64,
+                _ => return Err("network id must be a non-negative integer".to_string()),
+            };
+            let neuron_idx = parse_nonnegative_usize(neuron_idx, "neuron index")?;
+            let EValue::Bool(on) = *on else {
+                return Err("neural-set-neuron-selected takes true or false".to_string());
+            };
+            let neuron =
+                resolve_selected_neuron(&state_for_neural_set_selected, network_id, neuron_idx)?;
+            let mut selection = selection_for_neural_set_selected.lock().unwrap();
+            if on {
+                selection.clear();
+                selection.insert(neuron);
+            } else {
+                selection.remove(&neuron);
+            }
+            Ok(EValue::Bool(on))
         },
     );
 
@@ -1264,15 +1316,15 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     );
 
     // UI telemetry: the tick stamps a number at the audio sample it plays at
-    // (the boundary, plus `at` beats); the UI publishes the latest one sounded
-    // as SEQ.generator-mark-<id>, or SEQ.generator-mark-<id>-<key> for a keyed
-    // mark (the jaki kind's playhead and lit row items).
+    // (the boundary, plus `at` beats); the UI shows the latest one sounded as
+    // the generator's mark of that key (`generator-mark.value`: the jaki
+    // kind's playhead and lit row items).
     let generator_tick_for_mark = Arc::clone(&generator_tick);
     let state_for_mark = Arc::clone(&state);
     runtime.register_native_with_docs(
         "gen-mark",
         "(gen-mark value [key] [at-beats])",
-        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as SEQ.generator-mark-<id>[-<key>].",
+        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as (generator-mark-named g key).value (key \"\" unkeyed).",
         move |args, _ctx| {
             let Some(EValue::Number(value)) = args.first() else {
                 return Err("gen-mark expects a number".to_string());
@@ -3802,6 +3854,12 @@ pub(in crate::lisp_host) fn parse_midi_fx_param_descriptor(
         min,
         max,
         default,
+        // A script-declared param has no ratio flag: the range rule.
+        percent_ratio: crate::effects::ParamDescriptor::percent_ratio_by_range(
+            unit.as_deref(),
+            min,
+            max,
+        ),
         kind: labels
             .map(|labels| crate::effects::ParamKind::Enum { labels })
             .unwrap_or(crate::effects::ParamKind::Continuous { unit }),

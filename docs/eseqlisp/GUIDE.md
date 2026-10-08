@@ -106,6 +106,7 @@ The callback comes first, except in `each`, where the list comes first:
 (filter |x| (> x 1) xs)
 (reduce |acc x| (+ acc x) 0 xs)
 (for-each |x| (status (str x)) xs)
+(apply f a b xs)                          ; f with a, b, then the items of xs
 (each xs |x i| (label (str i ": " x)))    ; widget children; see below
 ```
 
@@ -122,12 +123,14 @@ An error inside a callback is logged and the element becomes `nil`. Set
 (let ((a 1) (b (+ a 1))) body…)    ; sequential: b sees a
 (-> x (f 1) g)  (->> x f)          ; threading
 (set! name value)
+(when c e1 e2)                     ; (if c (do e1 e2) nil)
+(toggle! place)                    ; (set! place (not place)); place may be a.b
 ```
 
-There is no `cond`, `when`, `unless`, `case`, `loop`, `while`, or `let*`.
-Nest `if`, and `let` is already sequential. There is no `try`/`catch`; a
-native error aborts the current evaluation and shows in `*lisp-reload*` or
-the status line.
+`when` and `toggle!` are macros from `content/core/init.lisp`. There is no
+`cond`, `unless`, `case`, `loop`, `while`, or `let*`. Nest `if`, and `let`
+is already sequential. There is no `try`/`catch`; a native error aborts
+the current evaluation and shows in `*lisp-reload*` or the status line.
 
 A list pattern in `let` or an argument list destructures a map by keyword,
 not a list by position:
@@ -145,10 +148,44 @@ not a list by position:
 |x| (* x x)
 ```
 
-Arity is fixed. There are no optional, keyword, or rest arguments for
-functions; calling with the wrong count is an error. Pass a map when you
-want options. Closures capture their environment and recursion works through
-the global name.
+Closures capture their environment and recursion works through the global
+name.
+
+#### Optional, keyword, and rest parameters
+
+`def` and `lambda` argument lists follow Common Lisp, in the order
+`required &optional &rest &key` (but not `&optional` and `&key` together):
+
+```lisp
+(def tone (note &optional (vel 100) ch) …)      ; (tone 60) (tone 60 90) (tone 60 90 2)
+(def pill (text &key (w 10) (h 4) lit on-click) …)
+(pill "A" :lit true :w 12)                       ; keys in any order
+(def sum (&rest xs) (reduce |a x| (+ a x) 0 xs)) ; (sum 1 2 3)
+(apply sum 1 (list 2 3))                         ; spread a list into the call
+```
+
+- A parameter is `name` (default `nil`) or `(name default)`. The default
+  is evaluated on each call that leaves it out, inside the function, so it
+  can read earlier parameters (destructured fields included):
+  `(b (* a 2))`. Defaults see earlier parameters only; reading a later one
+  (or the parameter itself) is a compile error. Passing `nil` explicitly is
+  passing a value; the default does not apply.
+- Keyword errors name the function: an unknown key
+  (`pill: unknown keyword :colour; accepts :w :h :lit :on-click`), a key
+  given twice, a key with no value, or a non-keyword where a key belongs.
+- `&rest` gets the arguments after the required and optional ones as a list.
+  With `&key` too, the rest list holds the key/value pairs as well (so a
+  wrapper can forward them with `apply`), and unknown keys are still an
+  error unless the list ends with `&allow-other-keys`:
+  `(def ctl (widget &rest props &key (w 8) &allow-other-keys) (apply box :width w props))`.
+- `&optional` and `&key` together are a compile error (whether `(f 0 :c 9)`
+  passes `:c` as the optional or as a key is ambiguous); use `&key`.
+- Too few or too many arguments is an error that gives the range
+  (`f takes 2 to 4 arguments, got 5`).
+- A function without `&` markers keeps plain fixed arity and its direct
+  call path: a missing argument is unbound and errors when read, an extra
+  one is an `ArityMismatch`. The `|x|` shorthand is always fixed-arity.
+- Map-destructuring patterns are allowed for required parameters only.
 
 ### Macros
 
@@ -162,8 +199,8 @@ the global name.
 ```
 
 Exactly one body form. Quasiquote, `,x`, and `,@xs` work only inside a
-`defmacro` body; elsewhere a backtick is a plain quote. `&rest` is allowed in
-macros only. Inside a module, a macro is interned as `module/name`, which is
+`defmacro` body; elsewhere a backtick is a plain quote. Macros take `&rest`
+only (no `&optional` or `&key`). Inside a module, a macro is interned as `module/name`, which is
 why the shader stdlib is called as `(sdf/circle r)`.
 
 ## Reactive State
@@ -183,45 +220,77 @@ the cell changes and only then. `defstate` values survive hot reload.
 Inside a `(module m)` the cell is registered as `m/volume`, so two modules
 can each have a `volume`.
 
-### The host namespaces
+### Host state: the kinds
 
-The sequencer publishes its state as dotted reactive reads:
-
-```lisp
-SEQ.current-track  SEQ.num-tracks  SEQ.track-names  SEQ.selected-steps
-(nth SEQ.steps 4)  (len SEQ.track-ids)
-```
-
-Read `(nth SEQ.steps i)`, never bind `SEQ.steps` whole. Indexed reads
-register a per-index dependency; a whole-list read makes the buffer rerun on
-every edit anywhere in the list. Other namespaces are `SEQV` (Lisp-writable
-scratch), `THEME`, `APP`, `INPUT`, `MIDI`, and `GRAPH`.
-
-Writes go through host commands, not `set!`:
+The sequencer publishes its state as host kinds (`eseq.kinds`,
+docs/kind-bindings-spec.md): instances with fields, read with dots.
 
 ```lisp
-(host-command "toggle-step" (dict :track 0 :step 4))
-(seq-set-step-param 4 :velocity 0.9)
-(seq-set-effect-param slot param-index 800)   ; on the current track
+(import eseq.kinds :refer (track tracks selection transport))
+selection.track.name  transport.playing  (len (tracks))
+(let ((t (track 0)) (s (nth t.steps 4))) s.active)
 ```
 
-Roughly three hundred host commands exist; the names are the `COMMANDS`
-arrays under `crates/sequencer/src/ui/host_commands/`. An unknown name shows
-"Unknown host command" in the status line and does nothing.
+A read subscribes to that field of that instance only, so a view reruns
+when what it read changed and not otherwise. The legacy `SEQ`, `SEQV`,
+`EXPORT` and `AGENT` namespaces are gone (eseq-0l17.78, .80): `SEQ.x` (or
+`#'SEQ.x`) is a compile error that points at the kinds, e.g. "SEQ.track-colors
+was removed; read the eseq.kinds instance fields, e.g. (map (lambda (t)
+t.color) (tracks))". `THEME` is the one host namespace a view still reads
+directly.
 
-### Float bindings for hot values
+Write a field with `set!` when the kind gives it a setter, or call one of
+the kinds' actions; either becomes a host command, applied (and recorded for
+undo) by the host:
+
+```lisp
+(set! t.volume 0.5)
+(set! n.delay 3)                            ; n a graph node, (nth g.nodes 1)
+(select-region! (track 0) (track 2) 0 16)   ; song.region
+(bind-port! out "velocity")                 ; a process port, p.ports
+```
+
+Underneath, roughly three hundred host commands exist; the names are the
+`COMMANDS` arrays under `crates/sequencer/src/ui/host_commands/`, and
+`(host-command "toggle-step" (dict :track 0 :step 4))` sends one directly.
+An unknown name shows "Unknown host command" in the status line and does
+nothing. A native removed with the legacy layer (eseq-0l17.81:
+`graph-node-value`, `graph-param-value`, `graph-edge-value`,
+`graph-route-tracks`, the `graph-node-process-*` wiring natives, the song
+selection natives `seq-song-select-clip`, `-deselect-clip`, `-set-region`
+and `-clear-region`, and `seq-arrangement-clip-set-source` and
+`seq-set-process-lane-step`) fails with a message naming its kind
+replacement, and completion no longer offers it. (Setting a lane clip's
+source to empty has no kind equivalent yet.) `graph-config-value` remains, as a
+plain read: a view that should follow a graph's config reads the `graph`
+kind (`g.reset-bars`, `g.node-count`, …) instead.
+
+### Bindings for hot values
 
 A meter or a knob that follows audio should not rerun a view sixty times a
-second. Bind the prop to a float reference instead:
+second. Bind the prop to the field instead of reading it:
 
 ```lisp
-(meter :level (bind-seq "master-peak-l"))
-(slider :value (bind-nth "SEQV" "track-gain" i))
+(meter :level #'master.peak-l)
+(let ((t (track i))) (slider :value #'t.volume))
 ```
 
-Only props a widget lists as bindable accept references. The
-`eseq.bindings` module wraps this with `scope`, `bound`, `write!`, and
-`one-hot!` over the `SEQV` namespace.
+Only props a widget lists as bindable accept references. A view's own
+hot state (a cursor, a highlight) is a view-local kind's `:state` field,
+bound the same way (`#'h.selected`). On a live host namespace, `#'THEME.accent`
+binds that field's float slot.
+
+`#'` and a field read are the whole binding API. The string-keyed forms
+`bind`, `bind-seq`, `bind-nth`, `bind-seq-nth`, `reactive-get` and
+`reactive-set` were removed (eseq-0l17.80); each is a compile error naming
+its replacement (unless your own code defines that name). Two forms are
+deprecated and warn once per session (per VM), naming the file of the
+first use:
+
+- `(reactive-value x)` is just `x`: a value position reads a binding already.
+- `defwidget`'s `:bindable (…)` is ignored: every `:state` accepts a binding.
+
+Drop both; they will be removed.
 
 ### `subtree`
 
@@ -271,14 +340,35 @@ file. Do not name a `def` or a parameter after a widget: a local called
 
 | widget | handler | receives |
 |---|---|---|
-| `box` `:on-click :on-drag :on-mouse-down …` | one event map | `phase x y col row shift ctrl alt super` |
-| `button :on-click` | one map | click info |
+| `box` `label` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `button :on-click :on-press :on-release` | one pointer event map | see below |
 | `slider knob number-picker tabs :on-change` | one number | |
 | `toggle :on-change` | one bool | |
 | `dropdown :on-change` | the option string | use `:value-index` for enums |
 | `text-input :on-change :on-submit` | string, none | |
 | `xy-pad :on-change` | `x y` | |
 | shader widgets `:on-drag` | `sx sy region` | normalized -1..1 |
+
+### Pointer events
+
+Pointer handlers receive a plain map; read it with dotted access (`e.u`).
+
+| Field | Meaning |
+|---|---|
+| `e.phase` | `"down"` `"drag"` `"up"` `"click"` `"right-click"` `"double-click"` (button: `"click"` `"press"` `"release"`) |
+| `e.u`, `e.v` | 0–1 position within the widget; `u` grows rightward, `v` downward |
+| `e.sx`, `e.sy` | the same position in -1..1 (`u = (sx + 1) / 2`) |
+| `e.x`, `e.y` | offset from the widget's top-left, in cells |
+| `e.at` | `(dict :col :row)`, the grid point a `context-menu` anchors to |
+| `e.col`, `e.row` | the same point as separate numbers |
+| `e.shift`, `e.cmd`, `e.alt`, `e.ctrl` | modifier booleans (`e.super` and `e.meta` alias `e.cmd`) |
+
+`u`/`v` are not clamped: a drag that leaves the widget reports values outside
+0–1. A `button` `:on-click` (which Enter/Space also fire) and a `box` or
+`label` `:on-click` fired from the keyboard carry no pointer position and
+report the widget's top-left (`u = v = 0`). `button` `:on-press` and
+`:on-release` report the modifiers as false. A right-click that bubbles to
+an ancestor's `:on-right-click` measures `u`/`v` against that ancestor.
 
 ### Children come from `each`
 
@@ -379,7 +469,10 @@ exported; `pc/param-set-control-value` reaches an export through its alias.
 A file with no `module` form belongs to `eseq.vanilla` and exports
 everything. Module `a.b.c` is the file `a/b/c.lisp` on the load path:
 `content/ui/` for factory code, then `~/.eseq.d/packages/<pkg>/src/`, then
-your user directory.
+your user directory. A module can also be a directory: `a.b` loads
+`a/b/index.lisp`, which is tried before a sibling `a/b.lisp` in the same
+root. `(import eseq.effects)` loads every module factory device UIs call by
+qualified name.
 
 `(load "@/ui/themes.lisp")` re-evaluates a file as a side effect. Use
 `import` for code you call and `load` for files whose evaluation is the point.
@@ -567,7 +660,8 @@ the project's scratch buffer.
 ## Gotchas
 
 - **`0`, `""`, and `()` are false.** Compare with `nil` explicitly.
-- **Functions have fixed arity.** No optional args; pass a map.
+- **A plain argument list is fixed-arity.** Use `&optional`, `&key`, or
+  `&rest` for anything else; `|x|` lambdas stay fixed.
 - **`merge` takes keyword pairs**, not a second map.
 - **No `\"` in strings.** Build the string with `str` or `fmt`.
 - **`each` for widget children, never `map`.** And give `each` a named list.
@@ -578,7 +672,8 @@ the project's scratch buffer.
 - **`defwidget` is a shader**, not a component.
 - **A `def` or parameter named like a widget shadows it.** `label` and
   `value` are the usual victims.
-- **Read `(nth SEQ.list i)`**, not `SEQ.list`.
+- **Read the field you need** (`s.active` of one step), not a whole list
+  you then index: the read is the subscription.
 - **Do not echo host values into a `defstate` from a drag handler.** Every
   reader re-renders per event. Read the host value directly or use a float
   binding.
@@ -640,6 +735,8 @@ cargo nextest run -p sequencer -E 'test(/customize_lists_the_mixer_clip_knob/)'
 
 ```lisp
 (def name value)  (def name (args…) body…)  (lambda (args…) body…)
+;; args…: a b [&optional c (d 1)] [&rest more] [&key e (f 2)] [&allow-other-keys]
+;;        (&optional or &key, not both)
 (defmacro name (args… [&rest r]) body)
 (defstate name init)  (def name (state init))  (def name (derived body…))
 (defscene name default)                 ; per-pattern persisted slot
@@ -676,12 +773,12 @@ map filter reduce for-each each
 ```lisp
 (effect-buffer "*name*" body)  (effect body…)  (observe body…)
 (subtree :key k body)
-(bind "NS" "field")  (bind-seq "field")  (bind-nth "NS" "field" i)  (bind-seq-nth "field" i)
-(reactive-get "NS" "f")  (reactive-set "NS" "f" v)  (reactive-value ref)
+#'t.volume  #'THEME.accent      ; bind a field (kind instance, live namespace)
+t.volume  (set! t.volume 0.5)   ; read (subscribes) and write a field
 (host-command "name" payload)  (status "text")
 (apply-theme (dict :slot '(r g b a) …))  (ui/style :pressed (dict …) :hover (dict …))
 (defwidget name :width w :height h [:paint-margin m] [:animates b]
-  :state (s…) :bindable (p…) :shader sdf-expr)
+  :state (s…) :shader sdf-expr)    ; every state accepts #' bindings
 (define-mode "m" [:read-only b] [:live-keys b] [:inherit "p"] [:on-enter "f"] [:on-key "f"])
 (bind-key "K" "f")  (mode-bind-key "m" "K" "f")  (set-buffer-mode-for "*b*" "m")
 ```

@@ -50,18 +50,19 @@ fn check_villain_panel(panel: VillainPanel) {
     )));
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 22);
-    editor.runtime_mut().register_reactive("SEQ", vec![
-        ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
-        ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
-        ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-        ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
-        ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
-    ], true);
-    for (field, value) in values { editor.runtime_mut().set_reactive("SEQ", &field, value); }
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
+    seed_values(vec![
+    ]);
+    for (field, value) in values { seed_value(&field, value); }
     editor.runtime_mut().eval_str(r#"
         (def eseq.seq-core-state/selected-bus-name () "Mix")
         (def seq-has-selection? () false)
-        (def eseq.browser/sbrowser-editor-name "")
+        (def eseq.browser/clear-editor-name! () nil)
         (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
         (def custom-midi-fx-ui (fx) false)
         (def custom-audio-fx-ui (fx) false)
@@ -70,6 +71,7 @@ fn check_villain_panel(panel: VillainPanel) {
     register_test_delete_target_natives(&mut editor, 1);
     editor.runtime_mut().eval_str(&ui).unwrap_or_else(|e| panic!("load {instrument} UI: {e:?}"));
     editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+    seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() { panic!("{instrument} UI: {status}"); }
     let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
@@ -92,7 +94,7 @@ fn check_villain_panel(panel: VillainPanel) {
         for child in &node.children { visit(child, panel, controls); }
     }
     let bound_name = |node: &eseqlisp::layout::LayoutNode| -> String {
-        let Some(Value::ReactiveRef { field, .. }) = node.props.get("value") else { panic!("unbound control"); };
+        let field = bound_field(node.props.get("value")).expect("unbound control");
         field.strip_prefix("vk-test-").expect("real parameter binding").to_string()
     };
 

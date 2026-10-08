@@ -72,8 +72,8 @@
               :border-color :black
               :background-color :mixer-strip-bg
               :font-size 18
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

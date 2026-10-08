@@ -3,8 +3,6 @@
 #include "hot_swap.h"
 #include <assert.h>
 
-#define EDGE_BUFFER_PAD_FLOATS 64
-
 static bool using_inline_in_cache(const RTNode *node) {
   return node->cached_inPtrs == (float **)node->cached_inInline;
 }
@@ -353,9 +351,13 @@ void update_orphaned_status(LiveGraph *lg) {
   // Mark scheduling cache as dirty - topology has changed
   lg->sched.dirty = true;
 
-  // Invalidate IO caches for all nodes - topology has changed
+  // Invalidate IO caches for all nodes - topology has changed. Reserve each
+  // node's discard buffers for its unconnected outputs now, in the edit
+  // phase, so the rebuild that follows only assigns pointers. On allocation
+  // failure the rebuild falls back to the shared scratch for those ports.
   for (int i = 0; i < lg->node_count; i++) {
     lg->nodes[i].io_cache_valid = false;
+    (void)node_reserve_unconnected_outputs(lg, &lg->nodes[i]);
   }
 
   // First, mark all nodes as orphaned (except watched nodes)
@@ -1260,6 +1262,8 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
     free(node->succ);
     node->succ = NULL;
   }
+
+  node_free_null_outputs(node);
 
   // Free cached IO pointers
   if (node->cached_inPtrs) {

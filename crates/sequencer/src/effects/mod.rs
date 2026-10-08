@@ -119,6 +119,13 @@ pub fn builtin_effect_name_from_project_name(name: &str) -> Option<&'static str>
         .or_else(|| dgen_builtin::find(bare).map(|builtin| builtin.name))
 }
 
+/// Whether `name` names an effect built into eseq: a built-in insert (its
+/// canonical name or a legacy alias) or a dgen built-in. Cheap: no
+/// descriptor is built.
+pub fn is_builtin_effect(name: &str) -> bool {
+    EffectDescriptor::canonical_builtin_insert_name(name).is_some() || dgen_builtin::contains(name)
+}
+
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
 
@@ -172,6 +179,16 @@ pub enum ParamKind {
     Continuous { unit: Option<String> }, // e.g., "Hz", "ms", "%"
     Boolean,                             // 0.0 = off, 1.0 = on
     Enum { labels: Vec<String> },        // value = index as f32
+}
+
+impl ParamKind {
+    /// A continuous param's unit (`None` for any other kind).
+    pub fn unit(&self) -> Option<&str> {
+        match self {
+            Self::Continuous { unit } => unit.as_deref(),
+            Self::Boolean | Self::Enum { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +408,13 @@ pub struct ParamDescriptor {
     pub node_param_span: u32, // number of contiguous state cells that share this value
     pub host_control: Option<HostControl>,
     pub ui_metadata: Option<ParamUiMetadata>,
+    /// A `%` param stored as a ratio (0.0-1.0, or the OTT time's 0.1-10)
+    /// and shown x100 ([`Self::is_percent`]); false for a `%` param stored
+    /// in display units already (the Filterbank's 0-100) and for any other
+    /// unit. Built-in descriptors declare it; sources with no such flag
+    /// (DGen manifests, script-declared params) infer it with
+    /// [`Self::percent_ratio_by_range`] (eseq-0l17.63).
+    pub percent_ratio: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -519,9 +543,19 @@ impl ParamDescriptor {
         matches!(self.kind, ParamKind::Enum { .. })
     }
 
-    /// Returns true if this param is displayed as percentage but stored 0.0-1.0.
+    /// Returns true if this param is displayed as a percentage of a stored
+    /// ratio (0.0-1.0, or the OTT time's 0.1-10): a `%` param declaring
+    /// [`Self::percent_ratio`]. A `%` param stored as 0-100 (the
+    /// Filterbank's) is already in display units.
     pub fn is_percent(&self) -> bool {
-        matches!(&self.kind, ParamKind::Continuous { unit: Some(u) } if u == "%")
+        self.percent_ratio && self.kind.unit() == Some("%")
+    }
+
+    /// The ratio rule for a param source that declares no
+    /// [`Self::percent_ratio`] (a DGen manifest, a script-declared param):
+    /// a `%` param whose range stays within ±10 is a stored ratio.
+    pub fn percent_ratio_by_range(unit: Option<&str>, min: f32, max: f32) -> bool {
+        unit == Some("%") && min.abs().max(max.abs()) <= 10.0
     }
 
     /// Convert user-entered value to stored value (handles % → /100).
@@ -577,6 +611,37 @@ impl ParamDescriptor {
             }
         }
     }
+
+    /// The label an enum value selects (rounded and clamped into the label
+    /// list); `None` for other kinds or an empty list.
+    pub fn option_label(&self, value: f32) -> Option<&str> {
+        match &self.kind {
+            ParamKind::Enum { labels } => option_label_at(labels, value),
+            _ => None,
+        }
+    }
+
+    /// Whether `other` describes the same parameter: name, range, default
+    /// and kind (units and labels included).
+    pub fn same_shape(&self, other: &ParamDescriptor) -> bool {
+        self.name == other.name
+            && self.min.to_bits() == other.min.to_bits()
+            && self.max.to_bits() == other.max.to_bits()
+            && self.default.to_bits() == other.default.to_bits()
+            && param_kinds_are_compatible(&self.kind, &other.kind)
+    }
+}
+
+/// The option `value` selects from `labels`: rounded, clamped into the list;
+/// `None` when the list is empty.
+pub fn option_label_at(labels: &[String], value: f32) -> Option<&str> {
+    let last = labels.len().checked_sub(1)?;
+    let index = if value.is_nan() {
+        0
+    } else {
+        (value.round().max(0.0) as usize).min(last)
+    };
+    Some(labels[index].as_str())
 }
 
 fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
@@ -605,6 +670,93 @@ mod tests {
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
+
+    #[test]
+    fn a_percent_param_is_a_fraction_shown_times_100() {
+        let param = |name: &str, effect: &str| {
+            EffectDescriptor::builtin_insert(effect)
+                .unwrap()
+                .params
+                .into_iter()
+                .find(|param| param.name == name)
+                .unwrap()
+        };
+        // The Chorus mix stores 0-1 and shows 0-100 %.
+        let mix = param("mix", "Chorus");
+        assert!(mix.is_percent());
+        assert_eq!(mix.stored_to_user(0.5), 50.0);
+        assert_eq!(mix.user_input_to_stored(50.0), 0.5);
+        // The OTT time is a ratio too: 1.0 shows 100 %.
+        let time = param("time", "OTT");
+        assert!(time.is_percent());
+        assert_eq!(time.stored_to_user(1.0), 100.0);
+        // The Filterbank stores its % params as 0-100 already.
+        let sense = param("sense", "Filterbank");
+        assert!(!sense.is_percent());
+        assert_eq!(sense.stored_to_user(30.0), 30.0);
+    }
+
+    /// eseq-0l17.63: the explicit `percent_ratio` flag classifies every
+    /// built-in param exactly as the ±10 range rule it replaced.
+    #[test]
+    fn every_builtin_percent_flag_matches_the_retired_range_rule() {
+        let mut descriptors: Vec<(String, Vec<ParamDescriptor>)> =
+            EffectDescriptor::builtin_insert_names()
+                .iter()
+                .map(|name| {
+                    let desc = EffectDescriptor::builtin_insert(name).unwrap();
+                    (name.to_string(), desc.params)
+                })
+                .collect();
+        descriptors.extend([
+            (
+                "Dynamics".into(),
+                EffectDescriptor::builtin_dynamics().params,
+            ),
+            ("Sampler".into(), EffectDescriptor::builtin_sampler().params),
+            (
+                "track modulator".into(),
+                crate::instruments::track_modulator::descriptor().params,
+            ),
+            (
+                "voice modulator".into(),
+                crate::instruments::voice_modulator::param_descriptors(),
+            ),
+            (
+                "voice modulator (effect)".into(),
+                crate::instruments::voice_modulator::effect_param_descriptors(),
+            ),
+            (
+                "voice modulator (ui)".into(),
+                crate::instruments::voice_modulator::ui_param_descriptors(),
+            ),
+        ]);
+        let (mut ratios, mut display) = (0, 0);
+        for (device, params) in &descriptors {
+            for param in params {
+                let unit = param.kind.unit();
+                let by_range = ParamDescriptor::percent_ratio_by_range(unit, param.min, param.max);
+                assert_eq!(
+                    param.is_percent(),
+                    by_range,
+                    "{device} {:?} ({:?}, {}..{})",
+                    param.name,
+                    unit,
+                    param.min,
+                    param.max
+                );
+                match (unit == Some("%"), param.is_percent()) {
+                    (true, true) => ratios += 1,
+                    (true, false) => display += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            ratios > 50 && display > 0,
+            "{ratios} ratio, {display} display % params"
+        );
+    }
 
     #[test]
     fn tensor_backed_options_bake_enum_labels_from_the_asset() {
@@ -761,6 +913,7 @@ mod tests {
             scaling: ParamScaling::Linear,
             node_param_idx: 0,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         };
@@ -782,6 +935,7 @@ mod tests {
             scaling: ParamScaling::Exponential,
             node_param_idx: 0,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         };
@@ -802,6 +956,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 1_000 + idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             })
@@ -824,6 +979,40 @@ mod tests {
         assert_eq!(slot.defaults.get(149), 7.5);
         assert_eq!(slot.plocks.get(3, 149), Some(-4.25));
         assert_eq!(slot.resolve_node_idx(149), 1_149);
+    }
+
+    /// eseq-0l17.72: a three-way rebase takes p-locks cell by cell and key
+    /// locks note by note, so disjoint lock edits rebase; one cell moved on
+    /// both sides is a conflict.
+    #[test]
+    fn slot_value_rebase_merges_lock_cells_and_key_lock_notes() {
+        let descriptor = EffectDescriptor::builtin_sampler();
+        let slot = EffectSlotState::new(&descriptor, 7);
+        let mut base = EffectSlotSnapshot::capture_authoring_values(&slot);
+        base.plocks = vec![vec![None; 4]; 2];
+        // The drag moved cell (0, 1) and added key locks on note 60.
+        let mut from = base.clone();
+        from.plocks[0][1] = Some(1.0);
+        from.key_locks.insert(60, vec![Some(0.5); base.num_params]);
+        // The edit moved cell (0, 2) and added key locks on note 62.
+        let mut to = from.clone();
+        to.plocks[0][2] = Some(2.0);
+        to.key_locks.insert(62, vec![Some(0.25); base.num_params]);
+        let rebased =
+            super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &to).expect("disjoint");
+        assert_eq!(
+            rebased.plocks[0][1], None,
+            "the drag's cell stays the base's"
+        );
+        assert_eq!(rebased.plocks[0][2], Some(2.0), "the edit's cell");
+        assert_eq!(
+            rebased.key_locks.keys().copied().collect::<Vec<_>>(),
+            vec![62]
+        );
+        // The edit moved the drag's own cell: a conflict.
+        let mut clash = from.clone();
+        clash.plocks[0][1] = Some(3.0);
+        assert!(super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &clash).is_none());
     }
 
     #[test]
@@ -922,6 +1111,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 5,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }],
@@ -980,6 +1170,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 5,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }],
@@ -1188,6 +1379,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 20,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }],
@@ -1219,6 +1411,7 @@ mod tests {
                 // Non-positional node layout, as on Space Echo.
                 node_param_idx: i + 1,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             })
@@ -1325,6 +1518,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 15,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }],
@@ -1419,6 +1613,7 @@ mod tests {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 2_000 + idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             })
@@ -1464,6 +1659,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 3,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1476,6 +1672,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1499,6 +1696,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 10,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1511,6 +1709,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 11,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1556,6 +1755,7 @@ mod tests {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: 3,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1568,6 +1768,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1591,6 +1792,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 10,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1605,6 +1807,7 @@ mod tests {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: 11,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1650,6 +1853,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 3,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1662,6 +1866,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1687,6 +1892,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 10,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1699,6 +1905,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 11,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1739,6 +1946,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 12,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -1751,6 +1959,7 @@ mod tests {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3385,6 +3594,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         }
@@ -3520,6 +3730,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx,
                 node_param_span: 1,
+                // Every EQ Eight % param is a stored ratio.
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             }
@@ -3551,6 +3763,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::effects::eq8::eq8_band_type_param_idx(band) as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             });
@@ -3628,6 +3841,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_MODE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3642,6 +3856,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_CUTOFF as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3654,6 +3869,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_RESONANCE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3668,6 +3884,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_DRIVE as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3682,6 +3899,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_WET as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3696,6 +3914,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_AMOUNT as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3710,6 +3929,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_RATE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3722,6 +3942,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_SYNCED as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3748,6 +3969,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_DIVISION as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3769,6 +3991,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_WAVE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3783,6 +4006,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_LFO_PHASE_OFFSET as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3797,6 +4021,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_ENV_AMOUNT as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3811,6 +4036,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_ENV_ATTACK_MS as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3825,6 +4051,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_ENV_RELEASE_MS as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3839,6 +4066,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::filter::FILTER_PARAM_SLOPE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3870,6 +4098,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             });
@@ -3914,6 +4143,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::instruments::sampler::PARAM_ATTACK_SAMPLES as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3926,6 +4156,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::instruments::sampler::PARAM_RELEASE_SAMPLES as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3940,6 +4171,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::instruments::sampler::PARAM_START_POINT as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3952,6 +4184,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::instruments::sampler::PARAM_END_POINT as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3964,6 +4197,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -3976,6 +4210,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: 5,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4029,6 +4264,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_WET as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4041,6 +4277,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_FEEDBACK as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4053,6 +4290,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_LEFT_SYNC as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4067,6 +4305,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_LEFT_DIV as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4081,6 +4320,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_LEFT_OFFSET as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4096,6 +4336,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_LEFT_TIME_MS
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4108,6 +4349,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_RIGHT_SYNC as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4122,6 +4364,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_RIGHT_DIV as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4137,6 +4380,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_RIGHT_OFFSET
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4152,6 +4396,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_RIGHT_TIME_MS
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4166,6 +4411,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_FILTER_FREQ as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4178,6 +4424,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_FILTER_Q as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4192,6 +4439,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_MOD_RATE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4206,6 +4454,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_MOD_AMOUNT as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4220,6 +4469,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::str8_delay::STR8_DELAY_PARAM_MOD_PHASE as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4269,6 +4519,8 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        // A % depth is a ratio, as its target is.
+                        percent_ratio: depth_unit == Some("%"),
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -4403,6 +4655,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_MODE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4417,6 +4670,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_RATE as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4429,6 +4683,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_SYNC as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4443,6 +4698,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_SYNC_DIV as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4457,6 +4713,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_SYNC_OFFSET as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4471,6 +4728,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_INTENSITY as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4483,6 +4741,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_BASS as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4495,6 +4754,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_TREBLE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4507,6 +4767,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_ECHO_VOL as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4519,6 +4780,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_REVERB_VOL as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4533,6 +4795,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_DRY as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4547,6 +4810,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_INPUT_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4561,6 +4825,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_WOW_FLUTTER as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4575,6 +4840,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_AGE as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -4624,6 +4890,8 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        // A % depth is a ratio, as its target is.
+                        percent_ratio: depth_unit == Some("%"),
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -4708,6 +4976,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_TENSION as u32,
             node_param_span: 1,
+            percent_ratio: true,
             host_control: None,
             ui_metadata: None,
         });
@@ -4725,6 +4994,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_SPRING_TYPE as u32,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         });
@@ -4739,6 +5009,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::effects::space_echo::SPACE_ECHO_PARAM_STEREO_WIDTH as u32,
             node_param_span: 1,
+            percent_ratio: true,
             host_control: None,
             ui_metadata: None,
         });
@@ -4772,6 +5043,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // The Filterbank stores its % params as 0-100: display units.
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -4787,6 +5060,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -4809,6 +5083,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -4829,6 +5104,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: Some(HostControl::FxSidechain { input_channel }),
                 ui_metadata: None,
             }
@@ -5180,6 +5456,7 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        percent_ratio: false,
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -5434,6 +5711,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_BTN1 as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5446,6 +5724,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_BTN2 as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5458,6 +5737,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_BTN3 as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5470,6 +5750,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_BTN4 as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5489,6 +5770,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_COLOR as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5509,6 +5791,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_SHAPE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5523,6 +5806,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_RATE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5537,6 +5821,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_DEPTH as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5551,6 +5836,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_WIDTH as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5565,6 +5851,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_TONE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5577,6 +5864,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dimension::DIMENSION_PARAM_MIX as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5612,6 +5900,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: node_param_idx as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 });
@@ -5693,6 +5982,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_MODE
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5706,6 +5996,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_NOTCHES
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5721,6 +6012,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_CENTER
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5736,6 +6028,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_SPREAD
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5749,6 +6042,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_BLEND
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5764,6 +6058,7 @@ impl EffectDescriptor {
                     node_param_idx:
                         crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_FLANGER_TIME as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5779,6 +6074,7 @@ impl EffectDescriptor {
                     node_param_idx:
                         crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_DOUBLER_TIME as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5792,6 +6088,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_SYNC
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5807,6 +6104,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_RATE
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5834,6 +6132,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_SYNC_DIV
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5854,6 +6153,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_SHAPE
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5869,6 +6169,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_AMOUNT
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5884,6 +6185,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_FEEDBACK
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5897,6 +6199,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_FB_INVERT
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5912,6 +6215,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_STEREO
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5927,6 +6231,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_WARMTH
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5941,6 +6246,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_MIX as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5956,6 +6262,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_OUTPUT
                         as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -5971,6 +6278,7 @@ impl EffectDescriptor {
                     node_param_idx:
                         crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_PHASER_CIRCUIT as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6020,6 +6328,8 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: first_depth_param as u32 + slot as u32,
                         node_param_span: 1,
+                        // A % depth is a ratio, as its target is.
+                        percent_ratio: depth_unit == Some("%"),
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -6097,6 +6407,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // Every Roar % param is a stored ratio.
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             }
@@ -6118,6 +6430,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -6132,6 +6445,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -6460,6 +6774,8 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: first_depth_param as u32 + slot as u32,
                         node_param_span: 1,
+                        // A % depth is a ratio, as its target is.
+                        percent_ratio: depth_unit == Some("%"),
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -6540,6 +6856,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_SPEED as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6554,6 +6871,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6566,6 +6884,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_LOOP as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6578,6 +6897,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_SYNC as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6599,6 +6919,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_DIV as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6611,6 +6932,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dj_mixer::DJ_MIXER_PARAM_WARP as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6643,6 +6965,8 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        // A % depth is a ratio, as its target is.
+                        percent_ratio: depth_unit == Some("%"),
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -6754,6 +7078,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // Every reverb % param is a stored ratio.
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: Some(modulatable_ui_metadata()),
             }
@@ -6797,6 +7123,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: rv::REVERB_PARAM_MODE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6891,6 +7218,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: rv::REVERB_PARAM_MIX_LAW as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -6930,6 +7258,7 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        percent_ratio: false,
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -7015,6 +7344,8 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // Every Multiverb % param is a stored ratio.
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7050,6 +7381,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::multiverb::MULTIVERB_PARAM_MODE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7194,6 +7526,7 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: node_param_idx as u32,
                         node_param_span: 1,
+                        percent_ratio: false,
                         host_control: None,
                         ui_metadata: None,
                     });
@@ -7287,6 +7620,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_MODE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7301,6 +7635,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_AMOUNT as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7320,6 +7655,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_ATTACK as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7339,6 +7675,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_RELEASE as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7359,6 +7696,7 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Linear,
                         node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
                         node_param_span: 1,
+                        percent_ratio: false,
                         host_control: None,
                         ui_metadata: None,
                     }
@@ -7374,6 +7712,7 @@ impl EffectDescriptor {
                         scaling: ParamScaling::Exponential,
                         node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
                         node_param_span: 1,
+                        percent_ratio: false,
                         host_control: None,
                         ui_metadata: None,
                     }
@@ -7389,6 +7728,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_DRIVE as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7403,6 +7743,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_INPUT_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7417,6 +7758,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_OUTPUT_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7431,6 +7773,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_MIX as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7446,6 +7789,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::dynamics::DYNAMICS_PARAM_KNEE_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7487,6 +7831,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // Every compressor % param is a stored ratio.
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7502,6 +7848,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7524,6 +7871,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7667,6 +8015,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: comp::SIDECHAIN_INPUT_CHANNEL,
                     }),
@@ -7701,6 +8050,8 @@ impl EffectDescriptor {
                 scaling,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                // Every OTT % param is a stored ratio (its time: 0.1-10).
+                percent_ratio: unit == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7716,6 +8067,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             }
@@ -7888,6 +8240,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::limiter::LIMITER_PARAM_INPUT_GAIN_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7902,6 +8255,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::limiter::LIMITER_PARAM_CEILING_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7916,6 +8270,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::effects::limiter::LIMITER_PARAM_RELEASE_MS as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7930,6 +8285,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::limiter::LIMITER_PARAM_LOOKAHEAD_MS as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7960,6 +8316,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_DRIVE_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7974,6 +8331,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_BIAS as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -7992,6 +8350,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_SPEED as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8006,6 +8365,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_OUTPUT_DB as u32,
                     node_param_span: 1,
+                    percent_ratio: false,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8020,6 +8380,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_MIX as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8034,6 +8395,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_WOW as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8048,6 +8410,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_FLUTTER as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8062,6 +8425,7 @@ impl EffectDescriptor {
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::effects::tape::TAPE_PARAM_HISS as u32,
                     node_param_span: 1,
+                    percent_ratio: true,
                     host_control: None,
                     ui_metadata: None,
                 },
@@ -8089,6 +8453,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 0,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8103,6 +8468,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 1,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8117,6 +8483,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 2,
                 node_param_span: 1,
+                percent_ratio: true,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8131,6 +8498,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: 3,
                 node_param_span: 1,
+                percent_ratio: true,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8144,6 +8512,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_REVERSE as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8163,6 +8532,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_LOOP_MODE as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8177,6 +8547,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8191,6 +8562,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Exponential,
                 node_param_idx: crate::instruments::sampler::PARAM_SR_HZ as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8203,6 +8575,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_WARP_ENABLED as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8222,6 +8595,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_WARP_MODE as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8234,6 +8608,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_WARP_SAMPLE_BPM as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8246,6 +8621,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_SPEED as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8260,6 +8636,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::instruments::sampler::PARAM_SCRUB_OFFSET as u32,
                 node_param_span: 1,
+                percent_ratio: true,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8304,6 +8681,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: lane.source_param as u32,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             });
@@ -8324,6 +8702,8 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: lane.depth_param as u32,
                 node_param_span: 1,
+                // A % depth is a ratio, as its target is.
+                percent_ratio: depth_unit.as_deref() == Some("%"),
                 host_control: None,
                 ui_metadata: None,
             });
@@ -8350,6 +8730,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::instruments::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         });
@@ -8374,6 +8755,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         });
@@ -8392,6 +8774,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
             node_param_span: 1,
+            percent_ratio: false,
             host_control: None,
             ui_metadata: None,
         });
@@ -8406,6 +8789,7 @@ impl EffectDescriptor {
             scaling: ParamScaling::Linear,
             node_param_idx: crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
             node_param_span: 1,
+            percent_ratio: true,
             host_control: None,
             ui_metadata: None,
         });
@@ -8424,6 +8808,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8438,6 +8823,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
+                percent_ratio: true,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8452,6 +8838,7 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
+                percent_ratio: false,
                 host_control: None,
                 ui_metadata: None,
             },
@@ -8610,6 +8997,12 @@ impl EffectDescriptor {
                 scaling: ParamScaling::Linear,
                 node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
                 node_param_span: p.cell_span as u32,
+                // A manifest declares no ratio flag: the range rule.
+                percent_ratio: ParamDescriptor::percent_ratio_by_range(
+                    p.unit.as_deref(),
+                    p.min,
+                    p.max,
+                ),
                 host_control: None,
                 ui_metadata: {
                     let mut metadata = crate::effects::ParamUiMetadata::new(
@@ -9028,6 +9421,23 @@ impl SlotPLockData {
                 mask[step / 64] |= 1u64 << (step % 64);
             }
         }
+    }
+
+    /// Whether any of the first `num_steps` steps locks `param_idx`. O(1)
+    /// for a plock-free slot; otherwise skips plock-free steps and stops at
+    /// the first lock.
+    pub fn param_has_any_plock(&self, param_idx: usize, num_steps: usize) -> bool {
+        if param_idx >= self.max_params || !self.has_any_plock() {
+            return false;
+        }
+        let Some(cells) = self.cells() else {
+            return false;
+        };
+        (0..num_steps.min(MAX_STEPS)).any(|step| {
+            self.step_count(step) > 0
+                && !f32::from_bits(cells.data[self.index(step, param_idx)].load(Ordering::Relaxed))
+                    .is_nan()
+        })
     }
 
     pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {
@@ -9601,6 +10011,64 @@ impl SlotTensorParamData {
     pub fn resolved_values(&self, step: Option<usize>, tensor_idx: usize) -> Option<Vec<f32>> {
         step.and_then(|step| self.plock_values(step, tensor_idx))
             .or_else(|| self.default_values(tensor_idx))
+    }
+
+    /// Tensor `tensor_idx`'s (flat offset, length), from the atomics (no
+    /// metadata lock or copy); `None` past the tensor count.
+    fn span(&self, tensor_idx: usize) -> Option<(usize, usize)> {
+        (tensor_idx < self.num_params()).then(|| {
+            let offset = self.flat_offsets[tensor_idx].load(Ordering::Relaxed) as usize;
+            (offset, self.tensor_len(tensor_idx))
+        })
+    }
+
+    /// Whether `step` p-locks tensor `tensor_idx` (no allocation).
+    pub fn has_tensor_plock(&self, step: usize, tensor_idx: usize) -> bool {
+        let Some((flat_offset, len)) = self.span(tensor_idx) else {
+            return false;
+        };
+        if step >= MAX_STEPS || len == 0 {
+            return false;
+        }
+        let Some(plocks) = self.plock_cells() else {
+            return false;
+        };
+        let idx = Self::plock_index(step, flat_offset, 0);
+        idx < plocks.len() && !f32::from_bits(plocks[idx].load(Ordering::Relaxed)).is_nan()
+    }
+
+    /// Tensor `tensor_idx`'s base cells, or with `step` its p-lock there,
+    /// written into `out` (cleared first; nothing else allocates). False
+    /// when there is no such tensor or `step` locks none.
+    pub fn read_cells_into(
+        &self,
+        tensor_idx: usize,
+        step: Option<usize>,
+        out: &mut Vec<f32>,
+    ) -> bool {
+        out.clear();
+        let Some((flat_offset, len)) = self.span(tensor_idx) else {
+            return false;
+        };
+        let cells = match step {
+            None => &self.defaults[flat_offset..flat_offset + len],
+            Some(step) => {
+                if !self.has_tensor_plock(step, tensor_idx) {
+                    return false;
+                }
+                let Some(plocks) = self.plock_cells() else {
+                    return false;
+                };
+                let start = Self::plock_index(step, flat_offset, 0);
+                &plocks[start..start + len]
+            }
+        };
+        out.extend(
+            cells
+                .iter()
+                .map(|cell| f32::from_bits(cell.load(Ordering::Relaxed))),
+        );
+        true
     }
 
     pub fn set_default(&self, tensor_idx: usize, values: &[f32]) -> bool {
@@ -10469,6 +10937,163 @@ impl EffectSlotValuesSnapshot {
                     + edits.user_deleted.capacity() * std::mem::size_of::<u32>()
                     + edits.user_moved.capacity() * std::mem::size_of::<crate::analysis::SliceMove>()
             })
+    }
+}
+
+/// One component of a three-way undo-snapshot rebase (eseq-0l17.72): an
+/// edit moved the component from `from` to `to` while an open drag's entry
+/// starts at `base`. The edit's value when it moved the component, `base`'s
+/// when it did not; `None` when both the edit and the drag moved it (the
+/// drag's `base` differs from the `from` the edit started at), a conflict
+/// the caller resolves another way.
+pub fn rebase_snapshot_component<T: Clone>(
+    base: &T,
+    from: &T,
+    to: &T,
+    eq: impl Fn(&T, &T) -> bool,
+) -> Option<T> {
+    if eq(from, to) {
+        Some(base.clone())
+    } else if eq(base, from) {
+        Some(to.clone())
+    } else {
+        None
+    }
+}
+
+/// [`rebase_snapshot_component`] element by element when the three lists
+/// have one length (`None` on a conflicting element), else as a whole.
+pub fn rebase_snapshot_elements<T: Clone>(
+    base: &[T],
+    from: &[T],
+    to: &[T],
+    eq: impl Fn(&T, &T) -> bool,
+) -> Option<Vec<T>> {
+    if base.len() == from.len() && from.len() == to.len() {
+        return base
+            .iter()
+            .zip(from)
+            .zip(to)
+            .map(|((base, from), to)| rebase_snapshot_component(base, from, to, &eq))
+            .collect();
+    }
+    let all_eq = |left: &[T], right: &[T]| {
+        left.len() == right.len() && left.iter().zip(right).all(|(l, r)| eq(l, r))
+    };
+    if all_eq(from, to) {
+        Some(base.to_vec())
+    } else if all_eq(base, from) {
+        Some(to.to_vec())
+    } else {
+        None
+    }
+}
+
+fn optional_f32_bits_eq(left: &Option<f32>, right: &Option<f32>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// P-lock rows (one row of steps per param) rebased cell by cell when the
+/// shapes match, a row as a whole when only its length differs, all of them
+/// as a whole when the row count differs.
+pub fn rebase_optional_f32_rows(
+    base: &[Vec<Option<f32>>],
+    from: &[Vec<Option<f32>>],
+    to: &[Vec<Option<f32>>],
+) -> Option<Vec<Vec<Option<f32>>>> {
+    if base.len() == from.len() && from.len() == to.len() {
+        return base
+            .iter()
+            .zip(from)
+            .zip(to)
+            .map(|((base, from), to)| {
+                rebase_snapshot_elements(base, from, to, optional_f32_bits_eq)
+            })
+            .collect();
+    }
+    rebase_snapshot_component(&base.to_vec(), &from.to_vec(), &to.to_vec(), |l, r| {
+        optional_f32_rows_bits_eq(l, r)
+    })
+}
+
+impl EffectSlotValuesSnapshot {
+    /// `base` with the components an edit moved from `from` to `to`
+    /// ([`rebase_snapshot_component`]): param base values one by one,
+    /// p-locks cell by cell, key locks note by note, tensors one by one, the
+    /// rest (IR, table, slice edits) each as a whole. `None` when the param
+    /// count differs or a component moved on both sides.
+    pub fn rebase_edit(base: &Self, from: &Self, to: &Self) -> Option<Self> {
+        if base.num_params != from.num_params || from.num_params != to.num_params {
+            return None;
+        }
+        let defaults =
+            rebase_snapshot_elements(&base.defaults, &from.defaults, &to.defaults, |l, r| {
+                l.to_bits() == r.to_bits()
+            })?;
+        let plocks = rebase_optional_f32_rows(&base.plocks, &from.plocks, &to.plocks)?;
+        let mut key_locks = BTreeMap::new();
+        let notes: std::collections::BTreeSet<u8> = base
+            .key_locks
+            .keys()
+            .chain(from.key_locks.keys())
+            .chain(to.key_locks.keys())
+            .copied()
+            .collect();
+        for note in notes {
+            let locks = rebase_snapshot_component(
+                &base.key_locks.get(&note),
+                &from.key_locks.get(&note),
+                &to.key_locks.get(&note),
+                |l, r| match (l, r) {
+                    (Some(l), Some(r)) => optional_f32_slice_bits_eq(l, r),
+                    (None, None) => true,
+                    _ => false,
+                },
+            )?;
+            if let Some(locks) = locks {
+                key_locks.insert(note, locks.clone());
+            }
+        }
+        let tensor_params = rebase_snapshot_elements(
+            &base.tensor_params,
+            &from.tensor_params,
+            &to.tensor_params,
+            |l, r| tensor_snapshots_bits_eq(std::slice::from_ref(l), std::slice::from_ref(r)),
+        )?;
+        let (ir, prepared_ir) = rebase_snapshot_component(
+            &(base.ir.clone(), base.prepared_ir.clone()),
+            &(from.ir.clone(), from.prepared_ir.clone()),
+            &(to.ir.clone(), to.prepared_ir.clone()),
+            |l, r| l.0 == r.0 && prepared_ir_bits_eq(l.1.as_deref(), r.1.as_deref()),
+        )?;
+        let (table, prepared_table) = rebase_snapshot_component(
+            &(base.table.clone(), base.prepared_table.clone()),
+            &(from.table.clone(), from.prepared_table.clone()),
+            &(to.table.clone(), to.prepared_table.clone()),
+            |l, r| l.0 == r.0 && prepared_table_bits_eq(l.1.as_deref(), r.1.as_deref()),
+        )?;
+        let sampler_slice_edits = rebase_snapshot_component(
+            &base.sampler_slice_edits,
+            &from.sampler_slice_edits,
+            &to.sampler_slice_edits,
+            |l, r| l == r,
+        )?;
+        Some(Self {
+            num_params: base.num_params,
+            defaults,
+            plocks,
+            key_locks,
+            tensor_params,
+            ir,
+            prepared_ir,
+            table,
+            prepared_table,
+            sampler_slice_edits,
+        })
     }
 }
 

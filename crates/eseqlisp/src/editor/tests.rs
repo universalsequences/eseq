@@ -596,6 +596,38 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
     );
 }
 
+
+#[test]
+fn failed_interactive_import_does_not_poison_later_transactional_reloads() {
+    let dir = hot_reload_temp_dir("eseqlisp-stale-import-error");
+    let root = dir.join("root.lisp");
+    let source = "(def stale-import-probe 1)";
+    std::fs::write(&root, source).unwrap();
+
+    let mut runtime = Runtime::new();
+    // An interactive eval of a missing module returns its message as the
+    // value and leaves the load error queued.
+    runtime.eval_str("(import no.such.module)").unwrap();
+
+    for attempt in 0..2 {
+        let report = runtime.eval_source_transactional(Some(root.clone()), source, Vec::new());
+        assert!(
+            report.success,
+            "reload {attempt} inherited a stale import error: {:?}",
+            report.diagnostics
+        );
+    }
+
+    // A path-based eval still fails on its own missing import.
+    let report = runtime.eval_source_transactional(
+        Some(root.clone()),
+        "(import no.such.module)",
+        Vec::new(),
+    );
+    assert!(!report.success);
+    let report = runtime.eval_source_transactional(Some(root.clone()), source, Vec::new());
+    assert!(report.success, "rollback re-queued the error: {:?}", report.diagnostics);
+}
 #[test]
 fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-graph-edges");
@@ -2518,7 +2550,7 @@ fn meta_period_opens_definition_from_workspace_file() {
 }
 
 #[test]
-fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
+fn meta_period_and_meta_comma_jump_to_and_back_from_definition() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)");
@@ -2526,20 +2558,12 @@ fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
     editor.set_active_buffer(callsite_id);
     editor.active_buffer_mut().cursor = (0, 1);
 
-    eprintln!("region = {:?}", editor.active_region_range().is_some());
-    eprintln!("completion = {:?}", editor.completion.is_some());
-    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
-    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
 
     assert_eq!(editor.active_buffer().id, defs_id);
     assert_eq!(editor.active_buffer().cursor, (0, 5));
 
-    eprintln!("region = {:?}", editor.active_region_range().is_some());
-    eprintln!("completion = {:?}", editor.completion.is_some());
-    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
-    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::ALT));
 
     assert_eq!(editor.active_buffer().id, callsite_id);
     assert_eq!(editor.active_buffer().cursor, (0, 1));
@@ -2802,6 +2826,36 @@ fn vim_insert_mode_accepts_text_and_escape_returns_to_normal() {
 
     assert_eq!(editor.active_buffer().text(), "aZbc");
     assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+}
+
+#[test]
+fn vim_escape_is_never_a_chord_prefix() {
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "");
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    editor.handle_key(key(KeyCode::Char('i')));
+    editor.handle_key(key(KeyCode::Char('a')));
+    editor.handle_key(key(KeyCode::Esc));
+    // A second, redundant Escape in normal mode must not arm an "ESC …"
+    // chord that eats the following command key.
+    editor.handle_key(key(KeyCode::Esc));
+    editor.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(editor.vim_input_mode, VimInputMode::Insert);
+    assert!(editor.pending_key.is_none());
+    editor.handle_key(key(KeyCode::Char('b')));
+    editor.handle_key(key(KeyCode::Esc));
+    editor.handle_key(key(KeyCode::Char('a')));
+    editor.handle_key(key(KeyCode::Char('c')));
+    let mut typed: Vec<char> = editor.active_buffer().text().chars().collect();
+    typed.sort();
+    assert_eq!(typed, vec!['a', 'b', 'c'], "every key after Escape reached Vim");
 }
 
 #[test]
@@ -3326,9 +3380,9 @@ fn tab_accepts_completion_from_runtime_symbols() {
 #[test]
 fn shader_completion_in_defwidget_includes_macros_and_native_forms() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    let source = "(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  :bindable (playing)\n  :paint-margin 0.4\n  :shader\n  (sdf";
+    let source = "(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  :paint-margin 0.4\n  :shader\n  (sdf";
     editor.open_scratch_buffer("*shader*", source);
-    editor.active_buffer_mut().cursor = (6, "  (sdf".len());
+    editor.active_buffer_mut().cursor = (5, "  (sdf".len());
     editor.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
 
     let completion = editor.completion_state().expect("SDF completion");
@@ -3364,7 +3418,7 @@ fn shader_completion_keywords_follow_defwidget_and_nested_material_context() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     for (source, keywords) in [
         ("(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  ",
-            &[":width", ":height", ":state", ":bindable", ":paint-margin", ":shader", ":animates"][..]),
+            &[":width", ":height", ":state", ":paint-margin", ":shader", ":animates"][..]),
         ("(defwidget xyz :shader (sdf/fill (sdf/rounded-rect width width 0.06)\n  (material ",
             &[":color", ":shadow", ":lighting"][..]),
         ("(defwidget xyz :shader (sdf/fill (sdf/circle 1)\n  (material :color (rgba 1 1 1 1) :shadow (shadow ",
@@ -5811,6 +5865,64 @@ fn real_patcher_lisp_right_click_opens_context_menu() {
         )),
         "the Lisp defaults populated the binding table"
     );
+}
+
+/// The REAL ui/patcher.lisp menu offers Insert Probe / Insert Scope on a
+/// cable and the other view on a probe node, and every probe command it
+/// names is a patcher command.
+#[test]
+fn real_patcher_lisp_menu_offers_probe_entries() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let source_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/ui/patcher.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real patcher.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real patcher.lisp");
+    for command in [
+        "insert-probe",
+        "insert-scope",
+        "show-as-scope",
+        "show-as-number",
+    ] {
+        assert!(
+            source.contains(&format!("\"{command}\"")),
+            "patcher.lisp menu names {command}"
+        );
+        assert!(crate::widget_render::patcher::PATCHER_COMMANDS.contains(&command));
+    }
+    let mut entry_count = |event: &str| {
+        editor
+            .runtime
+            .eval_str(&format!("(eseq.patcher/open-context-menu {event})"))
+            .expect("open menu");
+        match editor
+            .runtime
+            .eval_str("(len (eseq.patcher/menu-entries))")
+            .expect("menu entries evaluate")
+        {
+            Some(Value::Number(count)) => count as usize,
+            other => panic!("menu entries: {other:?}"),
+        }
+    };
+    // Ask Agent, Paste, Insert Probe, Insert Scope, Toggle Cable Style, Delete.
+    assert_eq!(
+        entry_count(r#"(dict :col 1 :row 1 :node nil :cable "a:0->b:0" :ghosts false)"#),
+        6
+    );
+    let plain = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "ph" :macro? false :probe-view nil) :cable nil :ghosts false)"#,
+    );
+    let number = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "number") :cable nil :ghosts false)"#,
+    );
+    let scope = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "scope") :cable nil :ghosts false)"#,
+    );
+    assert_eq!(number, plain + 1, "a number probe offers Show as Scope");
+    assert_eq!(scope, plain + 1, "a scope probe offers Show as Number");
 }
 
 #[test]
@@ -8395,11 +8507,11 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
             (effect-buffer "*controls*"
               (knob-number :label "cut"
                 :value 0 :min -1 :max 1 :decimals 2
-                :origin (bind "APP" "origin")
-                :base-value (bind "APP" "base") :base-min -1 :base-max 1
+                :origin #'APP.origin
+                :base-value #'APP.base :base-min -1 :base-max 1
                 :selected-mod-slot 1
                 :mod-range-0-slot 1
-                :mod-range-0-depth (bind "APP" "depth-1")
+                :mod-range-0-depth #'APP.depth-1
                 :mod-ranges (list
                   (dict :slot 2 :depth -0.25))
                 :width 4 :height 2.8
@@ -10357,7 +10469,7 @@ fn visible_inactive_tile_binding_write_marks_editor_for_redraw() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -10425,7 +10537,7 @@ fn tiled_frame_routes_binding_dirty_ids_to_inactive_tile() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -10485,7 +10597,7 @@ fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -10767,7 +10879,7 @@ fn idle_reactive_cycles_leave_hidden_deferred_effects_for_the_presentation_seam(
     // as no work at all rather than re-sorting the dirty set every frame.
     for _ in 0..3 {
         assert!(
-            !editor.runtime.has_resumable_hidden_effect_work(),
+            !editor.runtime.has_pending_visible_effect_work(),
             "a hidden deferred effect is not resumable work"
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -10798,7 +10910,7 @@ fn idle_reactive_cycles_leave_hidden_deferred_effects_for_the_presentation_seam(
         "presentation must resume the deferred effect: {visible_rendered}"
     );
     assert!(
-        !editor.runtime.has_resumable_hidden_effect_work(),
+        !editor.runtime.has_pending_visible_effect_work(),
         "resumed work should be drained"
     );
 }
@@ -17647,7 +17759,7 @@ fn context_menu_long_submenu_scrolls_and_keyboard_reaches_last_choice() {
 }
 
 /// A package channel strip (the `~/.eseq.d` autechre mixer) reads
-/// `(nth (or SEQ.field (list)) i)` inside a keyed subtree, living in a visible
+/// `(nth (or APP.field (list)) i)` inside a keyed subtree, living in a visible
 /// *inactive* tile (the mixer sits beside the fx panel, which holds focus).
 /// Republishing the list of device dicts, and growing the outer list, must
 /// rerun the strip and land in the inactive tile's cached layout.
@@ -17691,7 +17803,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     }
     let mut runtime = Runtime::new();
     runtime.register_reactive(
-        "SEQ",
+        "APP",
         vec![
             ("track-names", Value::List(vec![
                 Rc::new(RefCell::new(Value::String("a".into()))),
@@ -17720,12 +17832,12 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
                       (if device (get device :name) nil)
                       (if device (get device :enabled) false))))))
             (def track-cell (i)
-              (let ((devices (nth (or SEQ.track-device-chains (list)) i)))
+              (let ((devices (nth (or APP.track-device-chains (list)) i)))
                 (box :key (str "au-track-" i) :width 12 :height 5
                   (device-strip (str "au-track-" i) devices (lambda (d) d)))))
             (effect-buffer "*strip*"
               (h-stack
-                (each (range 0 (len SEQ.track-names)) |i idx|
+                (each (range 0 (len APP.track-names)) |i idx|
                   (subtree :key (str "au-track-sub-" i) (track-cell i)))))
             (split-window-right "*strip*")
             "#,
@@ -17758,7 +17870,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     assert_eq!(leaf_labels(&editor), vec!["Space Echo", "", "", "", "", ""]);
 
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-device-chains",
         chains(&[&[("Space Echo", true)], &[("808 Kick", true), ("Reverb", false)]]),
     );
@@ -17772,7 +17884,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     );
 
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-names",
         Value::List(vec![
             Rc::new(RefCell::new(Value::String("a".into()))),
@@ -17784,7 +17896,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(80, 20);
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-device-chains",
         chains(&[
             &[("Space Echo", true)],
@@ -17879,4 +17991,109 @@ fn context_menu_opened_from_inactive_tile_hover_moves_the_highlight() {
         .collect();
     assert!(!focused.contains(&rename), "Rename must not stay focused: {focused:?} (rename {rename}, delete {delete})");
     assert!(focused.contains(&delete), "hovered Delete must be focused: {focused:?}");
+}
+
+/// The context menu of [`CONTEXT_MENU_PROGRAM`], rendered by its own
+/// `subtree` only while open, with a widget after it (eseq-0l17.27).
+const SUBTREE_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (def menu-view ()
+      (if (not menu-open)
+        (box :width 1 :height 1)
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 58 :height 3
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (subtree :key :menu (menu-view))
+        (button "after" :width 10 :height 1)))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+/// eseq-0l17.27: a context menu opened in a tile keeps its first item's
+/// focus highlight while another tile is active. Only the active tile's
+/// focus followed relayouts, so once the menu's tile went inactive and
+/// was laid out afresh with new widget ids, its focus named an id the new
+/// layout no longer gave the item and the menu painted no highlight.
+#[test]
+fn a_context_menu_in_an_inactive_tile_keeps_its_focus_across_relayouts() {
+    let _overlay_guard = OverlayClearGuard;
+    for program in [CONTEXT_MENU_PROGRAM, SUBTREE_CONTEXT_MENU_PROGRAM] {
+        // Labels ahead of the menu while `extra` holds: showing them shifts
+        // the ids of every widget after it.
+        let program = program.replace(
+            "    (effect-buffer \"*panel*\"\n      (v-stack\n",
+            "    (def extra (state false))\n    (effect-buffer \"*panel*\"\n      (v-stack\n        (if extra (v-stack (label \"a\") (label \"b\")) (box :width 1 :height 1))\n",
+        );
+        assert!(program.contains("(if extra"));
+        let mut editor = context_menu_two_tile_editor_for(&program);
+        editor
+            .runtime_mut()
+            .eval_str("(set! menu-col 6) (set! menu-row 1) (set! menu-open true)")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+        let focused = editor.focused_widget_node().expect("the menu takes focus");
+        assert_eq!(focused.widget_type, "menu-item");
+        let panel_tile = editor.active_tile;
+        assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+        // The menu's tile re-renders while inactive, with new widget ids.
+        editor.runtime_mut().eval_str("(set! extra true)").unwrap();
+        editor.refresh_runtime_side_effects();
+        let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+        let panel = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.tile_id == panel_tile)
+            .expect("panel tile");
+        let layout = panel.frame.widget_layout.as_ref().expect("panel layout");
+        let rename = find_menu_item(layout, "Rename").expect("the menu is open");
+        assert_eq!(
+            panel.frame.focused_widget_id,
+            Some(rename.widget_id),
+            "the inactive tile's focus follows its relayout"
+        );
+        crate::widget_render::clear_overlay();
+    }
+}
+
+#[test]
+fn removed_natives_fail_with_their_hint_and_stay_out_of_completion() {
+    let mut runtime = Runtime::new();
+    runtime.register_native("kept-native", |_args, _ctx| Ok(Value::Nil));
+    // Populate the cache first: registering a removed native refreshes it.
+    runtime.completion_symbols();
+    runtime.register_removed_natives([("old-native", "old-native was removed; use new-native")]);
+    let symbols = runtime.completion_symbols();
+    assert!(symbols.iter().any(|name| name == "kept-native"));
+    assert!(!symbols.iter().any(|name| name == "old-native"), "removed names are not completed");
+    assert!(runtime.is_removed_native("old-native"));
+    assert!(!runtime.completion_metadata().contains_key("old-native"), "no docs");
+    runtime.take_status_message();
+    let _ = runtime.eval_str("(old-native 1)");
+    let status = runtime.take_status_message().unwrap_or_default();
+    assert!(status.contains("old-native was removed; use new-native"), "{status}");
 }

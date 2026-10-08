@@ -7,4 +7,4 @@
   (group 0 1))
 
 (def capture-after-sync ()
-  (eseq.mixer/open-track-menu (dict :col 30 :row 12) 1))
+  (eseq.mixer/open-strip-menu (dict :at (dict :col 30 :row 12)) (eseq.kinds/track 1) nil))

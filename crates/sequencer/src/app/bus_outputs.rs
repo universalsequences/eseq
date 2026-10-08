@@ -23,9 +23,10 @@ impl App {
 
     fn bus_output_is_acyclic(&self, source: BusId, destination: BusId) -> bool {
         let mut cursor = destination;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            if cursor == source || !seen.insert(cursor) {
+        // An acyclic chain visits each bus at most once: one longer than
+        // the bus list has looped.
+        for _ in 0..=self.buses.len() {
+            if cursor == source {
                 return false;
             }
             if cursor == BusId::MIX {
@@ -36,6 +37,7 @@ impl App {
             };
             cursor = BusId(bus.output.destination().unwrap_or(BusId::MIX.0));
         }
+        false
     }
 
     pub fn set_bus_output_recorded(&mut self, source: BusId, destination: BusId) -> Result<(), String> {

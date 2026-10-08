@@ -5,7 +5,7 @@ fn modal_coefficients_follow_parameter_events_without_delay() {
     let source = lisp_host::load_instrument_source("factory:Drums/Modal Snare").unwrap();
     // Observe the pure coefficient path, independently of the chaotic wire
     // recurrence. A freshly initialized voice supplies each expected value.
-    let audio = "(out (* dcy level-v vel-gain) 1 @name audio)";
+    let audio = "(out voice_out 1 @name audio)";
     assert_eq!(source.matches(audio).count(), 1);
     let source = source.replace(audio, "\
 (def coefficient-check (+ (/ (sum bat-r) 1000) (/ (sum r-bat) 72)

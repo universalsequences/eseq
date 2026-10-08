@@ -2,6 +2,7 @@
 //! to App; Lisp owns the crop/view gestures, with validation again on commit.
 
 use super::*;
+use crate::presented::{RetroItem, RetroView};
 use sequencer::app::retrospective::{capture_bar_count, detect_capture_loop, CaptureDraft};
 
 pub(crate) const COMMANDS: &[&str] = &[
@@ -19,15 +20,9 @@ pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
         }
         capture_bar_count(*duration, *bars as usize).map(|bars| Value::Number(bars as f64))
     });
-    runtime.register_reactive("RETRO", vec![
-        ("items", Value::List(vec![])),
-        ("lanes", Value::List(vec![])),
-        ("duration", Value::Number(0.0)),
-        ("error", Value::String(String::new())),
-        ("truncated", Value::Bool(false)),
-        ("playing", Value::Bool(false)),
-        ("position", Value::Number(0.0)),
-    ], true); // Presentation only; capture fixtures may seed a preview.
+    // The capture's presentation is the `retro` kind (the host kinds push
+    // it from `presented`); capture fixtures seed a preview
+    // (`present-fixture`).
 }
 
 pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft) -> Result<(), String> {
@@ -36,38 +31,54 @@ pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft)
     let mut lanes: Vec<_> = draft.notes.iter().map(|n| (n.track, n.transpose)).collect();
     lanes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
     lanes.dedup();
-    let lane_values = lanes.iter().enumerate().map(|(index, (track, transpose))| {
-        let name = app.track_registry.index_of(*track).and_then(|i| app.tracks.get(i))
-            .map(String::as_str).unwrap_or("Deleted track");
-        let note = (*transpose as i32 + 60).rem_euclid(12) as usize;
-        let octave = (*transpose as i32 + 60).div_euclid(12) - 1;
-        let pitch = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][note];
-        map_value([
-            ("id", Value::Number(index as f64)),
-            ("label", Value::String(format!("{name} · {pitch}{octave}"))),
-        ])
-    });
-    let items = draft.notes.iter().enumerate().map(|(index, note)| {
-        let lane = lanes.binary_search_by(|pair| {
-            pair.0.cmp(&note.track).then(note.transpose.total_cmp(&pair.1))
-        }).unwrap();
-        map_value([
-            ("id", Value::Number(index as f64)),
-            ("lane", Value::Number(lane as f64)),
-            ("start", Value::Number(note.start)),
-            ("end", Value::Number(note.end.max(note.start + 0.015))),
-        ])
-    });
+    let labels: Vec<String> = lanes
+        .iter()
+        .map(|(track, transpose)| {
+            let name = app
+                .track_registry
+                .index_of(*track)
+                .and_then(|i| app.tracks.get(i))
+                .map(String::as_str)
+                .unwrap_or("Deleted track");
+            let note = (*transpose as i32 + 60).rem_euclid(12) as usize;
+            let octave = (*transpose as i32 + 60).div_euclid(12) - 1;
+            let pitch = [
+                "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+            ][note];
+            format!("{name} · {pitch}{octave}")
+        })
+        .collect();
+    let items: Vec<RetroItem> = draft
+        .notes
+        .iter()
+        .map(|note| RetroItem {
+            lane: lanes
+                .binary_search_by(|pair| {
+                    pair.0
+                        .cmp(&note.track)
+                        .then(note.transpose.total_cmp(&pair.1))
+                })
+                .unwrap(),
+            start: note.start,
+            end: note.end.max(note.start + 0.015),
+        })
+        .collect();
     let start = draft.notes.first().map(|note| note.start).unwrap_or(0.0);
     let end = draft.duration.max(0.001);
     let rt = editor.runtime_mut();
-    rt.set_reactive("RETRO", "lanes", list_value(lane_values));
-    rt.set_reactive("RETRO", "items", list_value(items));
-    rt.set_reactive("RETRO", "duration", Value::Number(end));
-    rt.set_reactive("RETRO", "error", Value::String(String::new()));
-    rt.set_reactive("RETRO", "truncated", Value::Bool(draft.truncated));
+    present_retro(rt, |r| {
+        *r = RetroView {
+            lanes: labels,
+            items,
+            duration: end,
+            truncated: draft.truncated,
+            error: String::new(),
+        }
+    });
+    // The crop spans the capture from its first note; the roll's zoom takes
+    // the duration from here (the tick has not pushed `retro.duration` yet).
     let open = rt.global_value("eseq.retrospective/open").ok_or("MIDI capture UI is unavailable")?;
-    rt.invoke(open, vec![Value::Number(start), Value::Number(end)])
+    rt.invoke(open, vec![Value::Number(start), Value::Number(end), Value::Number(end)])
         .map_err(|error| format!("{error:?}"))?;
     apply_guess(editor, draft)?;
     editor.refresh_runtime_side_effects();
@@ -105,7 +116,7 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
                 if !apply_guess(editor, draft)? {
                     return Err("No repeating groove found. Set the crop by hand".into());
                 }
-                editor.runtime_mut().set_reactive("RETRO", "error", Value::String(String::new()));
+                present_retro(editor.runtime_mut(), |r| r.error.clear());
             }
             "retrospective-close" => {
                 app.state.note_audition.stop();
@@ -121,7 +132,7 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
                     .ok_or("Choose a whole number of bars")?;
                 if name == "retrospective-audition" {
                     app.audition_retrospective(start, end, bars as usize)?;
-                    editor.runtime_mut().set_reactive("RETRO", "error", Value::String(String::new()));
+                    present_retro(editor.runtime_mut(), |r| r.error.clear());
                     return Ok(());
                 }
                 let count = app.import_retrospective(start, end, bars as usize)?;
@@ -135,7 +146,7 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
         Ok(())
     })();
     if let Err(error) = result {
-        editor.runtime_mut().set_reactive("RETRO", "error", Value::String(error.clone()));
+        present_retro(editor.runtime_mut(), |r| r.error = error.clone());
         editor.show_transient_message(error);
     }
     sync(editor.runtime_mut(), app);
@@ -144,14 +155,15 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
     editor.mark_needs_redraw();
 }
 
+/// An audition error, into the capture's `error`. The audition's `playing`,
+/// `position` and `playhead` are the `retro` kind's live fields (the host
+/// kinds read the mailbox while something observes them).
 pub(crate) fn sync(runtime: &mut eseqlisp::Runtime, app: &app::App) -> bool {
-    let mut changed = runtime.set_reactive("RETRO", "playing",
-        Value::Bool(app.state.note_audition.generation() != 0)).effects_dirty;
-    if app.retrospective.draft.is_some() {
-        changed |= runtime.set_reactive("RETRO", "position", Value::Number(app.state.note_audition.position())).effects_dirty;
-        if let Some(error) = app.state.note_audition.take_error() {
-            changed |= runtime.set_reactive("RETRO", "error", Value::String(error)).effects_dirty;
-        }
+    if app.retrospective.draft.is_none() {
+        return false;
     }
-    changed
+    match app.state.note_audition.take_error() {
+        Some(error) => present_retro(runtime, |r| r.error = error),
+        None => false,
+    }
 }

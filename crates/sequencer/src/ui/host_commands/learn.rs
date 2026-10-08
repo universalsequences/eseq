@@ -3,13 +3,30 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "open-learn-patch",
     "set-learn-target",
-    "configure-learn",
     "start-learn-job",
     "stop-learn-job",
     "replan-learn-job",
     "apply-learn-result",
     "close-learn-patch",
+    "set-learn",
 ];
+
+/// The integer training settings: (field, min, max), the field the `learn`
+/// kind's name. `set-learn` (the `learn` kind's setters) takes only a value
+/// in the range.
+const LEARN_INT_SETTINGS: [(&str, usize, usize); 9] = [
+    ("epochs", 1, 2000),
+    ("cma-generations", 1, 1000),
+    ("cma-population", 0, 4096),
+    ("cma-seed", 0, u32::MAX as usize),
+    ("cma-forward-batch", 0, 4096),
+    ("local-epochs", 0, 2000),
+    ("cma-continue", 0, 4096),
+    ("cma-refine-epochs", 0, 2000),
+    ("cma-final-epochs", 0, 2000),
+];
+
+use crate::presented::{LEARN_METHODS, LEARN_REFINE_MODES};
 
 pub(super) fn handle(
     name: &str,
@@ -18,7 +35,6 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
-    let current_track = ctx.shared.current_track.load(Ordering::Relaxed);
     match name {
         "open-learn-patch" => {
             if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
@@ -49,9 +65,7 @@ pub(super) fn handle(
         "set-learn-target" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let path = extract_string_from_payload(&payload, "path")
                 .filter(|path| !path.is_empty())
@@ -84,28 +98,20 @@ pub(super) fn handle(
                 if let Some(pending) = ctx.sessions.pending_learn_job.take() {
                     let _ = pending.job.cancel();
                 }
-                let rt = editor.runtime_mut();
-                reset_learn_reactive(rt);
-                rt.set_reactive("SEQ", "learn-target-path", Value::String(String::new()));
-                rt.set_reactive("SEQ", "learn-target-name", Value::String(String::new()));
+                present_learn(editor.runtime_mut(), |l| {
+                    l.reset();
+                    l.target_path.clear();
+                    l.target_name.clear();
+                });
                 finish_reactive(editor);
                 return;
             }
-            {
-                let rt = editor.runtime_mut();
-                reset_learn_reactive(rt);
-                rt.set_reactive(
-                    "SEQ",
-                    "learn-target-path",
-                    Value::String(path.as_ref().unwrap().to_string_lossy().into_owned()),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "learn-target-name",
-                    Value::String(session.learn_target_name.clone().unwrap_or_default()),
-                );
-                rt.set_reactive("SEQ", "learn-phase", Value::String("planning".to_string()));
-            }
+            present_learn(editor.runtime_mut(), |l| {
+                l.reset();
+                l.target_path = path.as_ref().unwrap().to_string_lossy().into_owned();
+                l.target_name = session.learn_target_name.clone().unwrap_or_default();
+                l.phase = "planning".to_string();
+            });
             let launched = launch_learn_job(
                 app,
                 session,
@@ -122,53 +128,13 @@ pub(super) fn handle(
                 Err(error) => show_error(editor, error),
             }
         }
-        "configure-learn" => {
-            let rt = editor.runtime_mut();
-            if let Some(method) = extract_string_from_payload(&payload, "method") {
-                set_learn_method(rt, &method);
+        "set-learn" => match set_learn(editor.runtime_mut(), &payload) {
+            Ok(()) => finish_reactive(editor),
+            Err(error) => {
+                finish_reactive(editor);
+                editor.handle_host_event(HostEvent::Status(format!("set-learn: {error}")));
             }
-            for (payload_key, reactive_key, min, max) in [
-                ("epochs", "learn-epochs", 1, 2000),
-                ("cma-generations", "learn-cma-generations", 1, 1000),
-                ("cma-population", "learn-cma-population", 0, 4096),
-                ("cma-seed", "learn-cma-seed", 0, u32::MAX as usize),
-                ("cma-forward-batch", "learn-cma-forward-batch", 0, 4096),
-                ("local-epochs", "learn-local-epochs", 0, 2000),
-                ("cma-continue", "learn-cma-continue", 0, 4096),
-                ("cma-refine-epochs", "learn-cma-refine-epochs", 0, 2000),
-                ("cma-final-epochs", "learn-cma-final-epochs", 0, 2000),
-            ] {
-                if let Some(value) = extract_usize_from_payload(&payload, payload_key) {
-                    rt.set_reactive("SEQ", reactive_key, Value::Number(value.clamp(min, max) as f64));
-                }
-            }
-            if let Some(population) = extract_usize_from_payload(&payload, "cma-population") {
-                if population > 0 && population < 4 {
-                    rt.set_reactive("SEQ", "learn-cma-population", Value::Number(4.0));
-                }
-            }
-            if let Some(sigma) = extract_number_from_payload(&payload, "cma-sigma") {
-                if sigma.is_finite() && sigma > 0.0 {
-                    rt.set_reactive("SEQ", "learn-cma-sigma", Value::Number(sigma.min(10.0)));
-                }
-            }
-            if let Some(mode) = extract_string_from_payload(&payload, "cma-refine-mode") {
-                if matches!(mode.as_str(), "Auto" | "Scalar" | "Batched") {
-                    rt.set_reactive("SEQ", "learn-cma-refine-mode", Value::String(mode));
-                }
-            }
-            if let Some(pitch_hz) = extract_number_from_payload(&payload, "pitch-hz") {
-                if pitch_hz.is_finite() && pitch_hz > 0.0 {
-                    rt.set_reactive("SEQ", "learn-pitch-hz", Value::Number(pitch_hz));
-                }
-            }
-            if let Some(gate_frames) = extract_usize_from_payload(&payload, "gate-frames") {
-                if gate_frames > 0 {
-                    rt.set_reactive("SEQ", "learn-gate-frames", Value::Number(gate_frames as f64));
-                }
-            }
-            finish_reactive(editor);
-        }
+        },
         "start-learn-job" => {
             if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
                 editor.handle_host_event(HostEvent::Status(message.to_string()));
@@ -176,9 +142,7 @@ pub(super) fn handle(
             }
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 show_error(editor, "No instrument patch editor is active".to_string());
@@ -197,13 +161,15 @@ pub(super) fn handle(
                 Ok(job) => {
                     replace_learn_job(&mut ctx.sessions.pending_learn_job, job);
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
-                    rt.set_reactive("SEQ", "learn-stage", Value::String("starting".to_string()));
-                    rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(0.0));
-                    rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(0.0));
-                    rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
-                    rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
-                    rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
+                    present_learn(rt, |l| {
+                        l.phase = "training".to_string();
+                        l.stage = "starting".to_string();
+                        l.current_epoch = 0.0;
+                        l.total_epochs = 0.0;
+                        l.losses.clear();
+                        l.optimization_losses.clear();
+                        l.error.clear();
+                    });
                     finish_reactive(editor);
                 }
                 Err(error) => show_error(editor, error),
@@ -212,9 +178,7 @@ pub(super) fn handle(
         "stop-learn-job" => {
             let preview_cleared = clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(pending) = ctx.sessions.pending_learn_job.as_mut() else {
                 if preview_cleared {
@@ -233,9 +197,7 @@ pub(super) fn handle(
         "replan-learn-job" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 return;
@@ -255,7 +217,7 @@ pub(super) fn handle(
             ) {
                 Ok(job) => {
                     replace_learn_job(&mut ctx.sessions.pending_learn_job, job);
-                    editor.runtime_mut().set_reactive("SEQ", "learn-phase", Value::String("planning".to_string()));
+                    present_learn(editor.runtime_mut(), |l| l.phase = "planning".to_string());
                     finish_reactive(editor);
                 }
                 Err(error) => show_error(editor, error),
@@ -277,9 +239,7 @@ pub(super) fn handle(
             }
             match apply_learn_param_preview(app, &mut ctx.sessions.learn_param_preview) {
                 Ok(_) => {
-                    editor
-                        .runtime_mut()
-                        .set_reactive("SEQ", "learn-applied", Value::Bool(true));
+                    present_learn(editor.runtime_mut(), |l| l.applied = true);
                     ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                     finish_reactive(editor);
                     editor.handle_host_event(HostEvent::Status(
@@ -292,9 +252,7 @@ pub(super) fn handle(
         "close-learn-patch" => {
             clear_learn_param_preview(
                 app,
-                editor.runtime_mut(),
                 &mut ctx.sessions.learn_param_preview,
-                current_track,
             );
             if let Some(pending) = ctx.sessions.pending_learn_job.take() {
                 let _ = pending.job.cancel();
@@ -337,17 +295,58 @@ pub(crate) fn open_patch_learn_buffer(
     Ok(())
 }
 
-fn set_learn_method(rt: &mut Runtime, method: &str) {
-    if !matches!(
-        method,
-        "Local fit + basin check" | "Evolutionary search only" | "Evolutionary search + training"
-    ) {
-        return;
+/// One training setting (`set-learn`: `:field`, `:value`), the `learn`
+/// kind's setter: the current value always works, anything else must pass
+/// [`validate_learn_setting`] (no clamping).
+fn set_learn(rt: &mut Runtime, payload: &Value) -> Result<(), String> {
+    let Value::Map(map) = payload else {
+        return Err("needs a :field and a :value".to_string());
+    };
+    let (field, value) = super::track_settings::SetValue::field(map)?;
+    let Some(current) = crate::presented::presented(|p| p.learn.get().setting(&field)) else {
+        return Err(format!("no learn setting {field}"));
+    };
+    if &current == value.value() {
+        return Ok(());
     }
-    // Pipeline-specific defaults live in the reactive-state initializer. A
-    // method switch must not erase values the user already tuned; search-only
-    // enforces its disabled Adam stages when constructing the launch config.
-    rt.set_reactive("SEQ", "learn-method", Value::String(method.to_string()));
+    let next = validate_learn_setting(&field, value.value())?;
+    present_learn(rt, |l| l.set_setting(&field, next));
+    Ok(())
+}
+
+/// A training setting's value under the value rule (spec §14.2c), as
+/// stored: the method or refine mode one of its labels (case-insensitive),
+/// an integer setting an integer in its range (a population 0 or at least
+/// 4), the sigma a number above 0 up to 10, the pitch a positive number and
+/// the gate a positive integer. `set-learn` stores only what this accepts.
+fn validate_learn_setting(field: &str, value: &Value) -> Result<Value, String> {
+    let value = super::track_settings::SetValue::new(field, value.clone());
+    Ok(match field {
+        "method" => Value::String(LEARN_METHODS[value.choice(&LEARN_METHODS)?].to_string()),
+        "cma-refine-mode" => {
+            Value::String(LEARN_REFINE_MODES[value.choice(&LEARN_REFINE_MODES)?].to_string())
+        }
+        "cma-sigma" => match value.number(0.0, 10.0)? {
+            sigma if sigma > 0.0 => Value::Number(sigma),
+            _ => return value.fail("a number above 0 up to 10"),
+        },
+        "pitch-hz" => match value.finite()? {
+            hz if hz > 0.0 => Value::Number(hz),
+            _ => return value.fail("a positive number"),
+        },
+        "gate-frames" => Value::Number(value.integer(1, u32::MAX as usize)? as f64),
+        "cma-population" => match value.integer(0, 4096)? {
+            1..=3 => return value.fail("0 (auto) or an integer from 4 to 4096"),
+            population => Value::Number(population as f64),
+        },
+        _ => {
+            let (_, min, max) = LEARN_INT_SETTINGS
+                .iter()
+                .find(|(key, _, _)| *key == field)
+                .ok_or_else(|| format!("no learn setting {field}"))?;
+            Value::Number(value.integer(*min, *max)? as f64)
+        }
+    })
 }
 
 fn learn_training_config_from_payload(
@@ -400,9 +399,7 @@ fn extract_number_from_payload(payload: &Value, key: &str) -> Option<f64> {
 }
 
 fn show_error(editor: &mut Editor, error: String) {
-    let rt = editor.runtime_mut();
-    rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-    rt.set_reactive("SEQ", "learn-error", Value::String(error.clone()));
+    present_learn_error(editor.runtime_mut(), error.clone());
     finish_reactive(editor);
     editor.handle_host_event(HostEvent::Status(error));
 }

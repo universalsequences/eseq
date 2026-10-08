@@ -480,6 +480,10 @@ pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
 // older saved parameter indices remain stable; the scheduler regression test
 // verifies these constants against the built descriptor.
 pub const SLOT_PARAM_SLICE_MODE: usize = 138;
+// The playback start and end (stored 0-1 of the sample), the descriptor's
+// `start` and `end`.
+pub const SLOT_PARAM_START: usize = 2;
+pub const SLOT_PARAM_END: usize = 3;
 pub const SLOT_PARAM_SLICE_SENSITIVITY: usize = 139;
 pub const SLOT_PARAM_SLICE_BASE: usize = 140;
 pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;

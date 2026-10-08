@@ -41,6 +41,7 @@
 ;; two never drift.
 (module eseq.processes-buffer)
 
+(import eseq.kinds :refer (graph-of remove-process!))
 (import eseq.seq-core-state)
 (import eseq.seq-step-tabs)
 (import eseq.expr-buffer)
@@ -125,21 +126,18 @@
       nil node-inspectors)))
 
 ;; ── The inspected card ──────────────────────────────────────────────────
+;; The process of node `node` of instance `graph` whose proc-id is
+;; `slot-id`, or nil (gone, or not listed yet: the kinds list a process
+;; added through a native at the host's next sync).
 (def chain-slot (graph node slot-id)
-  (reduce |acc slot| (if (and (= acc nil) (= (get slot :instance-id) slot-id)) slot acc)
-    nil (graph-node-process-chain graph node)))
-
-(def chain-index (graph node slot-id)
-  (let ((slots (graph-node-process-chain graph node)))
-    (reduce |acc i| (if (and (< acc 0) (= (get (nth slots i) :instance-id) slot-id)) i acc)
-      -1 (range 0 (len slots)))))
+  (let ((g (graph-of graph))
+        (n (when g (nth g.nodes node))))
+    (when n (eseq.sequencer/process-of n slot-id))))
 
 ;; The card selected in node `node`'s bay while it is still in the chain,
-;; or nil. The node patch version is read so an edit (remove, promote)
-;; re-evaluates: the chain native is not reactive.
+;; or nil.
 (def inspected-slot-id (graph node)
-  (let ((selected (do (eseq.sequencer/lane-patch-node-version-value)
-                      (eseq.sequencer/lane-patch-node-selected-id))))
+  (let ((selected (eseq.sequencer/lane-patch-node-selected-id)))
     (if (and (number? selected) (>= selected 0) (chain-slot graph node selected))
       selected
       nil)))
@@ -158,7 +156,8 @@
   (let ((target (if (showing?) (dock-target) nil)))
     (if (and target code-visible)
       (let ((id (inspected-slot-id (nth target 0) (nth target 1))))
-        (if (and id (get (chain-slot (nth target 0) (nth target 1) id) :expr)) id nil))
+        (let ((p (when id (chain-slot (nth target 0) (nth target 1) id))))
+          (if (and p p.expr) id nil)))
       nil)))
 
 ;; For the layout spec: the code tile's buffer, created (without switching)
@@ -167,8 +166,9 @@
   (let ((id (code-slot-id)))
     (if id
       (let ((target (dock-target)))
-        (eseq.expr-buffer/ensure-node-slot-buffer (nth target 0) (nth target 1) id
-          (max 0 (chain-index (nth target 0) (nth target 1) id))))
+        (let ((p (chain-slot (nth target 0) (nth target 1) id)))
+          (eseq.expr-buffer/ensure-node-slot-buffer (nth target 0) (nth target 1) id
+            (if p p.index 0))))
       nil)))
 
 ;; Re-lay the right column when the dock appears, goes, or its code tile
@@ -224,11 +224,11 @@
         (header/chip "processes-caption" name (max 4.55 (+ 1.2 (* 0.6 (len name))))
           :process-lane-accent false :process-lane-accent)
         (header/note "processes-caption-note"
-          (str "node " node (if slot (str " · " (get slot :label)) "")))))))
+          (str "node " node (if slot (str " · " slot.name) "")))))))
 
 (def code-toggle (graph node slot-id)
   (let ((slot (if slot-id (chain-slot graph node slot-id) nil)))
-    (if (and slot (get slot :expr))
+    (if (and slot slot.expr)
       (button (if code-visible "hide code" "show code")
         :key "processes-code-toggle"
         :width 5.6 :height 1.1 :padding 0.05 :font-size 8
@@ -275,15 +275,16 @@
 
 ;; The inspected card's delete, pinned to the inspector's bottom right.
 (def delete-row (graph node slot-id)
-  (if (and slot-id (chain-slot graph node slot-id))
-    (h-stack :key "processes-delete-row" :width :fill :align :center
-      (box :flex 1 :height 0.5 :bg :transparent)
-      (button "Delete"
-        :key "processes-delete"
-        :width 6.0 :height 1.1 :padding 0.05 :font-size 8
-        :background-color :red :border-color :red :color :black
-        :on-click (lambda (event) (graph-node-process-remove graph node slot-id))))
-    nil))
+  (let ((p (when slot-id (chain-slot graph node slot-id))))
+    (if p
+      (h-stack :key "processes-delete-row" :width :fill :align :center
+        (box :flex 1 :height 0.5 :bg :transparent)
+        (button "Delete"
+          :key "processes-delete"
+          :width 6.0 :height 1.1 :padding 0.05 :font-size 8
+          :background-color :red :border-color :red :color :black
+          :on-click (lambda (event) (remove-process! p))))
+      nil)))
 
 (def root-widget ()
   (v-stack :width :fill :height :fill :gap 0 :padding 1.0

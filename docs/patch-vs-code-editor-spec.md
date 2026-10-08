@@ -370,7 +370,7 @@ Typing must not auto-compile — mid-edit text is usually invalid. Instead:
   through the *existing* preview pipeline — materialize defmacro imports
   (`materialize_defmacro_imports`, `effect_compile.rs:280`), background Draft
   compile, same `PendingInstrumentPreview` polling, same
-  `apply_compiled_*` hot-swap, same `SEQ.editor-error` / "Preview compiling…"
+  `apply_compiled_*` hot-swap, same `editor.error` / "Preview compiling…"
   status row in `sbrowser-editor-header`. Compile errors land in the same
   status row (with the compiler diagnostic).
 - Keybinding via the existing declarative layer: `define-mode` a

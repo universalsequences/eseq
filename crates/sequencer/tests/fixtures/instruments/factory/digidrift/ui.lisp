@@ -91,7 +91,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((filt (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((filt (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (subtree :key (str "drift-route-chip-" name "-" (if filt 1 0))
           (button ">" :width 2.1 :height height
             :font-size 11.0
@@ -111,7 +111,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (subtree :key (str "drift-osc-tab-" name "-" (if on 1 0))
           (box :width 2.1 :height 1.5 :v-align :end
             (button text :width 2.3 :height 1.5

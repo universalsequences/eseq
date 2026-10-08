@@ -90,6 +90,11 @@ const ESEQLISP_SPECIALS: &[(&str, &str, &str)] = &[
 const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
     ("append", "(append list ...)", "Concatenate lists."),
     (
+        "apply",
+        "(apply fn arg ... xs)",
+        "Call fn with the args followed by the items of xs.",
+    ),
+    (
         "clear-hooks",
         "(clear-hooks)",
         "Remove all registered sequencer hook callbacks.",

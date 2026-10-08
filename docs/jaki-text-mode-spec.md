@@ -62,7 +62,7 @@ jaki semantics, and everything in §5–§8 is package Lisp.
 | a number argument                 | scrub within rails              | schema `num` / `dyn-num` rails          |
 | `(rule TRIG …)`                   | rule trigger / body slots       | `proc-trigger-schema`, `proc-body-schema` |
 | an invalid word                   | error colour                    | schema check / `dyn-word-valid?`        |
-| the sounding hit's items          | `:lit` / `:lit-values` rings    | `SEQ.generator-mark-<id>-<route>` (§7.3 of the sequencer spec) |
+| the sounding hit's items          | `:lit` / `:lit-values` rings    | the generator's `<route>` marks (§7.3 of the sequencer spec) |
 
 In text, a route is `-> N` and N is a track number directly
 (`alez.jaki.surface` header). So the `param` source's context for a route is
@@ -297,8 +297,8 @@ inserts the word.
   against `row-schema` with the walker's check pass, and plock names with
   `dyn-word-valid?`. Mark failures with `set-buffer-styles` in the error
   colour. Text is never rewritten.
-- **Lit items** (stretch). The running generator already publishes
-  `SEQ.generator-mark-<id>-<route>` bitmasks of which route items applied to
+- **Lit items** (stretch). The running generator already marks
+  `<route>` with bitmasks of which route items applied to
   the sounding hit. Mapping item i of route r to its source span (kept
   by the segmenter during the validation pass) and styling it with
   `set-buffer-styles` gives the panel's rings in text. This needs the mark

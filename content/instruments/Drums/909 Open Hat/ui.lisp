@@ -4,6 +4,9 @@
 (def idhat-bind (name)
   (eseq.effects.custom-ui-runtime/custom-ui-param-binding
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+(def idhat-value (name)
+  (eseq.effects.custom-ui-runtime/custom-ui-param-value
+    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
 (def idhat-knob (name title decimals)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s 0 name title 7.0 3.6 2.35
     (idhat-c) decimals :linear :widget-knob-track 10 9.5 :center))
@@ -22,7 +25,6 @@
 (defwidget eseq-hat-mode-envelope
   :width 30 :height 0.35
   :state (gain rate tail decay metal attack hold)
-  :bindable (gain rate tail decay metal attack hold)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 1) 2) 0 1))
         (t (* u u))
@@ -40,7 +42,6 @@
 (defwidget eseq-hat-wash-envelope
   :width 35 :height 1.65
   :state (tail fast amount decay wash attack hold gain)
-  :bindable (tail fast amount decay wash attack hold gain)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 1) 2) 0 1))
         (t (* u u))
@@ -58,8 +59,8 @@
   (let ((prefix (str "m" index))
         (gesture (eseq.effects.drum-surface/parameter-gesture "decay" "metal")))
     (h-stack :width 35 :height 0.35 :gap 0.2
-      (label (str (round (* (reactive-value (idhat-bind (str prefix "f")))
-          (pow 2 (/ (reactive-value (idhat-bind "tune")) 12)))))
+      (label (str (round (* (idhat-value (str prefix "f"))
+          (pow 2 (/ (idhat-value "tune") 12)))))
         :width 4.8 :height 0.35 :font-size 6.7 :v-align :center :color :black :bg :transparent)
       (eseq-hat-mode-envelope :debug-name (str "hat-mode-" index)
         :on-mouse-down (get gesture :down) :on-drag (get gesture :drag) :on-mouse-up (get gesture :up)

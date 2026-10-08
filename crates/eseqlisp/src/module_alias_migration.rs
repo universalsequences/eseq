@@ -806,7 +806,7 @@ mod tests {
         assert!(
             migration
                 .rewritten
-                .contains("eseq.effects.state/effect-mods-open"),
+                .contains("eseq.effects.effect-panels/effect-mods-toggle-button"),
             "identity alias must still qualify"
         );
         assert!(

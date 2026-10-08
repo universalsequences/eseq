@@ -1193,6 +1193,7 @@ pub trait WidgetDefinition: Sync {
         _node: &LayoutNode,
         _local_col: f32,
         _local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         None
     }
@@ -3182,6 +3183,18 @@ fn offset_primitive_y_mut(prim: &mut GpuPrimitive, dy: f32, viewport: WidgetView
     }
 }
 
+/// The dict every pointer callback receives (kind-bindings spec §12 D4;
+/// documented in docs/eseqlisp/GUIDE.md "Pointer events"):
+///
+/// - `phase`: "down" "drag" "up" "click" "right-click" "double-click" …
+/// - `u`, `v`: 0–1 position within the widget, `u` left→right and `v`
+///   top→bottom; `(u, v) = ((sx + 1) / 2, (sy + 1) / 2)`. Not clamped: a
+///   drag that leaves the widget reports values outside 0–1, as sx/sy do.
+/// - `sx`, `sy`: the same position in -1–1 (sy = -1 at the top edge).
+/// - `x`, `y`: offset from the widget's top-left in cells.
+/// - `col`, `row`: content-space cell position (see below); `at` is the
+///   same point as `(dict :col :row)`, the shape menus anchor to.
+/// - `shift` `ctrl` `alt` `cmd` (= `super` = `meta`), `additive-selection`.
 pub(crate) fn pointer_event_info(
     phase: &str,
     modifiers: KeyModifiers,
@@ -3189,6 +3202,7 @@ pub(crate) fn pointer_event_info(
     local_col: f32,
     local_row: f32,
 ) -> Value {
+    let num = |n: f32| Rc::new(RefCell::new(Value::Number(n as f64)));
     let mut info = pointer_modifier_info(modifiers);
     info.insert(
         "phase".to_string(),
@@ -3206,14 +3220,8 @@ pub(crate) fn pointer_event_info(
     } else {
         0.0
     };
-    info.insert(
-        "x".to_string(),
-        Rc::new(RefCell::new(Value::Number(wc as f64))),
-    );
-    info.insert(
-        "y".to_string(),
-        Rc::new(RefCell::new(Value::Number(wr as f64))),
-    );
+    info.insert("x".to_string(), num(wc));
+    info.insert("y".to_string(), num(wr));
     // Absolute pointer position in tile-local layout CONTENT cells: the
     // tile's own scroll offsets are already folded in, so this matches the
     // space layout rects live in (the backend draws the layout, and the
@@ -3224,22 +3232,17 @@ pub(crate) fn pointer_event_info(
     //
     // Not folded in: the offset of an enclosing `scroll` WIDGET, which
     // children read separately via `scroll::current_event_scroll_offset`.
-    info.insert(
-        "col".to_string(),
-        Rc::new(RefCell::new(Value::Number(local_col as f64))),
-    );
-    info.insert(
-        "row".to_string(),
-        Rc::new(RefCell::new(Value::Number(local_row as f64))),
-    );
-    info.insert(
-        "sx".to_string(),
-        Rc::new(RefCell::new(Value::Number(sx as f64))),
-    );
-    info.insert(
-        "sy".to_string(),
-        Rc::new(RefCell::new(Value::Number(sy as f64))),
-    );
+    info.insert("col".to_string(), num(local_col));
+    info.insert("row".to_string(), num(local_row));
+    info.insert("sx".to_string(), num(sx));
+    info.insert("sy".to_string(), num(sy));
+    info.insert("u".to_string(), num((sx + 1.0) * 0.5));
+    info.insert("v".to_string(), num((sy + 1.0) * 0.5));
+    let at = HashMap::from([
+        ("col".to_string(), num(local_col)),
+        ("row".to_string(), num(local_row)),
+    ]);
+    info.insert("at".to_string(), Rc::new(RefCell::new(Value::Map(at))));
     Value::Map(info)
 }
 
@@ -3269,12 +3272,12 @@ pub fn map_mouse_event(
     // handling so :on-right-click has the same contract on every widget.
     if mouse_kind == MouseEventKind::Down(MouseButton::Right)
         && node.props.contains_key("on-right-click") {
-        // A tree adds the hit row as `:item` so the handler can open a menu
-        // for the row under the pointer.
-        let info = if node.widget_type == "tree" {
-            tree::tree_context_menu_info(node, modifiers, local_col, local_row)
-        } else {
-            pointer_event_info("right-click", modifiers, node, local_col, local_row)
+        // A tree adds the hit row as `:item`, a patcher the node or cable
+        // under the pointer as `:node` / `:cable`.
+        let info = match node.widget_type.as_str() {
+            "tree" => tree::tree_context_menu_info(node, modifiers, local_col, local_row),
+            "patcher" => patcher::patcher_context_menu_info(node, modifiers, local_col, local_row),
+            _ => pointer_event_info("right-click", modifiers, node, local_col, local_row),
         };
         return MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(info));
     }
@@ -3353,12 +3356,14 @@ pub fn map_key_event(node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEve
     widget_definition(&node.widget_type)?.key_event(node, key)
 }
 
+/// `modifiers` come from the mouse event that completed the double-click.
 pub fn map_double_click_event(
     node: &LayoutNode,
     local_col: f32,
     local_row: f32,
+    modifiers: KeyModifiers,
 ) -> Option<WidgetEvent> {
-    widget_definition(&node.widget_type)?.double_click_event(node, local_col, local_row)
+    widget_definition(&node.widget_type)?.double_click_event(node, local_col, local_row, modifiers)
 }
 
 pub fn map_magnify_event(
@@ -3388,6 +3393,22 @@ pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Whether the patch port whose id (`:track`) is `port` is the pending drag
+/// source: its `:pending` prop is true, or its `:pending-port` prop (a
+/// number, or a bound float read now) is `port`. The bound form lets a view
+/// arm a port with a repaint rather than a re-render.
+pub fn patch_port_pending(props: &HashMap<String, Value>, port: usize) -> bool {
+    if matches!(props.get("pending"), Some(Value::Bool(true))) {
+        return true;
+    }
+    let pending = match props.get("pending-port") {
+        Some(Value::Number(n)) => *n,
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot),
+        _ => return false,
+    };
+    pending >= 0.0 && pending == port as f64
+}
 
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     let value = match props.get(key) {
@@ -3813,6 +3834,101 @@ mod tests {
             focusable: false,
             animation: Default::default(),
         }
+    }
+
+    /// kind-bindings spec §12 D4: every pointer callback on box, label and
+    /// button receives one map shape (u v sx sy col row at + modifiers).
+    #[test]
+    fn pointer_callbacks_share_one_event_shape() {
+        let rect = Rect { col: 10.0, row: 4.0, width: 8.0, height: 2.0 };
+        let node = |widget_type: &str, callbacks: &[&str]| {
+            let props = callbacks
+                .iter()
+                .map(|name| (name.to_string(), Value::Symbol(name.to_string())))
+                .collect();
+            test_node(1, widget_type, rect, props, Vec::new())
+        };
+        let dispatch = |node: &LayoutNode, kind: MouseEventKind, mods: KeyModifiers| {
+            match map_mouse_event(node, kind, 14.0, 4.5, None, None, mods, 10.0, 20.0) {
+                MouseEventOutcome::Dispatch(event) => handle_event(node, event),
+                _ => None,
+            }
+            .unwrap_or_else(|| panic!("{} {kind:?} dispatched nothing", node.widget_type))
+        };
+        let double_click = |node: &LayoutNode, mods: KeyModifiers| {
+            handle_event(node, map_double_click_event(node, 14.0, 4.5, mods).unwrap()).unwrap()
+        };
+        let check = |output: EventOutput,
+                     callback: &str,
+                     (u, v, col, row): (f64, f64, f64, f64),
+                     (shift, cmd, alt): (bool, bool, bool)| {
+            assert_eq!(output.callback, Value::Symbol(callback.to_string()));
+            let [Value::Map(info)] = output.args.as_slice() else {
+                panic!("{callback}: expected one event map, got {:?}", output.args);
+            };
+            let num = |key: &str| match info.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::Number(n)) => n,
+                other => panic!("{callback}: {key} = {other:?}"),
+            };
+            let flag = |key: &str| match info.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::Bool(b)) => b,
+                other => panic!("{callback}: {key} = {other:?}"),
+            };
+            assert_eq!((num("u"), num("v")), (u, v), "{callback} u/v");
+            assert_eq!((num("sx"), num("sy")), (u * 2.0 - 1.0, v * 2.0 - 1.0), "{callback} sx/sy");
+            assert_eq!((num("col"), num("row")), (col, row), "{callback} col/row");
+            let Some(Value::Map(at)) = info.get("at").map(|value| value.borrow().clone()) else {
+                panic!("{callback}: at must be a map");
+            };
+            assert_eq!(at["col"].borrow().clone(), Value::Number(col), "{callback} at.col");
+            assert_eq!(at["row"].borrow().clone(), Value::Number(row), "{callback} at.row");
+            assert_eq!((flag("shift"), flag("cmd"), flag("alt")), (shift, cmd, alt), "{callback} mods");
+        };
+        // (u, v, col, row) for the pointer at (14, 4.5) and for the origin.
+        let at_point = (0.5, 0.25, 14.0, 4.5);
+        let at_origin = (0.0, 0.0, 10.0, 4.0);
+        let (shift, cmd, alt) = (KeyModifiers::SHIFT, KeyModifiers::SUPER, KeyModifiers::ALT);
+        let down = MouseEventKind::Down(MouseButton::Left);
+
+        for widget in ["box", "label"] {
+            let clickable = node(widget, &["on-click", "on-right-click", "on-double-click"]);
+            check(dispatch(&clickable, down, shift | cmd), "on-click", at_point, (true, true, false));
+            check(
+                dispatch(&clickable, MouseEventKind::Down(MouseButton::Right), alt),
+                "on-right-click",
+                at_point,
+                (false, false, true),
+            );
+            check(double_click(&clickable, shift), "on-double-click", at_point, (true, false, false));
+        }
+
+        let pointer = node("box", &["on-mouse-down", "on-drag", "on-mouse-up"]);
+        check(dispatch(&pointer, down, shift), "on-mouse-down", at_point, (true, false, false));
+        check(
+            dispatch(&pointer, MouseEventKind::Drag(MouseButton::Left), alt),
+            "on-drag",
+            at_point,
+            (false, false, true),
+        );
+        check(
+            dispatch(&pointer, MouseEventKind::Up(MouseButton::Left), cmd),
+            "on-mouse-up",
+            at_point,
+            (false, true, false),
+        );
+
+        // button: on-click is Activate (also fired by Enter/Space), so it has
+        // modifiers but no position; press/release have a position only.
+        let button = node("button", &["on-click"]);
+        check(dispatch(&button, down, shift), "on-click", at_origin, (true, false, false));
+        let pressable = node("button", &["on-press", "on-release"]);
+        check(dispatch(&pressable, down, shift), "on-press", at_point, (false, false, false));
+        check(
+            dispatch(&pressable, MouseEventKind::Up(MouseButton::Left), shift),
+            "on-release",
+            at_point,
+            (false, false, false),
+        );
     }
 
     fn assert_tagged_collection_matches_flat_collection(
@@ -4525,7 +4641,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 0,
             width: 1.0,
             height: 1.0,
@@ -4589,7 +4705,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 0,
             width: 1.0,
             height: 1.0,
@@ -4633,7 +4749,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 0,
             width: 1.0,
             height: 1.0,
@@ -4672,7 +4788,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 0,
             width: 1.0,
             height: 1.0,

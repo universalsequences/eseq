@@ -45,12 +45,59 @@ pub enum MacroCurve {
     LogDomain,
 }
 
+impl MacroCurve {
+    /// Every curve's label, in variant order.
+    pub const LABELS: [&'static str; 4] = ["linear", "exp", "log", "log-domain"];
+
+    /// The curve's label (the macro panel's, the host kinds' `curve`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::LogDomain => "log-domain",
+        }
+    }
+
+    /// The curve a label names (any case; `exponential` and `logarithmic`
+    /// too); `label` round-trips.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_ascii_lowercase().as_str() {
+            "linear" => Some(Self::Linear),
+            "exp" | "exponential" => Some(Self::Exp),
+            "log" | "logarithmic" => Some(Self::Log),
+            "log-domain" => Some(Self::LogDomain),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StealQuantize {
     Off,
     Sixteenth,
     #[default]
     Bar,
+}
+
+impl StealQuantize {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Sixteenth, Self::Bar];
+
+    /// The labels the macro panels show and set, in [`Self::ALL`] order.
+    pub const LABELS: [&'static str; 3] = ["off", "sixteenth", "bar"];
+
+    pub fn label(self) -> &'static str {
+        Self::LABELS[self as usize]
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        let index = Self::LABELS.iter().position(|known| *known == label)?;
+        Self::from_index(index)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +107,14 @@ pub struct SceneMacroConfig {
     pub steal_patterns: bool,
     pub quantize: StealQuantize,
     pub track_mask: Option<Vec<bool>>,
+}
+
+impl SceneMacroConfig {
+    /// Whether the macro acts on track position `track`: every track while
+    /// the mask names none.
+    pub fn covers_track(&self, track: usize) -> bool {
+        (self.track_mask.as_ref()).is_none_or(|mask| mask.get(track).copied().unwrap_or(false))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1093,6 +1148,11 @@ impl MacroEngine {
 
     pub fn effective_value(&self, key: &MacroParamKey, base: f32) -> f32 {
         self.override_value(key).unwrap_or(base)
+    }
+
+    /// The live override layer, borrowed (see [`Self::override_snapshot`]).
+    pub fn overrides(&self) -> &HashMap<MacroParamKey, f32> {
+        &self.overrides
     }
 
     pub fn is_engaged(&self, id: MacroId) -> bool {

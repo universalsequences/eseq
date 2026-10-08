@@ -15,6 +15,7 @@ mod metrics;
 mod model;
 mod project;
 mod preview;
+mod probe;
 mod render;
 mod sidecar;
 mod state;
@@ -1287,7 +1288,8 @@ use emit::debug_log_patch_lisp;
 use encapsulate::encapsulate_patcher_selection;
 use interaction::{
     PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
-    create_patcher_node_below_anchor, handle_patcher_double_click, handle_patcher_pointer_down,
+    NodeTextCaret, begin_patcher_node_text_edit, create_patcher_node_below_anchor,
+    handle_patcher_double_click, inbound_slots_for_node, handle_patcher_pointer_down,
     handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
     open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel, paste_patcher_clipboard,
     promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
@@ -1304,7 +1306,7 @@ use state::{
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
-    clamp_patcher_autocomplete_selection_with_macros, commit_patcher_text_edit,
+    clamp_patcher_autocomplete_selection_with_macros,
     move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
 };
 
@@ -1315,6 +1317,7 @@ use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
 };
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
+use crate::live_audio::ProbeView;
 use crate::vm::Value;
 use std::time::Instant;
 use text_metrics::cache_text_widths;
@@ -1379,14 +1382,9 @@ impl WidgetDefinition for PatcherWidget {
         cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Right)
-                if node.props.contains_key("on-right-click") =>
-            {
-                MouseEventOutcome::Dispatch(WidgetEvent::Custom(patcher_context_menu_info(
-                    node, modifiers, local_col, local_row,
-                )))
-            }
-            // macOS convention: ctrl+click is a right-click synonym, only when
+            // Plain right-click never reaches here: `map_mouse_event` claims
+            // it for every widget and builds this widget's payload with
+            // `patcher_context_menu_info`. macOS convention: ctrl+click is a right-click synonym, only when
             // the widget opts in via :on-right-click (as box/tree do).
             MouseEventKind::Down(MouseButton::Left)
                 if modifiers.contains(KeyModifiers::CONTROL)
@@ -1480,6 +1478,7 @@ impl WidgetDefinition for PatcherWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if handle_patcher_double_click(node, local_col, local_row) {
             Some(WidgetEvent::Custom(Value::Nil))
@@ -1711,16 +1710,17 @@ fn commit_active_patcher_text_edit(
     else {
         return false;
     };
-    let changed = commit_patcher_text_edit(state, view_key);
-    let promoted_macro = load_patch_from_props(&node.props)
-        .ok()
-        .is_some_and(|(_, root_patch)| {
-            promote_created_macro_definition(&root_patch, state, view_key, &committed_node_id)
-        });
-    // Retyping the header of a created macro's instance renames the macro
-    // (that is how an encapsulated `sub1` gets a real name) rather than
-    // leaving a call to an operator that does not exist.
-    let renamed_macro = encapsulate::rename_created_macro_from_instance_text(
+    let root_patch = load_patch_from_props(&node.props).ok().map(|(_, patch)| patch);
+    let changed = text::commit_patcher_text_edit(state, view_key, |state, edit_key| {
+        probe::taken_probe_ids_in(root_patch.as_ref(), state, Some(edit_key))
+    });
+    let promoted_macro = root_patch.as_ref().is_some_and(|root_patch| {
+        promote_created_macro_definition(root_patch, state, view_key, &committed_node_id)
+    });
+    // Retyping a local macro instance's name renames the macro and every
+    // call to it (that is how an encapsulated `sub1` gets a real name)
+    // rather than leaving a call to an operator that does not exist.
+    let renamed_macro = encapsulate::rename_macro_from_instance_text(
         node,
         state,
         view_key,
@@ -2296,8 +2296,13 @@ pub const PATCHER_COMMANDS: &[&str] = &[
     "open-bubble",
     "connect-bubble",
     "open-macro",
+    "edit-node",
     "delete-selection",
     "accept-suggestions",
+    "insert-probe",
+    "insert-scope",
+    "show-as-scope",
+    "show-as-number",
 ];
 
 /// The default key for each command, as `(key, command)` with `P-` standing
@@ -2619,6 +2624,27 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
             reset_patcher_pan(key);
             Some(WidgetEvent::Custom(Value::Nil))
         }
+        // Open the single selected node's text with its name selected — the
+        // context menu's Rename / Edit. Committing a new name on a macro
+        // instance renames the defmacro.
+        "edit-node" if state.selected_nodes.len() == 1 && state.drag.is_none() => {
+            let node_id = state.selected_nodes.iter().next().cloned()?;
+            let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+            let patch = active_patcher_patch(&root_patch, &state);
+            let patch = patch_with_interaction_state(patch, &state, &view_key);
+            if !begin_patcher_node_text_edit(
+                node,
+                &mut state,
+                &view_key,
+                &patch,
+                &node_id,
+                NodeTextCaret::SelectOp,
+            ) {
+                return None;
+            }
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
         "delete-selection" if state.selected_cable.is_some() => {
             let cable_id = state.selected_cable.clone()?;
             let changed = delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
@@ -2641,6 +2667,31 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
             Some(patcher_semantic_event(changed))
         }
         "accept-suggestions" => jev::accept_all_ghosts(node),
+        // Splice a probe into the selected cable (the context menu's Insert
+        // Probe / Insert Scope), or rewrite the selected probe's `@view`
+        // keeping its `@id` (Show as …; docs/patcher-probes-spec.md §6.2).
+        "insert-probe" | "insert-scope" | "show-as-number" | "show-as-scope"
+            if state.drag.is_none() =>
+        {
+            let view = if matches!(name, "insert-scope" | "show-as-scope") {
+                ProbeView::Scope
+            } else {
+                ProbeView::Number
+            };
+            let changed = if name.starts_with("insert-") {
+                probe::insert_probe_on_selected_cable(node, &mut state, &view_key, view)
+            } else {
+                probe::set_selected_probe_view(node, &mut state, &view_key, view)
+            };
+            if !changed {
+                return None;
+            }
+            if let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(true))
+        }
         _ => None,
     }
 }
@@ -2691,6 +2742,16 @@ pub(super) fn patcher_context_menu_info(
                     (
                         "macro?",
                         Value::Bool(patch_node.kind == NodeKind::MacroInstance),
+                    ),
+                    // `number` / `scope` / … for a probe, nil otherwise: the
+                    // menu offers the other view.
+                    (
+                        "probe-view",
+                        if probe::is_probe_node(patch_node) {
+                            Value::String(probe::probe_node_view_text(patch_node))
+                        } else {
+                            Value::Nil
+                        },
                     ),
                 ]);
             }
@@ -4092,12 +4153,13 @@ fn toggle_selected_cable_segmented(
         let input_indices = geometry::patch_input_indices(&patch);
         let input_slot_counts = geometry::patch_input_slot_counts(&patch, &input_indices);
         let output_counts = geometry::patch_output_counts(&patch);
-        if let Some((start, end)) = geometry::connection_endpoints(
+        if let Some((start, end)) = geometry::connection_endpoints_at(
             &connection,
             &node_rects,
             &input_indices,
             &input_slot_counts,
             &output_counts,
+            geometry::patcher_zoom(&pan_state),
         ) {
             let midpoint = ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5);
             segment.segment_row = geometry::screen_to_model(node.rect, &pan_state, midpoint).1;
@@ -4240,6 +4302,29 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     for patch_node in &patch.nodes {
         let font_size = display::node_font_size(patch_node);
         cache_text_widths(node_display_label(patch_node), font_size, ctx);
+        // What the box draws and is sized for; differs from the display label
+        // only for probes (`number~` + the reserved value field).
+        let probe = probe::ProbeAttrs::of(patch_node);
+        if probe.is_some() {
+            cache_text_widths(
+                display::build_node_header_label(patch_node, probe.as_ref()).text,
+                font_size,
+                ctx,
+            );
+            cache_text_widths(
+                display::node_width_label(patch_node, probe.as_ref()),
+                font_size,
+                ctx,
+            );
+        }
+        // Double-click places its caret in the editable text, which spells
+        // out cabled slots the label leaves off (`biquad ?`), so it needs
+        // its own advances.
+        let editable = display::editable_node_text(
+            patch_node,
+            &inbound_slots_for_node(&patch, &patch_node.id),
+        );
+        cache_text_widths(editable, font_size, ctx);
     }
     if let Some(tooltip) = interaction_state
         .hovered_input_port

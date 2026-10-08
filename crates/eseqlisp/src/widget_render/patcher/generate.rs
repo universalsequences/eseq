@@ -1161,6 +1161,11 @@ fn binding_base_for_node(node: &PatchNode) -> String {
             .map(|name| sanitize_binding(&name))
             .unwrap_or_else(|| format!("in{}", node_channel(node))),
         NodeKind::Constant => "value".to_string(),
+        // `probe` is an operator name, so the op-derived base would always
+        // lose to it (`probe-2`); the probe's own id is the readable name.
+        _ if super::probe::is_probe_node(node) => super::probe::probe_node_id(node)
+            .map(|id| sanitize_binding(&id))
+            .unwrap_or_else(|| "probed".to_string()),
         _ => {
             if node.op.trim().is_empty() {
                 "node".to_string()
@@ -1303,6 +1308,12 @@ fn node_call_is_incomplete(
     if let Some(arity) = fixed_macro_arity(macros, node) {
         return (0..arity).any(|idx| !slot_filled(idx));
     }
+    // An unwired probe would emit `(probe @id …)`, which the compiler rejects;
+    // a dangling probe is still emitted once something feeds it (every probe
+    // is a compiler root), but until then it lives only in the payload.
+    if super::probe::is_probe_node(node) && !slot_filled(0) {
+        return true;
+    }
     let mut last_filled: Option<usize> = None;
     for idx in 0..node.args.len() {
         if slot_filled(idx) {
@@ -1326,7 +1337,7 @@ fn out_amp_attr(node: &PatchNode) -> bool {
         .is_some_and(|value| super::lisp::is_true_literal(&value))
 }
 
-fn label_items(label: &str) -> Option<Vec<Expression>> {
+pub(super) fn label_items(label: &str) -> Option<Vec<Expression>> {
     let source = format!("({})", normalize_editor_node_text(label.trim()));
     let tokens = Parser::new(source).parse().ok()?;
     let exprs = ASTParser::new(tokens).parse().ok()?;

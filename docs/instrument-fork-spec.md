@@ -135,7 +135,7 @@ Empty name on save is already rejected ("Name cannot be empty",
   Concretely, it belongs in the `h-stack` at `content/ui/browser.lisp`
   (the "Save button" block, ~line 1333) that today renders
   Finalize / Save & Add / Save plus cancel. Fork renders in that stack when
-  `SEQ.editor-mode` is `edit-instrument` or `edit-effect` — i.e. exactly when
+  `editor.mode` is `edit-instrument` or `edit-effect` — i.e. exactly when
   the primary button means `update-instrument`, the clobbering path. The
   destructive action and its safe alternative sit side by side, which is the
   point: you should not have to leave the buffer, or know a menu exists, to
@@ -147,7 +147,7 @@ Empty name on save is already rejected ("Name cannot be empty",
   Implementation: copy the current *in-editor* source into a fresh draft dir
   rather than re-reading from disk — the whole value is preserving edits you
   have already made — then swap the session's `mode` from `EditExisting` to
-  `CreateDraft` and flip `SEQ.editor-mode` to `new-instrument`. That mode flip
+  `CreateDraft` and flip `editor.mode` to `new-instrument`. That mode flip
   does the rest of the UI for free: the name input at browser.lisp:1227 appears
   (empty, per §3.4) and the primary button relabels itself to Finalize. No new
   panel, no new naming UI — the session simply becomes the create flow it

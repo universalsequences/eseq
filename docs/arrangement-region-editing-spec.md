@@ -1,5 +1,7 @@
 # Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste/Duplicate, Move
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 3, 2026-07-27 — **all four slices shipped.** Slice 4 (move)
 landed on `arrangement-timeline`: `song_region_move` in `song_region.rs`, the
 `region-move` lowering case, the `:track-move` / `:region-move` ghosts in
@@ -225,7 +227,9 @@ pub song_region_selection: Option<SongRegionSelection>,
 Set/cleared by natives `seq-song-set-region {track-a track-b start end}` /
 `seq-song-clear-region` (precedent: `seq-song-select-clip`,
 `natives.rs:1127-1169`); published as `SEQ.song-region`
-(`sync_song_state`, `song_state.rs:513-685`). Rust ownership is what lets
+(`sync_song_state`, `song_state.rs:513-685`; since eseq-0l17.15 the host
+kinds' `song.region`, set by `select-region!` / `clear-region!`, kind-bindings
+spec §14.2d). Rust ownership is what lets
 the keyboard seam (§5.3) and the primitives read it, and makes it survive
 buffer reloads like the bound clip does.
 
@@ -615,7 +619,7 @@ called from the `arrangement-clip-move` host command.
   press retargets the clip editor before retaining the body-marquee drag
   behavior; body double-click still performs no mode transition.
 - Region state is Rust-owned (`App::song_region_selection`), published as
-  `SEQ.song-region`. A MARQUEE region is mutually exclusive with
+  the host kinds' `song.region`. A MARQUEE region is mutually exclusive with
   clip/scene-event selection and releases the sound binding; a clip selection
   is a one-clip region and keeps its binding (§4.1 as amended).
 - The clip BODY is not a selection surface for the clip: pressing it clears

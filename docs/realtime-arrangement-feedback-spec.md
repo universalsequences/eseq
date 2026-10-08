@@ -1,5 +1,7 @@
 # Realtime Arrangement Feedback — Recording You Can See, Editing While It Plays
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 3, 2026-07-27 — **design, nothing built; all questions resolved.**
 Raised while testing clip move (`docs/arrangement-region-editing-spec.md` §6):
 edits and recordings only become visible when they commit, which for
@@ -67,7 +69,7 @@ ownership of the whole `[P, Q)` splice is worth keeping simple.
 - Every `arr_*` primitive (`arr_edit.rs`) and every region primitive
   (`song_region.rs`) calls it first, so the lock is one seam, not fifty.
 - The UI already surfaces the rejection: the arrangement error banner renders
-  `SEQ.song-edit-error` (`arrangement.lisp`). Gestures themselves are not
+  `song.edit-error` (`arrangement.lisp`). Gestures themselves are not
   blocked — ghosts preview fine while playing; only the commit is refused.
 
 **The scheduler consumes a preflighted, immutable song.**
@@ -113,8 +115,8 @@ ownership of the whole `[P, Q)` splice is worth keeping simple.
 - Exception: **manually latched lanes already hear edits.** The lookahead
   merges the live snapshot over the row snapshot per chunk for every latched
   bit (`lookahead.rs:304-323`), consistent with the Seq UI only blocking
-  pointer gestures on take-governed lanes (state `1` in
-  `SEQ.song-track-governed`; ordinary lanes are never dimmed or blocked
+  pointer gestures on take-governed lanes (`track.governed` is
+  `take-governed`; ordinary lanes are never dimmed or blocked
   mid-playback — `song_state.rs:389`).
 - The timeline never sees note edits either: `SEQ.song-lane-events` rebuilds
   on `pattern_epoch`, which **no step edit bumps** — and an invariant test
@@ -165,7 +167,9 @@ While `ArrangementCapture` is active:
 
 ### 3.2 The surface
 
-One new reactive binding, `SEQ.song-pending`, published only while capture is
+(Since eseq-0l17.15 the view reads this surface as the host kinds'
+`song.pending-*` sub-kinds, kind-bindings spec §14.2o; `SEQ.song-pending` is
+gone.) One new reactive binding, `SEQ.song-pending`, published only while capture is
 active and cleared on every exit path (stop, cancel, failure):
 
 ```

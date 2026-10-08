@@ -1,5 +1,7 @@
 # Graph Sequencer Variable Node Count Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 > Status: design spec. Not implemented.
 > Scope: graph-mode `def-sequencer` line-shaped neural demos and any future graph
 > sequencer that wants a pattern-serializable active node count.
@@ -74,10 +76,14 @@ Add a sequencer-level graph config field:
 
 ```lisp
 (graph-config "neural-variable-demo" :node-count 12)
-(graph-config-value "neural-variable-demo" :node-count)
-(bind-graph-config "neural-variable-demo" :node-count)
-(graph-config-key "neural-variable-demo" :node-count)
+(graph-config-value "neural-variable-demo" :node-count)   ; a plain read
+;; A view binds and edits the graph kind's field (kind-bindings spec §14.2k):
+(let ((g (graph-of "neural-variable-demo")))
+  #'g.node-count            ; bound: re-renders when the count changes
+  (set! g.node-count 12))   ; one undo entry
 ```
+
+(`bind-graph-config` and `graph-config-key` were removed in eseq-0l17.67.)
 
 Rules:
 
@@ -91,9 +97,12 @@ The UI script should derive rows, trigger matrices, energy matrices, and weight
 matrices from the resolved active node count:
 
 ```lisp
-(def active-count (graph-config-value graph-name :node-count))
-(each (range 0 active-count) |n| ...)
+(let ((g (graph-of graph-name)))
+  (each (range 0 g.node-count) |n| ...))   ; re-renders when the count changes
 ```
+
+(`graph-config-value` is a plain, untracked read since eseq-0l17.81: fine
+for a one-time init, not for a view.)
 
 ## Storage Model
 
@@ -167,13 +176,14 @@ A variable-count graph demo must expose a top-level node count control.
 Recommended control:
 
 ```lisp
-(number-picker
-  :value (bind-graph-config graph-name :node-count)
-  :min 1
-  :max 16
-  :step 1
-  :decimals 0
-  :on-change (lambda (v) (graph-config graph-name :node-count v)))
+(let ((g (graph-of graph-name)))
+  (number-picker
+    :value #'g.node-count
+    :min 1
+    :max 16
+    :step 1
+    :decimals 0
+    :on-change (lambda (v) (set! g.node-count v))))
 ```
 
 The row table and matrices must use the resolved count. They must not depend on a
@@ -246,7 +256,7 @@ Required behavior:
 ### Authoring config
 
 - `graph-config :node-count 12` writes `ProjectGraphOverrides.node_count = Some(12)`.
-- `bind-graph-config :node-count` seeds a finite nonzero reactive value.
+- `#'g.node-count` (the graph kind's field) binds a finite nonzero value.
 - Fixed line shapes reject or ignore `:node-count` consistently; prefer a diagnostic
   on write.
 

@@ -8,7 +8,7 @@ fn edit_instrument_menu_tracks_selection_and_opens_existing_editor() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "Edit" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "Edit" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();
@@ -19,30 +19,22 @@ fn edit_instrument_menu_tracks_selection_and_opens_existing_editor() {
         ("rack", "Rack", false),
         ("empty", "", false),
     ] {
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(0.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            build_string_list(&[kind.to_string()]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-instrument-name",
+        seed_browser_tracks(&mut editor, &[kind], 0);
+        set_kind_field(
+            &mut editor,
+            "browser",
+            "instrument",
             Value::String(instrument.to_string()),
         );
-        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let item = find_layout_node_by_stable_key_suffix(&layout, "/edit-menu-instrument")
             .expect("edit instrument action");
         assert_finite_nonzero_rect(item, "edit instrument action");
         assert!(
-            matches!(item.props.get("disabled"), Some(Value::Bool(value)) if *value == !enabled)
+            matches!(item.props.get("disabled"), Some(Value::Bool(value)) if *value == !enabled),
+            "{kind} {instrument:?}: {:?}",
+            item.props.get("disabled")
         );
         if enabled {
             editor.drain_host_commands();
@@ -67,7 +59,7 @@ fn reload_from_disk_menu_items_queue_their_host_commands() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "Edit" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "Edit" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();
@@ -80,14 +72,7 @@ fn reload_from_disk_menu_items_queue_their_host_commands() {
         editor.drain_host_commands()
     };
     for (kind, enabled) in [("custom", true), ("sampler", false)] {
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
-        editor.runtime_mut().set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            build_string_list(&[kind.to_string()]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        seed_browser_tracks(&mut editor, &[kind], 0);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let item = find_layout_node_by_stable_key_suffix(&layout, "/edit-menu-reload-instrument")
@@ -140,7 +125,7 @@ fn application_menus_share_actions_and_fallback_layout() {
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(eseq.transport/open-application-menu \"{menu}\" (dict :col 2 :row 1))"
+                "(eseq.transport/open-application-menu \"{menu}\" (dict :at (dict :col 2 :row 1)))"
             ))
             .unwrap();
         editor.refresh_runtime_side_effects();
@@ -231,7 +216,9 @@ fn lisp_registered_menu_appears_in_toolbar_without_rust_configuration() {
     assert_finite_nonzero_rect(button, "custom menu button");
     editor
         .runtime_mut()
-        .eval_str("(eseq.transport/open-application-menu \"tools\" (dict :col 2 :row 1))")
+        .eval_str(
+            "(eseq.transport/open-application-menu \"tools\" (dict :at (dict :col 2 :row 1)))",
+        )
         .unwrap();
     editor.refresh_runtime_side_effects();
     let layout = editor.widget_layout().unwrap();
@@ -248,7 +235,7 @@ fn view_menu_tracks_panel_visibility_and_confirmation_cancel_is_inert() {
         .eval_str(
             r#"
         (set-window-buffer "*transport*")
-        (eseq.transport/open-application-menu "View" (dict :col 2 :row 1))
+        (eseq.transport/open-application-menu "View" (dict :at (dict :col 2 :row 1)))
     "#,
         )
         .unwrap();
@@ -288,4 +275,100 @@ fn view_menu_tracks_panel_visibility_and_confirmation_cancel_is_inert() {
         .eval_str("(eseq.file-dialogs/close-confirm)")
         .unwrap();
     assert!(editor.drain_host_commands().is_empty());
+}
+
+/// Edit > Edit Selected Effect… opens the effect armed for deletion (its
+/// header selected) when the effect editor can (`device.builtin` false), on
+/// the current track or a bus; Reload Selected Effect only a track's.
+#[test]
+fn edit_selected_effect_opens_the_armed_custom_effect() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    seed_browser_tracks(&mut editor, &["sampler"], 0);
+    seed_kind_buses(&mut editor, &[(0, "Main"), (3, "Verb")]);
+    let rt = editor.runtime_mut();
+    let track = kind_track(rt, 0);
+    let bus = rt.keyed_instance("eseq.kinds:bus", &[1]).unwrap();
+    let effect = |rt: &mut Runtime, owner: (&str, eseqlisp::vm::InstanceId), name: &str| {
+        let fx = rt
+            .register_keyed_instance("eseq.kinds:device", &[owner.1, 9])
+            .unwrap();
+        let role = if owner.0 == "bus" {
+            "bus-effect"
+        } else {
+            "effect"
+        };
+        for (field, value) in [
+            (owner.0, Value::Instance(owner.1)),
+            ("role", Value::String(role.into())),
+            ("slot", Value::Number(1.0)),
+            ("name", Value::String(name.into())),
+        ] {
+            set_field(rt, fx, field, value);
+        }
+        set_field(rt, owner.1, "devices", instance_list([fx]));
+        fx
+    };
+    let track_fx = effect(rt, ("track", track), "Grit");
+    let bus_fx = effect(rt, ("bus", bus), "Tape");
+    rt.run_reactive_cycle();
+    let item = |editor: &mut eseqlisp::Editor, id: &str, prop: &str| {
+        let callback = (editor.runtime_mut())
+            .eval_str(&crate::application_menu::menu_item_prop("Edit", id, prop))
+            .unwrap()
+            .unwrap();
+        editor.drain_host_commands();
+        let value = editor.runtime_mut().invoke(callback, vec![]).unwrap();
+        (value, editor.drain_host_commands())
+    };
+    assert_eq!(
+        item(&mut editor, "edit-menu-effect", "enabled-when").0,
+        Some(Value::Bool(false))
+    );
+    for (fx, builtin, enabled) in [(track_fx, true, false), (track_fx, false, true)] {
+        let rt = editor.runtime_mut();
+        set_field(rt, fx, "builtin", Value::Bool(builtin));
+        set_field(rt, fx, "delete-target", Value::Bool(true));
+        rt.run_reactive_cycle();
+        assert_eq!(
+            item(&mut editor, "edit-menu-effect", "enabled-when").0,
+            Some(Value::Bool(enabled)),
+            "builtin {builtin}"
+        );
+    }
+    let opened = |commands: &[HostCommand]| {
+        commands.iter().find_map(|command| match command {
+            HostCommand::Custom {
+                name,
+                payload: Value::Map(map),
+            } if name == "enter-edit-effect" => Some((
+                map_string(map, "name"),
+                map_usize(map, "slot"),
+                map_usize(map, "bus"),
+            )),
+            _ => None,
+        })
+    };
+    let (_, commands) = item(&mut editor, "edit-menu-effect", "on-select");
+    assert_eq!(
+        opened(&commands),
+        Some((Some("Grit".to_string()), Some(1), None))
+    );
+    let (_, commands) = item(&mut editor, "edit-menu-reload-effect", "on-select");
+    assert!(commands.iter().any(|command| matches!(command,
+        HostCommand::Custom { name, payload: Value::Map(map) }
+        if name == "reload-effect-from-disk" && map_usize(map, "slot") == Some(1))));
+    // A bus's effect: opened with its bus, never reloaded.
+    let rt = editor.runtime_mut();
+    set_field(rt, track_fx, "delete-target", Value::Bool(false));
+    set_field(rt, bus_fx, "delete-target", Value::Bool(true));
+    rt.run_reactive_cycle();
+    let (_, commands) = item(&mut editor, "edit-menu-effect", "on-select");
+    assert_eq!(
+        opened(&commands),
+        Some((Some("Tape".to_string()), Some(1), Some(1)))
+    );
+    assert_eq!(
+        item(&mut editor, "edit-menu-reload-effect", "enabled-when").0,
+        Some(Value::Bool(false))
+    );
 }

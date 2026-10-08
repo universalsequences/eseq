@@ -1,5 +1,7 @@
 # Instance kinds
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 1, 2026-09-24. Stages 1-7 built (see the
 "Built" notes under §5, §6, §7, §8.1, §8.3, §9, §10 and §11). Bead: see the `instance-kinds`
 epic (`bd list --label instance-kinds`).
@@ -275,7 +277,8 @@ Built (stage 2):
   (graph instance id, field): `id|n<node>|<field>` (`graph-node-value`),
   `id|p<node>|<param>` (`graph-param-value`), `id|e<from>_<to>|<param>`
   (`graph-edge-value`), `id|cfg|<field>` (`graph-config-value`) and
-  `id|proc<node>` (`graph-node-process-chain`, `graph-node-lane-patch`).
+  `id|proc<node>` (`graph-node-process-chain`; `graph-node-lane-patch`
+  until eseq-0l17.67 removed it).
   Reads outside a rendering effect keep no dependency.
 - A source's generation is the resolved value (a fingerprint for lists and
   errors; the chain plus the process-library version for `proc`), so
@@ -287,10 +290,10 @@ Built (stage 2):
   edits, another VM) is swept by `queue_graph_read_invalidations` from the UI
   tick when the scheduler snapshot version, published sequencer version or
   pattern moves.
-- The same writes echo the new value into numeric `bind-graph*` handles
-  that someone bound. Handles bound through an options list hold a dropdown
-  index, so they are never echoed. A view that needs an enum field kept in
-  step reads it with `graph-node-value` / `graph-config-value` instead.
+- The same writes echoed the new value into numeric `bind-graph*` handles
+  that someone bound. eseq-0l17.67 removed the `bind-graph*` handles, the
+  `GRAPH` namespace and the echo: views bind the graph kinds' fields
+  (kind-bindings spec §14.2k).
 - `variable-reset.lisp` echoed and had `gvr-proc-version` until the §10
   port (stage 7), which deleted both.
 
@@ -354,7 +357,7 @@ Built (stage 4):
   = `1024 + slot * 4096 + node`, where `slot` is the graph id itself below
   2^23 (instance ids) and a fold into `[2^23, 2^24)` above (legacy name
   hashes; two can collide only if equal mod 2^23), keeping every port id
-  under 2^53. `graph-node-lane-patch` mints ids in it; the new native
+  under 2^53. The node bay mints ids in it; the native
   `graph-node-patch-namespace` exposes it, and
   `eseq.sequencer/lane-patch-node-namespace` now takes `(graph node)`. The
   UI bin's track projection (`build_track_lane_patch_value`) is unchanged:
@@ -560,9 +563,13 @@ resolution, quantize, poly mode) read `graph-node-value` /
 handles (the batch threshold / global transpose / dur x pickers bind node 0,
 which every batch write echoes); the node patch reads
 `graph-node-process-chain` / `graph-node-lane-patch` directly. The owner chip
-reads `self.owner`. Exported for scripts/fixtures: `gvr-panel`,
-`gvr-init-ring-defaults`, `gvr-expand-node`, `gvr-map-arm`,
-`gvr-edit-config`, `gvr-node-count`, all taking the instance first. The
+reads `self.owner`. (Since eseq-0l17.67 the panel reads the graph kinds
+instead: `(graph-of self)`, its nodes, params and `n.processes`, kind-bindings
+spec §13.) Exported for scripts/fixtures: `gvr-panel`,
+`gvr-init-ring-defaults`, `gvr-expand-node`, `gvr-map-arm` (and, since .67,
+the route menu helpers `gvr-jakis`, `gvr-route-menu`, `gvr-route-label`,
+`gvr-set-route-label!`), all taking the instance (or its graph's nodes)
+first. The
 fixtures `graph-node-patchbay.lisp` / `graph-node-map-arm.lisp` create an
 instance with `(host-command "instance-create" …)` at top level and address it
 with `(instance-ref 1)`; capture now runs fixture instance commands through

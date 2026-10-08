@@ -1,12 +1,15 @@
 ;; Common panel framing, headers, and effect selection helpers.
 (module eseq.effects.panel-frame)
 
+(import eseq.kinds :refer (browser))
+
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
 (import eseq.effects.track-panels :as tp)
 (import eseq.effects.state :as st)
+(import eseq.effects.devices :as dv)
 
 (export fx-panel-body
         fx-panel-header-leading-spacer
@@ -128,7 +131,7 @@
 
 (def instrument-edit-source (inst)
   (host-command "enter-edit-instrument"
-    (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name))))
+    (dict :name (if (get inst :name) (get inst :name) browser.instrument))))
 
 ;; Inside a rack the instrument header belongs to one slot, so say so: the
 ;; rack-wide copy lives in the rack header's own menu.
@@ -176,7 +179,7 @@
 (def fx-effect-drag-payload (fx title)
   (dict :kind (fx-effect-drag-kind fx)
         :chain (fx-effect-chain-kind fx)
-        :track (if (get fx :rack-fx) (get fx :track-idx) SEQ.current-track)
+        :track (if (get fx :rack-fx) (get fx :track-idx) (dv/current-track-index))
         :rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
         :slot (get fx :slot-idx)
@@ -186,7 +189,7 @@
 (def fx-effect-drop-meta (fx)
   (dict :kind "fx-slot"
         :chain (fx-effect-chain-kind fx)
-        :track (if (get fx :rack-fx) (get fx :track-idx) SEQ.current-track)
+        :track (if (get fx :rack-fx) (get fx :track-idx) (dv/current-track-index))
         :rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
         :slot (get fx :slot-idx)))
@@ -224,7 +227,7 @@
           (if (get fx :bus-fx)
             (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
-      (label title :v-align :center :font-size 11 :color :white :bg :transparent)
+      (label title :v-align :center :font-size 11 :color :fg :bg :transparent)
       (if (pc/fx-has-modulators? fx)
         (ep/effect-mods-toggle-button fx)
         (box))
@@ -234,9 +237,7 @@
 
 (def fx-clear-delete-selection ()
   (do
-    (if (not (= tp/selected-plock-row -1))
-      (set! tp/selected-plock-row -1)
-      false)
+    (tp/clear-plock-row!)
     ;; seq-clear-delete-target is a Rust native (src/ui/natives.rs) — bare.
     (seq-clear-delete-target)))
 

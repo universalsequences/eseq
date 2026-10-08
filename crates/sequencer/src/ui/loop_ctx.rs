@@ -10,17 +10,19 @@ pub(crate) struct CpuOverloadIndicator {
 }
 
 impl CpuOverloadIndicator {
-    pub(crate) fn update(&mut self, misses: u64, now: Instant) -> Option<bool> {
+    /// Note the audio thread's deadline-miss count: a new miss shows the
+    /// warning for two seconds (`engine.overloaded` reads [`Self::displayed`]).
+    pub(crate) fn update(&mut self, misses: u64, now: Instant) {
         if misses != self.seen_misses {
             self.seen_misses = misses;
             self.hold_until = Some(now + Duration::from_secs(2));
         }
-        let active = self.hold_until.is_some_and(|deadline| now < deadline);
-        if active == self.displayed {
-            return None;
-        }
-        self.displayed = active;
-        Some(active)
+        self.displayed = self.hold_until.is_some_and(|deadline| now < deadline);
+    }
+
+    /// Whether the warning shows (as of the last [`Self::update`]).
+    pub(crate) fn displayed(&self) -> bool {
+        self.displayed
     }
 }
 
@@ -69,14 +71,33 @@ pub(crate) struct EditSessionState {
     >,
 }
 
-/// Demand at the previous display poll. Newly shown panels sample immediately,
-/// even when the ordinary meter cadence is not due yet.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct MeterVisibility {
+/// The meter caches a kind field observed at a display poll
+/// (`HostKinds::wants_*`). A newly observed one samples immediately, even
+/// when the ordinary meter cadence is not due yet.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct MeterDemand {
+    /// `master.peak-l` / `-r`.
     pub(crate) master: bool,
+    /// A track's `peak`.
     pub(crate) tracks: bool,
-    pub(crate) fx: bool,
-    pub(crate) mixer: bool,
+    /// A bus's `peak`.
+    pub(crate) buses: bool,
+    /// A modulator track instrument's `modulator-phase` / `-level`.
+    pub(crate) modulators: bool,
+    /// A track's or bus's mod port level.
+    pub(crate) mod_levels: bool,
+}
+
+impl MeterDemand {
+    pub(crate) fn of(host_kinds: &super::host_kinds::HostKinds) -> Self {
+        Self {
+            master: host_kinds.wants_master_peaks(),
+            tracks: host_kinds.wants_peaks(),
+            buses: host_kinds.wants_bus_peaks(),
+            modulators: host_kinds.wants_modulator_meters(),
+            mod_levels: host_kinds.wants_mod_levels(),
+        }
+    }
 }
 
 /// Meter/CPU/modulator polling caches: values read from the audio graph at a
@@ -85,7 +106,6 @@ pub(crate) struct MeterCache {
     pub(crate) cached_peak_l_level: f64,
     pub(crate) cached_peak_r_level: f64,
     pub(crate) cached_track_peak_levels: Vec<f64>,
-    pub(crate) cached_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) cached_bus_peak_levels: Vec<f64>,
     pub(crate) cached_modulator_phases: Vec<f64>,
     pub(crate) cached_modulator_levels: Vec<f64>,
@@ -96,8 +116,8 @@ pub(crate) struct MeterCache {
     /// meter rate off the modulator nodes (eseq-dtx.13, eseq-hpc, eseq-6mva).
     pub(crate) cached_mod_display_values: ModDisplayValues,
     /// Modulator nodes this poller currently holds on the audiograph
-    /// watchlist. Only modulated, visible effects and instruments appear
-    /// here.
+    /// watchlist. Only modulated effects and instruments appear here, and
+    /// only while the sample is observed (`HostKinds::wants_mod_display`).
     pub(crate) watched_display_modulators: HashSet<i32>,
     /// `fx_epoch` the effective values were last sampled at. A change forces
     /// an off-cadence poll so a newly built panel is seeded with its base
@@ -110,124 +130,60 @@ pub(crate) struct MeterCache {
     pub(crate) cached_cpu_load_bits: u32,
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
-    pub(crate) last_neural_visualization_poll_at: Instant,
-    pub(crate) visualization_liveness: VisualizationLiveness,
     pub(crate) last_voice_count_log_at: Instant,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ParamSyncRevision {
-    pub(crate) track: usize,
-    pub(crate) scene: usize,
-    pub(crate) pattern_epoch: u64,
-    pub(crate) song_row_mirror_epoch: u64,
-    pub(crate) ui_epoch: usize,
-    pub(crate) fx_epoch: usize,
-    pub(crate) sound_binding_epoch: usize,
-    pub(crate) display_step: Option<usize>,
-    pub(crate) selected_steps: Vec<usize>,
-    pub(crate) selected_neural_neurons:
-        Vec<sequencer::lisp_host::SelectedNeuralNeuron>,
 }
 
 /// Previous-frame values the reactive tick diffs against to decide which
 /// reactives to republish.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
-    pub(crate) prev_meter_visibility: MeterVisibility,
+    pub(crate) prev_meter_demand: MeterDemand,
     pub(crate) prev_editor_macro_action: (String, String),
     /// Hash of the macro-action query's inputs (edit-session path/source/
     /// validity plus the patcher's open macro view); the origin lookup only
     /// reruns when this changes.
     pub(crate) prev_editor_macro_action_fingerprint: u64,
     /// Hash of the active edit-session source; the macro sidebar values
-    /// (`editor-patch-macros` / `editor-library-macros`) republish on change.
+    /// (`editor.patch-macros` / `editor.library-macros`) republish on change.
     pub(crate) prev_editor_macro_sidebar_fingerprint: u64,
-    /// Macro view open in the patcher ("" = root), mirrored to
-    /// `SEQ.editor-open-macro` for the sidebar's selected row.
+    /// Macro view open in the patcher ("" = root), presented as
+    /// `editor.open-macro` for the sidebar's selected row.
     pub(crate) prev_editor_open_macro: String,
-    /// The selected file-backed tensor's `@file` reference, mirrored to
-    /// `SEQ.editor-selected-asset` for the sidebar's asset inspector.
+    /// The selected file-backed tensor's `@file` reference, presented as
+    /// `editor.selected-asset` for the sidebar's asset inspector.
     pub(crate) prev_editor_selected_asset: Option<String>,
     pub(crate) prev_playing: bool,
     pub(crate) prev_bpm: u32,
     pub(crate) prev_playhead: u32,
-    pub(crate) prev_transport_playhead: u32,
     pub(crate) prev_pattern_epoch: u64,
     /// Diffed against `App::song_row_mirror_epoch` so mirrored song-row
     /// transitions (which never bump the real pattern epoch) still trigger
     /// the full pattern-switch resync.
     pub(crate) prev_song_row_mirror_epoch: u64,
-    /// Last `published_sequencers_version` mirrored into `SEQ.graph-sequencers`.
-    pub(crate) prev_published_sequencers_version: u64,
-    /// (scheduler snapshot version, published sequencers version, pattern)
-    /// at the last sweep of tracked graph reads (`queue_graph_read_invalidations`).
-    pub(crate) prev_graph_read_key: (u64, u64, usize),
     /// (instance revision, kind registry version) at the last instance sync.
     pub(crate) prev_instance_key: (u64, u64, u64, u64),
-    /// Fingerprint of the last `SEQ.instances` value (the Packages tab and
-    /// the rack menu read it; owner names follow rack renames).
-    pub(crate) prev_instances_fingerprint: u64,
     pub(crate) prev_current_track: usize,
-    pub(crate) prev_cpu_load_bits: u32,
     pub(crate) cpu_overload: CpuOverloadIndicator,
-    pub(crate) prev_output_latency_bits: u32,
-    pub(crate) prev_peak_l_level: f64,
-    pub(crate) prev_peak_r_level: f64,
     /// Whether the recording-take undo transaction is open. Mirrors
     /// (recording armed && transport playing) via
     /// `App::sync_recording_history_boundary`; force it false whenever
     /// recording is forced off outside that seam.
     pub(crate) recording_history_open: bool,
-    pub(crate) prev_master_recording: bool,
-    pub(crate) prev_roll_mode: bool,
-    pub(crate) prev_roll_rate: u32,
-    pub(crate) prev_sequence_rolling: bool,
-    pub(crate) prev_roll_windows: Vec<(u64, u64)>,
-    pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
-    pub(crate) prev_armed_rack: Option<u64>,
-    pub(crate) prev_track_peak_levels: Vec<f64>,
-    pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
-    pub(crate) prev_bus_peak_levels: Vec<f64>,
-    pub(crate) prev_modulator_phases: Vec<f64>,
-    pub(crate) prev_modulator_levels: Vec<f64>,
-    pub(crate) prev_mod_port_levels: ModPortLevels,
-    pub(crate) prev_mod_display_values: ModDisplayValues,
-    /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
-    /// the instant each rack member last triggered, which is what the light
-    /// decays from.
-    pub(crate) prev_rack_pad_triggers: Vec<bool>,
+    /// Drum-rack pad lights (eseq-4b5.16): the instant each rack member last
+    /// triggered, which is what the light decays from.
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
+    /// The flags of the last tick, published or not (`pad.triggered` reads
+    /// them through `KindsMeters`).
+    pub(crate) rack_pad_triggers: Vec<bool>,
     pub(crate) prev_track_playheads: Vec<u32>,
-    /// Last published length-lane marker step per track (`length!`).
-    pub(crate) prev_track_process_lengths: Vec<Option<usize>>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
-    pub(crate) prev_current_track_playhead_visible: bool,
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
-    /// Scope version last published to `track-process-scopes`.
-    pub(crate) prev_process_scope_values_version: u64,
-    /// Scope version last published to `process-scope-cells`.
-    pub(crate) prev_process_scope_cells_version: u64,
-    pub(crate) prev_process_effective_params_version: u64,
-    /// Run-error version last published to `process-run-errors`; `None`
-    /// until the first publish, so a reader that opens after the errors
-    /// settled still gets them.
-    pub(crate) prev_process_run_errors_version: Option<u64>,
-    /// Last published `(display value, clamped)` per `(track, param)` of the
-    /// process effective-value feed, so the tick only writes deltas.
-    pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,
-    /// Same for the bus-send feed, keyed `(track, bus id)`.
-    pub(crate) prev_process_effective_sends: HashMap<(usize, u64), f32>,
-    pub(crate) prev_track_tint:
-        Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_ui_epoch: usize,
-    pub(crate) prev_fx_epoch: usize,
-    pub(crate) prev_fx_value_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
@@ -236,36 +192,21 @@ pub(crate) struct FrameDiffState {
     /// Tracks a multi-track (rack-wide) step selection last highlighted, so
     /// dropping that delete target un-highlights the non-current ones.
     pub(crate) prev_multi_track_selection: Vec<usize>,
-    pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
-    pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
     /// overlay, clip kind): `(selected (track, clip id), clip source kind,
     /// committed-song revision)`. They are keyed off the clip SELECTION,
     /// which can move while the resolved write focus stays put, so the focus
     /// spec alone is not enough to decide whether they need republishing.
-    pub(crate) prev_focus_clip_surface: (Option<(usize, u64)>, Option<&'static str>, u64),
-    pub(crate) prev_instrument_active_notes: Vec<u8>,
-    pub(crate) prev_track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>>,
     pub(crate) prev_active_buffer_name: String,
-    pub(crate) prev_selected_neural_neurons:
-        BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     pub(crate) prev_agent_generation_watermark: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_sampler_analysis_generation: u64,
-    pub(crate) prev_auto_follow: bool,
-    /// Browser sample preview: last published playing flag; the playhead
-    /// republishes every tick while true.
-    pub(crate) prev_browser_preview_playing: bool,
-    pub(crate) prev_queued_transport_scene: Option<usize>,
-    /// Per-track pattern id (-1 = none) with a pending quantized clip
-    /// launch, for the mixer grid's queued-cell blink.
-    pub(crate) prev_queued_track_clips: Vec<i64>,
-    /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
-    pub(crate) song: SongFrameState,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).
     pub(crate) sound_palette: SoundPaletteFrameState,
     pub(crate) watched_sampler_voice_track: Option<usize>,
     pub(crate) watched_sampler_voice_ids: Vec<i32>,
+    /// The host kinds of `eseq.kinds` (kind-bindings spec §13 stage 4).
+    pub(crate) host_kinds: super::host_kinds::HostKinds,
 }
 
 /// In-flight pointer-gesture state that host commands need to observe or
@@ -279,6 +220,27 @@ pub(crate) struct GestureState {
     /// App-side scroll momentum (Wayland has none); host commands toggle it,
     /// the event loop drives it.
     pub(crate) scroll_inertia: crate::scroll_inertia::ScrollInertia,
+    /// A mouse button is held (mirrors the event loop's pointer state), so
+    /// a script edit may belong to a drag whose release ends its gesture.
+    pub(crate) pointer_down: bool,
+    /// The history gesture a script param edit (`param.base`'s `:set`)
+    /// opened while the pointer was down; later script edits join it,
+    /// while any other active gesture is a user's and is left alone.
+    pub(crate) script_param_gesture: Option<sequencer::app::history::GestureId>,
+    /// The arrangement targets a script drag has set in that gesture
+    /// (`App::arr_script_drag`): every frame rebuilds from the gesture's
+    /// start with all of them.
+    pub(crate) script_arrangement_drag: Option<(
+        sequencer::app::history::GestureId,
+        sequencer::app::arr_edit::ArrangementDragTargets,
+    )>,
+    /// The notes a script drag moves, tied to the drag's gesture id
+    /// (`App::active_note_drag`): every frame rebuilds from where the drag
+    /// started with all of them.
+    pub(crate) script_note_drag: Option<(
+        sequencer::app::history::GestureId,
+        super::host_commands::notes::NoteDragTargets,
+    )>,
 }
 
 /// Shared handles threaded between the event loop, lisp natives, and the
@@ -302,14 +264,7 @@ pub(crate) struct SharedHandles {
     /// this for edits that change panel STRUCTURE (Boolean/Enum params drive
     /// conditional layout, add/remove effect, ...).
     pub(crate) fx_epoch: Arc<AtomicUsize>,
-    /// Value-only fx invalidation: the tick's fx branch republishes via
-    /// `set_reactive_value_patch` (in-place Number/Bool cell writes, NO dirty
-    /// marks — field bindings carry the visible updates). Only scene/clip
-    /// launch paths may bump this; anything that can change panel structure
-    /// must use `fx_epoch` instead.
-    pub(crate) fx_value_epoch: Arc<AtomicUsize>,
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
-    pub(crate) expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     pub(crate) active_delete_target_version: Arc<AtomicUsize>,
     pub(crate) auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
@@ -360,26 +315,36 @@ pub(crate) struct LoopCtx<'a> {
 mod cpu_overload_tests {
     use super::*;
 
+    /// Whether the warning shows after noting `misses` at `at`.
+    fn shown(indicator: &mut CpuOverloadIndicator, misses: u64, at: Instant) -> bool {
+        indicator.update(misses, at);
+        indicator.displayed()
+    }
+
     #[test]
     fn isolated_miss_is_held_and_later_misses_extend_the_hold() {
         let mut indicator = CpuOverloadIndicator::default();
         let now = Instant::now();
-        assert_eq!(indicator.update(0, now), None);
-        assert_eq!(indicator.update(1, now), Some(true));
-        assert_eq!(indicator.update(1, now + Duration::from_millis(1999)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_millis(1999)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_secs(2)), None);
-        assert_eq!(indicator.update(2, now + Duration::from_millis(3999)), Some(false));
-        assert_eq!(indicator.update(2, now + Duration::from_secs(5)), None);
+        assert!(!shown(&mut indicator, 0, now));
+        assert!(shown(&mut indicator, 1, now));
+        assert!(shown(&mut indicator, 1, now + Duration::from_millis(1999)));
+        assert!(shown(&mut indicator, 2, now + Duration::from_millis(1999)));
+        assert!(shown(&mut indicator, 2, now + Duration::from_secs(2)));
+        assert!(!shown(&mut indicator, 2, now + Duration::from_millis(3999)));
+        assert!(!shown(&mut indicator, 2, now + Duration::from_secs(5)));
     }
 
     #[test]
     fn delayed_poll_observes_accumulated_misses_and_counter_wrap() {
         let mut indicator = CpuOverloadIndicator::default();
         let now = Instant::now();
-        assert_eq!(indicator.update(u64::MAX, now), Some(true));
-        assert_eq!(indicator.update(u64::MAX, now + Duration::from_secs(2)), Some(false));
-        assert_eq!(indicator.update(0, now + Duration::from_secs(3)), Some(true));
-        assert_eq!(indicator.update(0, now + Duration::from_secs(5)), Some(false));
+        assert!(shown(&mut indicator, u64::MAX, now));
+        assert!(!shown(
+            &mut indicator,
+            u64::MAX,
+            now + Duration::from_secs(2)
+        ));
+        assert!(shown(&mut indicator, 0, now + Duration::from_secs(3)));
+        assert!(!shown(&mut indicator, 0, now + Duration::from_secs(5)));
     }
 }

@@ -1,6 +1,8 @@
 ;; Shared shader widgets and selected-effect actions for the FX strip.
 (module eseq.effects.panel-widgets)
 
+(import eseq.kinds :refer (buses))
+
 (import eseq.effects.track-panels :as tp)
 
 (import eseq.effects.process-panel :as pp)
@@ -41,10 +43,10 @@
             :rack-slot rack-slot
             :effect-slot effect-slot))))
 
+;; A bus is selected (the *fx* buffer shows its effects) and still exists.
 (def has-selected-bus? ()
   (and (>= eseq.seq-core-state/selected-bus 0)
-       (< eseq.seq-core-state/selected-bus (len SEQ.bus-names))
-       (< eseq.seq-core-state/selected-bus (len SEQ.bus-effects))))
+       (< eseq.seq-core-state/selected-bus (len (buses)))))
 
 (def delete-selected-effect ()
   (if (pp/delete-selected)

@@ -9,6 +9,7 @@ use crate::graph::{
     ProjectGraphSeedFrom,
 };
 use crate::lisp_host;
+use crate::lisp_host::graph_test_api as graph_api;
 use crate::scheduled_event::{ScheduledEventKind, ScheduledEventQueue};
 use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam, MAX_TRACKS};
 use eseqlisp::vm::Value;
@@ -331,21 +332,16 @@ fn expr_set_source_compiles_a_hidden_class_whose_wire_drives_the_payload() {
         assert_eq!(chain.slots[0].instance_id.0, expr);
         assert_eq!(chain.slots[0].class_name, class);
         assert_eq!(chain.slots[0].expr_source.as_deref(), Some("(* x rate)"));
-        let classes = eval(&mut ui, "(graph-node-process-classes)");
-        let Value::List(classes) = classes else { panic!("classes") };
-        let listed: Vec<String> = classes
-            .iter()
-            .map(|entry| match field(&entry.borrow(), "class") {
-                Value::String(name) => name,
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert!(listed.iter().any(|name| name == "expr"), "plain expr is offered");
-        assert!(!listed.iter().any(|name| crate::process::is_expr_process_class(name)));
-        let read = eval(&mut ui, &format!("(first (graph-node-process-chain \"{GRAPH}\" 1))"));
-        assert_eq!(field(&read, "label"), Value::String("expr".to_string()));
-        assert_eq!(field(&read, "expr-source"), Value::String("(* x rate)".to_string()));
-        assert_eq!(field(&read, "error"), Value::Nil);
+        // The library the add menu lists (`process-library.classes`) holds
+        // the plain `expr` card; the compiled body is flagged for the menu
+        // to leave out.
+        let defs = state.published_process_authoring().defs;
+        assert!(defs.iter().any(|def| def.name == "expr"), "plain expr is offered");
+        assert!(crate::process::is_expr_process_class(&class));
+        let view = &node1_slot_views(&state)[0];
+        assert_eq!(view.label, "expr");
+        assert!(view.expr);
+        assert_eq!(view.error, None);
         assert_eq!(
             eval(&mut ui, &format!("(graph-node-process-expr-source \"{GRAPH}\" 1 {expr})")),
             Value::String("(* x rate)".to_string())
@@ -354,10 +350,7 @@ fn expr_set_source_compiles_a_hidden_class_whose_wire_drives_the_payload() {
         // x = 2, rate = 3, wire -> transpose.amount: +6 on the payload.
         eval(&mut ui, &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {expr} :x 2)"));
         eval(&mut ui, &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {expr} :rate 3)"));
-        eval(
-            &mut ui,
-            &format!("(graph-node-process-wire \"{GRAPH}\" 1 {expr} \"wire\" {transpose} \"amount\")"),
-        );
+        graph_api::wire(&state, GRAPH, 1, expr, "wire", transpose, "amount");
         assert_node1_transposes(&state, 8.0, "2 + (* 2 3) through the wire");
 
         // Identical source elsewhere shares the class.
@@ -379,11 +372,8 @@ fn expr_recommit_reconciles_inlets_by_name_and_keeps_surviving_cables() {
         assert_eq!(field(&set_source(&mut ui, source, "3"), "ok"), Value::Bool(true));
         assert_eq!(field(&set_source(&mut ui, shaper, "(* x k)"), "ok"), Value::Bool(true));
         eval(&mut ui, &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {shaper} :k 2)"));
-        eval(
-            &mut ui,
-            &format!("(graph-node-process-wire \"{GRAPH}\" 1 {source} \"wire\" {shaper} \"x\")"),
-        );
-        eval(&mut ui, &format!("(graph-node-process-map \"{GRAPH}\" 1 {shaper} \"out\" :transpose)"));
+        graph_api::wire(&state, GRAPH, 1, source, "wire", shaper, "x");
+        map_out_to_transpose(&state, 1, shaper);
         assert_node1_transposes(&state, 8.0, "2 + 3 * 2 mapped onto transpose");
 
         // `x` survives: its cable follows the slot onto the new class; `k`
@@ -423,7 +413,7 @@ fn expr_bad_source_keeps_the_previous_class_running() {
         let mut ui = ui_runtime(&state);
         let expr = add_slot(&mut ui, "expr");
         set_source(&mut ui, expr, "(+ a 5)");
-        eval(&mut ui, &format!("(graph-node-process-map \"{GRAPH}\" 1 {expr} \"out\" :transpose)"));
+        map_out_to_transpose(&state, 1, expr);
         let before = node1_chain(&state);
         assert_node1_transposes(&state, 7.0, "2 + 5");
 
@@ -455,7 +445,7 @@ fn expr_runtime_error_and_step_budget_bypass_only_that_card() {
         let expr = add_slot(&mut ui, "expr");
         let transpose = add_slot(&mut ui, "neural-transpose");
         eval(&mut ui, &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {transpose} :amount 7)"));
-        eval(&mut ui, &format!("(graph-node-process-map \"{GRAPH}\" 1 {expr} \"out\" :transpose)"));
+        map_out_to_transpose(&state, 1, expr);
 
         for (body, why) in [
             ("(+ a (list 1))", "type error"),
@@ -470,8 +460,7 @@ fn expr_runtime_error_and_step_budget_bypass_only_that_card() {
             if body.contains("lambda") {
                 assert!(error.unwrap().contains("StepBudgetExceeded"), "{why}");
             }
-            let read = eval(&mut ui, &format!("(first (graph-node-process-chain \"{GRAPH}\" 1))"));
-            assert!(matches!(field(&read, "error"), Value::String(_)), "{why}: chain read error dot");
+            assert!(node1_slot_views(&state)[0].error.is_some(), "{why}: the card's error dot");
         }
 
         // A clean body clears the error on its next run.
@@ -490,11 +479,8 @@ fn expr_sources_round_trip_and_recompile_on_load() {
         let shaper = add_slot(&mut ui, "expr");
         set_source(&mut ui, source, "4");
         set_source(&mut ui, shaper, "(- x 1)");
-        eval(
-            &mut ui,
-            &format!("(graph-node-process-wire \"{GRAPH}\" 1 {source} \"wire\" {shaper} \"x\")"),
-        );
-        eval(&mut ui, &format!("(graph-node-process-map \"{GRAPH}\" 1 {shaper} \"out\" :transpose)"));
+        graph_api::wire(&state, GRAPH, 1, source, "wire", shaper, "x");
+        map_out_to_transpose(&state, 1, shaper);
         assert_node1_transposes(&state, 5.0, "2 + (4 - 1)");
 
         // Save: the override serializes the body, not just the hash.
@@ -553,8 +539,45 @@ fn expr_card_on(ui: &mut Runtime, node: usize, source: &str) -> u64 {
     id
 }
 
-fn map_out_to_transpose(ui: &mut Runtime, node: usize, id: u64) {
-    node_eval(ui, node, "graph-node-process-map", &format!("{id} \"out\" :transpose"));
+/// Map slot `id`'s `out` onto the fire's transpose (directly on the chain:
+/// the `graph-node-process-map` native went, eseq-0l17.81).
+fn map_out_to_transpose(state: &SequencerState, node: usize, id: u64) {
+    graph_api::map(state, GRAPH, node, id, "out", Some("transpose"));
+}
+
+/// One slot of node 1's patch as the `process` kind reads it (`name`,
+/// `known`, `expr`, `promoted-expr`, `as-expr-reason`, `error`), through the
+/// helpers the host kinds derive those fields with (what the removed
+/// `graph-node-process-chain` read reported).
+#[derive(Debug)]
+struct SlotView {
+    label: String,
+    known: bool,
+    expr: bool,
+    promoted_expr: bool,
+    as_expr_reason: Option<String>,
+    error: Option<String>,
+}
+
+fn node1_slot_views(state: &SequencerState) -> Vec<SlotView> {
+    let defs = state.published_process_authoring().defs;
+    node1_chain(state)
+        .slots
+        .iter()
+        .map(|slot| {
+            let def = defs.iter().find(|def| def.name == slot.class_name);
+            let (promoted_expr, as_expr_reason) = lisp_host::process_slot_as_expr(slot, def);
+            SlotView {
+                label: lisp_host::graph_node_process_label(&slot.class_name),
+                known: def.is_some(),
+                expr: lisp_host::is_expr_slot(slot),
+                promoted_expr,
+                as_expr_reason,
+                error: (slot.expr_compile_error(def.is_some()))
+                    .or_else(|| state.process_run_error(slot.instance_id.0)),
+            }
+        })
+        .collect()
 }
 
 fn node1_hits(state: &Arc<SequencerState>) -> Vec<Hit> {
@@ -579,7 +602,7 @@ fn expr_context_payload_vars_read_the_payload_as_earlier_slots_left_it() {
         let transpose = add_slot_on(&mut ui, 1, "neural-transpose");
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{transpose} :amount 5"));
         let note = expr_card_on(&mut ui, 1, "$note");
-        map_out_to_transpose(&mut ui, 1, note);
+        map_out_to_transpose(&state, 1, note);
         assert_eq!(transposes(&node1_hits(&state)), vec![14.0], "$note sees the earlier +5");
 
         // $vel / $dur read the payload; vel!/dur! write it, and a later
@@ -591,7 +614,7 @@ fn expr_context_payload_vars_read_the_payload_as_earlier_slots_left_it() {
             "$vel {} / $note 14: {hit:?}",
             base.velocity
         );
-        node_eval(&mut ui, 1, "graph-node-process-remove", &format!("{reader}"));
+        graph_api::remove(&state, GRAPH, 1, reader);
         let writer = expr_card_on(&mut ui, 1, "(do (vel! 0.25) (dur! (* $dur 2)))");
         let reader = expr_card_on(&mut ui, 1, "(xpose! (* $vel 8))");
         let hit = node1_hits(&state)[0].resolved;
@@ -599,7 +622,7 @@ fn expr_context_payload_vars_read_the_payload_as_earlier_slots_left_it() {
         assert!((hit.duration - base.duration * 2.0).abs() < 1e-6, "dur! from $dur: {hit:?}");
         assert!((hit.transpose - 16.0).abs() < 1e-6, "$vel after vel!: 14 + 0.25 * 8: {hit:?}");
         for id in [writer, reader, note, transpose] {
-            node_eval(&mut ui, 1, "graph-node-process-remove", &format!("{id}"));
+            graph_api::remove(&state, GRAPH, 1, id);
         }
 
         // $delay: what earlier slots added to the propagation delay.
@@ -618,7 +641,7 @@ fn expr_context_transport_vars_track_the_fire_beat() {
         // Four sixteenths per beat: $beat * 4 is the fire's step, and in
         // the first bar so is $phase * 16.
         let card = expr_card_on(&mut ui, 1, "(* $beat 4)");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         let hits = node1_hits(&state);
         assert_eq!(hits.len(), 4, "{hits:?}");
         for hit in &hits {
@@ -636,7 +659,7 @@ fn expr_n_and_prev_count_fires_and_clear_on_reset() {
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "$n");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(transposes(&node1_hits(&state)), vec![2.0, 3.0, 4.0, 5.0], "$n is 0-based");
 
         node_eval(&mut ui, 1, "graph-node-process-expr-set", &format!("{card} \"(+ $prev 1)\""));
@@ -673,7 +696,7 @@ fn expr_veto_mutes_from_a_condition_and_the_write_sends_nothing() {
         let card = expr_card_on(&mut ui, 1, "(if (> $n 1) (veto!))");
         assert_eq!(node1_hits(&state).len(), 2, "fires 0 and 1 play");
         // The body's value is the write's nil: nothing on the wire.
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(transposes(&node1_hits(&state)), vec![2.0, 2.0], "writes send nothing");
     });
 }
@@ -720,7 +743,7 @@ fn expr_xpose_write_and_value_combine_on_one_card() {
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(do (xpose! 3) 4)");
         assert_eq!(transposes(&node1_hits(&state)), vec![5.0], "xpose! adds; the value is unmapped");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(transposes(&node1_hits(&state)), vec![9.0], "2 + 3 + mapped 4");
     });
 }
@@ -733,7 +756,7 @@ fn expr_inlets_may_shadow_scheduler_functions() {
         // `vel` is a scheduler native (ratchet event read): as an argument it
         // is an inlet for this body, and the body runs.
         let card = expr_card_on(&mut ui, 1, "(* vel 2)");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{card} :vel 3"));
         assert_eq!(transposes(&node1_hits(&state)), vec![8.0], "2 + 3 * 2");
         assert_eq!(state.process_run_error(card), None);
@@ -838,7 +861,7 @@ fn expr_spec_lfsr_steps_across_fires_and_restarts_after_a_reset() {
         // A graph reset after fire 1: fire 2 starts over from 0xACE1.
         let resetter = expr_card_on(&mut ui, 1, "(if (= $n 1) (reset!))");
         assert_eq!(sent(&state), vec![expected[0], expected[1], expected[0], expected[1]]);
-        node_eval(&mut ui, 1, "graph-node-process-remove", &format!("{resetter}"));
+        graph_api::remove(&state, GRAPH, 1, resetter);
 
         // The register itself on the wire (16 bits of state, 4 sent).
         let wire = expr_card_on(
@@ -846,8 +869,8 @@ fn expr_spec_lfsr_steps_across_fires_and_restarts_after_a_reset() {
             1,
             "(state s 0xACE1) (set! s (bit-xor (shr s 1) (if (= (bit-and s 1) 1) 0xB400 0))) (bit-and s 15)",
         );
-        node_eval(&mut ui, 1, "graph-node-process-remove", &format!("{lfsr}"));
-        map_out_to_transpose(&mut ui, 1, wire);
+        graph_api::remove(&state, GRAPH, 1, lfsr);
+        map_out_to_transpose(&state, 1, wire);
         let expected: Vec<f32> = lfsr_sequence(4).iter().map(|s| (s & 15) as f32).collect();
         assert_eq!(sent(&state), expected);
     });
@@ -859,7 +882,7 @@ fn expr_state_set_reaches_the_cell_inside_let_and_lambda() {
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(state c 0) (let ((k 1)) (set! c (+ c k))) c");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(sent(&state), vec![1.0, 2.0, 3.0, 4.0], "set! inside let");
         recommit(&mut ui, card, "(state c 0) ((lambda (k) (if (> k 0) (set! c (+ c k)))) 2) c");
         assert_eq!(sent(&state), vec![2.0, 4.0, 6.0, 8.0], "set! inside a lambda and an if");
@@ -885,8 +908,8 @@ fn expr_cards_with_the_same_source_keep_independent_state() {
         assert_eq!(chain.slots[0].class_name, chain.slots[1].class_name, "one hashed class");
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{a} :k 1"));
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{b} :k 10"));
-        map_out_to_transpose(&mut ui, 1, a);
-        map_out_to_transpose(&mut ui, 1, b);
+        map_out_to_transpose(&state, 1, a);
+        map_out_to_transpose(&state, 1, b);
         // a: 1 2 3 4, b: 10 20 30 40 (a shared cell would give 1+11, …).
         assert_eq!(sent(&state), vec![11.0, 22.0, 33.0, 44.0]);
     });
@@ -898,7 +921,7 @@ fn expr_stateful_helpers_run_per_call_site_and_reset() {
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "0");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         // x per fire: 5 1 4 2.
         let x = "(nth '(5 1 4 2) $n)";
         for (body, expected) in [
@@ -937,7 +960,7 @@ fn expr_locals_may_shadow_globals_they_do_not_call() {
         let state = expr_graph_state();
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(let ((vel 2)) (* vel 3))");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(sent(&state), vec![6.0], "a let local named like a scheduler native");
         recommit(&mut ui, card, "((lambda (count) (+ count 1)) 2)");
         assert_eq!(sent(&state), vec![3.0], "a lambda parameter named like a global");
@@ -963,9 +986,9 @@ fn expr_state_is_per_slot_across_wires_and_identical_sources() {
         let a = expr_card_on(&mut ui, 1, counter);
         let b = expr_card_on(&mut ui, 1, "(state c 10) (set! c (+ c x)) c");
         let twin = expr_card_on(&mut ui, 1, counter);
-        node_eval(&mut ui, 1, "graph-node-process-wire", &format!("{a} \"wire\" {b} \"x\""));
-        map_out_to_transpose(&mut ui, 1, b);
-        map_out_to_transpose(&mut ui, 1, twin);
+        graph_api::wire(&state, GRAPH, 1, a, "wire", b, "x");
+        map_out_to_transpose(&state, 1, b);
+        map_out_to_transpose(&state, 1, twin);
         // Per fire: a 1 2 3 4 into b (11 13 16 20), twin 1 2 3 4. A shared
         // or leaked cell would break the sums. (Kept under the transpose
         // clamp.)
@@ -982,7 +1005,7 @@ fn expr_state_edge_cases() {
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(state c) (set! c (+ c 1)) c");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         assert_eq!(sent(&state), vec![1.0, 2.0, 3.0, 4.0], "(state c) starts at 0");
         recommit(&mut ui, card, "(state c -0x10) (set! c (+ c 1)) c");
         assert_eq!(sent(&state), vec![-15.0, -14.0, -13.0, -12.0], "signed hex init");
@@ -1012,7 +1035,7 @@ fn expr_state_restarts_on_stop_play_and_carries_on_without_it() {
         let state = expr_graph_state_seeded(&[0, 2, 4, 6, 8, 10, 12, 14]);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(state c 0) (set! c (+ c 1)) (+ c (integ 2))");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         let sends = |passes: Vec<Vec<Hit>>| -> Vec<Vec<f32>> {
             passes
                 .into_iter()
@@ -1048,7 +1071,7 @@ fn expr_shaping_helpers_threading_and_constants_run_on_the_scheduler_vm() {
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "0");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         for (body, expected) in [
             ("(euclid 3 8 $n)", vec![1.0, 0.0, 0.0, 1.0]),
             ("(-> $n (* 0.25) tri (scale 0 1 0 8))", vec![0.0, 4.0, 8.0, 4.0]),
@@ -1082,7 +1105,7 @@ fn expr_choose_picks_among_its_arguments_from_the_per_fire_rng() {
         let state = expr_graph_state_seeded(&steps);
         let mut ui = ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(choose 1 2 3 4 5 6 7 8)");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         let picks = sent(&state);
         assert!(picks.len() >= 6, "{picks:?}");
         assert!(picks.iter().all(|pick| (1.0..=8.0).contains(pick) && pick.fract() == 0.0), "{picks:?}");
@@ -1242,21 +1265,13 @@ fn promote_lfsr_card_writes_the_module_and_runs_identically() {
         assert_eq!(sent(&state), before, "the promoted class runs like the card");
         assert_eq!(state.process_run_error(lfsr), None);
 
-        // The chain read and the add menu see a My processes card.
-        let chain = node_eval(&mut ui, 1, "graph-node-process-chain", "");
-        let Value::List(slots) = chain else { panic!("chain list") };
-        let entry = slots[0].borrow().clone();
-        assert_eq!(string_field(&entry, "label"), "my-lfsr");
-        assert_eq!(field(&entry, "expr"), Value::Bool(false));
-        assert_eq!(field(&entry, "promoted-expr"), Value::Bool(true));
-        assert_eq!(field(&entry, "as-expr-reason"), Value::Nil);
-        let Value::List(classes) = eval(&mut ui, "(graph-node-process-classes)") else { panic!("classes") };
-        let row = classes
-            .iter()
-            .map(|row| row.borrow().clone())
-            .find(|row| string_field(row, "class") == class)
-            .expect("the add menu offers the promoted class");
-        assert_eq!(string_field(&row, "label"), "my-lfsr");
+        // The slot and the add menu see a My processes card.
+        let view = &node1_slot_views(&state)[0];
+        assert_eq!(view.label, "my-lfsr");
+        assert!(!view.expr);
+        assert!(view.promoted_expr);
+        assert_eq!(view.as_expr_reason, None);
+        assert_eq!(lisp_host::graph_node_process_label(&def.name), "my-lfsr", "its add menu label");
         assert!(
             def.source_path.as_deref().is_some_and(lisp_host::is_my_processes_source),
             "its source file lies in the My processes package: {:?}",
@@ -1298,8 +1313,8 @@ fn promote_keeps_cables_and_values_and_edit_as_expr_round_trips() {
         let source = expr_card_on(&mut ui, 1, "3");
         let bounce = expr_card_on(&mut ui, 1, "(+ (* k (pow decay $n)) (* 0 (prev k)))");
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{bounce} :decay 0.5"));
-        node_eval(&mut ui, 1, "graph-node-process-wire", &format!("{source} \"wire\" {bounce} \"k\""));
-        map_out_to_transpose(&mut ui, 1, bounce);
+        graph_api::wire(&state, GRAPH, 1, source, "wire", bounce, "k");
+        map_out_to_transpose(&state, 1, bounce);
         let before = sent(&state);
         assert_eq!(before, vec![3.0, 1.5, 0.75, 0.375]);
 
@@ -1334,9 +1349,9 @@ fn promote_keeps_cables_and_values_and_edit_as_expr_round_trips() {
         let refused = node_eval(&mut ui, 1, "graph-node-process-edit-as-expr", &format!("{transpose}"));
         assert_eq!(field(&refused, "ok"), Value::Bool(false));
         assert!(string_field(&refused, "error").contains("not promoted from an expr card"), "{refused:?}");
-        let Value::List(slots) = node_eval(&mut ui, 1, "graph-node-process-chain", "") else { panic!() };
-        let entry = slots.last().unwrap().borrow().clone();
-        assert!(string_field(&entry, "as-expr-reason").contains("not promoted"), "{entry:?}");
+        let views = node1_slot_views(&state);
+        let entry = views.last().unwrap();
+        assert!(entry.as_expr_reason.as_deref().unwrap_or_default().contains("not promoted"), "{entry:?}");
     });
 }
 
@@ -1347,7 +1362,7 @@ fn promoted_class_loads_on_restart_and_a_missing_package_leaves_the_card_inert()
         let state = expr_graph_state_seeded(FOUR_TRIGS);
         let (mut ui, _authoring) = promote_ui_runtime(&state);
         let card = expr_card_on(&mut ui, 1, "(+ 1 $n)");
-        map_out_to_transpose(&mut ui, 1, card);
+        map_out_to_transpose(&state, 1, card);
         let before = sent(&state);
         assert_eq!(before, vec![1.0, 2.0, 3.0, 4.0]);
         let class = promote(&mut ui, card, "counter");
@@ -1361,14 +1376,14 @@ fn promoted_class_loads_on_restart_and_a_missing_package_leaves_the_card_inert()
         // Without the package, the slot keeps its class and does nothing,
         // like any process whose package is missing.
         std::fs::remove_dir_all(dir.path().join("packages")).unwrap();
-        let (mut ui, _authoring) = promote_ui_runtime(&state);
+        let (_ui, _authoring) = promote_ui_runtime(&state);
         assert!(!state.published_process_authoring().defs.iter().any(|def| def.name == class));
         assert_eq!(slot_of(&state, card).class_name, class);
         assert!(sent(&state).is_empty() || sent(&state).iter().all(|v| *v == 0.0), "inert");
-        let Value::List(slots) = node_eval(&mut ui, 1, "graph-node-process-chain", "") else { panic!() };
-        let entry = slots[0].borrow().clone();
-        assert_eq!(field(&entry, "known"), Value::Bool(false));
-        assert!(string_field(&entry, "as-expr-reason").contains("not loaded"), "{entry:?}");
+        let views = node1_slot_views(&state);
+        let entry = &views[0];
+        assert!(!entry.known);
+        assert!(entry.as_expr_reason.as_deref().unwrap_or_default().contains("not loaded"), "{entry:?}");
     });
 }
 
@@ -1388,12 +1403,12 @@ fn promote_again_updates_my_own_class_for_every_card_using_it() {
         let a = expr_card_on(&mut ui, 1, "(* k (pow decay $n))");
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{a} :k 4"));
         node_eval(&mut ui, 1, "graph-node-process-inlet", &format!("{a} :decay 0.5"));
-        map_out_to_transpose(&mut ui, 1, a);
+        map_out_to_transpose(&state, 1, a);
         let class = promote(&mut ui, a, "bouncy");
         // A second card of the class, its decay cabled from the first.
         let b = add_slot_on(&mut ui, 1, &class);
-        map_out_to_transpose(&mut ui, 1, b);
-        node_eval(&mut ui, 1, "graph-node-process-wire", &format!("{a} \"wire\" {b} \"decay\""));
+        map_out_to_transpose(&state, 1, b);
+        graph_api::wire(&state, GRAPH, 1, a, "wire", b, "decay");
         assert!(sent(&state).iter().all(|v| v.is_finite()));
 
         // As expr remembers where the card came from.
@@ -1451,11 +1466,10 @@ fn promote_again_updates_my_own_class_for_every_card_using_it() {
         assert_eq!(sent(&state), vec![16.0, 16.0, 16.0, 16.0]);
         assert_eq!(state.process_run_error(a), None);
         assert_eq!(state.process_run_error(b), None);
-        // The chain read of the other card lists the new inlets.
-        let Value::List(slots) = node_eval(&mut ui, 1, "graph-node-process-chain", "") else { panic!() };
-        let entry = slots[1].borrow().clone();
-        assert_eq!(field(&entry, "known"), Value::Bool(true));
-        assert_eq!(field(&entry, "promoted-expr"), Value::Bool(true));
+        // The other card is a known, promoted class.
+        let views = node1_slot_views(&state);
+        assert!(views[1].known);
+        assert!(views[1].promoted_expr);
         // Restart: the updated file loads the same way.
         drop(ui);
         let (_ui, _authoring) = promote_ui_runtime(&state);
@@ -1504,10 +1518,7 @@ fn expr_commit_undo_restores_the_previous_class_on_the_scheduler() {
         set_source(editor.runtime_mut(), expr, "(* x rate)");
         eval(editor.runtime_mut(), &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {expr} :x 2)"));
         eval(editor.runtime_mut(), &format!("(graph-node-process-inlet \"{GRAPH}\" 1 {expr} :rate 3)"));
-        eval(
-            editor.runtime_mut(),
-            &format!("(graph-node-process-wire \"{GRAPH}\" 1 {expr} \"wire\" {transpose} \"amount\")"),
-        );
+        graph_api::wire(&state, GRAPH, 1, expr, "wire", transpose, "amount");
         assert_node1_transposes(&state, 8.0, "2 + (* 2 3)");
         let old_class = node1_chain(&state).slots[0].class_name.clone();
         editor.drain_host_commands();
@@ -1577,12 +1588,16 @@ fn node_process_history_json_round_trips_a_rich_chain() {
         let expr = expr_card_on(ui, 1, "(* x rate)");
         let transpose = add_slot_on(ui, 1, "neural-transpose");
         let spare = add_slot_on(ui, 1, "neural-transpose");
+        // Cables, a mapping and a bypass straight on the chain (their natives
+        // went, eseq-0l17.81), then two recorded inlet edits: the last
+        // payload's after is the whole chain.
+        graph_api::wire(&state, GRAPH, 1, expr, "wire", transpose, "amount");
+        graph_api::fanout_add(&state, GRAPH, 1, expr, "wire", spare, "amount");
+        map_out_to_transpose(&state, 1, spare);
+        graph_api::enable(&state, GRAPH, 1, transpose, false);
+        let ui = editor.runtime_mut();
         node_eval(ui, 1, "graph-node-process-inlet", &format!("{expr} :x 0.1"));
         node_eval(ui, 1, "graph-node-process-inlet", &format!("{expr} :rate 0.3333333333333333"));
-        node_eval(ui, 1, "graph-node-process-wire", &format!("{expr} \"wire\" {transpose} \"amount\""));
-        node_eval(ui, 1, "graph-node-process-fanout-add", &format!("{expr} \"wire\" {spare} \"amount\""));
-        map_out_to_transpose(ui, 1, spare);
-        node_eval(ui, 1, "graph-node-process-enable", &format!("{transpose} false"));
         let (_, after) = last_history_chains(&mut editor);
         let live = node1_chain(&state);
         assert_eq!(after.as_ref(), Some(&live), "the payload's after is the live chain");
@@ -1590,7 +1605,7 @@ fn node_process_history_json_round_trips_a_rich_chain() {
         assert!(live.slots.iter().any(|slot| !slot.fanout.is_empty()));
         assert!(live.slots.iter().any(|slot| slot.expr_source.is_some()));
 
-        // Fields the natives above do not reach, set directly.
+        // Fields the edits above do not reach, set directly.
         let mut rich = live.clone();
         rich.slots[1].instance_name = Some("named".to_string());
         rich.slots[1].unbound_ports.insert("out".to_string());
@@ -1622,9 +1637,11 @@ fn node_process_undo_delete_then_add_mints_a_fresh_id() {
         let a = add_slot_on(editor.runtime_mut(), 1, "neural-transpose");
         let b = add_slot_on(editor.runtime_mut(), 1, "neural-transpose");
         editor.drain_host_commands();
-        node_eval(editor.runtime_mut(), 1, "graph-node-process-remove", &format!("{b}"));
-        let (before, after) = last_history_chains(&mut editor);
-        assert_eq!(after.as_ref().map(|chain| chain.slots.len()), Some(1));
+        // The delete as the host kinds' `remove-process!` makes it; the undo
+        // entry restores the chain from before it.
+        let before = Some(node1_chain(&state));
+        graph_api::remove(&state, GRAPH, 1, b);
+        assert_eq!(node1_chain(&state).slots.len(), 1);
         let scene = state.current_scene_id().expect("a scene");
         let id = state.published_sequencers()[0].id;
         lisp_host::restore_graph_node_process_chain(&state, scene, id, 1, before).expect("undo");

@@ -33,24 +33,16 @@ fn digi_fm_pages_expose_bound_visible_controls() {
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("compiling", Value::Bool(false)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-            ("effects", test_list(vec![])),
-            ("midi-effects", test_list(vec![])),
-            ("instrument-panel", test_list(vec![Value::Map(digi_fm_inst)])),
-            ("bus-effects", test_list(vec![])),
-        ],
-        true,
-    );
+    let panel_seed = PanelSeed {
+        instrument_panel: test_list(vec![Value::Map(digi_fm_inst)]),
+        effects: test_list(vec![]),
+        midi_effects: test_list(vec![]),
+        bus_effects: test_list(vec![]),
+    };
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()
@@ -58,7 +50,7 @@ fn digi_fm_pages_expose_bound_visible_controls() {
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -72,6 +64,7 @@ fn digi_fm_pages_expose_bound_visible_controls() {
         .eval_str(&custom_ui_source)
         .expect("load digi_fm custom instrument ui");
     editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+    let kinds = seed_panel_kinds(&mut editor, &panel_seed);
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
         panic!("digi_fm fx lisp status after refresh: {status}");
@@ -98,7 +91,7 @@ fn digi_fm_pages_expose_bound_visible_controls() {
                 "{} clipped: {:?} in {:?}", node.widget_type, node.rect, panel.rect);
         }
         for value in node.props.values() {
-            if let Value::ReactiveRef { field, .. } = value {
+            if let Some(field) = bound_field(Some(value)) {
                 if let Some(name) = field.strip_prefix("digi_fm-test-") { seen.insert(name.to_string()); }
             }
         }
@@ -106,7 +99,7 @@ fn digi_fm_pages_expose_bound_visible_controls() {
     }
     for section in 0..7 {
         editor.runtime_mut().eval_str(&format!(r#"
-            (do (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+            (do (custom-instrument-synth-ui (eseq.effects.panel-data/current-instrument-panel))
                 ((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false))
         "#)).unwrap();
         editor.refresh_runtime_side_effects();
@@ -127,19 +120,27 @@ fn digi_fm_pages_expose_bound_visible_controls() {
             let node = find_layout_node_by_debug_name(&layout, debug).expect(debug);
             assert_finite_nonzero_rect(node, debug);
             if section == 3 {
-                let Some(Value::ReactiveRef { namespace, field, slot, .. }) = node.props.get("shader-state-harm") else {
+                let Some(Value::ReactiveRef { field, slot, .. }) =
+                    node.props.get("shader-state-harm")
+                else {
                     panic!("spectrum must bind directly to engine telemetry");
                 };
-                assert_eq!(namespace, "SEQ");
-                assert_eq!(field, "digi_fm-live-harmonics");
+                assert_eq!(field, "mod-value", "the harmonics param's modulated value");
+                assert_eq!(
+                    bound_field(node.props.get("shader-state-harm")).as_deref(),
+                    Some("digi_fm-live-harmonics")
+                );
                 // Keep the original widget/slot: meter updates must reach its
                 // shader without re-evaluating the custom UI or editing the base.
                 for value in [0.75, 3.0, -2.5, 0.0] {
-                    editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
+                    set_panel_param_field(
+                        &mut editor,
+                        &kinds,
+                        "digi_fm-test-harmonics",
+                        "mod-value",
+                        Value::Number(value),
+                    );
                     assert_eq!(eseqlisp::reactive::read_float_slot(slot), value);
-                    assert_eq!(editor.runtime_mut().eval_str(
-                        "(reactive-value (bind \"SEQ\" \"digi_fm-test-harmonics\"))"
-                    ).unwrap().unwrap(), Value::Number(0.0));
                 }
             }
             if section == 1 || section == 2 {

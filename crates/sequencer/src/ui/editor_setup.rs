@@ -3,18 +3,29 @@ use eseqlisp::backend::Backend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
 use sequencer::app;
 
-use super::constants::ui_entrypoint_path;
+use super::constants::{noui_entrypoint_path, ui_entrypoint_path};
 use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
 pub(crate) const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
 const STARTUP_GRID_LAYOUT_EXPR: &str = "(eseq.seq-layout/apply-fx-layout)";
 
+/// Which Lisp root assembles the session: the vanilla DAW (`ui/main.lisp`
+/// plus the startup grid layout) or the bare editor root of `metal_seq noui`
+/// (`ui/noui.lisp`, single window, no DAW buffers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UiRoot {
+    Distro,
+    Bare,
+}
+
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &app::App,
+    root: UiRoot,
 ) -> Result<(Editor, AppBackend), Box<dyn std::error::Error>> {
-    let mut editor = create_editor(runtime, app)?;
+    let mut editor =
+        create_editor_with_root(runtime, app, sequencer::paths::user_init_path(), root)?;
     let mut backend =
         AppBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
             .map_err(|_| "render backend creation failed")?;
@@ -35,9 +46,18 @@ pub(crate) fn create_editor(
 }
 
 pub(crate) fn create_editor_with_user_init_path(
+    runtime: Runtime,
+    app: &app::App,
+    user_init_path: Option<std::path::PathBuf>,
+) -> Result<Editor, Box<dyn std::error::Error>> {
+    create_editor_with_root(runtime, app, user_init_path, UiRoot::Distro)
+}
+
+pub(crate) fn create_editor_with_root(
     mut runtime: Runtime,
     app: &app::App,
     user_init_path: Option<std::path::PathBuf>,
+    root: UiRoot,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
     let app_paths = sequencer::app_paths::app_paths();
     // `@/` paths are rooted at immutable factory content, independent of the
@@ -68,7 +88,11 @@ pub(crate) fn create_editor_with_user_init_path(
     }
 
     reload_custom_instrument_ui(&mut editor);
-    let ui_entrypoint = ui_entrypoint_path();
+    super::host_kinds::reserve_kind_names(editor.runtime_mut());
+    let ui_entrypoint = match root {
+        UiRoot::Distro => ui_entrypoint_path(),
+        UiRoot::Bare => noui_entrypoint_path(),
+    };
     // Execute the distro root directly rather than opening it as an authored
     // file. Transactional file evaluation deliberately rejects compatibility-
     // alias escape hatches used by a few event-time UI cycles; those modules
@@ -83,12 +107,17 @@ pub(crate) fn create_editor_with_user_init_path(
         .runtime_mut()
         .eval_str(&grid_source)
         .map_err(|error| format!("failed to execute {}: {error:?}", ui_entrypoint.display()))?;
+    report_boot_load_errors(&mut editor);
+    // Both roots import eseq.kinds; the host must publish exactly its fields.
+    super::host_kinds::check_schema_at_startup(editor.runtime());
     editor.refresh_runtime_side_effects();
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
     load_user_init(&mut editor, user_init_path.as_deref());
-    apply_startup_grid_layout(&mut editor)?;
-    log_lisp_ui_load_diagnostics(&mut editor);
+    if root == UiRoot::Distro {
+        apply_startup_grid_layout(&mut editor)?;
+        log_lisp_ui_load_diagnostics(&mut editor);
+    }
     Ok(editor)
 }
 
@@ -177,6 +206,17 @@ fn eseqlisp_factory_init_candidates() -> Vec<std::path::PathBuf> {
     sequencer::paths::eseqlisp_init_candidates()
 }
 
+/// `eval_str` leaves the `(import …)` / `(load …)` failures of the root it
+/// ran queued on the VM: drain them and report each (log and status line),
+/// so a broken module at boot is visible instead of silently missing.
+fn report_boot_load_errors(editor: &mut Editor) {
+    for message in editor.runtime_mut().take_source_load_errors() {
+        let message = format!("UI root load error: {message}");
+        eprintln!("metal_seq: {message}");
+        editor.handle_host_event(eseqlisp::HostEvent::Error(message));
+    }
+}
+
 /// Evaluate the user tier only after every factory/content root. A failed
 /// transaction is rolled back wholesale, surfaced in the status line and
 /// `*lisp-reload*`, and never aborts application boot.
@@ -220,8 +260,6 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
         eprintln!("metal_seq: Lisp UI status during startup: {status}");
     }
 
-    // "*metal*" (the legacy step grid) is intentionally absent: ui/main.lisp
-    // no longer loads step-grid.lisp, so the buffer is never created.
     for name in [
         "*sequencer*",
         "*samples*",
@@ -245,7 +283,7 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
 
 #[cfg(test)]
 mod tests {
-    use super::load_user_init;
+    use super::{load_user_init, report_boot_load_errors};
     use eseqlisp::vm::Value;
     use eseqlisp::{Editor, EditorConfig, Runtime};
 
@@ -287,6 +325,36 @@ mod tests {
             "init diagnostics must be visible in the reload buffer"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// eseq-0l17.70: a root's failed `(load …)` / `(import …)` is drained
+    /// after its `eval_str` and shown, not left queued and invisible.
+    #[test]
+    fn boot_load_errors_are_drained_and_shown() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(import no.such.boot-module)");
+        report_boot_load_errors(&mut editor);
+        let status = editor.minibuffer.clone().unwrap_or_default();
+        assert!(
+            status.contains("UI root load error") && status.contains("no.such.boot-module"),
+            "the load error must reach the status line: {status:?}"
+        );
+        assert!(
+            editor.runtime_mut().take_source_load_errors().is_empty(),
+            "the boot report drains the queue"
+        );
+
+        // A clean boot reports nothing.
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(def ok 1)")
+            .expect("clean eval");
+        let before = editor.minibuffer.clone();
+        report_boot_load_errors(&mut editor);
+        assert_eq!(editor.minibuffer, before);
     }
 
     #[test]

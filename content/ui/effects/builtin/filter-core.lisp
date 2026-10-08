@@ -10,12 +10,10 @@
    param-control-max
    param-control-min
    param-mod-wrapper
-   param-plock-active?
    param-plock-color-b
    param-plock-color-g
    param-plock-color-r
    param-plock-default
-   param-plock-text-color
    param-set-control-value))
 
 (import eseq.effects.panel-frame :refer (fx-clear-selected-effect))
@@ -41,10 +39,10 @@
 
 ;; NOTE: no drag "live echo" state here on purpose. The curve editor renders
 ;; its own in-flight drag from widget-local state (LIVE_BANDS in
-;; response_curve_editor.rs) and the knob/readout values arrive through the
-;; host's targeted SEQV param-value fields (`sync_effect_param_batch_display`),
-;; which dirty exactly the bound widgets. Mirroring the drag into `defstate`
-;; globals instead re-ran the whole effect panel on every mouse move.
+;; response_curve_editor.rs) and the knob/readout values bind their params
+;; (`#'prm.value`, which the host kinds push), which dirties exactly the bound
+;; widgets. Mirroring the drag into `defstate` globals instead re-ran the
+;; whole effect panel on every mouse move.
 
 (def builtin-fx-param (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
@@ -84,7 +82,7 @@
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
     :id 0
-    :type (filter-mode-type (get mode-p :text-value))
+    :type (filter-mode-type (eseq.effects.param-controls/fx-param-text-value-for fx mode-p))
     :freq (filter-cutoff-value fx cutoff-p)
     :freq-min (eseq.effects.param-controls/param-control-min fx cutoff-p)
     :freq-max (eseq.effects.param-controls/param-control-max fx cutoff-p)
@@ -120,10 +118,9 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
-                :target-node-id (get fx :target-node-id)
-                :updates (list
-                  (dict :param-idx (get cutoff-p :idx) :value (get event :freq))
-                  (dict :param-idx (get resonance-p :idx) :value (get event :q)))
+                :target-node-id (eseq.effects.devices/fx-node-id fx)
+                :updates (eseq.effects.param-controls/effect-param-updates fx
+                  (list (list cutoff-p (get event :freq)) (list resonance-p (get event :q))))
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
@@ -133,8 +130,8 @@
       (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
       (number-picker :value value
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
-        :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :noui true :font-size 9.5 :text-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -147,8 +144,8 @@
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
       (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
-        :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :noui true :font-size 9.5 :text-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -160,9 +157,9 @@
     (h-stack :gap 0.22 :align :baseline
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
       (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
-        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
-        :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
+        :noui true :font-size 9.5 :text-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -173,10 +170,11 @@
   (subtree :key (builtin-fx-param-subtree-key fx p "opt")
     (h-stack :gap 0.22 :align :center
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-      (dropdown :value (get p :text-value)
+      (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -192,7 +190,7 @@
       (dropdown :value (builtin-fx-filter-sync-label fx p)
         :options '("free" "sync")
         :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p (if (= v "sync") 1 0)))
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -205,8 +203,8 @@
         (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
           :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
-          :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :noui true :font-size 9.5 :text-color :dim
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -220,8 +218,8 @@
         (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
         (number-picker :value (filter-cutoff-value fx p)
           :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
-          :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :noui true :font-size 9.5 :text-color :dim
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -234,8 +232,8 @@
       (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
       (number-picker :value (filter-resonance-value fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
-        :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :noui true :font-size 9.5 :text-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -266,8 +264,8 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.5
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :text-color :dim :label-color :dim
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -281,8 +279,8 @@
       :value (filter-resonance-value fx p)
       :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 2
       :font-size 9.5 :label-font-size 9.5
-      :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
-      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :text-color :dim :label-color :dim
+      :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
       :plock-default (eseq.effects.param-controls/param-plock-default fx p)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -296,9 +294,9 @@
       (h-stack :gap 0.18 :align :baseline
         (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
         (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
-          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
-          :noui true :font-size 9.5 :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
-          :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+          :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale (eseq.effects.param-controls/percent-scale fx p) :decimals 0
+          :noui true :font-size 9.5 :text-color :dim
+          :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -307,11 +305,12 @@
 
 (def builtin-fx-filter-mini-option (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mini-opt")
-    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
-      (dropdown :value current
+    (do
+      (dropdown :value (eseq.effects.param-controls/param-option-label fx p)
+        :value-index (eseq.effects.param-controls/param-option-index fx p)
         :options (get p :options)
         :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-active (eseq.effects.param-controls/param-plock-active-prop fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)

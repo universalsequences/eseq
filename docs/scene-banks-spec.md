@@ -1,5 +1,7 @@
 # Scene Banks Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: **BUILT** — implemented and acceptance-swept 2026-08-27 (epic `eseq-doy`).
 Rev 2 (2026-08-27, `eseq-doy.9`) adds §10: the mixer clip grid is bank-scoped
 too, which rev 1 had excluded.
@@ -113,26 +115,30 @@ subtree `"transport-pattern-pills"`).
   submit/cancel rename field, and **Delete bank** merges it according to §7.
   Delete is disabled when only one bank remains or the merge target would
   exceed 24 scenes.
-- **Viewed bank is pure UI state** (Lisp `defstate` in transport.lisp), not
-  engine state and not persisted; on load it initializes to the bank containing
-  the current scene. Switching it re-renders the strip and nothing else — no
-  host command, no scheduler traffic, no snapshot capture.
+- **Viewed bank is pure UI state** (the `scene-bank-view` singleton kind in
+  `content/ui/scene-banks.lisp`, holding the bank instance), not engine state
+  and not persisted; on load it initializes to the bank containing the current
+  scene. Switching it re-renders the strip and nothing else — no host command,
+  no scheduler traffic, no snapshot capture.
 - **Viewing a different bank never touches playback.** The playing scene keeps
   playing; if it lives outside the viewed bank, the bank dropdown shows a
   subtle **indicator** (dot/pulse in the playing bank's hue) marking which
   bank holds the playing scene. No auto-follow in v1.
 - If a structural edit removes the viewed bank (delete bank, undo), the view
-  falls back to the previous bank (index-clamped).
+  falls back to the previous bank (index-clamped: the bank now at its last
+  index, or the last bank). A project load replaces every bank instance and
+  shows the playing scene's bank again.
 - **`-` is disabled when the current scene is not in the viewed bank** (it
   still deletes the current scene when enabled — no risk of deleting a scene
   you can't see).
 
-Rust → Lisp feed: a new reactive value `SEQ.scene-banks` — list of
-`(dict :id :label :name :len :offset)` — published from
-`ui/state_values/song_state.rs` next to `SEQ.scene-names` (`:858`), with the
-same epoch-cached pattern. `SEQ.current-pattern` (global index) plus this
-table is enough for the Lisp side to derive the viewed-bank slice, local
-numbering, and the playing-bank indicator; no new per-frame work.
+Rust → Lisp feed: the host kinds (`docs/kind-bindings-spec.md`; built as
+`SEQ.scene-banks`, ported in eseq-0l17.12). `(banks)` lists `bank` instances
+(`index`, `bid` — the stable id the bank commands take —, `name`, `label`,
+`scenes`, `playing`); each `scene` has its `index`, its local `number`, its
+`bank`, `active` and `queued`; `transport.scene` is the playing scene. That is
+enough for the Lisp side to derive the viewed-bank slice, local numbering, and
+the playing-bank indicator; no new per-frame work.
 
 ## 5. Launch semantics (design question 4)
 
@@ -192,9 +198,9 @@ source/target are both local indices mapped to global before the existing
 
 Scene-switch perf work (subtree-scene-switch, scene/clip launch) assumed a
 flat scene list; nothing here changes that — the flat Vec is still the model.
-Bank switching is a Lisp-state change re-rendering ~24 pills. The
-`SEQ.scene-banks` value changes only on structural edits (same cadence as
-`SEQ.scene-names`), so drags and playback publish nothing new.
+Bank switching is a Lisp-state change re-rendering ~24 pills. The bank
+fields change only on structural edits, so drags and playback publish nothing
+new; a launch moves the lit pill by repainting (the pills bind `s.active`).
 
 ## 9. Built status and deviations
 
@@ -238,7 +244,9 @@ serialization change. Consequences:
   would strand a new clip behind a bank the user cannot guess, and the first
   click on one assigns it to the current scene, which gives it a bank.
 
-Host feed: `SEQ.track-pattern-cells` cells gain a `:banks` field — the list of
+Host feed (now the `cell` kind's `banks`, kind-bindings spec §14.2d; the
+legacy `SEQ.track-pattern-cells` is gone): `SEQ.track-pattern-cells` cells
+gained a `:banks` field — the list of
 bank indices referencing that clip, empty for orphans — built in
 `build_track_pattern_cells_value` from
 `ProjectScenes::track_pattern_bank_indices`. The viewed bank stays pure Lisp

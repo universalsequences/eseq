@@ -20,7 +20,7 @@ use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
 use super::text::{
-    apply_patcher_autocomplete, patcher_autocomplete_ghost_text,
+    apply_patcher_autocomplete, commit_patcher_text_edit, patcher_autocomplete_ghost_text,
     patcher_autocomplete_suggestions,
 };
 use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
@@ -459,6 +459,7 @@ fn staged_library_macro_edits_overlay_compile_library_without_writing_package() 
             text: "* 3".to_string(),
             position: (8.0, 8.0),
             width: None,
+            height: None,
         },
     );
 
@@ -510,6 +511,7 @@ fn patcher_writeback_payload_stages_library_macro_edits_without_autosave() {
             text: "* 3".to_string(),
             position: (8.0, 8.0),
             width: None,
+            height: None,
         },
     );
     set_patcher_interaction_state(key, state);
@@ -741,6 +743,7 @@ fn library_macro_text_edit_preserves_existing_package_layout_for_untouched_nodes
             text: "* 5".to_string(),
             position: return_node.position,
             width: return_node.width,
+            height: return_node.height,
         },
     );
 
@@ -792,6 +795,7 @@ fn library_macro_autosave_consumes_live_macro_edit_overlay_after_persist() {
             text: "in 2 @name shape".to_string(),
             position: (50.0, 12.0),
             width: None,
+            height: None,
         },
     );
 
@@ -953,6 +957,7 @@ fn save_macro_to_library_does_not_replay_edits_already_in_the_emitted_source() {
             text: "0.74".to_string(),
             position: (40.0, 60.0),
             width: None,
+            height: None,
         },
     );
     set_patcher_interaction_state(key, state.clone());
@@ -3044,6 +3049,7 @@ fn reload_patcher_macro_view_for_path_keeps_macro_view_and_clears_edit_overlays(
             text: "triangle".to_string(),
             position: (12.0, 14.0),
             width: None,
+            height: None,
         },
     );
     set_patcher_interaction_state(key, state);
@@ -3114,6 +3120,7 @@ fn active_macro_layout_merge_preserves_previous_positions_for_untouched_nodes() 
             text: node_display_label(&second_node),
             position: (99.0, 33.0),
             width: None,
+            height: None,
         },
     );
     let merged_layout = sidecar::current_layout_json(&root_patch, &state).unwrap();
@@ -3164,6 +3171,7 @@ fn active_macro_state_for_path_prefers_macro_edit_state_over_empty_registration(
             text: "in 1 @name input".to_string(),
             position: (55.0, 66.0),
             width: None,
+            height: None,
         },
     );
     set_patcher_interaction_state(current_key, current_state);
@@ -3246,6 +3254,7 @@ fn node_size_uses_cached_proportional_character_widths() {
         outputs: Vec::new(),
         position: (0.0, 0.0),
         width: None,
+        height: None,
         param: None,
         inline_inputs: Vec::new(),
         synthesized: false,
@@ -7158,6 +7167,7 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         outputs: vec!["out".to_string()],
         position: (0.0, 0.0),
         width: None,
+        height: None,
         param: None,
         inline_inputs: Vec::new(),
         synthesized: false,
@@ -9068,6 +9078,7 @@ fn writeback_reconnecting_unsaved_constant_to_param_edit_uses_param_name() {
             text: "param xyz".to_string(),
             position: (76.14, 4.0),
             width: None,
+            height: None,
         },
     );
     state
@@ -9288,6 +9299,7 @@ fn writeback_fuzz_unsaved_param_conversions_emit_and_sample_compile_without_stal
                 text: format!("param unsaved{seed}"),
                 position: (0.0, 0.0),
                 width: None,
+                height: None,
             },
         );
         state
@@ -16392,6 +16404,7 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
             text: "bi".to_string(),
             position: (0.0, 0.0),
             width: None,
+            height: None,
         },
     );
     state.text_edit = Some(PatcherTextEdit {
@@ -16488,6 +16501,7 @@ fn patcher_text_edit_tab_autocompletes_local_defmacro() {
             text: "sha".to_string(),
             position: (0.0, 0.0),
             width: None,
+            height: None,
         },
     );
     state.text_edit = Some(PatcherTextEdit {
@@ -16637,7 +16651,9 @@ fn created_node_reedit_updates_same_node_edit_text() {
         },
         autocomplete_selected: 0,
     });
-    commit_patcher_text_edit(&mut state, "root");
+    commit_patcher_text_edit(&mut state, "root", |_, _| {
+        unreachable!("ordinary node text never collects probe ids")
+    });
     assert_eq!(
         state
             .edit_state
@@ -16658,7 +16674,9 @@ fn created_node_reedit_updates_same_node_edit_text() {
         },
         autocomplete_selected: 0,
     });
-    commit_patcher_text_edit(&mut state, "root");
+    commit_patcher_text_edit(&mut state, "root", |_, _| {
+        unreachable!("ordinary node text never collects probe ids")
+    });
     assert_eq!(
         state
             .edit_state
@@ -19870,6 +19888,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
             outputs: vec!["out".to_string()],
             position: (2.0, 2.0),
             width: None,
+            height: None,
             param: None,
             inline_inputs: Vec::new(),
             synthesized: false,
@@ -22016,6 +22035,7 @@ fn patcher_paste_rejects_macro_self_reference() {
             text: "wobble 1".to_string(),
             position: (0.0, 0.0),
             width: None,
+            height: None,
         }],
         connections: Vec::new(),
         paste_serial: 0,
@@ -22551,6 +22571,108 @@ fn retyping_an_encapsulated_instance_renames_the_macro() {
         .source;
     assert!(source.contains("(defmacro wobble"), "{source}");
     assert!(!source.contains("sub1"), "{source}");
+}
+
+/// Once the patch is saved an encapsulated macro is an ordinary defmacro in
+/// the file. Retyping one instance's name still renames it: the defmacro and
+/// every call take the new name, instead of the edited node becoming a call
+/// to an operator that does not exist.
+#[test]
+fn retyping_a_saved_macro_instance_renames_the_defmacro_and_every_call() {
+    let path = temp_patcher_source_path("source-macro-rename");
+    fs::write(
+        &path,
+        "(defmacro sub1 (x) (* x 2))\n\
+         (def g (in 1 @name gate))\n\
+         (def first (sub1 g))\n\
+         (def second (sub1 first))\n\
+         (out 1 second)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("first".to_string());
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().expect("edit-node opens the edit");
+    let original = edit.original_text.clone();
+    assert!(original.starts_with("sub1"), "{original}");
+    edit.text = original.replacen("sub1", "wobble", 1);
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+    assert_eq!(
+        state.edit_state.renamed_macros.get("sub1").map(String::as_str),
+        Some("wobble")
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    for id in ["first", "second"] {
+        let instance = visible.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(instance.op, "wobble", "{id}");
+        assert_eq!(instance.kind, NodeKind::MacroInstance, "{id}");
+        assert!(instance.diagnostic.is_none(), "{id}: {:?}", instance.diagnostic);
+    }
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(defmacro wobble"), "{source}");
+    assert!(!source.contains("sub1"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(reparsed.diagnostics.is_empty(), "{:?}", reparsed.diagnostics);
+
+    // The macro opens under its new name, body intact.
+    state.active_macro = Some("wobble".to_string());
+    let body = active_patcher_patch(&root_patch, &state);
+    assert!(!body.nodes.is_empty());
+
+    // Renaming back drops the rename instead of chaining it.
+    state.active_macro = None;
+    state.selected_nodes = ["second".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().unwrap();
+    edit.text = edit.original_text.replacen("wobble", "sub1", 1);
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+    assert!(state.edit_state.renamed_macros.is_empty());
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+/// Retyping a macro instance as an operator that already exists swaps that
+/// one node; it is not a rename.
+#[test]
+fn retyping_a_saved_macro_instance_as_a_known_operator_does_not_rename() {
+    let path = temp_patcher_source_path("source-macro-swap");
+    fs::write(
+        &path,
+        "(defmacro sub1 (x) (* x 2))\n\
+         (def g (in 1 @name gate))\n\
+         (def first (sub1 g))\n\
+         (def second (sub1 first))\n\
+         (out 1 second)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("first".to_string());
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().unwrap();
+    edit.text = edit.original_text.replacen("sub1", "tanh", 1);
+    commit_active_patcher_text_edit(&node, &mut state, "root");
+    assert!(state.edit_state.renamed_macros.is_empty());
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let second = visible.nodes.iter().find(|n| n.id == "second").unwrap();
+    assert_eq!(second.op, "sub1");
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -25023,6 +25145,118 @@ fn double_clicking_a_two_cable_operator_opens_editable_text_with_both_slots() {
     let _ = fs::remove_file(path);
 }
 
+/// What the measure pass did before it measured editable text too: drawn
+/// labels only, so `- ?` (the editable text of a two-cable `-`) is unknown.
+fn prime_patcher_label_metrics_only(patch: &Patch) {
+    let measurer = MonospaceTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    for node in &patch.nodes {
+        cache_text_widths(node_display_label(node), node_font_size(node), &measure_ctx);
+    }
+}
+
+/// A node with a cable past its last written slot edits as text the label
+/// never drew. Double-click used to need that exact text's glyph advances to
+/// place the caret and silently refused the edit without them.
+#[test]
+fn double_clicking_a_cabled_node_edits_without_measured_editable_text() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-unmeasured");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_label_metrics_only(&root_patch);
+
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+    assert!(handle_patcher_double_click(
+        &node,
+        subtract_rect.col + subtract_rect.width - 1.0,
+        subtract_rect.row + subtract_rect.height * 0.5,
+    ));
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("double-click opens the edit");
+    assert_eq!(edit.text, "- ?");
+    assert!(edit.state.cursor_pos <= 3);
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn edit_node_command_opens_selected_node_text_with_op_selected() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-node-command");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("d".to_string());
+    set_patcher_interaction_state(key, state);
+
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("edit-node opens the edit");
+    assert_eq!(edit.node_id, "d");
+    assert_eq!(edit.text, "- ?");
+    assert_eq!(edit.state.cursor_pos, 1);
+    assert_eq!(edit.state.selection_anchor, Some(0), "the op is selected");
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+/// The generic dispatcher claims every right-click before the widget's own
+/// handler runs, so it has to build the patcher's payload itself or the menu
+/// never learns which node was clicked.
+#[test]
+fn right_click_through_generic_dispatch_reports_the_node_under_the_pointer() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-right-click-node");
+    fs::write(&path, source).unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert("on-right-click".to_string(), Value::Bool(true));
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+
+    let outcome = crate::widget_render::map_mouse_event(
+        &node,
+        MouseEventKind::Down(MouseButton::Right),
+        subtract_rect.col + 1.0,
+        subtract_rect.row + subtract_rect.height * 0.5,
+        None,
+        None,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
+    let MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(Value::Map(info))) = outcome else {
+        panic!("right-click dispatches a context menu");
+    };
+    let hit = info.get("node").expect(":node key").borrow().clone();
+    let Value::Map(hit) = hit else {
+        panic!("right-click on a node reports it, got {hit:?}");
+    };
+    assert_eq!(
+        hit.get("id").map(|value| value.borrow().clone()),
+        Some(Value::String("d".to_string()))
+    );
+    assert!(get_patcher_interaction_state(key).selected_nodes.contains("d"));
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn copying_a_two_cable_operator_pastes_it_with_both_cables() {
     let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
@@ -25251,4 +25485,1311 @@ fn two_cables_into_one_history_emit_a_single_summed_write() {
         "the two cables must be summed:\n{}",
         generated.source
     );
+}
+
+// ── Payload persists only reachable library macros (eseq-y8ku) ──
+
+fn payload_macro_names(patch: &Patch) -> Vec<String> {
+    let json = serde_json::to_value(graph_payload::payload_from_patch(patch)).unwrap();
+    let mut names = json["macros"]
+        .as_array()
+        .map(|macros| {
+            macros
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn payload_keeps_imported_library_macro_and_deps_but_drops_unused_ones() {
+    let library = temp_defmacro_library(
+        "payload-trim",
+        &[
+            ("inner", "(defmacro inner (x) (* x 2))"),
+            ("outer", "(use-defmacro inner)\n(defmacro outer (x) (inner (+ x 1)))"),
+            ("unused", "(defmacro unused (x) (* x 3))"),
+        ],
+    );
+    let source = "(use-defmacro outer)\n(defmacro local-gain (x) (* x 0.5))\n(def input (in 1))\n(def shaped (outer input))\n(out shaped 1)";
+    let patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    assert!(
+        patch.macros.iter().any(|macro_patch| macro_patch.name == "unused"),
+        "the live model still offers every library package"
+    );
+    assert_eq!(
+        payload_macro_names(&patch),
+        vec!["inner".to_string(), "local-gain".to_string(), "outer".to_string()],
+        "payload keeps local macros plus reachable library macros only"
+    );
+
+    let original = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(original.source.contains("(use-defmacro outer)"), "{}", original.source);
+    let json = serde_json::to_string(&graph_payload::payload_from_patch(&patch)).unwrap();
+    let payload = serde_json::from_str(&json).unwrap();
+
+    // Library present at load: every package is re-attached, source unchanged.
+    let mut with_library = graph_payload::patch_from_payload(&payload);
+    lisp::resolve_library_macros(&mut with_library, &library, PatcherIntent::Instrument);
+    lisp::resolve_node_operators(&mut with_library);
+    assert!(with_library.macros.iter().any(|m| m.name == "unused"));
+    assert_eq!(
+        generate::generate_patch_source(&with_library, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        original.source
+    );
+
+    // Library missing at load: the trimmed payload's stored bodies suffice.
+    let mut without_library = graph_payload::patch_from_payload(&payload);
+    lisp::resolve_node_operators(&mut without_library);
+    assert!(
+        without_library.nodes.iter().all(|node| node.diagnostic.is_none()),
+        "imported macro call must still resolve from the payload alone"
+    );
+    assert_eq!(
+        generate::generate_patch_source(&without_library, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        original.source
+    );
+}
+
+#[test]
+fn payload_without_library_calls_persists_no_library_macros() {
+    let library =
+        temp_defmacro_library("payload-no-imports", &[("unused", "(defmacro unused (x) (* x 3))")]);
+    let patch = parse_patch_source_with_library(
+        "(def input (in 1))\n(out input 1)",
+        PatcherIntent::Instrument,
+        &library,
+    )
+    .unwrap();
+    assert!(payload_macro_names(&patch).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Probes (docs/patcher-probes-spec.md §6.2)
+// ---------------------------------------------------------------------------
+
+const PROBE_FIXTURE_SOURCE: &str = "(def ph (phasor 440))\n(out ph 1 @name audio)";
+
+/// Types `text` into a fresh created node in `view_key`, optionally cables
+/// `from` into its first inlet, and commits it the way Enter does.
+fn type_and_commit_node(
+    node: &LayoutNode,
+    view_key: &str,
+    text: &str,
+    from: Option<&str>,
+) -> String {
+    let key = patcher_state_key(node);
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_node(&mut state, view_key, (4.0, 8.0));
+    if let Some(from) = from {
+        connect_output_to_input(&mut state, view_key, from, &created, 0);
+    }
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: created.clone(),
+        text: text.to_string(),
+        original_text: String::new(),
+        state: TextInputState::default(),
+        autocomplete_selected: 0,
+    });
+    commit_active_patcher_text_edit(node, &mut state, view_key);
+    set_patcher_interaction_state(key, state);
+    created
+}
+
+fn committed_node_text(node: &LayoutNode, view_key: &str, node_id: &str) -> String {
+    get_patcher_interaction_state(patcher_state_key(node))
+        .edit_state
+        .nodes[&node_edit_key(view_key, node_id)]
+        .text
+        .clone()
+}
+
+fn probe_fixture_node(name: &str, source: &str) -> (std::path::PathBuf, LayoutNode) {
+    let path = temp_patcher_dsp_path(name);
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    set_patcher_interaction_state(patcher_state_key(&node), PatcherInteractionState::default());
+    (path, node)
+}
+
+#[test]
+fn typing_probe_number_or_scope_creates_a_canonical_probe_form() {
+    for (typed, view) in [("probe", "number"), ("number~", "number"), ("scope~", "scope")] {
+        let (_path, node) = probe_fixture_node("probe-create", PROBE_FIXTURE_SOURCE);
+        let created = type_and_commit_node(&node, "root", typed, Some("ph"));
+        assert_eq!(
+            committed_node_text(&node, "root", &created),
+            format!("probe @id \"p1\" @view {view}"),
+            "`{typed}` commits to canonical probe text; the alias never persists"
+        );
+        let (source, _) = persistence_payload_source_and_layout(&node, typed);
+        assert!(
+            source.contains(&format!("(def p1 (probe ph @id \"p1\" @view {view}))")),
+            "`{typed}` emits a probe on its input:\n{source}"
+        );
+        assert!(!source.contains('~'), "patcher aliases never reach source:\n{source}");
+    }
+}
+
+#[test]
+fn probe_alias_text_projects_as_a_probe_even_without_a_commit() {
+    let node = node_from_editor_text("n", "scope~", (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(node.op, "probe");
+    assert_eq!(node.kind, NodeKind::Builtin);
+    assert_eq!(node.label, "probe @view scope");
+    assert_eq!(node.args.len(), 1, "one inlet");
+    assert_eq!(node.outputs.len(), 1, "one outlet: probe is a passthrough");
+    assert!(node.diagnostic.is_none(), "probe is a known builtin");
+}
+
+#[test]
+fn probe_is_a_one_in_one_out_builtin_in_the_operator_manifest() {
+    assert!(dgenlisp_operator_names().contains(&"probe".to_string()));
+    let docs = dgenlisp_operator_documentation();
+    let probe = docs.get("probe").expect("probe documented");
+    assert_eq!(probe.inputs.len(), 1);
+    assert_eq!(probe.outputs.len(), 1);
+}
+
+#[test]
+fn generated_probe_ids_are_unique_in_the_source_and_stable_across_edits() {
+    // An id already in the source is taken; the overlay's own probes too.
+    let source = "(def ph (phasor 440))\n(def p1 (probe ph @id \"p1\" @view number))\n(out ph 1 @name audio)";
+    let (_path, node) = probe_fixture_node("probe-unique", source);
+    let first = type_and_commit_node(&node, "root", "number~", Some("ph"));
+    let second = type_and_commit_node(&node, "root", "scope~", Some("ph"));
+    assert_eq!(
+        committed_node_text(&node, "root", &first),
+        "probe @id \"p2\" @view number"
+    );
+    assert_eq!(
+        committed_node_text(&node, "root", &second),
+        "probe @id \"p3\" @view scope"
+    );
+
+    // Retyping the alias over an existing probe keeps its identity, even when
+    // it switches view; an explicit id is kept as written.
+    let key = patcher_state_key(&node);
+    for (retyped, expected) in [
+        ("scope~", "probe @id \"p2\" @view scope"),
+        ("probe @view number", "probe @id \"p2\" @view number"),
+        ("number~ @id \"cut\"", "probe @id \"cut\" @view number"),
+    ] {
+        let mut state = get_patcher_interaction_state(key);
+        state.text_edit = Some(PatcherTextEdit {
+            node_id: first.clone(),
+            text: retyped.to_string(),
+            original_text: committed_node_text(&node, "root", &first),
+            state: TextInputState::default(),
+            autocomplete_selected: 0,
+        });
+        commit_active_patcher_text_edit(&node, &mut state, "root");
+        set_patcher_interaction_state(key, state);
+        assert_eq!(committed_node_text(&node, "root", &first), expected, "{retyped}");
+    }
+
+    // Undo/redo restore snapshots, ids included.
+    let undo = WidgetKeyEvent {
+        code: KeyCode::Char('z'),
+        modifiers: primary_shortcut_modifier(),
+    };
+    let redo = WidgetKeyEvent {
+        code: KeyCode::Char('z'),
+        modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
+    };
+    assert!(press_patcher_key(&node, undo).is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", &first),
+        "probe @id \"p2\" @view number"
+    );
+    assert!(press_patcher_key(&node, redo).is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", &first),
+        "probe @id \"cut\" @view number"
+    );
+}
+
+#[test]
+fn pasting_a_probe_mints_a_new_id() {
+    let (_path, node) = probe_fixture_node("probe-paste", PROBE_FIXTURE_SOURCE);
+    let original = type_and_commit_node(&node, "root", "number~", Some("ph"));
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = HashSet::from([original.clone()]);
+    set_patcher_interaction_state(key, state);
+
+    let copy = WidgetKeyEvent {
+        code: KeyCode::Char('c'),
+        modifiers: primary_shortcut_modifier(),
+    };
+    let paste = WidgetKeyEvent {
+        code: KeyCode::Char('v'),
+        modifiers: KeyModifiers::CONTROL,
+    };
+    assert!(press_patcher_key(&node, copy).is_some());
+    assert!(press_patcher_key(&node, paste.clone()).is_some());
+    assert!(press_patcher_key(&node, paste).is_some());
+
+    let state = get_patcher_interaction_state(key);
+    let mut texts = state
+        .edit_state
+        .nodes
+        .values()
+        .map(|edit| edit.text.clone())
+        .collect::<Vec<_>>();
+    texts.sort();
+    assert_eq!(
+        texts,
+        vec![
+            "probe @id \"p1\" @view number".to_string(),
+            "probe @id \"p2\" @view number".to_string(),
+            "probe @id \"p3\" @view number".to_string(),
+        ],
+        "the original keeps its id; each paste is a new probe"
+    );
+}
+
+#[test]
+fn dangling_probe_is_emitted_and_survives_save_and_reload() {
+    let (path, node) = probe_fixture_node("probe-dangling", PROBE_FIXTURE_SOURCE);
+    let probe = type_and_commit_node(&node, "root", "number~", Some("ph"));
+    // An unwired probe has nothing to observe: it stays in the payload only.
+    type_and_commit_node(&node, "root", "scope~", None);
+
+    let (source, layout) = persistence_payload_source_and_layout(&node, "dangling probe");
+    assert!(
+        source.contains("(def p1 (probe ph @id \"p1\" @view number))"),
+        "nothing reads the probe, yet it is emitted (every probe is a compiler root):\n{source}"
+    );
+    assert!(
+        !source.contains("@id \"p2\""),
+        "an unwired probe would not compile, so it is not emitted:\n{source}"
+    );
+    fs::write(&path, &source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    set_patcher_interaction_state(patcher_state_key(&node), PatcherInteractionState::default());
+
+    let (_, reloaded) = load_patch_from_props(&node.props).unwrap();
+    let probes = reloaded
+        .nodes
+        .iter()
+        .filter(|patch_node| patch_node.op == "probe")
+        .map(|patch_node| probe::probe_node_id(patch_node).unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        probes,
+        HashSet::from(["p1".to_string(), "p2".to_string()]),
+        "both probes reload from the payload, ids intact (created id {probe})"
+    );
+    assert_eq!(
+        generate::generate_patch_source(&reloaded, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        source,
+        "the reloaded model regenerates byte-identical source"
+    );
+
+    // Opened as code and re-promoted, the source alone still projects it.
+    let projected = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
+    let projected_probe = projected
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "probe")
+        .expect("projected probe");
+    assert_eq!(probe::probe_node_id(projected_probe).as_deref(), Some("p1"));
+    assert_eq!(probe::probe_node_view_text(projected_probe), "number");
+}
+
+#[test]
+fn debug_emitter_keeps_a_dangling_probe_as_a_top_level_form() {
+    // A created probe has no source form to anchor it; nothing reads it, so
+    // only the probe rule keeps it out of the inlined-expression bucket.
+    let mut patch = parse(PROBE_FIXTURE_SOURCE);
+    patch.nodes.push(node_from_editor_text(
+        "created-0",
+        "probe @id \"tap\" @view number",
+        (0.0, 0.0),
+        &HashMap::new(),
+        false,
+    ));
+    patch.connections.push(PatchConnection {
+        from_node: "ph".to_string(),
+        from_output: 0,
+        to_node: "created-0".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
+        source: None,
+        authored_reference: None,
+    });
+    // The debug emitter never writes builtin attributes (nor `out`'s @name);
+    // the form itself is what this checks.
+    let emitted = emit_patch_debug_lisp(&patch);
+    assert!(
+        emitted.lines().any(|line| line == "(probe ph)"),
+        "{emitted}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DGenLisp compiler with `probe`; run with ESEQ_DGENLISP_TOOL=<local build>"]
+fn generated_dangling_probe_compiles_with_a_probe_capable_dgenlisp() {
+    let (_path, node) = probe_fixture_node("probe-compile", PROBE_FIXTURE_SOURCE);
+    type_and_commit_node(&node, "root", "number~", Some("ph"));
+    type_and_commit_node(&node, "root", "scope~", None);
+    let (source, _) = persistence_payload_source_and_layout(&node, "probe compile");
+    compile_patch_source_with_dgenlisp(&source).unwrap_or_else(|error| {
+        panic!("generated probe source must compile:\n{source}\n{error}")
+    });
+}
+
+#[test]
+fn probe_values_format_to_about_four_significant_digits() {
+    use probe::format_probe_value;
+    for (value, expected) in [
+        (0.0, "0"),
+        (-0.0, "0"),
+        (0.5, "0.5000"),
+        (1.0, "1.000"),
+        (-1.23456, "-1.235"),
+        (440.0, "440.0"),
+        (12345.6, "12346"),
+        (9.99996, "10.00"),
+        (0.001234, "0.001234"),
+        (0.0001234, "1.234e-4"),
+        (123456.0, "1.235e5"),
+        (-3.4e38, "-3.400e38"),
+        (f32::NAN, "NaN"),
+        (f32::INFINITY, "inf"),
+        (f32::NEG_INFINITY, "-inf"),
+    ] {
+        let text = format_probe_value(value);
+        assert_eq!(text, expected, "{value}");
+        assert!(
+            text.chars().count() <= probe::PROBE_VALUE_WIDTH_SAMPLE.chars().count(),
+            "{text} must fit the reserved width"
+        );
+    }
+}
+
+fn probe_frame(last: f32, stale: bool) -> eseqlisp_live_audio::ProbeFrame {
+    eseqlisp_live_audio::ProbeFrame {
+        revision: 1,
+        last,
+        min: -0.25,
+        max: 0.75,
+        seq: 1,
+        stale,
+        scope: None,
+        display_range: None,
+    }
+}
+
+use crate::live_audio as eseqlisp_live_audio;
+
+#[test]
+fn probe_value_display_dims_missing_and_held_frames() {
+    let missing = probe::probe_value_display(None);
+    assert_eq!(missing.text, "—");
+    assert!(missing.dimmed);
+    assert!(missing.range.is_none());
+
+    let live = probe::probe_value_display(Some(&probe_frame(0.5, false)));
+    assert_eq!(live.text, "0.5000");
+    assert!(!live.dimmed);
+    assert_eq!(live.range_text().as_deref(), Some("min -0.2500  max 0.7500"));
+
+    let held = probe::probe_value_display(Some(&probe_frame(0.5, true)));
+    assert_eq!(held.text, "0.5000", "a stale frame keeps showing its held value");
+    assert!(held.dimmed);
+    assert_eq!(
+        held.range_text().as_deref(),
+        Some("min -0.2500  max 0.7500  (held)")
+    );
+}
+
+#[test]
+fn probe_text_rewrites_keep_bracketed_attributes() {
+    let taken = HashSet::new();
+    let canonical =
+        probe::canonical_probe_text("number~ @shape [2 2] @name x", None, &taken).unwrap();
+    assert_eq!(
+        canonical,
+        "probe @id \"p1\" @view number @shape [2 2] @name x",
+        "a bracketed attribute survives canonicalization intact"
+    );
+    assert_eq!(
+        probe::canonical_probe_text(&canonical, None, &taken).as_deref(),
+        Some(canonical.as_str()),
+        "canonical text is a fixed point"
+    );
+    let mut taken = HashSet::from(["p1".to_string()]);
+    assert_eq!(
+        probe::reminted_probe_text(&canonical, &mut taken).as_deref(),
+        Some("probe @id \"p2\" @view number @shape [2 2] @name x")
+    );
+    assert!(taken.contains("p2"), "the minted id is reserved");
+    assert_eq!(
+        probe::probe_text_with_view(&canonical, eseqlisp_live_audio::ProbeView::Scope, &taken)
+            .as_deref(),
+        Some("probe @id \"p1\" @view scope @shape [2 2] @name x")
+    );
+    assert_eq!(
+        probe::expand_probe_alias("scope~ @id \"cut\"").as_deref(),
+        Some("probe @id \"cut\" @view scope"),
+        "expanding an alias keeps an id written on it"
+    );
+    // An unknown `@view` is an opaque hint: passed through, not rewritten.
+    assert_eq!(
+        probe::canonical_probe_text("probe @view sparkle", None, &HashSet::new()).as_deref(),
+        Some("probe @id \"p1\" @view sparkle")
+    );
+}
+
+#[test]
+fn probe_text_precheck_rules_out_ordinary_node_text_without_parsing() {
+    for text in ["probe", "probe @view scope", "  number~", "scope~ @id \"a\"", "probe(x)"] {
+        assert!(probe::is_probe_text(text), "{text:?}");
+    }
+    for text in ["phasor 2", "probes", "probe-ish 1", "(probe x)", "number~x", ""] {
+        assert!(!probe::is_probe_text(text), "{text:?}");
+        assert!(probe::parse_probe(text).is_none(), "{text:?}");
+        assert!(probe::expand_probe_alias(text).is_none(), "{text:?}");
+        assert!(probe::canonical_probe_text(text, None, &HashSet::new()).is_none());
+    }
+    // `probe` text is already canonical in the model: only an alias expands.
+    assert!(probe::expand_probe_alias("probe @view scope").is_none());
+    // The pre-check agrees with the full parse on what is a probe.
+    let node = node_from_editor_text("n", "phasor 2", (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(node.op, "phasor");
+    let node = node_from_editor_text("n", "number~", (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(node.op, "probe");
+}
+
+#[test]
+fn probe_header_shows_the_alias_and_reserves_value_width() {
+    let header = |text: &str| {
+        let node = node_from_editor_text("n", text, (0.0, 0.0), &HashMap::new(), false);
+        (node_header_label(&node), node_display_label(&node))
+    };
+    assert_eq!(
+        header("probe @id \"p1\" @view number"),
+        (
+            "number~".to_string(),
+            "probe @id \"p1\" @view number".to_string()
+        ),
+        "the box draws the alias; the display label stays the editable text"
+    );
+    assert_eq!(header("probe @id \"p4\" @view scope").0, "scope~");
+    assert_eq!(header("probe @id \"cut\" @view number").0, "number~ cut");
+    assert_eq!(header("probe @id \"p1\" @view meter").0, "probe");
+
+    let node = node_from_editor_text(
+        "n",
+        "probe @id \"p1\" @view number",
+        (0.0, 0.0),
+        &HashMap::new(),
+        false,
+    );
+    assert_eq!(
+        node_width_label(&node, probe::ProbeAttrs::of(&node).as_ref()),
+        format!("number~  {}", probe::PROBE_VALUE_WIDTH_SAMPLE),
+        "width is sized for the widest value, independent of the live frame"
+    );
+}
+
+#[test]
+fn probe_frames_are_looked_up_by_id_with_occurrence_zero_in_every_view() {
+    let path = "/probe-lookup/dsp.lisp";
+    eseqlisp_live_audio::publish_patch_probe_instance(path, Some("eng3"));
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("eng3", "tap", 0),
+        probe_frame(0.5, false),
+    );
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("eng3", "tap", 1),
+        probe_frame(0.9, false),
+    );
+    let patch = parse(
+        "(defmacro lfo (rate)\n  (def ph (phasor rate))\n  (def tap (probe ph @id \"tap\" @view number))\n  ph)\n(def a (lfo 2))\n(def b (lfo 3))\n(out (+ a b) 1 @name audio)",
+    );
+    let macro_patch = &patch.macros.iter().find(|m| m.name == "lfo").unwrap().patch;
+    let tap = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "probe")
+        .expect("macro body probe");
+    let frame = probe::probe_frame_for_node(path, tap).expect("frame");
+    assert_eq!(frame.last, 0.5, "a macro view shows the first instance's occurrence");
+
+    let instance = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    assert!(
+        probe::probe_frame_for_node(path, instance).is_none(),
+        "a macro instance node does not surface the probes inside it"
+    );
+
+    eseqlisp_live_audio::publish_patch_probe_instance(path, None);
+    assert!(
+        probe::probe_frame_for_node(path, tap).is_none(),
+        "no live instance: —"
+    );
+}
+
+fn patcher_texts(prims: &[GpuPrimitive]) -> Vec<String> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::ProportionalText(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn probe_node_paints_the_live_value_and_repaints_on_a_new_frame() {
+    use super::super::paint_resources::PaintDependencies;
+    let (path, node) = probe_fixture_node(
+        "probe-render",
+        "(def ph (phasor 440))\n(def p1 (probe ph @id \"p1\" @view number))\n(out ph 1 @name audio)",
+    );
+    let path = path.display().to_string();
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+
+    let (prims, unbound) =
+        PaintDependencies::capture(|| build_primitives_for_patcher(&node, viewport));
+    let texts = patcher_texts(&prims);
+    assert!(texts.contains(&"number~".to_string()), "{texts:?}");
+    assert!(texts.contains(&"—".to_string()), "no instance yet: {texts:?}");
+    assert!(!unbound.is_empty(), "the read registers a paint dependency");
+
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, Some("fx77"));
+    assert!(unbound.changed(), "binding the instance repaints the patcher");
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("fx77", "p1", 0),
+        probe_frame(0.5, false),
+    );
+    let (prims, bound) =
+        PaintDependencies::capture(|| build_primitives_for_patcher(&node, viewport));
+    assert!(patcher_texts(&prims).contains(&"0.5000".to_string()));
+
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("fx77", "p1", 0),
+        probe_frame(-0.125, false),
+    );
+    assert!(bound.changed(), "a new frame invalidates the painted value");
+    let prims = build_primitives_for_patcher(&node, viewport);
+    assert!(patcher_texts(&prims).contains(&"-0.1250".to_string()));
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, None);
+}
+
+// ---------------------------------------------------------------------------
+// Probe scope view, insert-on-cable, view switch (spec §6.2, eseq-d1xr.6)
+// ---------------------------------------------------------------------------
+
+const SCOPE_FIXTURE_SOURCE: &str =
+    "(def ph (phasor 440))\n(def p1 (probe ph @id \"p1\" @view scope))\n(out p1 1 @name audio)";
+
+fn probe_test_viewport() -> WidgetViewport {
+    WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    }
+}
+
+fn patch_node_by_id<'a>(patch: &'a Patch, id: &str) -> &'a PatchNode {
+    patch
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| panic!("node {id}"))
+}
+
+fn undo_key_event() -> WidgetKeyEvent {
+    WidgetKeyEvent {
+        code: KeyCode::Char('z'),
+        modifiers: primary_shortcut_modifier(),
+    }
+}
+
+#[test]
+fn scope_probe_is_a_taller_node_with_ports_on_its_edges() {
+    let patch = parse(SCOPE_FIXTURE_SOURCE);
+    let scope = patch_node_by_id(&patch, "p1");
+    assert!(probe::is_scope_probe(scope));
+    let (width, height) = node_size(scope);
+    assert!(
+        (height - probe::SCOPE_DEFAULT_HEIGHT).abs() < 1e-4,
+        "{height}"
+    );
+    assert!((height - NODE_HEIGHT * 4.0).abs() < 1e-4);
+    assert!(width >= probe::SCOPE_DEFAULT_WIDTH, "{width}");
+
+    let mut number = scope.clone();
+    number.label = "probe @id \"p1\" @view number".to_string();
+    assert!(!probe::is_scope_probe(&number));
+    assert!(
+        node_size(&number).0 < width,
+        "the scope is wider than a number box"
+    );
+    assert_eq!(node_size(&number).1, NODE_HEIGHT);
+
+    // A height override applies to a scope only, never below its minimum.
+    let mut resized = scope.clone();
+    resized.height = Some(10.0);
+    assert_eq!(node_size(&resized).1, 10.0);
+    resized.height = Some(0.1);
+    assert_eq!(node_size(&resized).1, probe::SCOPE_MIN_HEIGHT);
+    number.height = Some(10.0);
+    assert_eq!(
+        node_size(&number).1,
+        NODE_HEIGHT,
+        "only a scope's height resizes"
+    );
+
+    // Ports sit on the scope's top and bottom edges, at the same inset a
+    // standard node uses, at any zoom.
+    let zoom = 1.6;
+    let pan = PatcherPanState {
+        zoom,
+        ..Default::default()
+    };
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 200.0,
+        height: 100.0,
+    };
+    let rects = patch_node_rects(&patch, rect, &pan);
+    let scope_rect = rects["p1"];
+    assert!((scope_rect.height - probe::SCOPE_DEFAULT_HEIGHT * zoom).abs() < 1e-3);
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let endpoints = |from: &str, to: &str| {
+        let connection = patch
+            .connections
+            .iter()
+            .find(|connection| connection.from_node == from && connection.to_node == to)
+            .unwrap_or_else(|| panic!("{from} -> {to}"));
+        connection_endpoints_at(
+            connection,
+            &rects,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+            zoom,
+        )
+        .unwrap()
+    };
+    let expected_x = scope_rect.col + PORT_EDGE_PADDING_CELLS * zoom;
+    let (_, inlet) = endpoints("ph", "p1");
+    assert!((inlet.0 - expected_x).abs() < 1e-3, "{inlet:?}");
+    assert!((inlet.1 - scope_rect.row).abs() < 1e-3);
+    let out_id = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "p1")
+        .unwrap()
+        .to_node
+        .clone();
+    let (outlet, _) = endpoints("p1", &out_id);
+    assert!((outlet.0 - expected_x).abs() < 1e-3, "{outlet:?}");
+    assert!((outlet.1 - (scope_rect.row + scope_rect.height)).abs() < 1e-3);
+    // The phasor's own outlet still sits at its standard inset.
+    let ph_rect = rects["ph"];
+    let (ph_outlet, _) = endpoints("ph", "p1");
+    assert!((ph_outlet.0 - (ph_rect.col + PORT_EDGE_PADDING_CELLS * zoom)).abs() < 1e-3);
+}
+
+#[test]
+fn scope_range_includes_zero_and_columns_bin_the_ring() {
+    use probe::{scope_columns, scope_target_range};
+    let close = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+
+    let range = scope_target_range(&[(0.2, 0.9)]).unwrap();
+    assert!(
+        close(range, (-0.072, 0.972)),
+        "0.2..0.9 gains a zero baseline: {range:?}"
+    );
+    let range = scope_target_range(&[(439.0, 441.0)]).unwrap();
+    assert!(
+        range.0 > 400.0,
+        "a steady offset keeps a tight axis: {range:?}"
+    );
+    let range = scope_target_range(&[(-1.0, 0.5), (-0.5, 1.0)]).unwrap();
+    assert!(close(range, (-1.16, 1.16)), "{range:?}");
+    let range = scope_target_range(&[(0.5, 0.5)]).unwrap();
+    assert!(
+        close(range, (0.45, 0.55)),
+        "a flat line is widened: {range:?}"
+    );
+    assert!(close(
+        scope_target_range(&[(-3.0, -1.0)]).unwrap(),
+        (-3.0 - 0.24, 0.24)
+    ));
+    assert!(scope_target_range(&[(f32::NAN, f32::INFINITY)]).is_none());
+    assert!(scope_target_range(&[]).is_none());
+
+
+    let plot = Rect {
+        col: 10.0,
+        row: 5.0,
+        width: 30.0,
+        height: 10.0,
+    };
+    let pairs = [
+        (-1.0, -0.5),
+        (-0.25, 0.0),
+        (0.0, 0.5),
+        (0.25, 1.0),
+        (f32::NAN, f32::NAN),
+        (f32::NAN, f32::NAN),
+        (-0.5, 0.5),
+        (0.0, 0.0),
+    ];
+    let columns = scope_columns(&pairs, plot, (-1.0, 1.0), 4);
+    assert_eq!(columns.len(), 3, "the all-NaN column leaves a gap");
+    let expected = [
+        (10.0, 0.0, -1.0, 0.0),
+        (20.0, 1.0, 0.0, 1.0),
+        (40.0, 0.5, -0.5, 3.0),
+    ];
+    for (column, (x, hi, lo, _)) in columns.iter().zip(expected) {
+        let row = |value: f32| plot.row + (1.0 - (value + 1.0) * 0.5) * plot.height;
+        assert!((column.x - x).abs() < 1e-4, "{column:?}");
+        assert!((column.top - row(hi)).abs() < 1e-4, "{column:?}");
+        assert!((column.bottom - row(lo)).abs() < 1e-4, "{column:?}");
+    }
+    // Out-of-range values clamp to the plot.
+    let clamped = scope_columns(&[(-5.0, 5.0), (0.0, 0.0)], plot, (-1.0, 1.0), 4);
+    assert_eq!(clamped[0].top, plot.row);
+    assert_eq!(clamped[0].bottom, plot.row + plot.height);
+}
+
+fn scope_frame(pairs: Vec<(f32, f32)>, stale: bool) -> eseqlisp_live_audio::ProbeFrame {
+    let last = pairs.last().map(|pair| pair.1).unwrap_or(0.0);
+    eseqlisp_live_audio::ProbeFrame {
+        revision: 1,
+        last,
+        min: -1.0,
+        max: 1.0,
+        seq: 1,
+        stale,
+        scope: Some(std::sync::Arc::new(pairs)),
+        display_range: None,
+    }
+}
+
+/// Vertices of the meshes drawn inside `rect`.
+fn mesh_vertices_inside(prims: &[GpuPrimitive], rect: Rect) -> Vec<super::super::GpuShadedVertex> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            GpuPrimitive::ForegroundMesh(mesh) => Some(mesh),
+            _ => None,
+        })
+        .filter(|mesh| {
+            mesh.vertices.iter().all(|vertex| {
+                vertex.point[0] >= rect.col - 0.5
+                    && vertex.point[0] <= rect.col + rect.width + 0.5
+                    && vertex.point[1] >= rect.row - 0.5
+                    && vertex.point[1] <= rect.row + rect.height + 0.5
+            })
+        })
+        .flat_map(|mesh| mesh.vertices.iter().cloned())
+        .collect()
+}
+
+#[test]
+fn scope_probe_paints_the_ring_as_an_envelope_and_dims_a_held_frame() {
+    let (path, node) = probe_fixture_node("probe-scope-render", SCOPE_FIXTURE_SOURCE);
+    let path = path.display().to_string();
+    let viewport = probe_test_viewport();
+    let key = patcher_state_key(&node);
+
+    // No live instance: the header and the plot both show the placeholder.
+    let prims = build_primitives_for_patcher(&node, viewport);
+    let texts = patcher_texts(&prims);
+    assert!(texts.contains(&"scope~".to_string()), "{texts:?}");
+    assert_eq!(
+        texts.iter().filter(|text| *text == "—").count(),
+        2,
+        "header value and empty plot: {texts:?}"
+    );
+    let (patch, pan, _) = interaction::load_interactive_patch_for_node(&node).unwrap();
+    let scope_rect = patch_node_rects(&patch, node.rect, &pan)["p1"];
+    assert!(mesh_vertices_inside(&prims, scope_rect).is_empty());
+
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, Some("fx91"));
+    let pairs = (0..256)
+        .map(|index| {
+            let value = (index as f32 / 256.0 * std::f32::consts::TAU).sin();
+            (value - 0.05, value + 0.05)
+        })
+        .collect::<Vec<_>>();
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("fx91", "p1", 0),
+        scope_frame(pairs.clone(), false),
+    );
+    let prims = build_primitives_for_patcher(&node, viewport);
+    let texts = patcher_texts(&prims);
+    assert!(!texts.contains(&"—".to_string()), "{texts:?}");
+    // Axis labels: the displayed range, padded around ±1.05.
+    let range = probe::scope_target_range(&pairs).unwrap();
+    assert!(
+        texts.contains(&probe::format_probe_value(range.1)),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&probe::format_probe_value(range.0)),
+        "{texts:?}"
+    );
+    let zoom = patcher_zoom(&pan);
+    let header = Rect {
+        height: NODE_HEIGHT * zoom,
+        ..scope_rect
+    };
+    let plot = render::scope_plot_rect(scope_rect, header, zoom);
+    assert!(
+        plot.row >= scope_rect.row + NODE_HEIGHT * zoom - 1e-4,
+        "plot below the header"
+    );
+    let vertices = mesh_vertices_inside(&prims, scope_rect);
+    assert!(
+        vertices.len() > 100,
+        "band + outline + zero line: {}",
+        vertices.len()
+    );
+    let rows = vertices.iter().map(|vertex| vertex.point[1]);
+    let (top, bottom) = rows.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), row| {
+        (lo.min(row), hi.max(row))
+    });
+    // The sine's peaks reach most of the plot height (allowing for the
+    // headroom and the stroke's own width).
+    assert!(
+        top < plot.row + plot.height * 0.2,
+        "top {top} plot {plot:?}"
+    );
+    assert!(
+        bottom > plot.row + plot.height * 0.8,
+        "bottom {bottom} plot {plot:?}"
+    );
+    assert!(top >= plot.row - 0.5 && bottom <= plot.row + plot.height + 0.5);
+    let live_alpha = vertices
+        .iter()
+        .map(|vertex| vertex.color.a)
+        .fold(0.0f32, f32::max);
+
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("fx91", "p1", 0),
+        scope_frame(pairs, true),
+    );
+    let prims = build_primitives_for_patcher(&node, viewport);
+    let held_alpha = mesh_vertices_inside(&prims, scope_rect)
+        .iter()
+        .map(|vertex| vertex.color.a)
+        .fold(0.0f32, f32::max);
+    assert!(
+        held_alpha < live_alpha * 0.6,
+        "held {held_alpha} live {live_alpha}"
+    );
+
+    // The axis follows the publisher's eased range when it carries one,
+    // not this frame's own extent.
+    eseqlisp_live_audio::publish_probe_frame(
+        eseqlisp_live_audio::probe_frame_key("fx91", "p1", 0),
+        eseqlisp_live_audio::ProbeFrame {
+            display_range: Some((-4.0, 4.0)),
+            ..scope_frame(
+                (0..256)
+                    .map(|index| ((index as f32).sin(), (index as f32).sin()))
+                    .collect(),
+                false,
+            )
+        },
+    );
+    let texts = patcher_texts(&build_primitives_for_patcher(&node, viewport));
+    assert!(texts.contains(&"4.000".to_string()), "{texts:?}");
+    assert!(texts.contains(&"-4.000".to_string()), "{texts:?}");
+    eseqlisp_live_audio::publish_patch_probe_instance(&path, None);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+}
+
+#[test]
+fn scope_probe_resizes_in_both_axes_persists_in_the_sidecar_and_undoes() {
+    let (path, node) = probe_fixture_node("probe-scope-resize", SCOPE_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let rect = patch_node_rects(&root_patch, node.rect, &pan)["p1"];
+    let start_position = patch_node_by_id(&root_patch, "p1").position;
+    let (start_width, start_height) = (rect.width / zoom, rect.height / zoom);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("p1".to_string());
+    set_patcher_interaction_state(key, state);
+
+    let corner = (rect.col + rect.width, rect.row + rect.height);
+    handle_patcher_pointer_down(&node, corner.0, corner.1, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_drag(
+        &node,
+        corner.0 + 4.0,
+        corner.1 + 3.0,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
+    assert_eq!(
+        handle_patcher_pointer_up(&node, corner.0 + 4.0, corner.1 + 3.0),
+        PatcherChangeKind::Layout
+    );
+    let expected = (start_width + 4.0 / zoom, start_height + 3.0 / zoom);
+    let edited = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let resized = patch_node_by_id(&edited, "p1");
+    assert_eq!(
+        resized.position, start_position,
+        "bottom-right keeps the top-left"
+    );
+    assert!((resized.width.unwrap() - expected.0).abs() < 1e-3);
+    assert!((resized.height.unwrap() - expected.1).abs() < 1e-3);
+    assert!((node_size(resized).1 - expected.1).abs() < 1e-3);
+
+    // One undo step restores the default size; redo brings it back.
+    assert!(press_patcher_key(&node, undo_key_event()).is_some());
+    let undone = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    assert!(patch_node_by_id(&undone, "p1").height.is_none());
+    assert!((node_size(patch_node_by_id(&undone, "p1")).1 - start_height).abs() < 1e-3);
+    let redo = WidgetKeyEvent {
+        code: KeyCode::Char('z'),
+        modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
+    };
+    assert!(press_patcher_key(&node, redo).is_some());
+
+    // The sidecar stores the size for the scope only; reloading restores it.
+    let layout = match patcher_layout_payload(&node) {
+        Value::Map(map) => match map.get("layout").map(|value| value.borrow().clone()) {
+            Some(Value::String(layout)) => layout,
+            other => panic!("expected layout string, got {other:?}"),
+        },
+        other => panic!("expected layout payload map, got {other:?}"),
+    };
+    let sidecar_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let nodes = &sidecar_json["root"]["nodes"];
+    assert!((nodes["p1"]["width"].as_f64().unwrap() - expected.0 as f64).abs() < 1e-3);
+    assert!((nodes["p1"]["height"].as_f64().unwrap() - expected.1 as f64).abs() < 1e-3);
+    assert!(nodes["ph"].get("height").is_none(), "{nodes}");
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let reloaded = load_patch_from_props(&node.props).unwrap().1;
+    let reloaded_scope = patch_node_by_id(&reloaded, "p1");
+    assert!((reloaded_scope.height.unwrap() - expected.1).abs() < 1e-3);
+    assert!((reloaded_scope.width.unwrap() - expected.0).abs() < 1e-3);
+}
+
+#[test]
+fn scope_probe_top_left_resize_keeps_the_bottom_right_corner() {
+    let (_path, node) = probe_fixture_node("probe-scope-resize-tl", SCOPE_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let pan = get_patcher_pan_state(key);
+    let zoom = patcher_zoom(&pan);
+    let rect = patch_node_rects(&root_patch, node.rect, &pan)["p1"];
+    let start = patch_node_by_id(&root_patch, "p1").position;
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("p1".to_string());
+    set_patcher_interaction_state(key, state);
+    handle_patcher_pointer_down(&node, rect.col, rect.row, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_drag(
+        &node,
+        rect.col - 2.0,
+        rect.row - 1.5,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
+    handle_patcher_pointer_up(&node, rect.col - 2.0, rect.row - 1.5);
+    let edited =
+        patch_with_interaction_state(root_patch, &get_patcher_interaction_state(key), "root");
+    let resized = patch_node_by_id(&edited, "p1");
+    let (width, height) = node_size(resized);
+    assert!((resized.position.0 - (start.0 - 2.0 / zoom)).abs() < 1e-3);
+    assert!((resized.position.1 - (start.1 - 1.5 / zoom)).abs() < 1e-3);
+    assert!((resized.position.0 + width - (start.0 + rect.width / zoom)).abs() < 1e-3);
+    assert!((resized.position.1 + height - (start.1 + rect.height / zoom)).abs() < 1e-3);
+}
+
+const CABLE_PROBE_FIXTURE_SOURCE: &str =
+    "(def ph (phasor 440))\n(def lp (* ph 0.5))\n(out lp 1 @name audio)";
+
+fn select_cable(node: &LayoutNode, from: &str, to: &str) -> String {
+    let key = patcher_state_key(node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let mut state = get_patcher_interaction_state(key);
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    let connection = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == from && connection.to_node == to)
+        .unwrap_or_else(|| panic!("{from} -> {to}"));
+    let cable_id = source_connection_id(connection);
+    state.selected_nodes.clear();
+    state.selected_cable = Some(cable_id.clone());
+    set_patcher_interaction_state(key, state);
+    cable_id
+}
+
+#[test]
+fn insert_scope_on_a_cable_splices_a_probe_at_its_midpoint_in_one_undo_step() {
+    let (_path, node) = probe_fixture_node("probe-insert-cable", CABLE_PROBE_FIXTURE_SOURCE);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let original = root_patch.clone();
+    let pan = get_patcher_pan_state(key);
+    let input_indices = patch_input_indices(&original);
+    let cable = original
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "ph" && connection.to_node == "lp")
+        .unwrap()
+        .clone();
+    let (start, end) = connection_endpoints_at(
+        &cable,
+        &patch_node_rects(&original, node.rect, &pan),
+        &input_indices,
+        &patch_input_slot_counts(&original, &input_indices),
+        &patch_output_counts(&original),
+        patcher_zoom(&pan),
+    )
+    .unwrap();
+    let midpoint = screen_to_model(
+        node.rect,
+        &pan,
+        ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5),
+    );
+
+    select_cable(&node, "ph", "lp");
+    assert!(run_patcher_command(&node, "insert-scope").is_some());
+
+    let state = get_patcher_interaction_state(key);
+    let edited = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let probe_node = edited
+        .nodes
+        .iter()
+        .find(|patch_node| probe::is_probe_node(patch_node))
+        .expect("spliced probe");
+    assert_eq!(probe::probe_node_id(probe_node).as_deref(), Some("p1"));
+    assert!(probe::is_scope_probe(probe_node));
+    assert_eq!(
+        state.selected_nodes,
+        HashSet::from([probe_node.id.clone()]),
+        "the new probe is selected"
+    );
+    assert!(state.selected_cable.is_none());
+    let (width, height) = node_size(probe_node);
+    let center = (
+        probe_node.position.0 + width * 0.5,
+        probe_node.position.1 + height * 0.5,
+    );
+    assert!(
+        (center.0 - midpoint.0).abs() < 1e-3 && (center.1 - midpoint.1).abs() < 1e-3,
+        "centred on the cable midpoint: {center:?} vs {midpoint:?}"
+    );
+    let links = |patch: &Patch| {
+        let mut links = patch
+            .connections
+            .iter()
+            .map(|connection| {
+                (
+                    connection.from_node.clone(),
+                    connection.to_node.clone(),
+                    connection.to_input,
+                )
+            })
+            .collect::<Vec<_>>();
+        links.sort();
+        links
+    };
+    let edited_links = links(&edited);
+    assert!(edited_links.contains(&("ph".to_string(), probe_node.id.clone(), 0)));
+    assert!(edited_links.contains(&(probe_node.id.clone(), "lp".to_string(), cable.to_input)));
+    assert!(
+        !edited_links
+            .iter()
+            .any(|(from, to, _)| from == "ph" && to == "lp"),
+        "the original cable is replaced: {edited_links:?}"
+    );
+
+    // Emitted source routes the signal through the probe.
+    let (source, _) = persistence_payload_source_and_layout(&node, "insert scope");
+    assert!(
+        source.contains("(probe ph @id \"p1\" @view scope)"),
+        "{source}"
+    );
+    let reparsed = parse(&source);
+    let reparsed_probe = reparsed
+        .nodes
+        .iter()
+        .find(|patch_node| probe::is_probe_node(patch_node))
+        .expect("probe in source");
+    let lp = reparsed
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "*")
+        .expect("multiply");
+    assert!(
+        reparsed
+            .connections
+            .iter()
+            .any(|connection| connection.from_node == reparsed_probe.id
+                && connection.to_node == lp.id),
+        "the multiply reads the probe:\n{source}"
+    );
+
+    // One undo step takes the whole splice back.
+    assert!(press_patcher_key(&node, undo_key_event()).is_some());
+    let undone =
+        patch_with_interaction_state(root_patch, &get_patcher_interaction_state(key), "root");
+    assert!(!undone.nodes.iter().any(probe::is_probe_node));
+    assert_eq!(links(&undone), links(&original));
+}
+
+#[test]
+fn insert_probe_mints_a_fresh_id_and_needs_a_selected_forward_cable() {
+    let source = "(def ph (phasor 440))\n(def p1 (probe ph @id \"p1\" @view number))\n(def lp (* p1 0.5))\n(out lp 1 @name audio)";
+    let (_path, node) = probe_fixture_node("probe-insert-mint", source);
+    let key = patcher_state_key(&node);
+    assert!(
+        run_patcher_command(&node, "insert-probe").is_none(),
+        "no cable selected: the command does not apply"
+    );
+    select_cable(&node, "p1", "lp");
+    assert!(run_patcher_command(&node, "insert-probe").is_some());
+    let state = get_patcher_interaction_state(key);
+    let texts = state
+        .edit_state
+        .nodes
+        .values()
+        .map(|edit| edit.text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, vec!["probe @id \"p2\" @view number".to_string()]);
+}
+
+#[test]
+fn switching_a_probe_between_number_and_scope_keeps_its_id() {
+    let source = "(def ph (phasor 440))\n(def cut (probe ph @id \"cut\" @view number))\n(out cut 1 @name audio)";
+    let (_path, node) = probe_fixture_node("probe-view-switch", source);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("cut".to_string());
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        run_patcher_command(&node, "show-as-number").is_none(),
+        "already a number"
+    );
+    assert!(run_patcher_command(&node, "show-as-scope").is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", "cut"),
+        "probe @id \"cut\" @view scope"
+    );
+    let edited = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let cut = patch_node_by_id(&edited, "cut");
+    assert!(probe::is_scope_probe(cut));
+    assert!((node_size(cut).1 - probe::SCOPE_DEFAULT_HEIGHT).abs() < 1e-4);
+    let (source, _) = persistence_payload_source_and_layout(&node, "view switch");
+    assert!(
+        source.contains("(probe ph @id \"cut\" @view scope)"),
+        "{source}"
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("cut".to_string());
+    set_patcher_interaction_state(key, state);
+    assert!(run_patcher_command(&node, "show-as-number").is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", "cut"),
+        "probe @id \"cut\" @view number"
+    );
+    assert!(press_patcher_key(&node, undo_key_event()).is_some());
+    assert_eq!(
+        committed_node_text(&node, "root", "cut"),
+        "probe @id \"cut\" @view scope"
+    );
+
+    // Not a probe: the commands do not apply.
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = HashSet::from(["ph".to_string()]);
+    set_patcher_interaction_state(key, state);
+    assert!(run_patcher_command(&node, "show-as-scope").is_none());
+}
+
+#[test]
+fn context_menu_payload_reports_a_probe_view() {
+    let (_path, node) = probe_fixture_node("probe-context-menu", SCOPE_FIXTURE_SOURCE);
+    let (patch, pan, _) = interaction::load_interactive_patch_for_node(&node).unwrap();
+    let rects = patch_node_rects(&patch, node.rect, &pan);
+    let probe_view_at = |id: &str| {
+        let rect = rects[id];
+        let info = patcher_context_menu_info(
+            &node,
+            KeyModifiers::empty(),
+            rect.col + rect.width * 0.5,
+            rect.row + rect.height * 0.5,
+        );
+        let Value::Map(info) = info else {
+            panic!("map payload");
+        };
+        let hit = info["node"].borrow().clone();
+        let Value::Map(hit) = hit else {
+            panic!("node hit for {id}: {hit:?}");
+        };
+        let view = hit["probe-view"].borrow().clone();
+        view
+    };
+    assert_eq!(probe_view_at("p1"), Value::String("scope".to_string()));
+    assert_eq!(probe_view_at("ph"), Value::Nil);
 }

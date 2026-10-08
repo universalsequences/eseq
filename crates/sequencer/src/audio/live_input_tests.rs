@@ -23,7 +23,7 @@ fn live_scene_transpose_reaches_synth_and_preserves_held_note_identity() {
         effect_latency_samples: None, dylib_path: Default::default(), asset_base: None,
         version: 1, process_abi: String::new(), total_memory_slots: 1,
         params: vec![], groups: vec![], envelopes: vec![], inputs: vec![],
-        modulators: vec![], mod_outputs: vec![], amp_output_channel: None, mod_destinations: vec![],
+        modulators: vec![], mod_outputs: vec![], amp_output_channel: None, probes: vec![], mod_destinations: vec![],
         n_inputs: 4, n_outputs: 1, tensors: vec![], tensor_init_data: vec![],
         voice_cell_id: None,
     };

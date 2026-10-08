@@ -7,6 +7,7 @@ mod tests;
 pub(super) const COMMANDS: &[&str] = &[
     "move-saved-instrument",
     "load-instrument-preset",
+    "step-instrument-preset",
     "save-preset",
     "overwrite-preset",
     "new-project",
@@ -32,7 +33,6 @@ pub(super) fn handle(
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
-    let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
     let bus_state = ctx.shared.bus_state.clone();
@@ -115,26 +115,14 @@ pub(super) fn handle(
                                     &mut *ctx.track_names,
                                     &track_pan_ids,
                                     &record_armed,
-                                    &selected_steps,
                                     &accumulator_names,
-                                    &ctx.meters.cached_track_peak_levels,
-                                    &ctx.meters.cached_bus_peak_levels,
                                     &ui_epoch,
                                     lg_raw,
                                 );
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "instrument-panel",
-                                    build_instrument_panel_value(
-                                        &app,
-                                        track,
-                                        &selected_steps,
-                                    ),
-                                );
-                                sync_sidebar_browser(rt, &app, track);
+                                sync_sidebar_browser(&app, track);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -151,6 +139,42 @@ pub(super) fn handle(
                     }
                 }
             }
+        }
+        // Groovebox-style preset stepping: load the preset before (-1) or
+        // after (+1) the track's loaded one in its preset list, wrapping.
+        "step-instrument-preset" => {
+            let track = extract_usize_from_payload(&payload, "track")
+                .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+            let delta = match &payload {
+                Value::Map(map) => match map.get("delta").map(|cell| cell.borrow().clone()) {
+                    Some(Value::Number(n)) if n < 0.0 => -1i64,
+                    _ => 1,
+                },
+                _ => 1,
+            };
+            let items = visible_preset_items_for_track(app, track);
+            if items.is_empty() {
+                editor.handle_host_event(HostEvent::Status("No presets for this track".to_string()));
+                return;
+            }
+            let loaded = app.state.pattern.track_sound_state.lock().unwrap()
+                .get(track)
+                .and_then(|meta| meta.loaded_preset.clone())
+                .unwrap_or_default();
+            let len = items.len() as i64;
+            let next = match items.iter().position(|item| *item == loaded) {
+                Some(index) => (index as i64 + delta).rem_euclid(len),
+                None if delta < 0 => len - 1,
+                None => 0,
+            } as usize;
+            // load-instrument-preset loads onto the current track.
+            current_track.store(track, Ordering::Relaxed);
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "name".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(Value::String(items[next].clone()))),
+            );
+            handle("load-instrument-preset", Value::Map(map), app, editor, ctx);
         }
         "save-preset" => {
             if let Value::Map(ref map) = payload {
@@ -179,7 +203,7 @@ pub(super) fn handle(
                             app.save_current_track_as_preset(&name, overwrite);
                         // Refresh sidebar presets list
                         let rt = editor.runtime_mut();
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         match save_result {
@@ -199,7 +223,7 @@ pub(super) fn handle(
             app.ui.cursor_track = track;
             app.overwrite_loaded_preset();
             let rt = editor.runtime_mut();
-            sync_sidebar_browser(rt, &app, track);
+            sync_sidebar_browser(&app, track);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
         }
@@ -250,23 +274,9 @@ pub(super) fn handle(
 
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
             let playing = state.transport.playing.load(Ordering::Relaxed);
-            let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let rt = editor.runtime_mut();
-            sync_project_scene_state(rt, &state);
-            sync_project_state(rt, &app);
-            rt.set_reactive("SEQ", "playing", Value::Bool(playing));
-            rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-            rt.set_reactive(
-                "SEQ",
-                "transport-playhead",
-                Value::Number(transport_playhead as f64),
-            );
-            sync_bus_mixer_state(rt, &app);
-            sync_groups_bindings(rt, &app.groups, &app.grooves);
-            sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-            sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-            sync_mod_port_level_fields(rt, &ctx.meters.cached_mod_port_levels);
+            sync_project_replacement(rt, &state);
+            record_preset_listings();
             // New projects have default tracks; publish their real topology,
             // rather than leaving live input and the UI with empty mirrors.
             sync_track_topology_state(
@@ -275,14 +285,9 @@ pub(super) fn handle(
                 &state,
                 ctx.track_names,
                 0,
-                &selected_steps,
-                &piano_roll_selection,
                 &accumulator_names,
-                &record_armed,
-                &ctx.meters.cached_track_peak_levels,
             );
-            rt.set_reactive("SEQ", "selected-steps", Value::List(vec![]));
-            sync_sidebar_browser(rt, &app, 0);
+            sync_sidebar_browser(&app, 0);
             rt.clear_subtree_effects_for_named_target("*sequencer*");
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -290,13 +295,9 @@ pub(super) fn handle(
 
             ctx.frame.prev_current_track = 0;
             ctx.frame.prev_playhead = 0;
-            ctx.frame.prev_transport_playhead = transport_playhead;
             ctx.frame.prev_bpm = bpm;
             ctx.frame.prev_playing = playing;
             ctx.frame.prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-            ctx.frame.prev_track_peak_levels.clear();
-            ctx.frame.prev_modulator_phases = ctx.meters.cached_modulator_phases.clone();
-            ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
             ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, &app);
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
             ctx.frame.prev_ui_epoch = ui_epoch.fetch_add(1, Ordering::Relaxed) + 1;
@@ -328,7 +329,7 @@ pub(super) fn handle(
             match app.save_project_with_name(requested_name.as_deref()) {
                 Ok(save_name) => {
                     let rt = editor.runtime_mut();
-                    sync_project_state(rt, &app);
+                    record_preset_listings();
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -359,7 +360,7 @@ pub(super) fn handle(
                     match app.promote_preset_to_sound(track, &name) {
                         Ok(_) => {
                             let rt = editor.runtime_mut();
-                            sync_project_state(rt, &app);
+                            record_preset_listings();
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.handle_host_event(HostEvent::Status(format!(
@@ -395,7 +396,6 @@ pub(super) fn handle(
             };
             eprintln!("metal_seq: host load-project name={project_name}");
             ui_invalidations.clear();
-            expanded_step_projection.clear();
             match app.queue_project_load_named(&project_name) {
                 Ok(()) => {
                     eprintln!("metal_seq: queued project load name={project_name}");

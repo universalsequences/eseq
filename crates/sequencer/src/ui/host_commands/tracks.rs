@@ -25,6 +25,21 @@ pub(super) const COMMANDS: &[&str] = &[
     "remove-track-from-group",
 ];
 
+/// The browser's saved-instrument row `name` spins (`""` stops it).
+fn show_loading(editor: &mut Editor, name: &str) {
+    let name = escape_lisp_string(name);
+    let _ = editor
+        .runtime_mut()
+        .eval_str(&format!("(eseq.browser/show-loading! \"{name}\")"));
+}
+
+/// The browser shows tab `name`, its searches kept.
+fn show_browser_tab(editor: &mut Editor, name: &str) {
+    let _ = editor
+        .runtime_mut()
+        .eval_str(&format!("(eseq.browser/show-browser-tab! \"{name}\")"));
+}
+
 fn extract_track_indices(payload: &Value) -> Option<Vec<usize>> {
     let Value::Map(fields) = payload else {
         return None;
@@ -99,17 +114,8 @@ fn sync_after_track_topology_delete(
         &state,
         ctx.track_names,
         new_idx,
-        &ctx.shared.selected_steps,
-        &ctx.shared.piano_roll_selection,
         &ctx.shared.accumulator_names,
-        &ctx.shared.record_armed,
-        &ctx.meters.cached_track_peak_levels,
     );
-    sync_bus_mixer_state(rt, app);
-    sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-    sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-    sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-    sync_mod_port_level_fields(rt, &ctx.meters.cached_mod_port_levels);
     rt.clear_subtree_effects_for_named_target("*sequencer*");
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -131,8 +137,6 @@ pub(super) fn handle(
     let lg_raw = ctx.shared.lg_raw;
     let current_track = ctx.shared.current_track.clone();
     let selected_tracks = ctx.shared.selected_tracks.clone();
-    let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -159,12 +163,8 @@ pub(super) fn handle(
                     match app.apply_recorded_track_name(track, &requested_name) {
                         Ok(app::edit::EditOutcome::Applied(result)) => {
                             *ctx.track_names = app.tracks.clone();
+                            crate::param_words::set_track_word_names(ctx.track_names);
                             let rt = editor.runtime_mut();
-                            rt.set_reactive(
-                                "SEQ",
-                                "track-names",
-                                build_track_names(&ctx.track_names),
-                            );
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             editor.show_transient_message(result.label);
@@ -189,8 +189,6 @@ pub(super) fn handle(
                     *track_groups.lock().unwrap() = app.groups.clone();
                     *bus_state.lock().unwrap() = app.buses.clone();
                     let rt = editor.runtime_mut();
-                    sync_groups_bindings(rt, &app.groups, &app.grooves);
-                    sync_bus_mixer_state(rt, &app);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.show_transient_message("Rename track group".to_string());
@@ -265,66 +263,9 @@ pub(super) fn handle(
                     push_solo_mutes(lg_raw, app, &state);
                 }
                 record_armed.lock().unwrap().push(false);
+                crate::param_words::set_track_word_names(ctx.track_names);
                 let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "num-tracks",
-                    Value::Number(ctx.track_names.len() as f64),
-                );
-                rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                set_current_track_reactive(rt, app.tracks.len(), idx);
-                rt.set_reactive("SEQ", "track-names", build_track_names(&ctx.track_names));
-                sync_all_track_sequencer_state(rt, &state, &app, idx, &selected_steps);
-                rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
-                sync_step_param_lists(rt, &state, idx);
-                sync_track_mixer_state(rt, &app, &state);
-                sync_bus_mixer_state(rt, &app);
-                sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-                sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                rt.set_reactive(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(
-                        &state,
-                        idx,
-                        &app.graph.effect_descriptors,
-                        &selected_steps,
-                    ),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "midi-effects",
-                    build_midi_effects_value(&state, idx, &selected_steps),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, idx, &selected_steps),
-                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                let selected_neural_snapshot =
-                    selected_neural_neurons.lock().unwrap().clone();
-                sync_track_params_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    idx,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
-                sync_fx_param_binding_fields_with_neural_selection(
-                    rt,
-                    &app,
-                    &state,
-                    idx,
-                    &selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "step-has-plocks",
-                    build_step_has_plocks(&state, idx, &app.graph.effect_descriptors),
-                );
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -408,10 +349,7 @@ pub(super) fn handle(
                         &mut *ctx.track_names,
                         &track_pan_ids,
                         &record_armed,
-                        &selected_steps,
                         &accumulator_names,
-                        &ctx.meters.cached_track_peak_levels,
-                        &ctx.meters.cached_bus_peak_levels,
                         &ui_epoch,
                         lg_raw,
                     );
@@ -443,10 +381,7 @@ pub(super) fn handle(
                     &mut *ctx.track_names,
                     &track_pan_ids,
                     &record_armed,
-                    &selected_steps,
                     &accumulator_names,
-                    &ctx.meters.cached_track_peak_levels,
-                    &ctx.meters.cached_bus_peak_levels,
                     &ui_epoch,
                     lg_raw,
                 );
@@ -472,19 +407,15 @@ pub(super) fn handle(
                     match load_or_convert_sampler_track(
                         &mut app,
                         &mut editor,
-                        &state,
                         &current_track,
                         &mut *ctx.track_names,
-                        &selected_steps,
                         lg_raw,
                         track,
                         None,
                         preserve_track_selection,
                     ) {
                         Ok(result) => {
-                            let _ = editor
-                                .runtime_mut()
-                                .eval_str("(set! sbrowser-tab \"samples\")");
+                            show_browser_tab(editor, "samples");
                             let status = result.reset_summary.map_or_else(
                                 || format!("Sampler already active ({})", result.name),
                                 |summary| {
@@ -573,83 +504,10 @@ pub(super) fn handle(
                         }
                         // Extend record_armed for new track
                         record_armed.lock().unwrap().push(false);
-                        // Update reactive state
+                        crate::param_words::set_track_word_names(ctx.track_names);
                         let rt = editor.runtime_mut();
-                        rt.set_reactive(
-                            "SEQ",
-                            "num-tracks",
-                            Value::Number(ctx.track_names.len() as f64),
-                        );
-                        rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                        set_current_track_reactive(rt, app.tracks.len(), selected);
-                        rt.set_reactive(
-                            "SEQ",
-                            "track-names",
-                            build_track_names(&ctx.track_names),
-                        );
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &state,
-                            &app,
-                            selected,
-                            &selected_steps,
-                        );
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, selected));
-                        sync_step_param_lists(rt, &state, selected);
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_groups_bindings(rt, &app.groups, &app.grooves);
-                        sync_bus_mixer_state(rt, &app);
-                        sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-                        sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                selected,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(&state, selected, &selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "instrument-panel",
-                            build_instrument_panel_value(&app, selected, &selected_steps),
-                        );
                         *accumulator_names.lock().unwrap() =
                             build_accumulator_names(&app);
-                        let selected_neural_snapshot =
-                            selected_neural_neurons.lock().unwrap().clone();
-                        sync_track_params_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            selected,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
-                        sync_fx_param_binding_fields_with_neural_selection(
-                            rt,
-                            &app,
-                            &state,
-                            selected,
-                            &selected_steps,
-                            Some(&selected_neural_snapshot),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                selected,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -687,16 +545,13 @@ pub(super) fn handle(
                         .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name)),
                 ) {
                     if track_runs_instrument(&app, track, &instrument_name) {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         apply_dropped_instrument_preset(
                             &mut app,
                             &mut editor,
                             track,
                             preset,
                             &current_track,
-                            &selected_steps,
                             &ui_epoch,
                         );
                         return;
@@ -704,10 +559,7 @@ pub(super) fn handle(
                 }
             }
             if let Some(pending) = ctx.sessions.pending_saved_instrument_load.as_ref() {
-                let escaped = escape_lisp_string(&pending.name);
-                let _ = editor.runtime_mut().eval_str(&format!(
-                    "(set! sbrowser-loading-instrument-name \"{escaped}\")"
-                ));
+                show_loading(editor, &pending.name);
                 editor.handle_host_event(HostEvent::Status(
                     "An instrument is already loading".to_string(),
                 ));
@@ -715,9 +567,7 @@ pub(super) fn handle(
             }
             let Some(instrument_name) = extract_string_from_payload(&payload, "name")
             else {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                show_loading(editor, "");
                 editor.handle_host_event(HostEvent::Status(
                     "Instrument load is missing a name".to_string(),
                 ));
@@ -727,9 +577,7 @@ pub(super) fn handle(
                 extract_bool_from_payload(&payload, "preserve-track-selection");
             let target = if name == "swap-track-instrument" {
                 let Some(track) = extract_usize_from_payload(&payload, "track") else {
-                    let _ = editor
-                        .runtime_mut()
-                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                    show_loading(editor, "");
                     editor.handle_host_event(HostEvent::Status(
                         "Instrument swap is missing a track".to_string(),
                     ));
@@ -742,9 +590,7 @@ pub(super) fn handle(
                 ) {
                     Ok(target) => target,
                     Err(error) => {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Cannot swap instrument: {error}"
                         )));
@@ -761,10 +607,7 @@ pub(super) fn handle(
                     pad_note: extract_i32_from_payload(&payload, "pad-note"),
                 }
             };
-            let escaped = escape_lisp_string(&instrument_name);
-            let _ = editor.runtime_mut().eval_str(&format!(
-                "(set! sbrowser-loading-instrument-name \"{escaped}\")"
-            ));
+            show_loading(editor, &instrument_name);
             // The browser row names a versioned instrument by its top folder;
             // the track gets the lineage's `current` release, pinned
             // (docs/instrument-versioning-spec.md §Ids). The loading marker
@@ -775,9 +618,7 @@ pub(super) fn handle(
                 match sequencer::lisp_host::load_instrument_source(&instrument_name) {
                     Ok(source) => source,
                     Err(error) => {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Error loading instrument source: {error}"
                         )));
@@ -789,9 +630,7 @@ pub(super) fn handle(
             ) {
                 Ok(run_mode) => run_mode,
                 Err(error) => {
-                    let _ = editor
-                        .runtime_mut()
-                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                    show_loading(editor, "");
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error loading instrument metadata: {error}"
                     )));
@@ -805,9 +644,7 @@ pub(super) fn handle(
                 &source,
                 run_mode,
             ) {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                show_loading(editor, "");
                 match cached_result {
                     Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
                         let committed = finish_added_instrument_track(
@@ -820,9 +657,7 @@ pub(super) fn handle(
                                 track_names: &mut *ctx.track_names,
                                 track_pan_ids: &track_pan_ids,
                                 record_armed: &record_armed,
-                                selected_steps: &selected_steps,
                                 accumulator_names: &accumulator_names,
-                                cached_track_peak_levels: &ctx.meters.cached_track_peak_levels,
                                 group_id,
                                 pad_note,
                                 track_groups: &track_groups,
@@ -837,7 +672,6 @@ pub(super) fn handle(
                                 track,
                                 preset,
                                 &current_track,
-                                &selected_steps,
                                 &ui_epoch,
                             );
                         }
@@ -855,10 +689,8 @@ pub(super) fn handle(
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,
-                                state: &state,
                                 current_track: &current_track,
                                 track_names: &mut *ctx.track_names,
-                                selected_steps: &selected_steps,
                                 fx_epoch: &fx_epoch,
                                 ui_epoch: &ui_epoch,
                             },
@@ -870,7 +702,6 @@ pub(super) fn handle(
                                 track,
                                 preset,
                                 &current_track,
-                                &selected_steps,
                                 &ui_epoch,
                             );
                         }
@@ -1142,10 +973,7 @@ pub(super) fn handle(
                                 &mut *ctx.track_names,
                                 &track_pan_ids,
                                 &record_armed,
-                                &selected_steps,
                                 &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
                                 preserve_track_selection,
@@ -1184,10 +1012,7 @@ pub(super) fn handle(
                             &mut *ctx.track_names,
                             &track_pan_ids,
                             &record_armed,
-                            &selected_steps,
                             &accumulator_names,
-                            &ctx.meters.cached_track_peak_levels,
-                            &ctx.meters.cached_bus_peak_levels,
                             &ui_epoch,
                             lg_raw,
                         );
@@ -1266,17 +1091,7 @@ pub(super) fn handle(
                 *bus_state.lock().unwrap() = app.buses.clone();
                 *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                 *track_groups.lock().unwrap() = app.groups.clone();
-                let ct = current_track.load(Ordering::Relaxed);
                 let rt = editor.runtime_mut();
-                sync_track_mixer_state(rt, &app, &state);
-                sync_bus_mixer_state(rt, &app);
-                sync_groups_bindings(rt, &app.groups, &app.grooves);
-                sync_selected_tracks_bindings(
-                    rt,
-                    app.tracks.len(),
-                    ct,
-                    &HashSet::new(),
-                );
                 let _ =
                     rt.eval_str(&format!("(set! eseq.seq-core-state/selected-bus {selected_bus_index})"));
                 rt.run_reactive_cycle();
@@ -1295,9 +1110,6 @@ pub(super) fn handle(
                     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                     *track_groups.lock().unwrap() = app.groups.clone();
                     let rt = editor.runtime_mut();
-                    sync_track_mixer_state(rt, &app, &state);
-                    sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1314,9 +1126,6 @@ pub(super) fn handle(
                     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                     *track_groups.lock().unwrap() = app.groups.clone();
                     let rt = editor.runtime_mut();
-                    sync_track_mixer_state(rt, &app, &state);
-                    sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1335,9 +1144,6 @@ pub(super) fn handle(
                         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *track_groups.lock().unwrap() = app.groups.clone();
                         let rt = editor.runtime_mut();
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_bus_mixer_state(rt, &app);
-                        sync_groups_bindings(rt, &app.groups, &app.grooves);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1354,9 +1160,6 @@ pub(super) fn handle(
                     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                     *track_groups.lock().unwrap() = app.groups.clone();
                     let rt = editor.runtime_mut();
-                    sync_track_mixer_state(rt, &app, &state);
-                    sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);

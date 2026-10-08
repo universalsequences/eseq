@@ -84,9 +84,15 @@ pub fn is_builtin_widget_name(name: &str) -> bool {
 pub fn register_widget_natives(vm: &mut VM) {
     for widget in BUILTIN_WIDGET_NAMES {
         let widget_type = widget.to_string();
-        vm.register_native_with_vm(widget, move |args, vm| {
+        vm.register_ref_aware_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);
             vm.qualify_widget_stable_key(&mut widget);
+            if widget_type == "box"
+                && let Err(error) = fill_box_background_instance_fields(vm, &mut widget)
+            {
+                vm.fail_native_call(error);
+                return Value::Nil;
+            }
             if let Some(symbol) = vm.current_source_symbol() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
@@ -112,8 +118,29 @@ pub fn register_widget_natives(vm: &mut VM) {
     register_inline_lane_native(vm);
 }
 
+/// `(box :background "step-cell" :step s)`: the background widget's
+/// instance props pass through the box like any prop, so its instance field
+/// uniforms are bound here as the `defwidget` constructor binds them
+/// (kind-bindings spec §7.3).
+fn fill_box_background_instance_fields(
+    vm: &mut VM,
+    widget: &mut Value,
+) -> Result<(), crate::vm::VMError> {
+    let Value::Map(map) = widget else {
+        return Ok(());
+    };
+    let Some(Value::String(background)) = map.get("background").map(|value| value.borrow().clone())
+    else {
+        return Ok(());
+    };
+    let Some(definition) = crate::widget_render::sdf_widget::sdf_widget_def(&background) else {
+        return Ok(());
+    };
+    vm.bind_sdf_widget_instance_fields(&definition, map)
+}
+
 fn register_inline_widget_target_binding_native(vm: &mut VM) {
-    vm.register_native_with_vm("__bind-inline-widget-target", |args, vm| {
+    vm.register_ref_aware_native_with_vm("__bind-inline-widget-target", |args, vm| {
         if !vm.inline_widget_registration_enabled() {
             return Value::Bool(true);
         }
@@ -153,7 +180,7 @@ fn register_inline_value_widget_natives(vm: &mut VM) {
         ("~toggle", "toggle", None),
     ] {
         let widget_type = widget_type.to_string();
-        vm.register_native_with_vm(form_name, move |args, vm| {
+        vm.register_ref_aware_native_with_vm(form_name, move |args, vm| {
             let value = args.first().cloned().unwrap_or(Value::Nil);
             if !vm.inline_widget_registration_enabled() {
                 return value;
@@ -267,7 +294,7 @@ fn keyword_string_arg(args: &[Value], key: &str) -> Option<String> {
 }
 
 fn register_inline_scope_native(vm: &mut VM) {
-    vm.register_native_with_vm("~scope", |args, vm| {
+    vm.register_ref_aware_native_with_vm("~scope", |args, vm| {
         if !vm.inline_widget_registration_enabled() {
             return Value::Nil;
         }
@@ -329,7 +356,7 @@ fn register_inline_scope_native(vm: &mut VM) {
 }
 
 fn register_inline_lane_native(vm: &mut VM) {
-    vm.register_native_with_vm("~lane", |args, vm| {
+    vm.register_ref_aware_native_with_vm("~lane", |args, vm| {
         let value = args.first().cloned().unwrap_or(Value::Nil);
         if !vm.inline_widget_registration_enabled() {
             return value;
@@ -500,12 +527,68 @@ fn prop_accepts_binding(
             && let Some(background) = props.get("background")
             && let Value::String(background_type) = &*background.borrow()
         {
-            return crate::widget_render::sdf_widget::sdf_widget_def(background_type).is_some_and(
-                |definition| definition.bindable_props.iter().any(|name| name == prop),
-            );
+            return crate::widget_render::sdf_widget::sdf_widget_def(background_type)
+                .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop));
         }
         return false;
     }
     crate::widget_render::sdf_widget::sdf_widget_def(widget_type)
-        .is_some_and(|definition| definition.bindable_props.iter().any(|name| name == prop))
+        .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop))
+}
+
+/// The error for a `defwidget` call that binds a ref (`#'x.field`) to a
+/// prop the widget does not declare in `:state` (eseq-0l17.68). Such a prop
+/// never reaches the shader, and the widget used to be replaced by a
+/// diagnostic label that a port or cell layout could hide, so the widget
+/// just vanished: the call is an error naming the widget and the prop.
+/// An instance state handed a ref keeps its diagnostic (it is declared).
+pub(crate) fn undeclared_sdf_binding_error(widget_type: &str, args: &[Value]) -> Option<String> {
+    let definition = crate::widget_render::sdf_widget::sdf_widget_def(widget_type)?;
+    let state = &definition.state;
+    let declared = |prop: &str| {
+        state.names.iter().any(|name| name == prop)
+            || state.plan.scalars.iter().any(|name| name == prop)
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match (&args[i], args.get(i + 1)) {
+            (Value::Keyword(prop), Some(value)) => {
+                if matches!(value, Value::ReactiveRef { .. }) && !declared(prop) {
+                    let names = if state.names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        state.names.join(", ")
+                    };
+                    return Some(format!(
+                        "{widget_type}: :{prop} is bound to a ref, but '{prop}' is not in the \
+                         defwidget's :state ({names}); declare it there or pass a plain value"
+                    ));
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Every scalar state of an SDF widget accepts a binding ref (kind-bindings
+/// spec §7.3; `:bindable` is ignored): a declared `:state` name, read by the
+/// shader or not (the view may bind one only the host reads), or a captured
+/// `defstate` the shader reads. An instance state takes an instance, and a
+/// uniform name (`step.active`) is never a prop.
+fn sdf_state_accepts_binding(
+    definition: &crate::widget_render::sdf_widget::SdfWidgetDef,
+    prop: &str,
+) -> bool {
+    use crate::widget_render::sdf_widget::SdfFieldSource;
+    let state = &definition.state;
+    let instance_head = state
+        .plan
+        .fields
+        .iter()
+        .any(|field| matches!(&field.source, SdfFieldSource::Prop(head) if head == prop));
+    !instance_head
+        && (state.names.iter().any(|name| name == prop)
+            || state.plan.scalars.iter().any(|name| name == prop))
 }

@@ -42,6 +42,52 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-midi-fx",
 ];
 
+/// Bump the epochs the host kinds' model sync follows when a change of
+/// `pdesc`'s value redefines model data (the sampler's slice settings:
+/// [`param_change_needs_fx_rebuild`]); the panels bind the param itself.
+pub(super) fn rebuild_panel_if_needed(
+    shared: &SharedHandles,
+    pdesc: &sequencer::effects::ParamDescriptor,
+) {
+    if param_change_needs_fx_rebuild(pdesc) {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Set param `param_idx` of `device` on `track` to `value` (stored units)
+/// through history (`SetInstrumentParam`, `SetEffectParam`,
+/// `SetMidiFxParam`, `SetRackSlot…Param`, which coalesce until the gesture
+/// ends) with `apply`, which answers whether the model changed; on a change
+/// queue the param's invalidation and bump the epochs when the param's
+/// value redefines model data (`pdesc`; `None` where the caller owns the refresh, as
+/// a rack slot's `rack_param_applied` does, or no descriptor is known).
+/// Shared by the knob commands (`set-instrument-param`, `set-effect-param`,
+/// `set-midi-fx-param`) and `set-device-param`. A bus effect (no history
+/// command of its own) changes nothing here.
+pub(super) fn apply_device_param_base(
+    app: &mut app::App,
+    shared: &SharedHandles,
+    (track, device, param_idx): (usize, DeviceSlot, usize),
+    pdesc: Option<&sequencer::effects::ParamDescriptor>,
+    value: f32,
+    apply: impl FnOnce(&mut app::App, app::AppCommand) -> bool,
+) -> bool {
+    let Some(command) = device.set_command(track, param_idx, value) else {
+        return false;
+    };
+    if !apply(app, command) {
+        return false;
+    }
+    if let Some(invalidation) = device.invalidation(track, param_idx, false) {
+        shared.ui_invalidations.push(invalidation);
+    }
+    if let Some(pdesc) = pdesc {
+        rebuild_panel_if_needed(shared, pdesc);
+    }
+    true
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -101,29 +147,7 @@ pub(super) fn handle(
                     };
                     match result {
                         Ok(()) => {
-                            // Refresh the relevant effects view so the label updates.
-                            let rt = editor.runtime_mut();
-                            if bus.is_some() {
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "bus-effects",
-                                    build_bus_effects_value_for_selection(
-                                        &app,
-                                        Some(&selected_steps),
-                                    ),
-                                );
-                            } else if let Some(track) = track {
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "effects",
-                                    build_effects_value(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                        &selected_steps,
-                                    ),
-                                );
-                            }
+                            // The panel's IR label reads `device.ir-name`.
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Loaded IR: {reference}"
                             )));
@@ -217,14 +241,8 @@ pub(super) fn handle(
                     };
                     match result {
                         Ok(()) => {
-                            if let (Some(track), Some(_)) = (track, rack_slot) {
-                                refresh_instrument_panel_reactive(
-                                    &mut editor,
-                                    &app,
-                                    track,
-                                    &selected_steps,
-                                    &ui_epoch,
-                                );
+                            if let (Some(_), Some(_)) = (track, rack_slot) {
+                                refresh_instrument_panel_reactive(&ui_epoch);
                             } else {
                                 queue_effect_panel_tree_invalidation(
                                     &ui_invalidations,
@@ -383,14 +401,8 @@ pub(super) fn handle(
             })();
             match result {
                 Ok(message) => {
-                    if let (Some(track), Some(_)) = (track, rack_slot) {
-                        refresh_instrument_panel_reactive(
-                            &mut editor,
-                            &app,
-                            track,
-                            &selected_steps,
-                            &ui_epoch,
-                        );
+                    if let (Some(_), Some(_)) = (track, rack_slot) {
+                        refresh_instrument_panel_reactive(&ui_epoch);
                     } else {
                         queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
                     }
@@ -414,6 +426,15 @@ pub(super) fn handle(
             let track = extract_usize_from_payload(&payload, "track");
             let slot = extract_usize_from_payload(&payload, "slot");
             let result = (|| -> Result<(), String> {
+                // A host kinds' `device-target` (`table-editor-open!`): the
+                // device by its owner's stable id and did, resolved now.
+                if let Value::Map(map) = &payload {
+                    if map.contains_key("device") {
+                        let addressed = super::devices::addressed(app, map)?;
+                        let target = filter_table_editor_target(app, &addressed)?;
+                        return app.open_filter_table_editor(target);
+                    }
+                }
                 let slot = slot.ok_or_else(|| "need a slot".to_string())?;
                 let target = if let Some(bus) = bus {
                     EditorTarget::Bus { bus, slot }
@@ -540,8 +561,7 @@ pub(super) fn handle(
             }
         }
         "filter-table-editor-frame" => {
-            let result = extract_usize_from_payload(&payload, "frame")
-                .ok_or_else(|| "need a frame".to_string())
+            let result = filter_table_editor_frame_from_payload(&payload)
                 .and_then(|frame| app.filter_table_editor_select_frame(frame));
             match result {
                 Ok(()) => {
@@ -636,8 +656,6 @@ pub(super) fn handle(
                     if name == "set-effect-param-batch"
                         && try_latch_effect_param_print(
                             ctx.shared,
-                            &mut editor,
-                            &app,
                             track,
                             slot_idx,
                             &print_updates,
@@ -665,37 +683,6 @@ pub(super) fn handle(
                             "Set effect curve",
                         )
                     };
-                    if result.is_ok() {
-                        let plocks_changed = name == "set-effect-plock-batch";
-                        let display_step = if plocks_changed {
-                            displayed_plock_step(
-                                &state,
-                                track,
-                                selected_plock_step(&selected_steps),
-                            )
-                        } else {
-                            None
-                        };
-                        let param_indices = commands
-                            .iter()
-                            .filter_map(|command| match command {
-                                app::AppCommand::SetEffectParam { param_idx, .. }
-                                | app::AppCommand::SetEffectPlockMulti {
-                                    param_idx, ..
-                                } => Some(*param_idx),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>();
-                        sync_effect_param_batch_display(
-                            &mut editor,
-                            &app,
-                            &neural_selection,
-                            track,
-                            slot_idx,
-                            &param_indices,
-                            display_step,
-                        );
-                    }
                     match result {
                         Ok(_) if map_bool(map, "commit") => {
                             app::edit::finish_active_gesture(&mut app);
@@ -775,16 +762,28 @@ pub(super) fn handle(
                     let print_gesture = !wrote_neural_plock
                         && try_latch_effect_param_print(
                             ctx.shared,
-                            &mut editor,
-                            &app,
                             track,
                             slot_idx,
                             &[(param_idx, clamped)],
                             neural_selection.is_empty(),
                         );
                     if !print_gesture {
-                        if !wrote_neural_plock {
-                            app::apply_command(
+                        match (&desc, wrote_neural_plock) {
+                            (Some(desc), false) => {
+                                apply_device_param_base(
+                                    app,
+                                    ctx.shared,
+                                    (track, DeviceSlot::Effect(slot_idx), param_idx),
+                                    Some(desc),
+                                    clamped,
+                                    |app, command| {
+                                        app::apply_command(app, command);
+                                        true
+                                    },
+                                );
+                            }
+                            (Some(desc), true) => rebuild_panel_if_needed(ctx.shared, desc),
+                            (None, false) => app::apply_command(
                                 &mut app,
                                 app::AppCommand::SetEffectParam {
                                     track,
@@ -792,26 +791,8 @@ pub(super) fn handle(
                                     param_idx,
                                     value: clamped,
                                 },
-                            );
-                        }
-                        sync_effect_param_authoring_display(
-                            &mut editor,
-                            EffectParamDisplaySync {
-                                state: &state,
-                                effect_descriptors: &app.graph.effect_descriptors,
-                                app: &app,
-                                selected_steps: &selected_steps,
-                                selection: &neural_selection,
-                                track,
-                                slot_idx,
-                                param_idx,
-                                display_step: None,
-                                sync_plock_list: wrote_neural_plock,
-                            },
-                        );
-                        if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            ),
+                            (None, true) => {}
                         }
                     }
                 }
@@ -886,8 +867,6 @@ pub(super) fn handle(
                                     if printable
                                         && try_latch_param_print(
                                             ctx.shared,
-                                            &mut editor,
-                                            &app,
                                             track,
                                             &[(PrintTarget::BusEffect {
                                                 bus_idx,
@@ -911,15 +890,6 @@ pub(super) fn handle(
                                             app.publish_bus_effect_runtime();
                                             *bus_state.lock().unwrap() =
                                                 app.buses.clone();
-                                            if sync_bus_effect_param_value_field(
-                                                editor.runtime_mut(),
-                                                &app,
-                                                bus_idx,
-                                                slot_idx,
-                                                param_idx,
-                                            ) {
-                                                editor.mark_needs_redraw();
-                                            }
                                         }
                                         Err(error) => {
                                             editor.handle_host_event(
@@ -986,8 +956,6 @@ pub(super) fn handle(
                                 if selected.is_empty() {
                                     if try_latch_param_print(
                                         ctx.shared,
-                                        &mut editor,
-                                        &app,
                                         track,
                                         &[(PrintTarget::MidiFx { slot_idx, param_idx }, next)],
                                     ) {
@@ -1002,16 +970,6 @@ pub(super) fn handle(
                                             value: next,
                                         },
                                     );
-                                    if sync_midi_fx_param_value_field(
-                                        editor.runtime_mut(),
-                                        &state,
-                                        track,
-                                        slot_idx,
-                                        param_idx,
-                                        None,
-                                    ) {
-                                        editor.mark_needs_redraw();
-                                    }
                                 } else {
                                     app::apply_command(
                                         &mut app,
@@ -1086,23 +1044,8 @@ pub(super) fn handle(
                                 );
                             }
                             if wrote_neural_plock {
-                                sync_effect_param_authoring_display(
-                                    &mut editor,
-                                    EffectParamDisplaySync {
-                                        state: &state,
-                                        effect_descriptors: &app
-                                            .graph
-                                            .effect_descriptors,
-                                        app: &app,
-                                        selected_steps: &selected_steps,
-                                        selection: &neural_selection,
-                                        track,
-                                        slot_idx,
-                                        param_idx,
-                                        display_step: None,
-                                        sync_plock_list: true,
-                                    },
-                                );
+                                // The override shows on the param (the host
+                                // kinds' `param.value`).
                             } else if selected.is_empty() {
                                 app::apply_command(
                                     &mut app,
@@ -1113,16 +1056,6 @@ pub(super) fn handle(
                                         value: next,
                                     },
                                 );
-                                if sync_track_effect_param_value_field(
-                                    editor.runtime_mut(),
-                                    &app,
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    None,
-                                ) {
-                                    editor.mark_needs_redraw();
-                                }
                             } else {
                                 app::apply_command(
                                     &mut app,
@@ -1247,8 +1180,6 @@ pub(super) fn handle(
                             let print_gesture = !wrote_neural_plock
                                 && try_latch_effect_param_print(
                                     ctx.shared,
-                                    &mut editor,
-                                    &app,
                                     track,
                                     slot_idx,
                                     &[(param_idx, value)],
@@ -1266,21 +1197,6 @@ pub(super) fn handle(
                                         },
                                     );
                                 }
-                                sync_effect_param_authoring_display(
-                                    &mut editor,
-                                    EffectParamDisplaySync {
-                                        state: &state,
-                                        effect_descriptors: &app.graph.effect_descriptors,
-                                        app: &app,
-                                        selected_steps: &selected_steps,
-                                        selection: &neural_selection,
-                                        track,
-                                        slot_idx,
-                                        param_idx,
-                                        display_step: None,
-                                        sync_plock_list: wrote_neural_plock,
-                                    },
-                                );
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
@@ -1373,7 +1289,7 @@ pub(super) fn handle(
                             );
                         } else {
                             let value = selected_idx as f32;
-                            let (neural_selection, wrote_neural_plock, neural_history_before) =
+                            let (_, wrote_neural_plock, neural_history_before) =
                                 record_selected_neural_effect_plock(
                                     &mut editor,
                                     &state,
@@ -1407,21 +1323,6 @@ pub(super) fn handle(
                                     },
                                 );
                             }
-                            sync_effect_param_authoring_display(
-                                &mut editor,
-                                EffectParamDisplaySync {
-                                    state: &state,
-                                    effect_descriptors: &app.graph.effect_descriptors,
-                                    app: &app,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    display_step: None,
-                                    sync_plock_list: wrote_neural_plock,
-                                },
-                            );
                         }
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1469,33 +1370,17 @@ pub(super) fn handle(
                         let print_gesture = desc.is_some()
                             && try_latch_param_print(
                                 ctx.shared,
-                                &mut editor,
-                                &app,
                                 track,
                                 &[(PrintTarget::MidiFx { slot_idx, param_idx }, clamped)],
                             );
                         if !print_gesture {
-                            app::apply_command(
-                                &mut app,
-                                app::AppCommand::SetMidiFxParam {
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    value: clamped,
-                                },
-                            );
-                            sync_midi_fx_param_value_field(
-                                editor.runtime_mut(),
-                                &state,
-                                track,
-                                slot_idx,
-                                param_idx,
-                                None,
-                            );
-                            if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
+                            let device = (track, DeviceSlot::MidiFx(slot_idx), param_idx);
+                            let apply = |app: &mut app::App, command| {
+                                app::apply_command(app, command);
+                                true
+                            };
+                            let desc = desc.as_ref();
+                            apply_device_param_base(app, ctx.shared, device, desc, clamped, apply);
                         }
                     }
                 }
@@ -1588,8 +1473,6 @@ pub(super) fn handle(
                             let value = selected_idx as f32;
                             let print_gesture = try_latch_param_print(
                                 ctx.shared,
-                                &mut editor,
-                                &app,
                                 track,
                                 &[(PrintTarget::MidiFx { slot_idx, param_idx }, value)],
                             );
@@ -1673,11 +1556,6 @@ pub(super) fn handle(
                         app.ui.cursor_track = current_track.load(Ordering::Relaxed);
                         if let Some(slot_idx) = app.next_free_custom_slot() {
                             app.start_effect_compile(&effect_name, slot_idx);
-                            editor.runtime_mut().set_reactive(
-                                "SEQ",
-                                "compiling",
-                                Value::Bool(true),
-                            );
                         } else {
                             editor.handle_host_event(HostEvent::Status(
                                 "No free effect slots available".to_string(),
@@ -1703,10 +1581,7 @@ pub(super) fn handle(
                 if let Some(slot_idx) = app.next_free_custom_slot() {
                     app.start_effect_compile(&effect_name, slot_idx);
                     let rt = editor.runtime_mut();
-                    set_current_track_reactive(rt, app.tracks.len(), track);
-                    rt.set_reactive("SEQ", "compiling", Value::Bool(true));
-                    sync_track_mixer_state(rt, &app, &state);
-                    sync_sidebar_browser(rt, &app, track);
+                    sync_sidebar_browser(&app, track);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1736,25 +1611,6 @@ pub(super) fn handle(
                         ) {
                             Ok(slot_idx) => {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "effects",
-                                    build_effects_value(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "step-has-plocks",
-                                    build_step_has_plocks(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                    ),
-                                );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1794,28 +1650,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1847,24 +1682,6 @@ pub(super) fn handle(
                         ) {
                             Ok(slot_idx) => {
                                 let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "midi-effects",
-                                    build_midi_effects_value(
-                                        &state,
-                                        track,
-                                        &selected_steps,
-                                    ),
-                                );
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "step-has-plocks",
-                                    build_step_has_plocks(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                    ),
-                                );
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1903,23 +1720,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(&state, track, &selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -1958,28 +1759,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2016,28 +1796,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2068,23 +1827,7 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(&state, track, &selected_steps),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
-                        sync_sidebar_browser(rt, &app, track);
+                        sync_sidebar_browser(&app, track);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2119,27 +1862,6 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), target_track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                target_track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                target_track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2198,26 +1920,6 @@ pub(super) fn handle(
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
-                        set_current_track_reactive(rt, app.tracks.len(), target_track);
-                        rt.set_reactive(
-                            "SEQ",
-                            "midi-effects",
-                            build_midi_effects_value(
-                                &state,
-                                target_track,
-                                &selected_steps,
-                            ),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "step-has-plocks",
-                            build_step_has_plocks(
-                                &state,
-                                target_track,
-                                &app.graph.effect_descriptors,
-                            ),
-                        );
-                        sync_track_mixer_state(rt, &app, &state);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2266,30 +1968,6 @@ pub(super) fn handle(
             match app.paste_effect_clipboard_to_track(track) {
                 Ok(message) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, track, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     editor.reset_widget_scroll_for_buffer_named("*fx*");
@@ -2325,30 +2003,6 @@ pub(super) fn handle(
             ) {
                 Ok(()) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, track, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2390,20 +2044,6 @@ pub(super) fn handle(
             ) {
                 Ok(()) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, track, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(
-                            &state,
-                            track,
-                            &app.graph.effect_descriptors,
-                        ),
-                    );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2428,8 +2068,6 @@ pub(super) fn handle(
 /// control's stable node identity.
 fn try_latch_effect_param_print(
     shared: &SharedHandles,
-    editor: &mut Editor,
-    app: &app::App,
     track: usize,
     slot_idx: usize,
     updates: &[(usize, f32)],
@@ -2450,11 +2088,11 @@ fn try_latch_effect_param_print(
             )
         })
         .collect::<Vec<_>>();
-    try_latch_param_print(shared, editor, app, track, &targets)
+    try_latch_param_print(shared, track, &targets)
 }
 
 /// Queue the panel-tree rebuild through the normal post-event invalidation
-/// pass. Directly writing `SEQ.effects` here leaves its Lisp subscribers
+/// pass. Directly bumping the panel state here leaves its Lisp subscribers
 /// pending; while transport is stopped there may be no other reactive delta
 /// to run that cycle, so controlled widgets retain their previous props.
 fn queue_effect_panel_tree_invalidation(
@@ -2477,7 +2115,7 @@ fn queue_effect_panel_tree_invalidation(
 
 /// Rebuild the panel the active Filter Table editor session is displayed in,
 /// through the same queued invalidation every other fx mutation uses — a
-/// direct `SEQ.effects` write leaves the editor's controlled widgets (frame
+/// direct panel-state write leaves the editor's controlled widgets (frame
 /// counter, undo/redo enablement, dirty marker, band handle) showing stale
 /// props whenever the gesture is the only reactive delta that cycle.
 ///
@@ -2499,6 +2137,45 @@ fn refresh_filter_table_editor_panels(
         }
         None => {}
     }
+}
+
+/// A `filter-table-editor-frame` payload's `:frame`: a whole number from 0
+/// (the value rule: a fraction or a negative is an error, never truncated).
+fn filter_table_editor_frame_from_payload(payload: &Value) -> Result<usize, String> {
+    let Value::Map(map) = payload else {
+        return Err("need a frame".to_string());
+    };
+    let frame = map.get("frame").map(|cell| cell.borrow().clone());
+    match frame {
+        Some(Value::Number(frame)) if frame >= 0.0 && frame.fract() == 0.0 => Ok(frame as usize),
+        Some(Value::Number(frame)) => Err(format!("frame {frame} is not a frame index")),
+        _ => Err("need a frame".to_string()),
+    }
+}
+
+/// The editor target of an addressed device: a track's or a bus's Filter
+/// Table (the session targets nothing else).
+fn filter_table_editor_target(
+    app: &app::App,
+    addressed: &super::devices::Addressed,
+) -> Result<sequencer::effects::filter_table_editor::EditorTarget, String> {
+    use sequencer::effects::filter_table_editor::EditorTarget;
+    let owner = addressed.owner;
+    let target = match addressed.device {
+        DeviceSlot::Effect(slot) => EditorTarget::Track { track: owner, slot },
+        DeviceSlot::BusEffect(slot) => EditorTarget::Bus { bus: owner, slot },
+        DeviceSlot::Instrument
+        | DeviceSlot::MidiFx(_)
+        | DeviceSlot::RackSlot(_)
+        | DeviceSlot::RackEffect { .. } => {
+            return Err("only a track's or a bus's effect has a response editor".to_string())
+        }
+    };
+    let desc = addressed.device.descriptor(app, owner, &[]);
+    if !desc.is_some_and(|desc| desc.name == sequencer::effects::filter_table::NAME) {
+        return Err("not a Filter Table".to_string());
+    }
+    Ok(target)
 }
 
 /// Translate a `filter-table-editor-band` payload (response-curve-editor

@@ -2,10 +2,10 @@
 ;; explicit controls and analytic graphics; no fitted parameter auto-grids.
 (module eseq.effects.drum-surface)
 (export panel bind value envelope dsr-envelope strike pitch-view burst-view cut-view parameter-gesture)
-(def bind (name)
-  (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
-(def value (name) (reactive-value (bind name)))
+;; The instrument's param `name`: its value as a control binds it, and as a
+;; number (0 when the instrument has none).
+(def bind (name) (eseq.effects.custom-ui-controls/ui-param-bound-value name 0))
+(def value (name) (eseq.effects.custom-ui-controls/ui-param-value name 0))
 (def section () eseq.vanilla/custom-ui-selected-section)
 (def ink (p)
   (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black))
@@ -32,7 +32,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color (ink p) :edit-color (ink p) :cursor-color (ink p)
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p)))))))
 (def knob (spec section)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (nth spec 0) (nth spec 1)
@@ -104,8 +104,8 @@
       (dict
         :down (lambda (x y region)
           (set! gesture.start (list x y
-            (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding xp))
-            (if yp (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding yp)) 0))))
+            (eseq.effects.custom-ui-runtime/custom-ui-param-value xp)
+            (if yp (eseq.effects.custom-ui-runtime/custom-ui-param-value yp) 0))))
         :up (lambda (x y region) (set! gesture.start nil))
         :drag (lambda (x y region)
           (if gesture.start
@@ -123,7 +123,7 @@
 
 ;; T60 envelope: meaningful for isolated decay parameters, not an audio trace.
 (defwidget eseq-drum-decay-envelope
-  :width 35.2 :height 1.5 :state (duration) :bindable (duration)
+  :width 35.2 :height 1.5 :state (duration)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (a (exp (/ (* -6907.7553 u u) (max duration 0.01))))
@@ -142,7 +142,7 @@
     (eseq-drum-decay-envelope :debug-name "drum-envelope-b" :duration b
       :on-mouse-down (get gb :down) :on-drag (get gb :drag) :on-mouse-up (get gb :up)))))
 (defwidget eseq-drum-strike-position
-  :width 35.2 :height 4.2 :state (sx sy) :bindable (sx sy)
+  :width 35.2 :height 4.2 :state (sx sy)
   :shader
   (let ((u (/ x aspect)))
     (sdf/layer
@@ -164,7 +164,6 @@
 (defwidget eseq-drum-pitch-trajectory
   :width 35.2 :height 4.1
   :state (base a1 a2 r1 r2 scale tune hold)
-  :bindable (base a1 a2 r1 r2 scale tune hold)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (t (* 0.25 u u))
@@ -185,7 +184,6 @@
       :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up)))))
 (defwidget eseq-drum-burst-timing
   :width 35.2 :height 4.1 :state (count spread decay tail snap body)
-  :bindable (count spread decay tail snap body)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (ms (* 500 u u))
@@ -203,7 +201,7 @@
       :decay (bind "bdec") :tail (bind "dec") :snap (bind "snap") :body (bind "body")
       :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up)))))
 (defwidget eseq-drum-layer-cut
-  :width 35.2 :height 1.5 :state (length scale) :bindable (length scale)
+  :width 35.2 :height 1.5 :state (length scale)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (t (* 1200 u u))
@@ -228,7 +226,6 @@
 ;; and output saturation. This is a mechanism view, not a mixed audio waveform.
 (defwidget eseq-drum-quadratic-envelope
   :width 35.2 :height 4.1 :state (attack decay linear quadratic)
-  :bindable (attack decay linear quadratic)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (t (* 0.5 u u))
@@ -249,7 +246,7 @@
 ;; Held amplitude approaches Sustain; release starts at the note-off level.
 ;; The release plot is normalized to that level, since note length is external.
 (defwidget eseq-drum-sustain-envelope
-  :width 35.2 :height 1.5 :state (duration sustain) :bindable (duration sustain)
+  :width 35.2 :height 1.5 :state (duration sustain)
   :shader
   (let ((u (clamp (/ (+ (/ x aspect) 0.96) 1.92) 0 1))
         (a (+ sustain (* (- 1 sustain) (exp (/ (* -6907.7553 u u) (max duration 0.01))))))

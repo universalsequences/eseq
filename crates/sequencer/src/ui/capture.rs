@@ -43,6 +43,9 @@ pub(crate) struct CaptureArgs {
     /// (a document write, as a widget's on-change makes) then builds and
     /// renders the frame; reports per-frame timings.
     edit_frames: usize,
+    /// `--noui`: load the bare `-noui` root (`ui/noui.lisp`) instead of the
+    /// DAW, so a `metal_seq noui` view file renders as it does there.
+    noui: bool,
 }
 
 impl CaptureArgs {
@@ -73,6 +76,7 @@ impl CaptureArgs {
         let mut scroll_y = 0.0;
         let mut all_panels = false;
         let mut edit_frames = 0;
+        let mut noui = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -99,6 +103,7 @@ impl CaptureArgs {
                 }
                 "--all-panels" => all_panels = true,
                 "--edit-frames" => edit_frames = parse_usize_arg(&mut args, "--edit-frames")?,
+                "--noui" => noui = true,
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -132,11 +137,12 @@ impl CaptureArgs {
             scroll_y,
             all_panels,
             edit_frames,
+            noui,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N]"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui]"
             .to_string()
     }
 }
@@ -764,9 +770,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 })?;
         }
         for effect in &spec.audio_fx {
-            let result = if sequencer::effects::EffectDescriptor::builtin_insert(effect).is_some()
-                || sequencer::effects::dgen_builtin::contains(effect)
-            {
+            let result = if sequencer::effects::is_builtin_effect(effect) {
                 app.add_builtin_effect_sync(track, effect)
             } else {
                 app.add_saved_effect_sync(track, effect)
@@ -1005,9 +1009,10 @@ fn apply_capture_macro_host_commands(
             }
             continue;
         }
-        // Pad map edits (note, choke, role), so a fixture can lay a rack out
-        // on the standard layout and tag pads.
-        if let Some(result) = crate::host_commands::apply_rack_pad_map_command(&name, &payload, app) {
+        // The rack kinds' setters (`set-pad`, `set-rack-clip`, `set-groove`,
+        // `set-pool-groove`), so a fixture lays a rack out and tags pads as
+        // the views do (`(set! p.note …)`, `(set! p.role …)`).
+        if let Some(result) = crate::host_commands::rack_kinds::apply_command(&name, &payload, app) {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;
             continue;
@@ -1015,6 +1020,24 @@ fn apply_capture_macro_host_commands(
         // Rack grooves (extract / pick / amounts), so a fixture can show the
         // drum rack panel's Groove section with a real extracted groove.
         if let Some(result) = crate::host_commands::apply_rack_groove_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
+        // The arrangement kinds' selection setters (song.bound-clip, the
+        // region), so a fixture can drive the arrangement view's gestures.
+        if let Some(result) =
+            crate::host_commands::apply_capture_selection_command(&name, &payload, app)
+        {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
+        // A graph node's process setters (`edit-process` by id), so a fixture
+        // can cable a node patch it just built.
+        if let Some(result) =
+            crate::host_commands::apply_capture_process_command(&name, &payload, app)
+        {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;
             continue;
@@ -1275,7 +1298,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let fx_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     let auto_follow_override_until = Arc::new(Mutex::new(None::<Instant>));
@@ -1291,7 +1313,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     } = init_runtime(
         &app,
         Arc::clone(&state),
-        &track_names,
         Arc::clone(&track_pan_ids),
         Arc::clone(&track_collapsed),
         Arc::clone(&bus_state),
@@ -1303,23 +1324,68 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&piano_roll_selection),
         piano_roll_move_state,
         new_shared_piano_roll_focus(),
-        recording,
-        master_recording,
+        Arc::clone(&recording),
+        Arc::clone(&master_recording),
         master_recorder,
         Arc::clone(&record_armed),
         Arc::clone(&armed_rack),
         Arc::clone(&ui_epoch),
-        fx_epoch,
-        ui_invalidations,
-        Arc::clone(&expanded_step_projection),
-        selected_neural_neurons,
-        active_delete_target,
-        active_delete_target_version,
-        auto_follow_override_until,
+        Arc::clone(&fx_epoch),
+        Arc::clone(&ui_invalidations),
+        Arc::clone(&selected_neural_neurons),
+        Arc::clone(&active_delete_target),
+        Arc::clone(&active_delete_target_version),
+        Arc::clone(&auto_follow_override_until),
         graph,
     );
+    // Host kinds (eseq.kinds) read these; the live loop syncs them every
+    // tick, capture at each step below.
+    let kinds_handles = super::host_kinds::KindsHandles {
+        state: Arc::clone(&state),
+        current_track: Arc::clone(&current_track),
+        selected_steps: Arc::clone(&selected_steps),
+        active_delete_target,
+        active_delete_target_version,
+        record_armed: Arc::clone(&record_armed),
+        recording,
+        master_recording,
+        selected_tracks: Arc::clone(&selected_tracks),
+        track_collapsed: Arc::clone(&track_collapsed),
+        ui_epoch: Arc::clone(&ui_epoch),
+        fx_epoch,
+        ui_invalidations,
+        step_print: Arc::new(Mutex::new(StepPrintState::default())),
+        auto_follow_override_until,
+        armed_rack,
+        bus_state: Arc::clone(&bus_state),
+        selected_neural_neurons,
+        piano_roll_selection: Arc::clone(&piano_roll_selection),
+    };
+    let mut host_kinds = super::host_kinds::HostKinds::default();
+    // Whether the sync pushed anything.
+    let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
+        let changed = host_kinds.sync_with(
+            app,
+            editor.runtime_mut(),
+            &kinds_handles,
+            &Default::default(),
+        );
+        if changed {
+            editor.refresh_runtime_side_effects();
+        }
+        changed
+    };
 
-    let mut editor = create_editor(runtime, &app)?;
+    let mut editor = if args.noui {
+        create_editor_with_root(
+            runtime,
+            &app,
+            sequencer::paths::user_init_path(),
+            UiRoot::Bare,
+        )?
+    } else {
+        create_editor(runtime, &app)?
+    };
     editor
         .runtime_mut()
         .eval_str("(def capture-after-sync () nil)")
@@ -1331,37 +1397,21 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     {
         let runtime = editor.runtime_mut();
-        sync_project_state(runtime, &app);
+        record_preset_listings();
         // This also publishes group topology, which hook gestures need to
         // calculate the same visible track order as the rendered UI.
-        sync_track_color_state(runtime, &app, &state);
-        sync_macro_state(runtime, &app);
         sync_track_topology_state(
             runtime,
             &app,
             &state,
             &mut track_names,
             args.track,
-            &selected_steps,
-            &piano_roll_selection,
             &accumulator_names,
-            &record_armed,
-            &vec![0.0; app.tracks.len()],
         );
-        runtime.set_reactive(
-            "SEQ",
-            "selected-steps",
-            build_selection_value(&selected_steps),
-        );
-        runtime.set_reactive(
-            "SEQ",
-            "bus-effects",
-            build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
-        );
-        sync_song_state(runtime, &app, &mut SongFrameState::default(), true);
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
+    sync_host_kinds(&mut editor, &app);
     if args.project.is_some() {
         // Match live project-open ordering: scripts can read the loaded
         // topology and must restore their own buffers before the capture hook.
@@ -1376,69 +1426,17 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     // before the palette / clip-sound colors below are published, since those
     // rows carry the theme's variant tint baked into their RGB.
     editor.refresh_runtime_side_effects();
-    if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
-        sync_macro_state(editor.runtime_mut(), &app);
-        sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
-        sync_song_state(
-            editor.runtime_mut(),
-            &app,
-            &mut SongFrameState::default(),
-            true,
-        );
-    }
-    // Selection gestures in the hook mutate the same shared state as live UI
-    // clicks. Publish it before drawing, as the live reactive tick does.
-    let selected_track = current_track.load(std::sync::atomic::Ordering::Relaxed);
-    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(selected_track as f64));
-    sync_selected_tracks_bindings(
-        editor.runtime_mut(), app.tracks.len(), selected_track,
-        &selected_tracks.lock().unwrap(),
-    );
-    // Capture has no meter tick. Seed the same effective-value bindings at
-    // rest, so mod-capable curves draw their resolved base rather than reading
-    // an uninitialized reactive field as zero. No DSP or watchlist is needed.
-    let mod_values = read_mod_display_values(
-        app.graph.lg, &app, &state, Some(selected_track), selected_plock_step(&selected_steps),
-        false, &mut HashSet::new(),
-    );
-    sync_effect_mod_offset_field_delta(editor.runtime_mut(), &[], &mod_values.effects);
-    sync_instrument_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.instrument.as_ref());
-    sync_rack_slot_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
+    apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
-    let _ = sync_sound_palette(
-        editor.runtime_mut(),
-        &app,
-        &mut SoundPaletteFrameState::default(),
-        true,
-        true,
-    );
+    let _ = sync_sound_palette(&app, &mut SoundPaletteFrameState::default(), true);
     publish_capture_sound_glyphs(&mut editor)?;
-    // The live tick publishes `SEQ.instances`; capture has no tick.
-    let mut instances_fingerprint = u64::MAX;
-    if let Some(value) =
-        crate::host_commands::instances::instances_value_if_changed(&app, &mut instances_fingerprint)
-    {
-        editor.runtime_mut().set_reactive("SEQ", "instances", value);
-    }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
-    // Expanded editors register their viewports while evaluating the fixture's
-    // UI state. The live reactive tick publishes these projections; headless
-    // capture must do the same before its first frame, or every slot stays zero.
-    reactive_sync::sync_all_expanded_step_viewports(
-        editor.runtime_mut(), &state, &app, &selected_steps,
-        current_track.load(std::sync::atomic::Ordering::Relaxed), &expanded_step_projection,
-    );
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
-
-    // capture-after-sync may apply a theme after the initial project sync.
-    // Mirror the live loop's display-color refresh before rendering.
-    sync_track_color_state(editor.runtime_mut(), &app, &state);
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
+    // capture-after-sync may apply a theme after the initial project sync:
+    // the host kinds re-push the tinted colors before rendering.
+    sync_host_kinds(&mut editor, &app);
 
     let buffer_id = editor
         .buffers
@@ -1486,6 +1484,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.set_layout_viewport(columns as u16, rows as u16);
     editor.update_tile_rects(columns as u16, rows as u16);
     let mut frame = build_render_frame(&mut editor, columns, rows);
+    // A frame observes the kind fields its views read. The ones computed
+    // only while observed (a sampler's media, a sound binding) arrive with
+    // the next sync, as on the live loop's next tick: settle them.
+    if sync_host_kinds(&mut editor, &app) {
+        frame = build_render_frame(&mut editor, columns, rows);
+    }
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
         frame = build_render_frame(&mut editor, columns, rows);
     }

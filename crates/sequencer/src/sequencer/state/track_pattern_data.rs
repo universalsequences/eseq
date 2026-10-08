@@ -71,6 +71,9 @@ impl TrackPatternData {
                 step.clear();
             }
         }
+        for ids in &mut self.chord_snapshot.ids {
+            ids.clear();
+        }
         self.bar_transpose_snapshot = [0.0; BARS_PER_PATTERN];
         self.timebase_plock_snapshot = [None; MAX_STEPS];
         self.swing_plock_snapshot = [None; MAX_STEPS];
@@ -107,6 +110,9 @@ impl TrackPatternData {
                 notes.clear();
             }
         }
+        if let Some(ids) = self.chord_snapshot.ids.get_mut(step) {
+            ids.clear();
+        }
         self.timebase_plock_snapshot[step] = None;
         self.swing_plock_snapshot[step] = None;
         self.swing_resolution_plock_snapshot[step] = None;
@@ -124,7 +130,8 @@ impl TrackPatternData {
 
     /// Copy one step's complete per-step content (activation, params,
     /// chord notes/durations/delays, timing plocks) from `src`'s
-    /// `src_step` into this pattern's `dst_step`.
+    /// `src_step` into this pattern's `dst_step`. The copied notes are new
+    /// notes (fresh ids).
     pub fn copy_step_content_from(
         &mut self,
         dst_step: usize,
@@ -160,6 +167,11 @@ impl TrackPatternData {
                 *dst = src_lane.get(src_step).cloned().unwrap_or_default();
             }
         }
+        let count = self.chord_snapshot.steps.get(dst_step).map_or(0, Vec::len);
+        let ids = (0..count)
+            .map(|_| crate::sequencer::new_note_id())
+            .collect();
+        self.chord_snapshot.set_step_ids(dst_step, ids);
         self.timebase_plock_snapshot[dst_step] = src.timebase_plock_snapshot[src_step];
         self.swing_plock_snapshot[dst_step] = src.swing_plock_snapshot[src_step];
         self.swing_resolution_plock_snapshot[dst_step] =
@@ -382,6 +394,7 @@ impl TrackPatternData {
             chord: self.chord_snapshot.steps.get(step)?.clone(),
             chord_durations: self.chord_snapshot.durations.get(step)?.clone(),
             chord_delays: self.chord_snapshot.delays.get(step)?.clone(),
+            chord_ids: self.chord_snapshot.step_ids(step),
             timebase: self.timebase_plock_snapshot[step].map(Timebase::from_index),
             swing: self.swing_plock_snapshot[step].map(f32::from_bits),
             swing_resolution: self.swing_resolution_plock_snapshot[step]
@@ -480,6 +493,7 @@ impl TrackPatternData {
         self.chord_snapshot.steps[step] = snapshot.chord.clone();
         self.chord_snapshot.durations[step] = snapshot.chord_durations.clone();
         self.chord_snapshot.delays[step] = snapshot.chord_delays.clone();
+        self.chord_snapshot.set_step_ids(step, snapshot.note_ids());
         self.timebase_plock_snapshot[step] = snapshot.timebase.map(|value| value as u32);
         self.swing_plock_snapshot[step] = snapshot.swing.map(f32::to_bits);
         self.swing_resolution_plock_snapshot[step] =

@@ -10,6 +10,10 @@ pub(crate) fn dispatch_custom_host_command(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
+    if name != "set-note" {
+        // A script note drag's pending frame lands before anything else.
+        super::notes::flush_note_drag(app, editor, ctx);
+    }
     match name {
         n if crate::retrospective::COMMANDS.contains(&n) => {
             crate::retrospective::handle(name, payload, app, editor);
@@ -19,18 +23,28 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::export::COMMANDS.contains(&n) => super::export::handle(name, payload, app, editor, ctx),
         n if super::file_menu::COMMANDS.contains(&n) => super::file_menu::handle(name, payload, app, editor, ctx),
         n if super::step_history::COMMANDS.contains(&n) => super::step_history::handle(name, payload, app, editor, ctx),
+        n if super::track_settings::COMMANDS.contains(&n) => super::track_settings::handle(name, payload, app, editor, ctx),
         n if super::tracks::COMMANDS.contains(&n) => super::tracks::handle(name, payload, app, editor, ctx),
         n if super::scenes::COMMANDS.contains(&n) => super::scenes::handle(name, payload, app, editor, ctx),
         n if super::scene_banks::COMMANDS.contains(&n) => super::scene_banks::handle(name, payload, app, editor, ctx),
         n if super::scene_slots::COMMANDS.contains(&n) => super::scene_slots::handle(name, payload, app, editor, ctx),
         n if super::graph_node_processes::COMMANDS.contains(&n) => super::graph_node_processes::handle(name, payload, app, editor, ctx),
+        n if super::graphs::COMMANDS.contains(&n) => super::graphs::handle(name, payload, app, editor, ctx),
+        n if super::neural::COMMANDS.contains(&n) => super::neural::handle(name, payload, app, editor, ctx),
         n if super::song::COMMANDS.contains(&n) => super::song::handle(name, payload, app, editor, ctx),
+        n if super::arrangement::COMMANDS.contains(&n) => super::arrangement::handle(name, payload, app, editor, ctx),
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),
         n if super::drum_rack_v2::COMMANDS.contains(&n) => super::drum_rack_v2::handle(name, payload, app, editor, ctx),
         n if super::rack_grooves::COMMANDS.contains(&n) => super::rack_grooves::handle(name, payload, app, editor, ctx),
+        n if super::rack_kinds::COMMANDS.contains(&n) => super::rack_kinds::handle(name, payload, app, editor, ctx),
         n if super::instances::COMMANDS.contains(&n) => super::instances::handle(name, payload, app, editor, ctx),
         n if super::instrument_params::COMMANDS.contains(&n) => super::instrument_params::handle(name, payload, app, editor, ctx),
         n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),
+        n if super::devices::COMMANDS.contains(&n) => super::devices::handle(name, payload, app, editor, ctx),
+        n if super::lanes::COMMANDS.contains(&n) => super::lanes::handle(name, payload, app, editor, ctx),
+        n if super::notes::COMMANDS.contains(&n) => super::notes::handle(name, payload, app, editor, ctx),
+        n if super::focus_steps::COMMANDS.contains(&n) => super::focus_steps::handle(name, payload, app, editor, ctx),
+        n if super::panel::COMMANDS.contains(&n) => super::panel::handle(name, payload, app, editor, ctx),
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),
         n if super::samples::COMMANDS.contains(&n) => super::samples::handle(name, payload, app, editor, ctx),

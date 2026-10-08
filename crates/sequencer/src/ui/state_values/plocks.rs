@@ -208,6 +208,55 @@ pub(super) fn plock_entry_with_label(
     Rc::new(RefCell::new(Value::Map(map)))
 }
 
+/// The keys of a p-lock table row the table's host commands address it by
+/// (`set-track-plock-entry`, `-option`, `clear-track-plock-entry`): the
+/// `plock-row`'s `address`.
+pub(crate) const PLOCK_ROW_ADDRESS: [&str; 8] = [
+    "target",
+    "step-idx",
+    "slot-idx",
+    "rack-slot",
+    "param-idx",
+    "target-track",
+    "network-id",
+    "neuron-idx",
+];
+
+/// A table row's field (nil when unset).
+pub(crate) fn plock_row_field(row: &HashMap<String, Rc<RefCell<Value>>>, name: &str) -> Value {
+    row.get(name)
+        .map_or(Value::Nil, |cell| cell.borrow().clone())
+}
+
+/// A table row's text field (empty when unset).
+pub(crate) fn plock_row_text(row: &HashMap<String, Rc<RefCell<Value>>>, name: &str) -> String {
+    match plock_row_field(row, name) {
+        Value::String(text) => text,
+        _ => String::new(),
+    }
+}
+
+/// A table row's `plock-row.source` (step, neuron or preview) and its title
+/// (a neuron's prefixed with its label).
+pub(crate) fn plock_row_source_and_name(
+    row: &HashMap<String, Rc<RefCell<Value>>>,
+) -> (&'static str, String) {
+    let source = match plock_row_text(row, "source").as_str() {
+        "neuron" => "neuron",
+        "preview" => "preview",
+        _ => "step",
+    };
+    let name = match source {
+        "neuron" => format!(
+            "{} {}",
+            plock_row_text(row, "label"),
+            plock_row_text(row, "name")
+        ),
+        _ => plock_row_text(row, "name"),
+    };
+    (source, name)
+}
+
 pub(super) fn plock_entry_domain(target: &str) -> &'static str {
     match target {
         "instrument"
@@ -563,7 +612,7 @@ pub(super) fn build_track_plock_preview_row_for_variant_entry(
                 .cloned()
                 .flatten()?;
             let rack_macro = rack.macros.get(entry.param)?;
-            let row = preview_plock_entry(
+            Some(preview_plock_entry(
                 label,
                 "rack-macro",
                 "rack",
@@ -575,11 +624,7 @@ pub(super) fn build_track_plock_preview_row_for_variant_entry(
                 None,
                 Some(entry.param),
                 None,
-            );
-            if let Value::Map(map) = &mut *row.borrow_mut() {
-                insert_string_prop(map, "name-field", rack_macro_name_field(track, entry.param));
-            }
-            Some(row)
+            ))
         }
         sequencer::plock_variants::PlockVariantDomain::RackSlotParam => {
             let param = rack_slot_param_by_index(entry.param)?;
@@ -840,19 +885,13 @@ pub(super) fn build_selected_neural_plocks_value(
     Value::List(items)
 }
 
-/// Builds the `SEQ.track-plocks` rows for the selected step.
+/// The p-lock table's rows for the selected step (`selection.plock-rows`
+/// reads them: `host_kinds::plock_rows`), in the legacy table's shape.
 ///
-/// INVARIANT — one row per projected key. The `*plock-sync*` effect buffer
-/// (`ui/effects/param-controls.lisp`) reduces these rows into per-param `SEQV`
-/// scalars keyed by `(target, slot-idx, rack-slot, param-idx)` — or by
-/// `target` alone for the rows that carry no param index (timebase, swing,
-/// swing resolution). It writes `<key>-on` / `<key>-def` once per row and then
-/// clears the keys that dropped out of the list, so two rows collapsing onto
-/// the same key would make a control's displayed default depend on row order
-/// and could leave a stale `-on` after one of them disappears. Every row
-/// emitted below must therefore be unique in that tuple: each track-level lock
-/// appears at most once, and the step-param / instrument / effect / rack-macro
-/// / rack-effect rows are each emitted once per distinct parameter slot.
+/// One row per locked target: each track-level lock appears at most once,
+/// and the step-param / instrument / effect / rack-macro / rack-effect rows
+/// are each emitted once per distinct parameter slot (the kind keys a row by
+/// what it locks).
 pub(crate) fn build_track_plocks_value(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -976,8 +1015,7 @@ pub(crate) fn build_track_plocks_value(
                     ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
                     ParamKind::Continuous { .. } => None,
                 };
-                let continuous = options.is_none();
-                let entry = plock_entry(
+                items.push(plock_entry(
                     step,
                     "instrument",
                     "inst",
@@ -989,27 +1027,7 @@ pub(crate) fn build_track_plocks_value(
                     None,
                     Some(param_idx),
                     options,
-                );
-                if continuous {
-                    // Bind the LOCK readout to the per-param SEQV field the
-                    // authoring syncs already maintain (it carries the
-                    // displayed step's p-lock value). With the value bound,
-                    // a knob drag repaints this row without republishing
-                    // SEQ.track-plocks — which would rerun the whole *step*
-                    // panel on every mouse move. `fx-plock-row-value` prefers
-                    // :value-field and falls back to :value.
-                    if let Value::Map(map) = &mut *entry.borrow_mut() {
-                        map.insert(
-                            "value-field".to_string(),
-                            value_cell(Value::String(instrument_param_value_field(
-                                track,
-                                param_idx,
-                                &param.name,
-                            ))),
-                        );
-                    }
-                }
-                items.push(entry);
+                ));
             }
         }
     }
@@ -1046,7 +1064,7 @@ pub(crate) fn build_track_plocks_value(
     if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
         for rack_macro in &rack.macros {
             if let Some(value) = rack_macro.plocks.get(step).copied().flatten() {
-                let entry = plock_entry(
+                items.push(plock_entry(
                     step,
                     "rack-macro",
                     "rack",
@@ -1058,18 +1076,7 @@ pub(crate) fn build_track_plocks_value(
                     None,
                     Some(rack_macro.id.index()),
                     None,
-                );
-                if let Value::Map(map) = &mut *entry.borrow_mut() {
-                    insert_string_prop(map, "name-field", rack_macro_name_field(track, rack_macro.id.index()));
-                    map.insert(
-                        "value-field".to_string(),
-                        value_cell(Value::String(rack_macro_value_field(
-                            track,
-                            rack_macro.id.index(),
-                        ))),
-                    );
-                }
-                items.push(entry);
+                ));
             }
         }
         for (rack_slot_idx, rack_slot) in rack.slots.iter().enumerate() {
@@ -1092,7 +1099,7 @@ pub(crate) fn build_track_plocks_value(
                     else {
                         continue;
                     };
-                    let entry = rack_effect_plock_entry(
+                    items.push(rack_effect_plock_entry(
                         step,
                         rack_slot_idx,
                         effect_slot_idx,
@@ -1108,27 +1115,7 @@ pub(crate) fn build_track_plocks_value(
                         param.max,
                         param_idx,
                         plock_param_options(&param.kind),
-                    );
-                    if matches!(param.kind, ParamKind::Continuous { .. }) {
-                        // Same as the instrument rows above: bind the LOCK
-                        // readout to the per-param SEQV field the rack
-                        // authoring syncs maintain, so a later drag event of
-                        // this lock repaints the row without republishing
-                        // SEQ.track-plocks (eseq-lf72).
-                        if let Value::Map(map) = &mut *entry.borrow_mut() {
-                            map.insert(
-                                "value-field".to_string(),
-                                value_cell(Value::String(rack_slot_effect_param_value_field(
-                                    track,
-                                    rack_slot_idx,
-                                    effect_slot_idx,
-                                    param_idx,
-                                    &param.name,
-                                ))),
-                            );
-                        }
-                    }
-                    items.push(entry);
+                    ));
                 }
             }
         }
@@ -1169,114 +1156,54 @@ pub(crate) fn build_track_plocks_value(
     Value::List(items)
 }
 
-pub(crate) fn build_track_plock_variants_value(
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-) -> Value {
-    build_track_plock_variants_value_with_preview(state, track, selected, None)
+/// What a variant chip shows: its label, its name (else the label), how
+/// many params it locks and its themed color. Shared by the keys tab's chip
+/// list and the host kinds' `variant`.
+pub(crate) struct VariantChip {
+    pub(crate) label: String,
+    pub(crate) name: String,
+    pub(crate) count: usize,
+    pub(crate) color: [f32; 3],
 }
 
-pub(crate) fn build_track_plock_variants_value_with_preview(
-    state: &Arc<SequencerState>,
-    track: usize,
-    selected: &Arc<Mutex<HashSet<usize>>>,
-    preview_label: Option<&str>,
-) -> Value {
-    let registry = state.plock_variant_registry_snapshot(track);
-    let selected_step = selected_plock_step(selected);
-    let current_key = selected_step.and_then(|step| {
-        sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step)
-    });
-    let preview_label = current_key.is_none().then_some(preview_label).flatten();
-    let preview_is_def = preview_label.map_or(true, |label| label == "def");
-
-    let mut items = Vec::with_capacity(registry.entries.len() + 1);
-    let mut def_map = HashMap::new();
-    def_map.insert(
-        "kind".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
-    );
-    def_map.insert(
-        "label".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
-    );
-    def_map.insert(
-        "display".to_string(),
-        Rc::new(RefCell::new(Value::String("base".to_string()))),
-    );
-    def_map.insert(
-        "count".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.0))),
-    );
-    def_map.insert(
-        "current".to_string(),
-        Rc::new(RefCell::new(Value::Bool(
-            current_key.is_none() && preview_is_def,
-        ))),
-    );
-    def_map.insert(
-        "color-r".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
-    );
-    def_map.insert(
-        "color-g".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.545_098_07))),
-    );
-    def_map.insert(
-        "color-b".to_string(),
-        Rc::new(RefCell::new(Value::Number(0.588_235_3))),
-    );
-    items.push(Rc::new(RefCell::new(Value::Map(def_map))));
-
-    for entry in registry.entries {
-        let mut map = HashMap::new();
-        map.insert(
-            "kind".to_string(),
-            Rc::new(RefCell::new(Value::String("variant".to_string()))),
-        );
-        map.insert(
-            "label".to_string(),
-            Rc::new(RefCell::new(Value::String(entry.label.clone()))),
-        );
-        map.insert(
-            "display".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                entry.name.clone().unwrap_or_else(|| entry.label.clone()),
-            ))),
-        );
-        map.insert(
-            "count".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
-        );
-        map.insert(
-            "current".to_string(),
-            Rc::new(RefCell::new(Value::Bool(
-                current_key.as_ref().is_some_and(|key| key == &entry.key)
-                    || preview_label.is_some_and(|label| label == entry.label),
-            ))),
-        );
-        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
-        map.insert(
-            "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
-        );
-        map.insert(
-            "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
-        );
-        map.insert(
-            "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
-        );
-        items.push(Rc::new(RefCell::new(Value::Map(map))));
+impl VariantChip {
+    pub(crate) fn of(entry: &sequencer::plock_variants::PlockVariantRegistryEntry) -> Self {
+        Self {
+            label: entry.label.clone(),
+            name: entry.name.clone().unwrap_or_else(|| entry.label.clone()),
+            count: entry.key.param_count(),
+            color: super::track_and_mixer::themed_variant_rgb(entry.color),
+        }
     }
 
-    Value::List(items)
 }
 
-pub(super) fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> Value {
-    let label = match tp.output() {
+/// The variant chip the step panel's p-lock table lights
+/// (`selection.plock-variant`): the variant the selected step plays (empty
+/// when its locks match no variant; def when it holds none), else the
+/// previewed variant (`preview`), else def.
+pub(crate) fn plock_variant_chip(
+    state: &SequencerState,
+    track: usize,
+    step: Option<usize>,
+    preview: Option<&str>,
+) -> String {
+    let playing =
+        step.and_then(|step| sequencer::plock_variants::live_track_variant_key(state, track, step));
+    let Some(playing) = playing else {
+        return preview.unwrap_or("def").to_string();
+    };
+    let registry = state.plock_variant_registry_snapshot(track);
+    (registry.entries.iter())
+        .find(|entry| entry.key == playing)
+        .map_or_else(String::new, |entry| entry.label.clone())
+}
+
+/// Where a track's audio goes, as the output dropdown names it
+/// (`track.output`'s bus name; main, sends only).
+#[cfg(test)]
+pub(crate) fn track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> String {
+    match tp.output() {
         sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
         sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
         sequencer::sequencer::TrackOutput::Bus(id) => app
@@ -1285,122 +1212,49 @@ pub(super) fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer
             .find(|bus| bus.id == id)
             .map(|bus| bus.name.clone())
             .unwrap_or_else(|| "main".to_string()),
-    };
-    Value::String(label)
+    }
 }
 
-pub(crate) fn build_track_output_options(app: &app::App) -> Value {
-    let mut labels = vec![
-        Rc::new(RefCell::new(Value::String("main".to_string()))),
-        Rc::new(RefCell::new(Value::String("sends only".to_string()))),
-    ];
-    labels.extend(
-        app.buses
+/// The output a dropdown label names ("main", "sends only" or a bus name
+/// but the main mix's), resolved against the current buses; `None` for an
+/// unknown label.
+pub(crate) fn track_output_named(
+    app: &app::App,
+    label: &str,
+) -> Option<sequencer::sequencer::TrackOutput> {
+    match label {
+        "main" => Some(sequencer::sequencer::TrackOutput::Mix),
+        "sends only" => Some(sequencer::sequencer::TrackOutput::None),
+        _ => app
+            .buses
             .iter()
             .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-            .map(|bus| Rc::new(RefCell::new(Value::String(bus.name.clone())))),
-    );
-    Value::List(labels)
+            .find(|bus| bus.name == label)
+            .map(|bus| sequencer::sequencer::TrackOutput::Bus(bus.id)),
+    }
 }
 
-pub(super) fn build_track_bus_sends(app: &app::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
-    use std::collections::HashMap;
-
-    let items = app
-        .buses
-        .iter()
-        .enumerate()
-        .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
-        .map(|(bus_idx, bus)| {
-            let mut map = HashMap::new();
-            map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))));
-            map.insert(
-                "bus-idx".to_string(),
-                Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
-            );
-            map.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-            );
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    Value::List(items)
-}
-
-/// Build a Lisp Value::Map of track parameters for the current track.
-pub(crate) fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
-    use std::collections::HashMap;
-    let tp = &state.pattern.track_params[track];
-    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    map.insert(
-        "gate".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_gate_on()))),
-    );
-    map.insert(
-        "attack".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_attack_ms() as f64))),
-    );
-    map.insert(
-        "release".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_release_ms() as f64))),
-    );
-    map.insert(
-        "swing".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_swing() as f64))),
-    );
-    map.insert(
-        "swing-resolution".into(),
-        Rc::new(RefCell::new(Value::String(
-            tp.get_swing_resolution().label().to_string(),
-        ))),
-    );
-    map.insert(
-        "num-steps".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_num_steps() as f64))),
-    );
-    map.insert(
-        "volume".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_volume() as f64))),
-    );
-    map.insert(
-        "pan".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))),
-    );
-    map.insert(
-        "mute".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_muted()))),
-    );
-    map.insert(
-        "solo".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_solo()))),
-    );
-    map.insert(
-        "timebase".into(),
-        Rc::new(RefCell::new(Value::String(
-            tp.get_timebase().label().to_string(),
-        ))),
-    );
-    map.insert(
-        "send".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_send() as f64))),
-    );
-    map.insert(
-        "poly".into(),
-        Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))),
-    );
-    map.insert(
-        "max-polyphony".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_max_polyphony() as f64))),
-    );
-    map.insert(
-        "mute-group".into(),
-        Rc::new(RefCell::new(Value::Number(tp.get_mute_group() as f64))),
-    );
-    Value::Map(map)
+/// The output that sends a track to bus `bus` (the main mix bus is
+/// `Mix`), or to its sends only for `None`; `None` for a bus that does not
+/// exist. The host kinds' `track.output` setter resolves its bus with it.
+pub(crate) fn track_output_for_bus(
+    app: &app::App,
+    bus: Option<sequencer::sequencer::BusId>,
+) -> Option<sequencer::sequencer::TrackOutput> {
+    use sequencer::sequencer::{BusId, TrackOutput};
+    match bus {
+        None => Some(TrackOutput::None),
+        Some(BusId::MIX) => Some(TrackOutput::Mix),
+        Some(bus) => app
+            .buses
+            .iter()
+            .any(|known| known.id == bus)
+            .then_some(TrackOutput::Bus(bus)),
+    }
 }
 
 /// Build a Lisp Value::List of bools indicating which steps have any p-locks on the given track.
+#[cfg(test)]
 pub(crate) fn build_step_has_plocks(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1410,6 +1264,7 @@ pub(crate) fn build_step_has_plocks(
     build_step_has_plocks_from_mask(&mask)
 }
 
+#[cfg(test)]
 pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
@@ -1425,6 +1280,10 @@ pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> V
 pub(crate) struct PlockVariantStepRender {
     pub(crate) kind: u8,
     pub(crate) color: [f32; 3],
+    /// The step variant the step plays (kind 2), by its label's place in
+    /// the A, B, … order (`plock_variants::label_sort_index`: the host
+    /// kinds' variant `vid`).
+    pub(crate) vid: Option<u64>,
 }
 
 pub(crate) fn plock_variant_step_render_values(
@@ -1440,6 +1299,9 @@ pub(crate) fn plock_variant_step_render_values(
                 PlockVariantStepRender {
                     kind: 2,
                     color: super::track_and_mixer::themed_variant_rgb(assignment.color),
+                    vid: Some(
+                        sequencer::plock_variants::label_sort_index(&assignment.label) as u64,
+                    ),
                 }
             } else if sequencer::plock_variants::live_track_has_seq_lock(
                 state.as_ref(),
@@ -1449,87 +1311,23 @@ pub(crate) fn plock_variant_step_render_values(
                 PlockVariantStepRender {
                     kind: 1,
                     color: SEQ_ONLY_COLOR,
+                    vid: None,
                 }
             } else {
                 PlockVariantStepRender {
                     kind: 0,
                     color: [0.0, 0.0, 0.0],
+                    vid: None,
                 }
             }
         })
         .collect()
 }
 
-pub(crate) fn build_step_plock_kinds(state: &Arc<SequencerState>, track: usize) -> Value {
-    build_step_plock_kinds_from_render(&plock_variant_step_render_values(state, track))
-}
-
-pub(crate) fn build_step_plock_kinds_from_render(render_values: &[PlockVariantStepRender]) -> Value {
-    Value::List(
-        render_values
-            .iter()
-            .map(|render| Rc::new(RefCell::new(Value::Number(render.kind as f64))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_step_variant_color_channel(
-    state: &Arc<SequencerState>,
-    track: usize,
-    channel: usize,
-) -> Value {
-    build_step_variant_color_channel_from_render(
-        &plock_variant_step_render_values(state, track),
-        channel,
-    )
-}
-
-pub(crate) fn build_step_variant_color_channel_from_render(
-    render_values: &[PlockVariantStepRender],
-    channel: usize,
-) -> Value {
-    Value::List(
-        render_values
-            .iter()
-            .map(|render| {
-                Rc::new(RefCell::new(Value::Number(
-                    render.color.get(channel).copied().unwrap_or(0.0) as f64,
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_all_track_step_plock_kinds(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-) -> Value {
-    Value::List(
-        (0..app.tracks.len())
-            .map(|track| Rc::new(RefCell::new(build_step_plock_kinds(state, track))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_all_track_step_variant_color_channel(
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    channel: usize,
-) -> Value {
-    Value::List(
-        (0..app.tracks.len())
-            .map(|track| {
-                Rc::new(RefCell::new(build_step_variant_color_channel(
-                    state, track, channel,
-                )))
-            })
-            .collect(),
-    )
-}
-
 /// One bit per step: whether any effect/instrument/midi-fx/timebase/swing
 /// plock exists for that step. Single flat scan per slot instead of the
 /// per-(step, slot, param) probing done by track_step_has_plock.
+#[cfg(test)]
 pub(crate) fn track_step_plock_mask(
     state: &Arc<SequencerState>,
     track: usize,
@@ -1541,15 +1339,28 @@ pub(crate) fn track_step_plock_mask(
 /// A full UI sync already reconciles variant keys and sequencer locks for its
 /// color lanes. Reuse that result while still including the rack/slot locks
 /// that do not participate in the variant palette.
+#[cfg(test)]
 pub(super) fn track_step_plock_mask_with_render(
     state: &Arc<SequencerState>,
     track: usize,
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
     render_values: Option<&[PlockVariantStepRender]>,
 ) -> [u64; MAX_STEPS / 64] {
+    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
+    track_step_plock_mask_for_slots(state, track, num_slots, render_values)
+}
+
+/// [`track_step_plock_mask_with_render`] given the track's effect slot count
+/// (the length of its `app.graph.effect_descriptors` row), so the host kinds
+/// can compute `step.plocked` without the `App`.
+pub(crate) fn track_step_plock_mask_for_slots(
+    state: &Arc<SequencerState>,
+    track: usize,
+    num_slots: usize,
+    render_values: Option<&[PlockVariantStepRender]>,
+) -> [u64; MAX_STEPS / 64] {
     let mut mask = [0u64; MAX_STEPS / 64];
     let chain = &state.pattern.effect_chains[track];
-    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
     for slot_idx in 0..num_slots {
         if let Some(slot) = chain.get(slot_idx) {
             let np = slot.num_params.load(Ordering::Relaxed) as usize;
@@ -1633,111 +1444,12 @@ pub(super) fn track_step_plock_mask_with_render(
     mask
 }
 
-pub(crate) fn track_step_has_plock(
-    state: &Arc<SequencerState>,
-    track: usize,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
-    step: usize,
-) -> bool {
-    let chain = &state.pattern.effect_chains[track];
-    let midi_fx_slots = &state.pattern.midi_fx_slots[track];
-    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
-    let instrument_slot = &state.pattern.instrument_slots[track];
-    let instrument_num_params = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-    let timebase_plocks = &state.pattern.timebase_plocks[track];
-    let swing_plocks = &state.pattern.swing_plocks[track];
-    let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
-    let track_send_plocks = state.pattern.track_send_plocks[track].snapshot();
-    let effect_has_plock = (0..num_slots).any(|slot_idx| {
-        let Some(slot) = chain.get(slot_idx) else {
-            return false;
-        };
-        let np = slot.num_params.load(Ordering::Relaxed) as usize;
-        (0..np).any(|p| slot.plocks.get(step, p).is_some())
-    });
-    let instrument_has_plock =
-        (0..instrument_num_params).any(|p| instrument_slot.plocks.get(step, p).is_some());
-    let rack_slot_has_plock = state
-        .pattern
-        .rack_tracks
-        .lock()
-        .unwrap()
-        .get(track)
-        .and_then(|rack| rack.as_ref())
-        .is_some_and(|rack| {
-            if rack
-                .macros
-                .iter()
-                .any(|rack_macro| rack_macro.plocks.get(step).is_some_and(Option::is_some))
-            {
-                return true;
-            }
-            rack.slots.iter().any(|slot| {
-                if slot.param_plocks.step_has_plock(step) {
-                    return true;
-                }
-                let num_params = slot.instrument_slot.num_params as usize;
-                if slot
-                    .instrument_slot
-                    .plocks
-                    .get(step)
-                    .is_some_and(|step_plocks| {
-                        step_plocks
-                            .iter()
-                            .take(num_params)
-                            .any(|value| value.is_some())
-                    })
-                {
-                    return true;
-                }
-                slot.effect_slots.iter().any(|effect| {
-                    let num_params = effect.num_params as usize;
-                    effect
-                        .plocks
-                        .get(step)
-                        .is_some_and(|row| row.iter().take(num_params).any(Option::is_some))
-                })
-            })
-        });
-    let midi_fx_has_plock = midi_fx_slots.iter().any(|slot| {
-        let np = slot.num_params.load(Ordering::Relaxed) as usize;
-        (0..np).any(|p| slot.plocks.get(step, p).is_some())
-    });
-
-    effect_has_plock
-        || midi_fx_has_plock
-        || instrument_has_plock
-        || rack_slot_has_plock
-        || track_send_plocks.get(step)
-            .is_some_and(|row| !row.is_empty())
-        || timebase_plocks.has_plock(step)
-        || swing_plocks.has_plock(step)
-        || swing_resolution_plocks.has_plock(step)
-        || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
-        || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step).is_some()
-}
-
-pub(crate) fn playhead_transition_changes_param_bindings(
-    state: &Arc<SequencerState>,
-    track: usize,
-    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    previous_step: usize,
-    current_step: usize,
-) -> bool {
-    if previous_step == current_step || !selected_steps.lock().unwrap().is_empty() {
-        return false;
-    }
-    track_step_has_plock(state, track, descriptors, previous_step)
-        || track_step_has_plock(state, track, descriptors, current_step)
-}
-
 /// One row of the p-lock key projections (beads eseq-4seq / eseq-yr6w).
 ///
 /// Carries only the fields the Lisp side keys on — `param-plock-projected-row-key`
 /// in content/ui/effects/param-controls.lisp derives the per-param SEQV field
 /// name from exactly (target, slot-idx, rack-slot, param-idx). Reusing the row
-/// shape of `SEQ.track-plocks` means the presence and print projections build
+/// shape of the p-lock table (`build_track_plocks_value`) means the presence and print projections build
 /// their field names with the same helper the lock projection already uses, so
 /// the three namespaces can never drift apart.
 pub(crate) fn plock_key_row(
@@ -1776,19 +1488,21 @@ pub(crate) fn plock_key_row(
 
 /// Params on `track` that carry at least one p-lock on ANY step of the current
 /// pattern (bead eseq-yr6w) — the Ableton-style "this control is automated"
-/// indicator, as opposed to `SEQ.track-plocks`, which only ever describes the
-/// selected step.
+/// indicator, as opposed to the p-lock table (`selection.plock-rows`), which
+/// only ever describes the selected step. The legacy `SEQ.track-plock-any` rows, kept for the tests
+/// (the kinds read `param.has-locks`, `rack-macro.has-locks`,
+/// `device.strip-locks`).
 ///
 /// The traversal mirrors `track_step_plock_mask` family for family; this is its
 /// transpose (per param rather than per step). `SlotPLockData::has_any_plock`
 /// makes a lock-free slot O(1), which is the overwhelmingly common case, so the
-/// whole build costs nothing on a pattern with no automation. Runs at publish
-/// time, never per frame.
+/// whole build costs nothing on a pattern with no automation.
 ///
 /// Deliberately excludes `step-param` rows: velocity/duration/transpose deviate
 /// from their defaults on almost every pattern, so a presence dot there would
 /// be permanently lit and carry no information. Rack slot instrument params
 /// are excluded because their controls do not yet consume a dedicated target.
+#[cfg(test)]
 pub(crate) fn build_track_plock_any_value(
     app: &app::App,
     state: &Arc<SequencerState>,

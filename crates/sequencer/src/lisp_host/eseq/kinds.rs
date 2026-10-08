@@ -22,15 +22,22 @@ app publishes each instance's sequencer with [`instance_published_sequencer`].
 
 use super::super::*;
 use crate::graph::GraphManifest;
+use eseqlisp::vm::KindField;
+pub use eseqlisp::vm::{SCRATCH_KIND_PACKAGE, kind_id, kind_name_of};
 
-pub const DEF_KIND_SIGNATURE: &str =
-    "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) ...) :state ((field default) ...) :view f :keymap mode :on-create f)";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\".";
-pub const DEF_KIND_KEYWORDS: &[&str] =
-    &["sequencer", "generator", "document", "state", "view", "keymap", "on-create"];
-
-/// Kind id prefix for kinds defined in headerless (scratch) code.
-pub const SCRATCH_KIND_PACKAGE: &str = "scratch";
+pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
+pub const DEF_KIND_KEYWORDS: &[&str] = &[
+    "key",
+    "host",
+    "sequencer",
+    "generator",
+    "document",
+    "state",
+    "view",
+    "keymap",
+    "on-create",
+];
 
 /// One registered kind, as the host sees it. Everything here is `Send`; the
 /// `:view` closure and the evaluated `:state` defaults live in the defining
@@ -145,17 +152,6 @@ pub fn clear_kind_registry() {
     });
 }
 
-/// `<package name>:<kind name>`. Kinds outside any installed package fall
-/// back to their module (`<module>:<kind>`), and headerless code to
-/// `scratch:<kind>`, so a kind id is never ambiguous with a package's.
-pub fn kind_id(package: Option<&str>, module: Option<&str>, name: &str) -> String {
-    match (package, module) {
-        (Some(package), _) => format!("{package}:{name}"),
-        (None, Some(module)) => format!("{module}:{name}"),
-        (None, None) => format!("{SCRATCH_KIND_PACKAGE}:{name}"),
-    }
-}
-
 /// The installed package (`author/name`) whose owned namespace holds `module`.
 pub fn package_name_for_module(module: &str) -> Option<String> {
     crate::app_paths::app_paths()
@@ -213,11 +209,6 @@ pub fn declared_module_for_kind(kind_id: &str) -> Option<String> {
                 .find(|kind| package.manifest.kind_id(&kind.name) == kind_id)
                 .map(|kind| kind.module.clone())
         })
-}
-
-/// The kind name part of a kind id (`alez/neural:neural` -> `neural`).
-pub fn kind_name_of(kind_id: &str) -> &str {
-    kind_id.rsplit_once(':').map(|(_, name)| name).unwrap_or(kind_id)
 }
 
 /// The package/module part of a kind id (`alez/neural:neural` -> `alez/neural`).
@@ -439,32 +430,22 @@ pub fn parse_def_kind(
                     generator = Some(template);
                 }
             }
+            // Entries are `(field default)` or `(field default type)`
+            // (kind-bindings spec §3.3); eseqlisp parses both.
             "document" => {
                 for entry in def_kind_list(value).unwrap_or_default() {
-                    let pair = def_kind_list(&entry).ok_or_else(|| {
-                        format!("def-kind {name}: each :document entry is (field default)")
-                    })?;
-                    let field = pair.first().and_then(def_kind_symbol).ok_or_else(|| {
-                        format!("def-kind {name}: :document field names must be symbols")
-                    })?;
-                    let default = pair.get(1).cloned().unwrap_or(EValue::Nil);
-                    let literal = crate::process::ProcessLiteral::from_value(&default)
-                        .map_err(|error| format!("def-kind {name} :document {field}: {error}"))?;
-                    schema = schema.document_field(field.clone(), default);
-                    document.push((field, literal));
+                    let field = KindField::from_entry(&name, "document", &entry)?;
+                    let literal = crate::process::ProcessLiteral::from_value(&field.default)
+                        .map_err(|error| {
+                            format!("def-kind {name} :document {}: {error}", field.name)
+                        })?;
+                    document.push((field.name.clone(), literal));
+                    schema = schema.with_document_field(field);
                 }
             }
             "state" => {
                 for entry in def_kind_list(value).unwrap_or_default() {
-                    let pair = def_kind_list(&entry).ok_or_else(|| {
-                        format!("def-kind {name}: each :state entry is (field default)")
-                    })?;
-                    let field = pair
-                        .first()
-                        .and_then(def_kind_symbol)
-                        .ok_or_else(|| format!("def-kind {name}: :state field names must be symbols"))?;
-                    let default = pair.get(1).cloned().unwrap_or(EValue::Nil);
-                    schema = schema.field(field, default);
+                    schema = schema.with_field(KindField::from_entry(&name, "state", &entry)?);
                 }
             }
             "view" => {
@@ -508,7 +489,7 @@ pub fn parse_def_kind(
         sequencer,
         generator,
         document,
-        state_fields: schema.fields.iter().map(|(field, _)| field.clone()).collect(),
+        state_fields: schema.fields.iter().map(|field| field.name.clone()).collect(),
         has_view: view.is_some(),
         keymap: keymap.clone(),
     };
@@ -595,18 +576,18 @@ pub fn sync_instance_records(
         }
         let owner = instance_owner_value(instance.owner);
         if runtime.instance_field(instance.id, "owner").ok().as_ref() != Some(&owner) {
-            let _ = runtime.set_instance_host_field(
+            let _ = runtime.set_instance_builtin_field(
                 instance.id,
-                eseqlisp::vm::InstanceHostField::Owner,
+                eseqlisp::vm::InstanceBuiltinField::Owner,
                 owner,
             );
             changed = true;
         }
         let label = EValue::String(instance.label.clone());
         if runtime.instance_field(instance.id, "label").ok().as_ref() != Some(&label) {
-            let _ = runtime.set_instance_host_field(
+            let _ = runtime.set_instance_builtin_field(
                 instance.id,
-                eseqlisp::vm::InstanceHostField::Label,
+                eseqlisp::vm::InstanceBuiltinField::Label,
                 label,
             );
             changed = true;
@@ -623,7 +604,7 @@ pub fn sync_instance_records(
 /// whether a hook ran; an instance with no record here, or a kind without
 /// `:on-create`, is a quiet no-op.
 pub fn run_instance_on_create(runtime: &mut Runtime, id: u64) -> Result<bool, String> {
-    let Some(kind) = runtime.instance_kind(id) else {
+    let Some(kind) = runtime.instance_kind(id).map(str::to_string) else {
         return Ok(false);
     };
     let Some(hook) = runtime

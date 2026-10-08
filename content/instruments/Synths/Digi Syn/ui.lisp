@@ -18,7 +18,7 @@
 (def syn-switch (name title width)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :debug-name (str "syn-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (syn-ink) :dim)
         :background-color (if on (syn-accent) :instrument-control-bg)
@@ -38,7 +38,7 @@
           :value-index-offset (get p :min) :options options
           :text-color ink :chevron-color ink :badge-color :transparent
           :bg-color surface :border-color :transparent
-          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -89,7 +89,7 @@
             :text-align :left
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
@@ -110,11 +110,11 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-            :text-color (if ink ink (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p))
+            :text-color (if ink ink (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p))
             :text-align :left
             ;; Display ink marks locks with an underline; the accent would vanish on orange.
             :plock-style (if ink :underline :fill)
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -304,7 +304,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color ink :edit-color ink :cursor-color ink
             :plock-style :underline
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 2 p)))))))
 (def syn-screen-choice (name title options)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
@@ -319,7 +319,7 @@
             :value-index-offset (get p :min) :options options
             :text-color (syn-ink) :chevron-color (syn-ink) :badge-color :transparent
             :bg-color (syn-accent) :border-color :transparent :border-width 0
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -335,7 +335,7 @@
 (def syn-mode-button (mode title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "voice_mode"))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (= (round (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p))) mode)))
+    (let ((on (= (round (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) mode)))
       (button title :debug-name (str "syn-voice-mode-" mode) :width 8.1 :height 1.1 :font-size 9 :padding 0 :corner-radius 0
         :color (if on (syn-accent) (syn-ink))
         :background-color (if on (syn-ink) (syn-accent))
@@ -428,7 +428,7 @@
         (syn-num "vel_to_vol" "Velocity" 5.8 2 :dim))
       (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (syn-section) 5.8 :fg))))
 (def syn-rate-param (prefix)
-  (let ((mode (round (reactive-value (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_mode") 0)))))
+  (let ((mode (round (eseq.effects.custom-ui-controls/ui-param-value (str prefix "_mode") 0))))
     (str prefix (nth '("_rate_hz" "_time_ms" "_ratio" "_beats") mode))))
 
 (defsynth-ui

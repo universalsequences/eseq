@@ -264,3 +264,8 @@ $tables
 (def right_out (* (svf (ride-drive (+ plate_right wash_right click_noise) drive_v) cutoff 0.707 0) output_gain))
 (out left_out 1 @name left)
 (out right_out 2 @name right)
+;; Key-up leaves the plate ringing (unless choked) and a hit may never see
+;; note-off, so the amp flag ignores the gate: the voice is done once its
+;; output is silent.
+(use-defmacro voice-amp)
+(out (voice-amp 0 left_out right_out) 3 @name amp @amp true)

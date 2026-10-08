@@ -626,21 +626,11 @@ impl App {
     }
 
     pub fn effective_instrument_param_value(&self, track: usize, param_idx: usize) -> Option<f32> {
-        let slot = self.state.pattern.instrument_slots.get(track)?;
-        if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
-            return None;
-        }
-        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id.load(Ordering::Relaxed),
-            slot.modulator_node_id.load(Ordering::Relaxed),
-            raw_idx,
-        );
-        let key = crate::macro_engine::MacroParamKey::for_instrument(track, param_idx, param_id);
-        Some(
-            self.macro_engine
-                .effective_value(&key, slot.defaults.get(param_idx)),
-        )
+        let key = instrument_param_macro_key(&self.state, track, param_idx)?;
+        let base = self.state.pattern.instrument_slots[track]
+            .defaults
+            .get(param_idx);
+        Some(self.macro_engine.effective_value(&key, base))
     }
 
     /// Sends the current base value unless an engaged macro owns this param.
@@ -712,6 +702,20 @@ impl App {
                 })
             }
             InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack => None,
+        }
+    }
+
+    /// The descriptor a rack slot's instrument plays, borrowed: the builtin
+    /// sampler's (one shared copy: it is derived from constants, so one is
+    /// as good as another, and building it costs ~100 param descriptors) or
+    /// its engine's (`None` for an empty slot or an engine the registry does
+    /// not know yet). The borrowing twin of
+    /// [`Self::rack_slot_instrument_descriptor`].
+    pub fn rack_slot_descriptor(&self, slot: &RackSlotSnapshot) -> Option<&EffectDescriptor> {
+        static SAMPLER: std::sync::OnceLock<EffectDescriptor> = std::sync::OnceLock::new();
+        match slot.instrument_type {
+            InstrumentType::Sampler => Some(SAMPLER.get_or_init(EffectDescriptor::builtin_sampler)),
+            _ => self.rack_slot_cached_instrument_descriptor(slot),
         }
     }
 
@@ -1144,19 +1148,32 @@ impl App {
         slot_exists && wrote
     }
 
-    pub fn rename_rack_macro(
+    /// Clears a rack layer's instrument step p-lock; `true` when a lock was
+    /// held (the derived modulation-active lock is re-synced like a set).
+    pub fn clear_rack_slot_instrument_plock(
         &mut self,
         track: usize,
-        id: crate::sequencer::RackMacroId,
-        name: String,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
     ) -> bool {
-        // This is a live text-input value, not a submitted identifier.
-        // Preserve empty text and spaces so clearing/replacing a label works;
-        // macro identity and mappings are carried by RackMacroId, not its name.
-        self.state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.name = name.clone()
-            })
+        let mut cleared = false;
+        let slot_exists = self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            let held = slot
+                .instrument_slot
+                .plocks
+                .get(step)
+                .and_then(|row| row.get(param_idx))
+                .is_some_and(Option::is_some);
+            if held && slot.instrument_slot.clear_plock(step, param_idx) {
+                slot.track_sound_state.dirty = true;
+                cleared = true;
+            }
+        });
+        if slot_exists && cleared {
+            self.sync_rack_slot_mod_active_plock(track, slot_idx, step, param_idx);
+        }
+        slot_exists && cleared
     }
 
     pub fn set_rack_macro_plock(
@@ -1205,6 +1222,8 @@ impl App {
         id: crate::sequencer::RackMacroId,
         mapping: crate::sequencer::RackMacroMapping,
     ) -> Result<(), String> {
+        // Unrecorded: a rack macro edit's open gesture ends before it.
+        super::edit::finish_active_gesture(self);
         if !mapping.range_min.is_finite() || !mapping.range_max.is_finite() {
             return Err("Rack macro mapping range must be finite".to_string());
         }
@@ -1236,74 +1255,22 @@ impl App {
         Ok(())
     }
 
-    pub fn set_rack_macro_mapping_range(
-        &mut self,
+    /// The target of mapping `mapping` of rack macro `id` of `track` (the
+    /// live rack's), which a recorded range or curve edit names it by.
+    pub fn rack_macro_mapping_target(
+        &self,
         track: usize,
         id: crate::sequencer::RackMacroId,
-        mapping_idx: usize,
-        range_min: f32,
-        range_max: f32,
-    ) -> bool {
-        if !range_min.is_finite() || !range_max.is_finite() {
-            return false;
-        }
-        let mapping_exists = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .and_then(|rack| rack.macros.get(id.index()))
-            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
-        if !mapping_exists {
-            return false;
-        }
-        let updated = self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                let mapping = &mut rack_macro.mappings[mapping_idx];
-                mapping.range_min = range_min;
-                mapping.range_max = range_max;
-            });
-        if updated {
-            self.state.publish_scheduler_snapshot();
-        }
-        updated
+        mapping: usize,
+    ) -> Option<crate::sequencer::RackMacroTarget> {
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        let rack_macro = racks.get(track)?.as_ref()?.macros.get(id.index())?;
+        Some(rack_macro.mappings.get(mapping)?.target.clone())
     }
 
-    pub fn set_rack_macro_mapping_curve(
-        &mut self,
-        track: usize,
-        id: crate::sequencer::RackMacroId,
-        mapping_idx: usize,
-        curve: crate::sequencer::RackMacroCurve,
-    ) -> bool {
-        let mapping_exists = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .and_then(|rack| rack.macros.get(id.index()))
-            .is_some_and(|rack_macro| mapping_idx < rack_macro.mappings.len());
-        if !mapping_exists {
-            return false;
-        }
-        let updated = self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.mappings[mapping_idx].curve = curve;
-            });
-        if updated {
-            self.state.publish_scheduler_snapshot();
-        }
-        updated
-    }
-
+    /// Set rack macro `id`'s own value (clamped to 0–1), unrecorded (a
+    /// fresh mapping's reset), through the recorded edit's write; a value
+    /// it already holds still reaches its targets.
     pub fn set_rack_macro_value(
         &mut self,
         track: usize,
@@ -1311,14 +1278,17 @@ impl App {
         value: f32,
     ) -> bool {
         let value = value.clamp(0.0, 1.0);
-        if !self
-            .state
-            .update_rack_macro_in_current_pattern(track, id, |rack_macro| rack_macro.value = value)
-        {
+        let field = crate::sequencer::RackMacroField::Value(value);
+        let Some(pattern) = self.rack_macro_pattern(track) else {
             return false;
+        };
+        let Ok(before) = self.write_rack_macro_field(track, pattern, id, &field) else {
+            return false;
+        };
+        if before == field {
+            self.state.set_live_rack_macro_default(track, id, value);
+            self.send_transient_rack_macro_value(track, id, value);
         }
-        self.state.set_live_rack_macro_default(track, id, value);
-        self.send_transient_rack_macro_value(track, id, value);
         true
     }
 
@@ -1432,26 +1402,16 @@ impl App {
         id: crate::sequencer::RackMacroId,
         step: Option<usize>,
     ) -> Option<f32> {
-        if let Some(value) = self.state.take_rack_macro_override.values_for_track(track)[id.index()] {
-            return Some(value);
-        }
+        let take = self.state.take_rack_macro_override.values_for_track(track)[id.index()];
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
         let rack_macro = racks
             .get(track)
             .and_then(Option::as_ref)
             .and_then(|rack| rack.macros.get(id.index()))?;
-        if let Some(value) = step
-            .and_then(|step| rack_macro.plocks.get(step))
-            .and_then(|value| *value)
-        {
-            return Some(value.clamp(0.0, 1.0));
-        }
-        let key = crate::macro_engine::MacroParamKey::for_rack_macro(track, id.index() as u8);
-        Some(
-            self.macro_engine
-                .effective_value(&key, rack_macro.value)
-                .clamp(0.0, 1.0),
-        )
+        let overrides = self.macro_engine.overrides();
+        Some(rack_macro_shown_value(
+            take, overrides, track, rack_macro, step,
+        ))
     }
 
     pub fn unmap_rack_macro(
@@ -1460,6 +1420,8 @@ impl App {
         id: crate::sequencer::RackMacroId,
         mapping_idx: usize,
     ) -> bool {
+        // Unrecorded: a rack macro edit's open gesture ends before it.
+        super::edit::finish_active_gesture(self);
         let exists = self
             .state
             .pattern
@@ -1490,7 +1452,7 @@ impl App {
         slot_idx: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) =
+        let Some((active_param_idx, value, _)) =
             self.rack_slot_mod_active_value(track, slot_idx, None, changed_param_idx)
         else {
             return;
@@ -1507,16 +1469,21 @@ impl App {
         step: usize,
         changed_param_idx: usize,
     ) {
-        let Some((active_param_idx, value)) =
+        let Some((active_param_idx, value, step_locked)) =
             self.rack_slot_mod_active_value(track, slot_idx, Some(step), changed_param_idx)
         else {
             return;
         };
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
-            if slot
-                .instrument_slot
-                .set_plock(step, active_param_idx, value)
-            {
+            // No depth lock left on the step (a cleared p-lock): the derived
+            // active lock goes too, as `sync_instrument_mod_active_plock` does.
+            let wrote = if step_locked {
+                slot.instrument_slot
+                    .set_plock(step, active_param_idx, value)
+            } else {
+                slot.instrument_slot.clear_plock(step, active_param_idx)
+            };
+            if wrote {
                 slot.track_sound_state.dirty = true;
             }
         });
@@ -1532,7 +1499,7 @@ impl App {
         slot_idx: usize,
         step: Option<usize>,
         changed_param_idx: usize,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, f32, bool)> {
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
         let slot = racks
             .get(track)
@@ -1555,19 +1522,27 @@ impl App {
             .iter()
             .find(|target| target.depth_param_idx == changed_param_idx)
             .and_then(|target| target.active_param_idx)?;
+        let step_lock = |target: &crate::effects::InstrumentModulationTarget| {
+            step.and_then(|step| {
+                slot.instrument_slot
+                    .plocks
+                    .get(step)
+                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                    .copied()
+                    .flatten()
+            })
+        };
+        let step_locked = descriptor
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| step_lock(target).is_some());
         let active = descriptor
             .instrument_modulation_targets
             .iter()
             .filter(|target| target.active_param_idx == Some(active_param_idx))
             .any(|target| {
-                step.and_then(|step| {
-                    slot.instrument_slot
-                        .plocks
-                        .get(step)
-                        .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
-                        .copied()
-                        .flatten()
-                })
+                step_lock(target)
                 .or_else(|| {
                     slot.instrument_slot
                         .defaults
@@ -1584,7 +1559,11 @@ impl App {
                 .abs()
                     > f32::EPSILON
             });
-        Some((active_param_idx, if active { 1.0 } else { 0.0 }))
+        Some((
+            active_param_idx,
+            if active { 1.0 } else { 0.0 },
+            step_locked,
+        ))
     }
 
     pub(super) fn push_instrument_defaults_for_track(&self, track: usize) {
@@ -1787,4 +1766,54 @@ impl App {
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
+}
+
+/// A rack macro's shown value: a take's override (`take`), else its p-lock
+/// on `step`, else its own value under an engaged project macro (the
+/// `overrides` layer). Shared by [`App::effective_rack_macro_value`] and the
+/// host kinds' `rack-macro.value`, which reads a copy of the layer.
+pub fn rack_macro_shown_value(
+    take: Option<f32>,
+    overrides: &std::collections::HashMap<crate::macro_engine::MacroParamKey, f32>,
+    track: usize,
+    rack_macro: &crate::sequencer::RackMacro,
+    step: Option<usize>,
+) -> f32 {
+    if let Some(value) = take {
+        return value;
+    }
+    if let Some(value) = step
+        .and_then(|step| rack_macro.plocks.get(step))
+        .and_then(|value| *value)
+    {
+        return value.clamp(0.0, 1.0);
+    }
+    let key =
+        crate::macro_engine::MacroParamKey::for_rack_macro(track, rack_macro.id.index() as u8);
+    let value = overrides.get(&key).copied().unwrap_or(rack_macro.value);
+    value.clamp(0.0, 1.0)
+}
+
+/// The macro engine's key for `track`'s instrument param `param_idx`; `None`
+/// when the track or the param (past the slot's live params) does not exist.
+/// Shared by [`App::effective_instrument_param_value`] and the host kinds,
+/// which look the key up in a copy of the override layer.
+pub fn instrument_param_macro_key(
+    state: &crate::sequencer::SequencerState,
+    track: usize,
+    param_idx: usize,
+) -> Option<crate::macro_engine::MacroParamKey> {
+    let slot = state.pattern.instrument_slots.get(track)?;
+    if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+        return None;
+    }
+    let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+    let param_id = crate::neural::ParamNodeId::from_slot_param(
+        slot.node_id.load(Ordering::Relaxed),
+        slot.modulator_node_id.load(Ordering::Relaxed),
+        raw_idx,
+    );
+    Some(crate::macro_engine::MacroParamKey::for_instrument(
+        track, param_idx, param_id,
+    ))
 }

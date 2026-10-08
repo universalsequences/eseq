@@ -111,9 +111,13 @@ pub(in crate::lisp_host) unsafe fn connect_effect_chain(
     predecessor_outputs: usize,
     effect_id: i32,
     effect_inputs: usize,
-    effect_outputs: usize,
+    effect_audio_outputs: &[usize],
     successor: EffectChainSuccessor,
 ) -> Result<(), String> {
+    // Only audio channels reach the successor: mod outputs, the `@amp` flag
+    // and probe taps stay unconnected (`DGenManifest::audio_output_channels`).
+    let effect_outputs = effect_audio_outputs.len();
+    let audio_port = |idx: usize| effect_audio_outputs.get(idx).copied().unwrap_or(idx) as i32;
     if effect_inputs <= 1 {
         let pred_channels = predecessor_outputs.max(1).min(2);
         for src_port in 0..pred_channels {
@@ -150,7 +154,7 @@ pub(in crate::lisp_host) unsafe fn connect_effect_chain(
                     connect_effect_port(
                         lg,
                         effect_id,
-                        0,
+                        audio_port(0),
                         node_id,
                         dst_port as i32,
                         "connect effect output",
@@ -161,7 +165,7 @@ pub(in crate::lisp_host) unsafe fn connect_effect_chain(
                     connect_effect_port(
                         lg,
                         effect_id,
-                        ch as i32,
+                        audio_port(ch),
                         node_id,
                         ch as i32,
                         "connect effect output",
@@ -170,11 +174,11 @@ pub(in crate::lisp_host) unsafe fn connect_effect_chain(
             }
         }
         EffectChainSuccessor::MonoPair { left, right } => {
-            connect_effect_port(lg, effect_id, 0, left, 0, "connect effect left output")?;
+            connect_effect_port(lg, effect_id, audio_port(0), left, 0, "connect effect left output")?;
             connect_effect_port(
                 lg,
                 effect_id,
-                if effect_outputs > 1 { 1 } else { 0 },
+                audio_port(if effect_outputs > 1 { 1 } else { 0 }),
                 right,
                 0,
                 "connect effect right output",
@@ -237,7 +241,13 @@ pub unsafe fn add_effect_to_chain_at_successor(
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
 
     // Compact init message: only header + non-zero index/value pairs
-    let init_msg = build_init_message(slot_id, manifest, Some(lib.process_fn));
+    let mut init_msg = build_init_message(slot_id, manifest, Some(lib.process_fn));
+    // An effect with probes carries its probe token in the header's
+    // diagnostics slot so the wrapper can find its capture slots.
+    let probe_token = super::probe_capture::register_effect_probes(manifest, lib.process_fn as usize);
+    if let Some(token) = probe_token {
+        init_msg[0] = token.header_code();
+    }
     let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
 
     let name = CString::new(format!("dgenlisp_fx_{}", slot_id)).unwrap();
@@ -254,7 +264,13 @@ pub unsafe fn add_effect_to_chain_at_successor(
     );
 
     if node_id < 0 {
+        if let Some(token) = probe_token {
+            super::probe_capture::release_effect_probe_token(token);
+        }
         return Err("Failed to add DGenLisp node to graph".to_string());
+    }
+    if let Some(token) = probe_token {
+        super::probe_capture::bind_effect_probe_node(token, node_id);
     }
 
     let modulator_node_id = if effect_has_host_modulation(manifest) {
@@ -271,6 +287,7 @@ pub unsafe fn add_effect_to_chain_at_successor(
         );
         if mod_id < 0 {
             audiograph::delete_node(lg, node_id);
+            super::probe_capture::clear_effect_probes(node_id);
             return Err("Failed to add DGenLisp effect modulator node to graph".to_string());
         }
         Some(mod_id)
@@ -289,11 +306,12 @@ pub unsafe fn add_effect_to_chain_at_successor(
         predecessor_outputs,
         node_id,
         manifest.n_inputs,
-        manifest.n_outputs,
+        &manifest.audio_output_channels(),
         successor,
     );
     if let Err(error) = connect_result {
         audiograph::delete_node(lg, node_id);
+        super::probe_capture::clear_effect_probes(node_id);
         if let Some(mod_id) = modulator_node_id {
             audiograph::delete_node(lg, mod_id);
         }
@@ -333,6 +351,7 @@ pub unsafe fn add_effect_to_chain_at_successor(
     })();
     if let Err(error) = mod_connect_result {
         audiograph::delete_node(lg, node_id);
+        super::probe_capture::clear_effect_probes(node_id);
         if let Some(mod_id) = modulator_node_id {
             audiograph::delete_node(lg, mod_id);
         }

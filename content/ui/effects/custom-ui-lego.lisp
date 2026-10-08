@@ -10,7 +10,7 @@
    custom-ui-param-control-max custom-ui-param-base-value-prop
    custom-ui-param-base-min-prop custom-ui-param-base-max-prop
    custom-ui-param-knob-mod-slot-prop custom-ui-param-knob-mod-depth-prop
-   custom-ui-selected-mod-slot-prop custom-ui-param-plock-text-color
+   custom-ui-selected-mod-slot-prop
    custom-ui-param-plock-active? custom-ui-param-plock-default
    custom-ui-param-change-callback custom-ui-param-change-callback-s
    custom-ui-tensor-bound-values custom-ui-tensor-cell-change-callback-s
@@ -398,8 +398,8 @@
             :mod-range-9-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (eseq.effects.custom-ui-runtime/custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :label-color :dim
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :label-color :dim
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-default (eseq.effects.custom-ui-runtime/custom-ui-param-plock-default p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -443,8 +443,8 @@
             :mod-range-9-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (eseq.effects.custom-ui-runtime/custom-ui-selected-mod-slot-prop p)
             :font-size font-size :label-font-size label-font-size
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :label-color :dim
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :label-color :dim
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-default (eseq.effects.custom-ui-runtime/custom-ui-param-plock-default p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -504,10 +504,10 @@
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -527,10 +527,10 @@
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -556,14 +556,14 @@
               :border-color :black
               :background-color :mixer-strip-bg
               :font-size 9.5
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active (if stage
                 (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
                 false)
               :active-color (ui-accent-cyan)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -599,12 +599,12 @@
               :background-color :mixer-strip-bg
               :noui false 
               :font-size 9.5
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active false
               :active-color (ui-accent-cyan)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -662,7 +662,7 @@
               :badge-color :dropdown-badge-bg
               :border-color accent
               :border-width 0.05
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -691,7 +691,7 @@
               :badge-color :dropdown-badge-bg
               :border-color accent
               :border-width 0.05
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -721,7 +721,7 @@
               :badge-color :transparent
               :border-color :black
               :border-width 0.05
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -739,7 +739,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
           (str "custom-ui-lego-micro-toggle-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
           (subtree :key (str "custom-ui-lego-micro-toggle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
@@ -768,10 +768,10 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.0
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -792,10 +792,10 @@
               :unit unit
               :noui true :font-size 10.2
               :text-align :left
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -813,10 +813,10 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -837,12 +837,12 @@
               :unit unit
               :noui true :font-size 10.5
               :text-align :center
-              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding -1 stage)
               :active-color (ui-accent-cyan)
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -863,12 +863,12 @@
                 :unit unit
                 :noui true :font-size 10.5
                 :text-align :center
-                :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+                :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
                 :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
                 :active-color (ui-accent-cyan)
-                :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+                :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
                 :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
                 :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
                 :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -1244,10 +1244,10 @@
           :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
           :unit unit
           :noui true :font-size 8.6
-          :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+          :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-knob-text-color p) :edit-color :yellow
               :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
               :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
-          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
           :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -1264,7 +1264,7 @@
     (if p
       ;; the value is read concretely, so it must be part of the subtree key
       ;; for the chip to rebuild when the param changes
-      (let ((idx (round (- (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) (get p :min))))
+      (let ((idx (round (- (eseq.effects.custom-ui-runtime/custom-ui-param-value p) (get p :min))))
             (n (length labels)))
         (subtree :key (str "custom-ui-lego-chip-cycle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name "-" idx)
           (box :width width :height 1.18 :v-align :end
@@ -1272,7 +1272,7 @@
               :width width :height 0.92 :padding 0 :font-size 8.8
               :background-color :instrument-control-bg
               :color accent
-              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-active (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active-prop p)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
@@ -1341,7 +1341,7 @@
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
+      (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
         (subtree :key (str "custom-ui-lego-chip-toggle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name "-" (if on 1 0))
           (box :width width :height 1.18 :v-align :end
             (button text

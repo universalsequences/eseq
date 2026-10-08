@@ -1,8 +1,11 @@
 ;; Instrument panel composition for sampler, rack, modulator, and synth tracks.
 (module eseq.effects.instrument-panel)
 
-(import eseq.macro-state :as ms)
-(import eseq.effects.state :as st)
+(import eseq.macro-state :as ms :refer (macro-arm))
+(import eseq.effects.devices :as dv)
+(import eseq.effects.panel-data :as pd)
+(import eseq.view-kit :refer (listed?))
+(import eseq.effects.state :as st :refer (effect-mods instrument-view))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
@@ -158,84 +161,82 @@
         :on-click |x y r| (rack-panel-toggle-macros inst)))
     ))
 
-(def rack-macro-set (track macro value)
+(def rack-macro-set (track rm value)
   (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
-    (dict :track track :id (get macro :id) :value value)))
+    (dict :track track :id rm.index :value value)))
 
-(def rack-macro-display-value (macro)
-  (if (get macro :value-field)
-    (bind-seq (get macro :value-field))
-    (get macro :value)))
+;; Arm rack macro `index` for mapping (its map button), or disarm it when
+;; it is the armed one.
+(def rack-macro-arm (index)
+  (if (= macro-arm.rack-index index)
+    (ms/rack-clear-mapping-arm)
+    (do
+      (ms/clear-mapping-arm)
+      (pc/process-map-clear)
+      (set! instrument-view.mods-open false)
+      (set! effect-mods.open false)
+      (set! macro-arm.rack-index index)
+      ;; Hook natives register at runtime under flat names; inside a module,
+      ;; reach hooks through the data-addressed flat keyspace (spec §10 e).
+      (run-hook "macro-mapping-sidebar-open-hook")
+      (run-hook "macro-mapping-sidebar-refresh-hook"))))
 
-(def rack-macro-plock-active (macro)
-  (if (get macro :plock-active-field)
-    (bind-seq (get macro :plock-active-field))
-    0))
-
-(def rack-macro-plock-default (macro)
-  (if (get macro :plock-default-field)
-    (bind-seq (get macro :plock-default-field))
-    (get macro :value)))
-
-(def rack-macro-arm (macro)
-  (let ((next (if (= ms/rack-mapping-selected (get macro :id)) -1 (get macro :id))))
-    (if (< next 0)
-      (ms/rack-clear-mapping-arm)
-      (do
-        (ms/clear-mapping-arm)
-        (pc/process-map-clear)
-        (set! st/instrument-mods-open false)
-        (set! st/effect-mods-open false)
-        (set! ms/rack-mapping-selected next)
-        ;; Hook natives register at runtime under flat names; inside a module,
-        ;; reach hooks through the data-addressed flat keyspace (spec §10 e).
-        (run-hook "macro-mapping-sidebar-open-hook")
-        (run-hook "macro-mapping-sidebar-refresh-hook")))))
-
-(def rack-macro-control (track macro)
-  (let ((target (dict :track track :target "rack-macro" :param-idx (get macro :id)))
-        (has-locks (pc/target-plock-any? target)))
-    (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
+(def rack-macro-control (track rm)
+  (let ((id rm.index)
+      (target (dict :track track :target "rack-macro" :param-idx rm.index)))
+    (box :key (str "rack-macro-" id) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
-      (if (= ms/rack-mapping-selected (get macro :id)) :rack-mapping-border :mixer-strip-border)
+      (if (= macro-arm.rack-index id) :rack-mapping-border :mixer-strip-border)
       (v-stack :gap 0.08 :align :center
-        (subtree :key (str "rack-macro-name-" (get macro :id))
-          (text-input :debug-name (str "rack-macro-name-" (get macro :id))
-            :width 5.2 :height 0.9 :font-size 8.5 :value (ms/macro-name macro)
-            :on-change (lambda (name) (host-command "rename-rack-macro"
-                (dict :track track :id (get macro :id) :name name)))))
-        (box :debug-name (str "rack-macro-control-" (get macro :id))
-          :plock-any (if has-locks 1 0)
-          :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
-          (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
-            :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
+        (subtree :key (str "rack-macro-name-" id)
+          (text-input :debug-name (str "rack-macro-name-" id)
+            :width 5.2 :height 0.9 :font-size 8.5 :value rm.name
+            :on-change (lambda (name) (set! rm.name name))))
+        ;; The instrument panel has no subtree of its own, so a by-value
+        ;; read here would sit in the *fx* root: the dot and the knob's lock
+        ;; state are bound (the menu reads has-locks on the click).
+        (box :debug-name (str "rack-macro-control-" id)
+          :plock-any #'rm.has-locks
+          :on-right-click (lambda (event) (pc/open-target-plock-menu event target rm.has-locks))
+          (knob-number :debug-name (str "rack-macro-knob-" id)
+            :value #'rm.value :min 0 :max 1 :decimals 2
             :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
-            :plock-active (rack-macro-plock-active macro)
-            :plock-default (rack-macro-plock-default macro)
-            :plock-color-r (pc/param-plock-color-r)
-            :plock-color-g (pc/param-plock-color-g)
-            :plock-color-b (pc/param-plock-color-b)
-            :on-change (lambda (value) (rack-macro-set track macro value))))
-        (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
-          :active (if (= ms/rack-mapping-selected (get macro :id)) 1 0)
-          :background-color :mixer-control-bg
-          :active-background-color :rack-mapping-bg
-          :border-color :transparent
-          :color :dim :active-color :black
-          :on-click (lambda (event) (rack-macro-arm macro)))))))
+            :plock-active #'rm.locked
+            :text-color :fg
+            :plock-default #'rm.base
+              :plock-color-r (pc/param-plock-color-r)
+              :plock-color-g (pc/param-plock-color-g)
+              :plock-color-b (pc/param-plock-color-b)
+              :on-change (lambda (value) (rack-macro-set track rm value))))
+          (button (str "map " (len rm.mappings)) :width 4.6 :height 0.7 :font-size 7.5
+            :active (if (= macro-arm.rack-index id) 1 0)
+            :background-color :mixer-control-bg
+            :active-background-color :rack-mapping-bg
+            :border-color :transparent
+            :color :dim :active-color :black
+            :on-click (lambda (event) (rack-macro-arm id)))))))
 
+;; The rack's macros are its instrument device's (rack-macro instances).
 (def rack-macro-bank (inst)
-  (let ((track (get inst :track)) (macros (get inst :macros)))
+  (let ((track (get inst :track))
+        (rack (dv/inst-device inst))
+        (macros (if rack rack.macros '())))
     (box :debug-name "rack-macro-bank" :width 24 :height 9.7 :padding 0.2
-      :background-color :bg :border-color :buffer-bg :corner-radius 10
+      :background-color :mixer-control-bg :border-color :buffer-bg :corner-radius 10
       (v-stack :gap 0.15
         (h-stack :gap 0.15
-          (rack-macro-control track (nth macros 0)) (rack-macro-control track (nth macros 1))
-          (rack-macro-control track (nth macros 2)) (rack-macro-control track (nth macros 3)))
+          (rack-macro-cell track macros 0) (rack-macro-cell track macros 1)
+          (rack-macro-cell track macros 2) (rack-macro-cell track macros 3))
         (h-stack :gap 0.15
-          (rack-macro-control track (nth macros 4)) (rack-macro-control track (nth macros 5))
-          (rack-macro-control track (nth macros 6)) (rack-macro-control track (nth macros 7)))))))
+          (rack-macro-cell track macros 4) (rack-macro-cell track macros 5)
+          (rack-macro-cell track macros 6) (rack-macro-cell track macros 7))))))
+
+;; Macro i of the bank, or an empty cell while the rack device is not
+;; published.
+(def rack-macro-cell (track macros i)
+  (let ((rm (nth macros i)))
+    (if rm (rack-macro-control track rm) (box :width 5.7 :height 4.35))))
 
 (def rack-panel-drop-on-rack (event)
   (let ((payload (get event :payload))
@@ -315,11 +316,9 @@
     (rack-slot-select slot)
     (seq-set-delete-target :rack-slot (rack-slot-delete-target-payload slot))))
 
-(def rack-slot-delete-target-binding (slot)
-  (bind-seq (str "rack-slot-delete-target-" (get slot :track) "-" (get slot :idx))))
-
-(def rack-slot-delete-target? (slot)
-  (rack-slot-delete-target-binding slot))
+;; The rack slot device a rack panel's slot dict stands for, or nil.
+(def slot-device (slot)
+  (dv/rack-slot-device (get slot :track) (get slot :idx)))
 
 (def rack-slot-set-param-or-plock (slot param default-command v)
   (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" default-command)
@@ -392,46 +391,36 @@
               :name (get payload :name)
               :builtin (get payload :builtin))))))
 
-(def rack-slot-display-value (slot prop field-prop)
-  (if (get slot field-prop)
-    (bind-seq (get slot field-prop))
-    (get slot prop)))
-
-;; Only used for mute/solo flags. bind-seq is a float binding (bools arrive as
-;; 1.0/0.0) and `not` doesn't negate numbers, so normalize to a real boolean.
-(def rack-slot-display-scalar (slot prop field-prop)
-  (let ((field (get slot field-prop)))
-    (if field
-      (> (reactive-value (bind-seq field)) 0.5)
-      (get slot prop))))
-
-;; Slot controls are separate from instrument params, but use the same macro dot.
-(def rack-slot-param-macro-owned? (slot param)
-  (let ((panel (nth SEQ.instrument-panel 0)))
-    (and (= (get panel :track) (get slot :track))
-      (> (len (filter |macro|
-        (> (len (filter |mapping|
-          (and (= (get mapping :kind) "rack-slot")
-               (= (get mapping :rack-slot) (get slot :idx))
-               (= (get mapping :param) param))
-          (get macro :mappings))) 0)
-        (get panel :macros))) 0))))
-
-(def rack-slot-param-wrapper (slot param body)
+;; Slot controls are separate from instrument params, but use the same macro
+;; dot: a macro of the rack mapped onto the control (the slot device's
+;; strip-macros), as their p-lock dot reads its strip-locks.
+(def rack-slot-param-wrapper (inst slot sd param body)
   (let ((target (nth (filter |target| (= (get target :name) param)
                       (get slot :param-targets)) 0))
-        (has-locks (pc/target-plock-any? target)))
+        (has-locks (listed? param sd.strip-locks)))
     (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
       :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
       :background-color :transparent
-      :macro-owned (if (rack-slot-param-macro-owned? slot param) 1 0)
+      :macro-owned (if (listed? param sd.strip-macros) 1 0)
       :plock-any (if has-locks 1 0)
       :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
       body)))
 
-(def rack-slot-row (slot)
-  (let ((delete-target (rack-slot-delete-target? slot))
-      (selected (get slot :selected)))
+;; A rack slot's row: its strip, read from the slot device (an empty row
+;; while the device is not published).
+(def rack-slot-row (inst slot)
+  (let ((sd (slot-device slot)))
+    (if sd
+      (rack-slot-strip inst slot sd)
+      (box :key (str "rack-slot-row-" (get slot :idx)) :width 34.6 :height 1.65))))
+
+;; The delete-target highlight is bound (a box's :selected, a label's
+;; :active).
+(def rack-slot-strip (inst slot sd)
+  (let ((selected (get slot :selected))
+        (delete-target #'sd.delete-target)
+        (muted sd.muted-display)
+        (soloed sd.soloed-display))
     (box :key (str "rack-slot-row-" (get slot :idx))
       :width 34.6
       :height 1.65
@@ -463,7 +452,7 @@
           :width 1.5 :height 1.02 :padding 0 :font-size 10
           :border-color :transparent
           :background-color (if (get slot :enabled) :transparent :mixer-control-bg)
-          :color (if (get slot :enabled) (if selected :white :gray) :dim)
+          :color (if (get slot :enabled) (if selected :fg :gray) :dim)
           :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
         (box :width 1)
         (box :key (str "rack-slot-label-" (get slot :idx))
@@ -477,61 +466,61 @@
             (box :height 0.2)
             (label (substring (get slot :display-name) 0 14)
               :font-size 10.5
-              :color (if (get slot :enabled) :white :dim)
+              :color (if (get slot :enabled) :fg :dim)
               :active delete-target
               :active-color :white
               :bg :transparent)))
         
-        (rack-slot-param-wrapper slot "base-note"
+        (rack-slot-param-wrapper inst slot sd "base-note"
           (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
             (label "T" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
+            (number-picker :value #'sd.base-note-display
               :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
               :noui true :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
               :width 3.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-base-note slot v)))))
-        (rack-slot-param-wrapper slot "gain"
+        (rack-slot-param-wrapper inst slot sd "gain"
           (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
             (label "G" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value (rack-slot-display-value slot :gain :gain-field)
+            (number-picker :value #'sd.gain-display
               :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
               :noui true :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
               :width 3.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-gain slot v)))))
-        (rack-slot-param-wrapper slot "pan"
+        (rack-slot-param-wrapper inst slot sd "pan"
           (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
             (label "P" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value (rack-slot-display-value slot :pan :pan-field)
+            (number-picker :value #'sd.pan-display
               :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
               :noui true :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
               :width 3.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-pan slot v)))))
-        (rack-slot-param-wrapper slot "max-polyphony"
+        (rack-slot-param-wrapper inst slot sd "max-polyphony"
           (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
             (label "V" :font-size 8.2 :color :dim :bg :transparent)
-            (number-picker :value (rack-slot-display-value slot :max-polyphony :max-polyphony-field)
+            (number-picker :value #'sd.voices-display
               :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
               :noui true :font-size 9.4
               :text-align :center :text-color :dim :edit-color :yellow
               :width 3.55 :height 0.84
               :on-change (lambda (v) (rack-slot-set-max-polyphony slot v)))))
-        (rack-slot-param-wrapper slot "mute"
+        (rack-slot-param-wrapper inst slot sd "mute"
           (button "M"
             :width 2.0 :height 1.02 :padding 0 :font-size 9
             :border-color :transparent
-            :background-color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-bg :mixer-control-bg)
-            :color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-fg :dim)
-            :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field)))))
-        (rack-slot-param-wrapper slot "solo"
+            :background-color (if muted :control-on-bg :mixer-control-bg)
+            :color (if muted :control-on-fg :dim)
+            :on-click |x y r| (rack-slot-set-mute slot (not muted))))
+        (rack-slot-param-wrapper inst slot sd "solo"
           (button "S"
             :width 2.0 :height 1.02 :padding 0 :font-size 9
             :border-color :transparent
-            :background-color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-bg :mixer-control-bg)
-            :color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-fg :dim)
-            :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field)))))))))
+            :background-color (if soloed :control-on-bg :mixer-control-bg)
+            :color (if soloed :control-on-fg :dim)
+            :on-click |x y r| (rack-slot-set-solo slot (not soloed))))))))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"
@@ -564,16 +553,21 @@
   (let ((slot-idx (get inst :selected-slot)))
     (if (< slot-idx 0)
       (box :width 0 :height 0)
-      (let ((slot (nth (get inst :slots) slot-idx)))
-        (if (= (len (get slot :effects)) 0)
-          (box :width 0 :height 0)
-          (h-stack :debug-name "rack-slot-fx-panel"
-                   :height st/fx-fixed-panel-height :gap 1 :align :stretch
-            (each (get slot :effects) |fx fx-idx|
-              (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
-                (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
-                  (ep/fx-panel (get fx :name) (get fx :params) fx))
-                (pf/device-output-meter (get fx :meter))))))))))
+      ;; The selected slot's running effects, each panel's dict built in its
+      ;; own subtree (eseq.effects.panel-data), as a bus effect's.
+      (subtree :key (str "rack-selected-fx-" (get inst :track) "-" slot-idx)
+        (let ((effects (pd/rack-slot-effect-devices
+                         (dv/rack-slot-device (get inst :track) slot-idx))))
+          (if (= (len effects) 0)
+            (box :width 0 :height 0)
+            (h-stack :debug-name "rack-slot-fx-panel"
+                     :height st/fx-fixed-panel-height :gap 1 :align :stretch
+              (each effects |d fx-idx|
+                (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+                  (subtree :key (str "rack-slot-fx-" d.slot "-" d.name)
+                    (let ((fx (pd/fx-panel-of d)))
+                      (ep/fx-panel (get fx :name) (get fx :params) fx)))
+                  (pf/device-output-meter d.meter))))))))))
 
 (def rack-slot-fx-drop-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))
@@ -622,7 +616,7 @@
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :start :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :v-align :center
-                :font-size 11 :color :white :bg :transparent)
+                :font-size 11 :color :fg :bg :transparent)
               (box :flex 1 :height 0.15))
             (box :debug-name "rack-compact-header-content"
               :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
@@ -649,13 +643,13 @@
           (if (st/rack-panel-macros-open inst) (rack-macro-bank inst) (box :width 0 :height 0))
           (if (st/rack-panel-slot-list-open inst)
             (box
-              :background-color :bg
+              :background-color :mixer-control-bg
               :border-color :buffer-bg
               :corner-radius 10
               (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
                 (if (> (len (get inst :slots)) 0)
                   (each (get inst :slots) |slot idx|
-                    (rack-slot-row slot))
+                    (rack-slot-row inst slot))
                   (box :width :fill :height 9 :h-align :center :v-align :center
                     (label "Drop an Instrument or Sample"
                       :font-size 11 :color :dim :bg :transparent)))))
@@ -686,9 +680,9 @@
       (box :width 0 :height 0))))
 
 (def instrument-polyphony-control ()
-  (button (if SEQ.tp-poly "poly" "mono")
+  (button (if (tp/poly?) "poly" "mono")
     :debug-name "instrument-polyphony" :width 4 :height 0.8 :padding 0
-    :font-size 9 :color :white :background-color :transparent :border-color :transparent
+    :font-size 9 :color :fg :background-color :transparent :border-color :transparent
     :on-click |x y r| (tp/toggle-polyphony)
     :on-right-click (lambda (event) (tp/open-polyphony-menu event))))
 
@@ -704,7 +698,11 @@
           (number-picker :debug-name "instrument-base-note" :width 3.5 :height 0.7
             :noui true :font-size 9 :decimals 0 :step 1
             :value (pc/fx-param-value p) :min (get p :min) :max (get p :max)
-            :text-color (pc/param-plock-text-color false p)
+            :text-color :dim
+            :plock-active (pc/param-plock-active-prop false p)
+            :plock-color-r (pc/param-plock-color-r)
+            :plock-color-g (pc/param-plock-color-g)
+            :plock-color-b (pc/param-plock-color-b)
             :on-change (lambda (v) (pc/fx-set-instrument-value p v)))))
       (box :width 0 :height 0))))
 
@@ -723,7 +721,7 @@
                 (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "instrument-enabled")
                 (h-stack :v-align :center :height st/fx-panel-header-height :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
-                    :font-size 11  :color :white :bg :transparent)
+                    :font-size 11  :color :fg :bg :transparent)
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
                   (ep/instrument-keys-button)

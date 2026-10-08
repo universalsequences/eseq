@@ -41,7 +41,7 @@ def stream(inst, frames=24000, block=128, onset=137, idle=False, gate_only=False
         inst.process_fn(pointers(inputs), pointers(outputs), count,
                         state.ctypes.data_as(ctypes.c_void_p), ctypes.byref(inst.context), None)
         offset += count
-    return np.array(outputs).T, state
+    return np.array(outputs)[inst.audio_channels].T, state
 
 
 def onset_check(inst):

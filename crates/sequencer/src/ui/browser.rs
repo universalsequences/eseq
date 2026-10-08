@@ -922,7 +922,7 @@ fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
     ])
 }
 
-/// `:instrument-id` of a builtin row, matched against `SEQ.track-instrument-ids`.
+/// `:instrument-id` of a builtin row, matched against `track.instrument-id`.
 pub(crate) fn builtin_instrument_id(name: &str) -> String {
     format!("builtin:{name}")
 }
@@ -1109,7 +1109,7 @@ fn mark_favorite_instrument_value(
                 );
             }
             // The same canonical id marks the row the current track plays
-            // (`SEQ.track-instrument-ids`).
+            // (`track.instrument-id`).
             map.insert("instrument-id".to_string(), Rc::new(RefCell::new(Value::String(id.clone()))));
             map.insert("favorite-id".to_string(), Rc::new(RefCell::new(Value::String(id))));
         }

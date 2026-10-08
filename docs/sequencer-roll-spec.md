@@ -278,7 +278,7 @@ Notes:
    `roll-gate` / `roll-clock` pair above + a script tab with a momentary
    roll button and a 1–8 timebase strip (eight small buttons or a
    number-picker), wired per the process-ui-control-demo pattern.
-2. Verify by ear + `SEQ.track-events` event-view: hold roll over a sparse
+2. Verify by ear + `transport.track-events` event-view: hold roll over a sparse
    pattern (empty steps mid-roll is the key case), jam the timebase, release
    on/off the grid.
 3. Confirm `timebase-beats` table; extend if needed.

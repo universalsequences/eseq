@@ -1,5 +1,7 @@
 # Mono Legato (Single-Trigger) Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Goal
 
 Add classic mono-synth **legato / single-trigger** behavior as a track option next

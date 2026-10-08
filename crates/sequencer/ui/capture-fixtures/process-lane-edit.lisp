@@ -12,9 +12,9 @@
     (capture-lane :amount (lane 0 4 8 12 16 20 24 12 0 -4 -8 -12 -16 -20 -24 -12))))
 
 (def capture-after-sync ()
-  (let ((track-id (nth SEQ.track-ids 0)))
-    (eseq.sequencer/set-track-expanded track-id true)
-    (eseq.sequencer/set-track-param-mode track-id
+  (let ((t (eseq.kinds/track 0)))
+    (eseq.sequencer/set-track-expanded t true)
+    (eseq.sequencer/set-track-param-mode t
       (+ eseq.seqv-track-params/seqv-process-lane-mode-offset
-        (- (len SEQ.process-lanes) 1)))
+        (- (len t.lanes) 1)))
     (seq-select-step-range 1 5)))

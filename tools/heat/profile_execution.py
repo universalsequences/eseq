@@ -48,7 +48,10 @@ class Patch:
         for p in self.params.values():
             self.mem[p["cellId"]] = params.get(p["name"], p["default"])
         self.ins = [np.zeros(516, np.float32) for _ in self.manifest["inputs"]]
-        self.outs = [np.zeros(516, np.float32) for _ in self.manifest["outputs"]]
+        # Probe taps may sit on channels outputs[] does not list.
+        n_out = max([1] + [o.get("channel", i) + 1 for i, o in enumerate(self.manifest["outputs"])]
+                    + [p["channel"] + 1 for p in self.manifest.get("probes") or []])
+        self.outs = [np.zeros(516, np.float32) for _ in range(n_out)]
         self.ip = (P * len(self.ins))(*[a.ctypes.data_as(P) for a in self.ins])
         self.op = (P * len(self.outs))(*[a.ctypes.data_as(P) for a in self.outs])
         self.mp = self.mem.ctypes.data_as(C.c_void_p)

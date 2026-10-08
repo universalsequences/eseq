@@ -18,6 +18,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         UI_PROCESS_HANDLE_BASE,
     };
     use crate::accumulator::ResolvedStep;
+    use super::eseq::graph_authoring::test_api as graph_api;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
     use crate::neural::{NeuralMaxPolySelection, ParamNodeId};
     use crate::scheduled_event::{
@@ -1140,225 +1141,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         });
     }
 
-    /// Every graph demo script keeps the handle `def-sequencer` returns and,
-    /// under a rack owner, publishes a rack-owned instance and labels its tab
-    /// with the rack. The variable-reset demo additionally checks the
-    /// member-built route options and a route edit through its own helper.
-    #[test]
-    fn every_graph_demo_loads_project_owned_and_rack_owned() {
-        for (file, name, prefix) in [
-            ("graph-markov-8x8-demo.lisp", "markov-8x8-demo", "m8"),
-            ("graph-neural-16-cycle-demo.lisp", "neural-16-cycle-demo", "g16c"),
-            ("graph-neural-16-demo.lisp", "neural-16-demo", "g16"),
-            ("graph-neural-8x8-demo.lisp", "neural-8x8-demo", "g8"),
-            ("graph-neural-8x8-reset-demo.lisp", "neural-8x8-reset-demo", "g8r"),
-            ("graph-neural-group-matrix-demo.lisp", "neural-group-matrix-demo", "ggm"),
-        ] {
-            let state = Arc::new(SequencerState::new(
-                4,
-                (0..4).map(|_| default_empty_effect_chain()).collect(),
-            ));
-            let mut runtime = Runtime::new();
-            runtime.register_reactive(
-                "SEQ",
-                vec![
-                    ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                    ("graph-visualizations", Value::List(Vec::new())),
-                    ("track-colors", Value::List(Vec::new())),
-                    ("track-active-notes", Value::List(Vec::new())),
-                    ("track-events", Value::List(Vec::new())),
-                    ("track-event-current-beat", Value::Number(0.0)),
-                    (
-                        "track-names",
-                        Value::List(
-                            ["kick", "snare", "hat", "perc"]
-                                .iter()
-                                .map(|n| Rc::new(RefCell::new(Value::String(n.to_string()))))
-                                .collect(),
-                        ),
-                    ),
-                ],
-                true,
-            );
-            register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-            register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-            let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(|crates_dir| crates_dir.parent())
-                .expect("sequencer crate should live under workspace crates dir")
-                .join(".eseqlisp-scratch");
-            let stubs = r#"
-                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
-                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-                (def eseq.drum-rack-v2/group-index-by-id (gid) 0)
-                (def eseq.drum-rack-v2/group-name (gidx) "Break")
-            "#;
-            let load = format!(r#"(load "content/scripts/sequencers/{file}")"#);
-            let report = runtime.eval_source_transactional(
-                Some(workspace_root.clone()),
-                &format!("{stubs}\n{load}"),
-                Vec::new(),
-            );
-            assert!(report.success, "{file}: project-owned load failed: {:?}", report.diagnostics);
-            let handle = runtime.eval_str(&format!("{prefix}-name")).expect("handle").expect("value");
-            let project_id = super::graph_instance_id(name, None);
-            assert!(matches!(handle, Value::Number(n) if n == project_id as f64), "{file}: {handle:?}");
-            assert_eq!(
-                runtime.eval_str("script-sequencer-name").unwrap(),
-                Some(Value::String(name.into())),
-                "{file}: the tab registry still keys by name"
-            );
-            assert_eq!(
-                runtime.eval_str(&format!("(len ({prefix}-route-options))")).unwrap(),
-                Some(Value::Number(17.0)),
-                "{file}: project-owned: 16 tracks + Off"
-            );
-
-            state.set_rack_memberships(vec![crate::graph::RackMembership {
-                group_id: 9,
-                members: vec![2, 0],
-            }]);
-            let report = super::with_graph_owner_rack(Some(9), || {
-                runtime.eval_source_transactional(Some(workspace_root.clone()), &load, Vec::new())
-            });
-            assert!(report.success, "{file}: rack-owned load failed: {:?}", report.diagnostics);
-            let handle = runtime.eval_str(&format!("{prefix}-name")).expect("handle").expect("value");
-            let rack_id = super::graph_instance_id(name, Some(9));
-            assert!(matches!(handle, Value::Number(n) if n == rack_id as f64), "{file}: {handle:?}");
-            assert_eq!(
-                runtime.eval_str("script-tab-label").unwrap(),
-                Some(Value::String("Break".into())),
-                "{file}: rack-owned: the tab wears the rack's name"
-            );
-            assert_eq!(
-                eseqlisp::vm::format_lisp_value(
-                    &runtime.eval_str(&format!("({prefix}-route-options)")).unwrap().unwrap()
-                ),
-                r#"("3 hat" "1 kick" "Off")"#,
-                "{file}: rack-owned route options"
-            );
-            assert!(
-                state.published_sequencers().iter().any(|p| p.id == rack_id
-                    && p.graph.as_ref().is_some_and(|m| m.owner_rack == Some(9))),
-                "{file}: rack-owned instance published"
-            );
-            // A member that joins the rack after the script loaded shows up:
-            // the options are read live, not snapshotted at load.
-            state.set_rack_memberships(vec![crate::graph::RackMembership {
-                group_id: 9,
-                members: vec![2, 0, 3],
-            }]);
-            assert_eq!(
-                eseqlisp::vm::format_lisp_value(
-                    &runtime.eval_str(&format!("({prefix}-route-options)")).unwrap().unwrap()
-                ),
-                r#"("3 hat" "1 kick" "4 perc" "Off")"#,
-                "{file}: a later member joins the route options"
-            );
-        }
-    }
-
-    /// The variable-reset demo is the reference rack-ready script: it keeps
-    /// the handle `def-sequencer` returns, and under a rack owner it labels
-    /// its tab with the rack and builds route options from the members.
-    #[test]
-    fn variable_reset_demo_loads_project_owned_and_rack_owned() {
-        let state = Arc::new(SequencerState::new(
-            4,
-            (0..4).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-                ("track-colors", Value::List(Vec::new())),
-                ("track-active-notes", Value::List(Vec::new())),
-                (
-                    "track-names",
-                    Value::List(
-                        ["kick", "snare", "hat", "perc"]
-                            .iter()
-                            .map(|n| Rc::new(RefCell::new(Value::String(n.to_string()))))
-                            .collect(),
-                    ),
-                ),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|crates_dir| crates_dir.parent())
-            .expect("sequencer crate should live under workspace crates dir")
-            .join(".eseqlisp-scratch");
-        let stubs = r#"
-            (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
-            (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-            (def eseq.drum-rack-v2/group-index-by-id (gid) 0)
-            (def eseq.drum-rack-v2/group-name (gidx) "Break")
-        "#;
-        let load = r#"(load "content/scripts/sequencers/graph-neural-variable-reset-demo.lisp")"#;
-        let report = runtime.eval_source_transactional(
-            Some(workspace_root.clone()),
-            &format!("{stubs}\n{load}"),
-            Vec::new(),
-        );
-        assert!(report.success, "project-owned load failed: {}", report.failure_message());
-        let handle = runtime.eval_str("gvr-name").expect("handle").expect("value");
-        let project_id = super::graph_instance_id("neural-variable-reset-demo", None);
-        assert!(matches!(handle, Value::Number(n) if n == project_id as f64), "{handle:?}");
-        assert_eq!(
-            runtime.eval_str("script-tab-label").unwrap(),
-            Some(Value::String("var rst".into()))
-        );
-        assert_eq!(
-            runtime.eval_str("(len (gvr-route-options))").unwrap(),
-            Some(Value::Number(17.0)),
-            "project-owned: 16 tracks + Off"
-        );
-
-        state.set_rack_memberships(vec![crate::graph::RackMembership {
-            group_id: 9,
-            members: vec![2, 0],
-        }]);
-        let report = super::with_graph_owner_rack(Some(9), || {
-            runtime.eval_source_transactional(Some(workspace_root), load, Vec::new())
-        });
-        assert!(report.success, "rack-owned load failed: {}", report.failure_message());
-        let handle = runtime.eval_str("gvr-name").expect("handle").expect("value");
-        let rack_id = super::graph_instance_id("neural-variable-reset-demo", Some(9));
-        assert!(matches!(handle, Value::Number(n) if n == rack_id as f64), "{handle:?}");
-        assert_eq!(
-            runtime.eval_str("script-tab-label").unwrap(),
-            Some(Value::String("Break".into())),
-            "rack-owned: the tab wears the rack's name"
-        );
-        assert_eq!(
-            eseqlisp::vm::format_lisp_value(&runtime.eval_str("(gvr-route-options)").unwrap().unwrap()),
-            r#"("3 hat" "1 kick" "Off")"#,
-            "rack-owned: route options are the members in order (labelled by track number), then Off"
-        );
-        // Editing a route through the demo's own helper stores a member index.
-        runtime
-            .eval_str(r#"(gvr-edit-route 0 "1 kick" (list))"#)
-            .expect("edit route through the demo helper");
-        let overrides = state.current_graph_overrides();
-        let owned = overrides
-            .iter()
-            .find(|o| o.sequencer_id == rack_id)
-            .expect("rack-owned overrides");
-        assert_eq!(owned.owner_rack, Some(9));
-        assert!(matches!(
-            owned.node_intrinsics[0].route,
-            Some(crate::graph::ProjectGraphRouteOverride::Track(1))
-        ));
-    }
-
     /// Graph ownership never comes from the evaluating module any more
     /// (instance-kinds spec §5): only the legacy explicit rack scope, used
     /// for plain rack scripts, makes a def-sequencer rack-owned, and an
@@ -1461,33 +1243,20 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(!overrides.iter().any(|o| project.matches_overrides(o)), "project copy untouched");
 
         // Member-relative routes are what the rack instance stores; the route
-        // options come from membership, and bind-graph indexes them directly.
+        // options come from membership, and a node's route reads back as that
+        // index.
         state.set_rack_memberships(vec![crate::graph::RackMembership { group_id: 3, members: vec![9, 2] }]);
-        let tracks = authoring
-            .eval_str(&format!("(graph-route-tracks {})", rack3.id))
-            .expect("route tracks");
-        assert_eq!(eseqlisp::vm::format_lisp_value(&tracks.expect("value")), "(9 2)");
-        assert!(matches!(
-            authoring.eval_str(&format!("(graph-route-tracks {})", project.id)).unwrap(),
-            Some(Value::Nil)
-        ));
-        let index = authoring
-            .eval_str(&format!(
-                "(reactive-value (bind-graph {} 0 :route (list \"a\" \"b\" \"Off\")))",
-                rack3.id
-            ))
-            .expect("bind-graph route index");
-        assert!(matches!(index, Some(Value::Number(n)) if n == 1.0), "{index:?}");
+        let memberships = state.rack_memberships();
+        assert_eq!(crate::graph::rack_members(&memberships, 3), Some(&[9, 2][..]));
+        assert_eq!(project.owner_rack, None, "the project's copy routes to plain track indices");
+        let rack3_id = rack3.id.to_string();
+        let index = graph_api::node_value(&state, &rack3_id, 0, "route");
+        assert_eq!(index, Ok(Value::Number(1.0)));
         authoring
             .eval_str(&format!("(graph-node {} 0 :route :off)", rack3.id))
             .expect("route off");
-        let index = authoring
-            .eval_str(&format!(
-                "(reactive-value (bind-graph {} 0 :route (list \"a\" \"b\" \"Off\")))",
-                rack3.id
-            ))
-            .expect("bind-graph route index");
-        assert!(matches!(index, Some(Value::Number(n)) if n == 2.0), "Off is the last option: {index:?}");
+        let index = graph_api::node_value(&state, &rack3_id, 0, "route");
+        assert_eq!(index, Ok(Value::Nil), "an Off route reads nil");
     }
 
     #[test]
@@ -1608,2296 +1377,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn graph_8x8_demo_ui_exposes_node_param_controls_and_weight_matrix() {
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        let state = Arc::new(SequencerState::new(
-            8,
-            (0..8).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-                ("track-events", Value::List(Vec::new())),
-                ("track-event-current-beat", Value::Number(0.0)),
-                ("track-colors", Value::List(Vec::new())),
-                (
-                    "track-active-notes",
-                    Value::List(
-                        (0..8)
-                            .map(|_| Rc::new(RefCell::new(Value::List(Vec::new()))))
-                            .collect(),
-                    ),
-                ),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
-            .expect("install sequencer tab registration test stub");
-        runtime
-            .eval_str(
-                r#"
-                (def graph-8x8-registered-tab nil)
-                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
-                  (label buffer sequencer source-path)
-                  (set! graph-8x8-registered-tab
-                    (list label buffer sequencer source-path)))
-                "#,
-            )
-            .expect("install script sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-8x8-demo.lisp"))
-        .expect("read graph 8x8 demo script");
-        runtime.eval_str(&source).expect("evaluate graph 8x8 demo");
-        assert_eq!(
-            runtime
-                .eval_str("graph-8x8-registered-tab")
-                .expect("read graph tab registration"),
-            Some(Value::List(
-                [
-                    "8x8",
-                    "*8x8*",
-                    "neural-8x8-demo",
-                    "",
-                ]
-                .into_iter()
-                .map(|value| Rc::new(RefCell::new(Value::String(value.to_string()))))
-                .collect(),
-            )),
-            "the script must reach tab registration after publishing its graph and UI"
-        );
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the graph demo must publish graph/UI without writing pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published graph manifest");
-        assert_eq!(
-            manifest.shape.num_nodes(),
-            8,
-            "the demo matrix must cover every materialized node"
-        );
-
-        let pending = runtime.take_pending_buffer_widget_trees();
-        let tree = pending
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("graph 8x8 script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 48.0)))
-            .expect("graph 8x8 widget tree should lay out");
-
-        let mut matrices = Vec::new();
-        collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(
-            matrices.len(),
-            4,
-            "expected editable weight matrix plus trigger/energy/dampening telemetry"
-        );
-        for matrix in &matrices {
-            assert_measured(matrix);
-        }
-
-        let matrix = find_by_stable_key(&layout, "graph-8x8-weight-matrix")
-            .expect("weight matrix stable key");
-        assert_measured(matrix);
-        for key in [
-            "graph-8x8-trigger-matrix",
-            "graph-8x8-energy-matrix",
-            "graph-8x8-dampening-matrix",
-            "graph-8x8-event-view",
-            "graph-8x8-track-event-view",
-            "graph-8x8-piano",
-        ] {
-            let widget =
-                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing widget {key}"));
-            assert_measured(widget);
-        }
-        let mut event_views = Vec::new();
-        collect_widgets(&layout, "event-view", &mut event_views);
-        assert_eq!(event_views.len(), 2, "expected two event-view widgets");
-        let mut piano_keyboards = Vec::new();
-        collect_widgets(&layout, "piano-keyboard", &mut piano_keyboards);
-        assert_eq!(
-            piano_keyboards.len(),
-            1,
-            "expected one aggregate track piano keyboard"
-        );
-        assert_eq!(
-            piano_keyboards[0].props.get("key-count"),
-            Some(&Value::Number(80.0))
-        );
-        assert_eq!(
-            piano_keyboards[0].props.get("tracks"),
-            Some(&Value::List(
-                (0..8)
-                    .map(|track| Rc::new(RefCell::new(Value::Number(track as f64))))
-                .collect(),
-            ))
-        );
-        assert_eq!(
-            piano_keyboards[0].props.get("overlap-mode"),
-            Some(&Value::Keyword("loudest".to_string()))
-        );
-        let activity = |note: f64, velocity: f64| {
-            Rc::new(RefCell::new(Value::Map(std::collections::HashMap::from([
-                (
-                    "note".to_string(),
-                    Rc::new(RefCell::new(Value::Number(note))),
-                ),
-                (
-                    "velocity".to_string(),
-                    Rc::new(RefCell::new(Value::Number(velocity))),
-                ),
-                (
-                    "trigger-id".to_string(),
-                    Rc::new(RefCell::new(Value::Number(note))),
-                ),
-            ]))))
-        };
-        let active_notes = Value::List(
-            (0..8)
-                .map(|track| {
-                    Rc::new(RefCell::new(Value::List(
-                        if track == 0 {
-                            vec![activity(60.0, 0.4)]
-                        } else if track == 7 {
-                            vec![activity(60.0, 0.9), activity(67.0, 0.7)]
-                        } else {
-                            Vec::new()
-                        },
-                    )))
-                })
-                .collect(),
-        );
-        runtime.set_reactive("SEQ", "track-active-notes", active_notes.clone());
-        runtime.run_reactive_cycle();
-        let updated_tree = runtime
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("active-note update should republish the graph keyboard");
-        let updated_layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&updated_tree, Some((40.0, 48.0)))
-            .expect("updated graph keyboard should lay out");
-        let updated_piano = find_by_stable_key(&updated_layout, "graph-8x8-piano")
-            .expect("updated piano stable key");
-        assert_eq!(
-            updated_piano.props.get("notes-by-track"),
-            Some(&active_notes),
-            "aggregate note activity must reach the piano widget reactively"
-        );
-
-        // Five number-pickers per node (delay + transpose + vel-decay + dampening +
-        // recovery) plus the three top-of-panel pickers (reset-bars + max-poly +
-        // piano press depth); three dropdowns per node (route + resolution + quantize).
-        let mut pickers = Vec::new();
-        collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(
-            pickers.len(),
-            8 * 5 + 3,
-            "expected per-node controls + reset-bars + max-poly + piano press depth"
-        );
-        let mut dropdowns = Vec::new();
-        collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(
-            dropdowns.len(),
-            24,
-            "expected route + resolution + quantize per node"
-        );
-        for key in [
-            "graph-8x8-reset-bars",
-            "graph-8x8-max-poly",
-            "graph-8x8-piano-press-depth",
-        ] {
-            let widget = find_by_stable_key(&layout, key)
-                .unwrap_or_else(|| panic!("missing config control {key}"));
-            assert_measured(widget);
-        }
-        for idx in 0..8 {
-            for key in [
-                format!("graph-8x8-route-{idx}"),
-                format!("graph-8x8-delay-{idx}"),
-                format!("graph-8x8-transpose-{idx}"),
-                format!("graph-8x8-vel-decay-{idx}"),
-                format!("graph-8x8-dampening-{idx}"),
-                format!("graph-8x8-recovery-{idx}"),
-                format!("graph-8x8-resolution-{idx}"),
-                format!("graph-8x8-quantize-{idx}"),
-            ] {
-                let widget = find_by_stable_key(&layout, &key)
-                    .unwrap_or_else(|| panic!("missing control {key}"));
-                assert_measured(widget);
-            }
-        }
-        let quantize_options = find_by_stable_key(&layout, "graph-8x8-quantize-0")
-            .and_then(|node| node.props.get("options"))
-            .expect("quantize options");
-        let Value::List(options) = quantize_options else {
-            panic!("quantize options should be a list");
-        };
-        for label in ["2T", "4T", "8T", "16T", "32T", "64T"] {
-            assert!(
-                options.iter().any(
-                    |option| matches!(&*option.borrow(), Value::String(value) if value == label)
-                ),
-                "missing quantize triplet option {label}"
-            );
-        }
-
-        runtime
-            .eval_str("(g8-init-ring-defaults)")
-            .expect("explicitly initialize graph demo defaults");
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
-            .expect("graph overrides after explicit init");
-        assert_eq!(
-            graph.edge_params.len(),
-            64,
-            "explicit init should write the full ring weight matrix"
-        );
-        assert!(
-            graph.edge_params.iter().any(|edge| {
-                edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 1.0
-            }),
-            "explicit init should write the first ring edge"
-        );
-        assert!(
-            graph.node_intrinsics.iter().any(|node| {
-                node.instance == 0
-                    && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
-            }),
-            "explicit init should seed node 0 from track 0"
-        );
-
-        // transpose picker -> per-node behavioral param override.
-        let transpose_change = find_by_stable_key(&layout, "graph-8x8-transpose-2")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("transpose callback");
-        runtime
-            .invoke(transpose_change, vec![Value::Number(7.0)])
-            .expect("invoke transpose callback");
-        // vel-decay picker -> per-node behavioral param override (the velocity analogue).
-        let vel_change = find_by_stable_key(&layout, "graph-8x8-vel-decay-5")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("vel-decay callback");
-        runtime
-            .invoke(vel_change, vec![Value::Number(0.5)])
-            .expect("invoke vel-decay callback");
-        // resolution dropdown -> per-node intrinsic override.
-        let resolution_change = find_by_stable_key(&layout, "graph-8x8-resolution-3")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("resolution callback");
-        runtime
-            .invoke(resolution_change, vec![Value::String("8".into())])
-            .expect("invoke resolution callback");
-        // route dropdown -> per-node intrinsic route override.
-        let route_change = find_by_stable_key(&layout, "graph-8x8-route-4")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("route callback");
-        runtime
-            .invoke(route_change, vec![Value::String("Track 3".into())])
-            .expect("invoke route callback");
-
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
-            .expect("graph overrides");
-        assert!(
-            graph.node_params.iter().any(|param| {
-                param.instance == 2 && param.param == "transpose" && param.value == 7.0
-            }),
-            "transpose knob should write a node param override"
-        );
-        assert!(
-            graph.node_params.iter().any(|param| {
-                param.instance == 5 && param.param == "vel-decay" && param.value == 0.5
-            }),
-            "vel-decay knob should write a node param override"
-        );
-        assert!(
-            graph.node_intrinsics.iter().any(|node| {
-                node.instance == 3
-                    && node.resolution == Some(vec![crate::sequencer::Timebase::Eighth as u8])
-            }),
-            "resolution dropdown should write an intrinsic override"
-        );
-        assert!(
-            graph.node_intrinsics.iter().any(|node| {
-                node.instance == 4
-                    && node.route == Some(crate::graph::ProjectGraphRouteOverride::Track(2))
-            }),
-            "route dropdown should write an intrinsic override"
-        );
-
-        {
-            let mut bank = state.export_pattern_repository();
-            let mut pattern = bank[0].clone();
-            let graph = pattern
-                .graph_overrides
-                .iter_mut()
-                .find(|graph| graph.sequencer_name == "neural-8x8-demo")
-                .expect("cloned graph overrides");
-            graph
-                .node_params
-                .push(crate::graph::ProjectGraphNodeParamOverride {
-                    group: "nrn".to_string(),
-                    instance: 2,
-                    param: "transpose".to_string(),
-                    value: -12.0,
-                });
-            graph
-                .node_intrinsics
-                .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
-                    group: "nrn".to_string(),
-                    instance: 3,
-                    resolution: None,
-                    delay_steps: Some(6),
-                    quantize: None,
-                    route: None,
-                    seed_from: None,
-                    seed_on_reset: None,
-                    duration: None,
-                    swing: None,
-                    neural_group: None,
-                    process_chain: None,
-                });
-            graph
-                .node_intrinsics
-                .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
-                    group: "nrn".to_string(),
-                    instance: 4,
-                    resolution: None,
-                    delay_steps: None,
-                    quantize: None,
-                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
-                    seed_from: None,
-                    seed_on_reset: None,
-                    duration: None,
-                    swing: None,
-                    neural_group: None,
-                    process_chain: None,
-                });
-            graph
-                .edge_params
-                .push(crate::graph::ProjectGraphEdgeParamOverride {
-                    group: "nrn->nrn".to_string(),
-                    from: 0,
-                    to: 1,
-                    param: "weight".to_string(),
-                    value: 0.25,
-                });
-            bank.push(pattern);
-            state.replace_pattern_repository(bank, 1);
-        }
-        runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
-        runtime.run_reactive_cycle();
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 2 :transpose))")
-                .expect("read bound transpose value"),
-            Some(Value::Number(-12.0)),
-            "pattern switch should reload transpose control state"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 3 :delay))")
-                .expect("read bound delay value"),
-            Some(Value::Number(6.0)),
-            "pattern switch should reload delay control state"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 4 :route (g8-route-options)))")
-                .expect("read bound route index"),
-            Some(Value::Number(0.0)),
-            "pattern switch should display internal route 0 as Track 1 (index 0)"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth g8-weights 0) 1)")
-                .expect("read synced weight"),
-            Some(Value::Number(0.25)),
-            "pattern switch should reload matrix state"
-        );
-        let bank = state.export_pattern_repository();
-        state.replace_pattern_repository(bank, 0);
-        runtime.set_reactive("SEQ", "current-pattern", Value::Number(0.0));
-        runtime.run_reactive_cycle();
-
-        let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
-        assert_eq!(graph_runtime.seed_track_mask_for_node(0), Some(1));
-        let seeded = graph_runtime.seed(
-            0,
-            0.0,
-            crate::graph::GraphPayload {
-                note: 0.0,
-                velocity: 1.0,
-                duration_beats: 0.25,
-            },
-        );
-        assert_eq!(seeded, 1, "track 0 should seed node 0 exactly once");
-        let mut scratch = ScratchControlRuntime::new(
-            Arc::clone(&state),
-            fallback_effect_descriptors(8),
-            fallback_instrument_descriptors(8),
-            0,
-            0,
-        );
-        let mut chunked_emissions = Vec::new();
-        let mut start_beats = 0.0_f64;
-        let mut eval_count = 0_usize;
-        let mut max_input = 0.0_f64;
-        let mut max_energy = 0.0_f64;
-        while start_beats < 1.0 {
-            let end_beats = (start_beats + 0.021_f64).min(1.0_f64);
-            graph_runtime.process_block(
-                start_beats,
-                end_beats,
-                0,
-                48_000.0,
-                manifest.max_poly,
-                |eval| {
-                    eval_count += 1;
-                    max_input = max_input.max(eval.input);
-                    max_energy = max_energy.max(eval.energy);
-                    scratch
-                        .invoke_graph_update(&manifest, eval)
-                        .expect("demo graph update should evaluate")
-                },
-                &mut chunked_emissions,
-            );
-            start_beats = end_beats;
-        }
-        assert!(eval_count > 0, "chunked graph drive should evaluate nodes");
-        assert!(
-            !chunked_emissions.is_empty(),
-            "track-0 seed should propagate through the ring under chunked graph drive; evals={eval_count} max_input={max_input} max_energy={max_energy} edge_overrides={}",
-            graph.edge_params.len()
-        );
-
-        let matrix_cell_change = matrix
-            .props
-            .get("on-cell-change")
-            .cloned()
-            .expect("matrix cell callback");
-        // A single cell edit writes exactly one edge override; (from=3, to=4) == 0.5.
-        runtime
-            .invoke(
-                matrix_cell_change.clone(),
-                vec![gv_num(3.0), gv_num(4.0), gv_num(0.5)],
-            )
-            .expect("invoke matrix cell callback");
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
-            .expect("graph overrides after matrix edit");
-        assert_eq!(graph.edge_params.len(), 64);
-        assert!(graph.edge_params.iter().any(|edge| {
-            edge.from == 3 && edge.to == 4 && edge.param == "weight" && edge.value == 0.5
-        }));
-
-        // Zero every weight one cell at a time (the per-cell edit path) to silence the net.
-        for r in 0..8 {
-            for c in 0..8 {
-                runtime
-                    .invoke(
-                        matrix_cell_change.clone(),
-                        vec![gv_num(r as f64), gv_num(c as f64), gv_num(0.0)],
-                    )
-                    .expect("invoke zero matrix cell callback");
-            }
-        }
-
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
-            .expect("graph overrides after zero matrix edit");
-        let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
-        graph_runtime.seed(
-            0,
-            0.0,
-            crate::graph::GraphPayload {
-                note: 0.0,
-                velocity: 1.0,
-                duration_beats: 0.25,
-            },
-        );
-        let mut scratch = ScratchControlRuntime::new(
-            Arc::clone(&state),
-            fallback_effect_descriptors(8),
-            fallback_instrument_descriptors(8),
-            0,
-            0,
-        );
-        let mut emissions = Vec::new();
-        graph_runtime.process_block(
-            0.0,
-            4.0,
-            0,
-            48_000.0,
-            manifest.max_poly,
-            |eval| {
-                scratch
-                    .invoke_graph_update(&manifest, eval)
-                    .unwrap_or_default()
-            },
-            &mut emissions,
-        );
-        assert!(
-            emissions.is_empty(),
-            "zero matrix should silence graph propagation"
-        );
-    }
-
-    #[test]
-    fn graph_8x8_reset_demo_ui_exposes_reset_and_global_timing_controls() {
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        let state = Arc::new(SequencerState::new(
-            8,
-            (0..8).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
-            .expect("install sequencer tab registration test stub");
-        runtime
-            .eval_str(
-                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
-            )
-            .expect("install script sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-8x8-reset-demo.lisp"))
-        .expect("read graph 8x8 reset demo script");
-        runtime
-            .eval_str(&source)
-            .expect("evaluate graph 8x8 reset demo");
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the reset demo must publish graph/UI without writing pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published reset graph manifest");
-        assert_eq!(manifest.name, "neural-8x8-reset-demo");
-        assert_eq!(manifest.shape.num_nodes(), 8);
-        assert_eq!(manifest.node.param_default("global-transpose"), Some(0.0));
-        assert_eq!(manifest.node.param_default("transpose-reset"), Some(0.0));
-        assert_eq!(manifest.node.param_default("dur-factor"), Some(1.0));
-        assert_eq!(manifest.node.param_default("vel-reset"), Some(0.0));
-
-        let pending = runtime.take_pending_buffer_widget_trees();
-        let tree = pending
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("graph 8x8 reset script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((64.0, 52.0)))
-            .expect("graph 8x8 reset widget tree should lay out");
-
-        let mut matrices = Vec::new();
-        collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(
-            matrices.len(),
-            4,
-            "expected editable weight matrix plus trigger/energy/dampening telemetry"
-        );
-        for matrix in &matrices {
-            assert_measured(matrix);
-        }
-
-        let mut event_views = Vec::new();
-        collect_widgets(&layout, "event-view", &mut event_views);
-        assert_eq!(event_views.len(), 1, "expected graph event history view");
-        assert_measured(event_views[0]);
-
-        let mut pickers = Vec::new();
-        collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(
-            pickers.len(),
-            8 * 5 + 4,
-            "expected per-node numeric controls plus reset/max/global transpose/duration"
-        );
-        let mut toggles = Vec::new();
-        collect_widgets(&layout, "toggle", &mut toggles);
-        assert_eq!(
-            toggles.len(),
-            8 * 2,
-            "expected transpose-reset and vel-reset toggles per node"
-        );
-        let mut dropdowns = Vec::new();
-        collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(
-            dropdowns.len(),
-            8 * 3 + 2,
-            "expected per-node route/resolution/quantize plus delay and res/q scale factors"
-        );
-
-        for key in [
-            "graph-8x8-reset-global-transpose",
-            "graph-8x8-reset-dur-factor",
-            "graph-8x8-reset-delay-factor",
-            "graph-8x8-reset-timebase-factor",
-            "graph-8x8-reset-weight-matrix",
-            "graph-8x8-reset-event-view",
-        ] {
-            let widget = find_by_stable_key(&layout, key)
-                .unwrap_or_else(|| panic!("missing reset/global control {key}"));
-            assert_measured(widget);
-        }
-        for idx in 0..8 {
-            for key in [
-                format!("graph-8x8-reset-transpose-reset-{idx}"),
-                format!("graph-8x8-reset-vel-reset-{idx}"),
-                format!("graph-8x8-reset-resolution-{idx}"),
-                format!("graph-8x8-reset-quantize-{idx}"),
-            ] {
-                let widget = find_by_stable_key(&layout, &key)
-                    .unwrap_or_else(|| panic!("missing reset fork control {key}"));
-                assert_measured(widget);
-            }
-        }
-
-        let global_transpose_change =
-            find_by_stable_key(&layout, "graph-8x8-reset-global-transpose")
-                .and_then(|node| node.props.get("on-change"))
-                .cloned()
-                .expect("global transpose callback");
-        runtime
-            .invoke(global_transpose_change, vec![Value::Number(12.0)])
-            .expect("invoke global transpose callback");
-
-        let dur_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-dur-factor")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("duration factor callback");
-        runtime
-            .invoke(dur_factor_change, vec![Value::Number(2.0)])
-            .expect("invoke duration factor callback");
-
-        let transpose_reset_change =
-            find_by_stable_key(&layout, "graph-8x8-reset-transpose-reset-2")
-                .and_then(|node| node.props.get("on-change"))
-                .cloned()
-                .expect("transpose reset callback");
-        runtime
-            .invoke(transpose_reset_change, vec![Value::Bool(true)])
-            .expect("invoke transpose reset callback");
-
-        let vel_reset_change = find_by_stable_key(&layout, "graph-8x8-reset-vel-reset-3")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("velocity reset callback");
-        runtime
-            .invoke(vel_reset_change, vec![Value::Bool(true)])
-            .expect("invoke velocity reset callback");
-
-        let delay_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-delay-factor")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("delay factor callback");
-        runtime
-            .invoke(delay_factor_change, vec![Value::String("2".to_string())])
-            .expect("invoke delay factor callback");
-
-        let timebase_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-timebase-factor")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("timebase factor callback");
-        runtime
-            .invoke(timebase_factor_change, vec![Value::String("2".to_string())])
-            .expect("invoke timebase factor callback");
-
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-8x8-reset-demo")
-            .expect("reset graph overrides");
-        assert_eq!(
-            graph
-                .node_params
-                .iter()
-                .filter(|param| param.param == "global-transpose" && param.value == 12.0)
-                .count(),
-            8,
-            "global transpose should write every node param"
-        );
-        assert_eq!(
-            graph
-                .node_params
-                .iter()
-                .filter(|param| param.param == "dur-factor" && param.value == 2.0)
-                .count(),
-            8,
-            "duration factor should write every node param"
-        );
-        assert!(graph.node_params.iter().any(|param| {
-            param.instance == 2 && param.param == "transpose-reset" && param.value == 1.0
-        }));
-        assert!(graph.node_params.iter().any(|param| {
-            param.instance == 3 && param.param == "vel-reset" && param.value == 1.0
-        }));
-        assert_eq!(
-            graph
-                .node_intrinsics
-                .iter()
-                .filter(|node| {
-                    node.delay_steps == Some(2)
-                        && node.resolution
-                            == Some(vec![crate::sequencer::Timebase::ThirtySecond as u8])
-                        && node.quantize
-                            == Some(crate::graph::ProjectGraphQuantizeOverride::Timebase(vec![
-                                crate::sequencer::Timebase::ThirtySecond as u8,
-                            ]))
-                })
-                .count(),
-            8,
-            "delay and res/q factors should batch-edit all node intrinsics"
-        );
-    }
-
-    #[test]
-    fn graph_variable_reset_demo_tracks_active_node_count_and_dormant_overrides() {
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        fn assert_number_prop(node: &eseqlisp::layout::LayoutNode, prop: &str, expected: f64) {
-            assert_eq!(
-                node.props.get(prop),
-                Some(&Value::Number(expected)),
-                "expected {} {:?} to be {expected}",
-                node.widget_type,
-                prop
-            );
-        }
-
-        fn assert_number_prop_close(
-            node: &eseqlisp::layout::LayoutNode,
-            prop: &str,
-            expected: f64,
-        ) {
-            let Some(Value::Number(actual)) = node.props.get(prop) else {
-                panic!(
-                    "expected {} {:?} to be number {expected}, got {:?}",
-                    node.widget_type,
-                    prop,
-                    node.props.get(prop)
-                );
-            };
-            assert!(
-                (actual - expected).abs() < 0.001,
-                "expected {} {:?} to be {expected}, got {actual}",
-                node.widget_type,
-                prop
-            );
-        }
-
-        fn value_list(items: Vec<Value>) -> Value {
-            Value::List(
-                items
-                    .into_iter()
-                    .map(|value| Rc::new(RefCell::new(value)))
-                    .collect(),
-            )
-        }
-
-        fn test_track_colors() -> Value {
-            let palette = [
-                [0.96, 0.28, 0.52],
-                [0.25, 0.56, 0.98],
-                [0.28, 0.84, 0.54],
-                [0.96, 0.72, 0.24],
-                [0.66, 0.42, 0.96],
-                [0.26, 0.78, 0.84],
-                [0.98, 0.44, 0.28],
-                [0.76, 0.82, 0.30],
-                [0.52, 0.48, 0.98],
-                [0.98, 0.36, 0.70],
-                [0.38, 0.72, 0.42],
-                [0.90, 0.58, 0.22],
-                [0.40, 0.64, 0.90],
-                [0.72, 0.46, 0.82],
-                [0.30, 0.76, 0.68],
-                [0.86, 0.34, 0.34],
-            ];
-            value_list(
-                palette
-                    .iter()
-                    .map(|color| {
-                        value_list(
-                            color
-                                .iter()
-                                .map(|channel| Value::Number(*channel))
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            )
-        }
-
-        fn assert_reactive_number(runtime: &mut Runtime, expr: &str, expected: f64) {
-            assert_eq!(
-                runtime.eval_str(expr).expect("read reactive number"),
-                Some(Value::Number(expected)),
-                "{expr}"
-            );
-        }
-
-        fn latest_layout(runtime: &mut Runtime) -> std::sync::Arc<eseqlisp::layout::LayoutNode> {
-            let tree = runtime
-                .take_pending_buffer_widget_trees()
-                .into_iter()
-                .rev()
-                .find_map(|pending| match pending {
-                    eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                    eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-                })
-                .expect("script should publish widget tree");
-            runtime
-                .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 64.0)))
-                .expect("variable graph widget tree should lay out")
-        }
-
-        fn assert_active_layout(layout: &eseqlisp::layout::LayoutNode, count: usize) {
-            for key in [
-                "graph-variable-reset-node-count",
-                "graph-variable-reset-max-poly-selection",
-                "graph-variable-reset-threshold",
-                "graph-variable-reset-route-color-0",
-                "graph-variable-reset-seed-route-0",
-                "graph-variable-reset-reset-seed-0",
-                "graph-variable-reset-trigger-matrix",
-                "graph-variable-reset-energy-matrix",
-                "graph-variable-reset-weight-matrix",
-                "graph-variable-reset-dampening-matrix",
-            ] {
-                let widget =
-                    find_by_stable_key(layout, key).unwrap_or_else(|| panic!("missing {key}"));
-                assert_measured(widget);
-            }
-            let weight = find_by_stable_key(layout, "graph-variable-reset-weight-matrix").unwrap();
-            assert_number_prop(weight, "rows", count as f64);
-            assert_number_prop(weight, "cols", count as f64);
-            assert!(weight.props.contains_key("on-cell-press"));
-            assert!(weight.props.contains_key("on-cell-release"));
-            let trigger =
-                find_by_stable_key(layout, "graph-variable-reset-trigger-matrix").unwrap();
-            assert_number_prop(trigger, "rows", count as f64);
-            assert_number_prop(trigger, "cols", 1.0);
-            let energy = find_by_stable_key(layout, "graph-variable-reset-energy-matrix").unwrap();
-            let expected_matrix_height = count as f64 + (count.saturating_sub(1) as f64 * 0.2);
-            for matrix in [trigger, energy, weight] {
-                assert_number_prop_close(matrix, "height", expected_matrix_height);
-            }
-            let first_row = find_by_stable_key(layout, "graph-variable-reset-transpose-0")
-                .expect("missing first active row control");
-            let first_row_highlight =
-                find_by_stable_key(layout, "graph-variable-reset-row-0")
-                    .expect("missing first active row highlight");
-            assert_measured(first_row_highlight);
-            let active_row_key = format!("graph-variable-reset-transpose-{}", count - 1);
-            let final_row = find_by_stable_key(layout, &active_row_key)
-                .unwrap_or_else(|| panic!("missing final active row control {active_row_key}"));
-            let active_bar_key = format!("graph-variable-reset-route-color-{}", count - 1);
-            assert!(
-                find_by_stable_key(layout, &active_bar_key).is_some(),
-                "missing final active route color bar {active_bar_key}"
-            );
-            let active_seed_route_key = format!("graph-variable-reset-seed-route-{}", count - 1);
-            assert!(
-                find_by_stable_key(layout, &active_seed_route_key).is_some(),
-                "missing final active seed route toggle {active_seed_route_key}"
-            );
-            let active_reset_seed_key = format!("graph-variable-reset-reset-seed-{}", count - 1);
-            assert!(
-                find_by_stable_key(layout, &active_reset_seed_key).is_some(),
-                "missing final active reset seed toggle {active_reset_seed_key}"
-            );
-            let inactive_row_key = format!("graph-variable-reset-transpose-{count}");
-            assert!(
-                find_by_stable_key(layout, &inactive_row_key).is_none(),
-                "inactive row control {inactive_row_key} should not be visible"
-            );
-            let inactive_bar_key = format!("graph-variable-reset-route-color-{count}");
-            assert!(
-                find_by_stable_key(layout, &inactive_bar_key).is_none(),
-                "inactive route color bar {inactive_bar_key} should not be visible"
-            );
-            let inactive_seed_route_key = format!("graph-variable-reset-seed-route-{count}");
-            assert!(
-                find_by_stable_key(layout, &inactive_seed_route_key).is_none(),
-                "inactive seed route toggle {inactive_seed_route_key} should not be visible"
-            );
-            let inactive_reset_seed_key = format!("graph-variable-reset-reset-seed-{count}");
-            assert!(
-                find_by_stable_key(layout, &inactive_reset_seed_key).is_none(),
-                "inactive reset seed toggle {inactive_reset_seed_key} should not be visible"
-            );
-        }
-
-        let state = Arc::new(SequencerState::new(
-            16,
-            (0..16).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-                ("track-colors", test_track_colors()),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
-            .expect("install sequencer tab registration test stub");
-        runtime
-            .eval_str(
-                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
-            )
-            .expect("install script sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-variable-reset-demo.lisp"))
-        .expect("read graph variable reset demo script");
-        runtime
-            .eval_str(&source)
-            .expect("evaluate graph variable reset demo");
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the variable demo must publish graph/UI without writing pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published variable graph manifest");
-        assert_eq!(manifest.name, "neural-variable-reset-demo");
-        assert_eq!(manifest.shape.num_nodes(), 8);
-        assert_eq!(manifest.shape.capacity_num_nodes(), 16);
-
-        let layout = latest_layout(&mut runtime);
-        assert_active_layout(&layout, 8);
-        let cell_press = find_by_stable_key(&layout, "graph-variable-reset-weight-matrix")
-            .and_then(|node| node.props.get("on-cell-press"))
-            .cloned()
-            .expect("weight matrix cell-press callback");
-        let cell_release = find_by_stable_key(&layout, "graph-variable-reset-weight-matrix")
-            .and_then(|node| node.props.get("on-cell-release"))
-            .cloned()
-            .expect("weight matrix cell-release callback");
-        runtime
-            .invoke(
-                cell_press,
-                vec![Value::Number(2.0), Value::Number(3.0)],
-            )
-            .expect("select destination neuron 3 from source neuron 2");
-        runtime.run_reactive_cycle();
-        let layout = latest_layout(&mut runtime);
-        let source_row = find_by_stable_key(&layout, "graph-variable-reset-row-2")
-            .expect("source row highlight");
-        let destination_row = find_by_stable_key(&layout, "graph-variable-reset-row-3")
-            .expect("destination row highlight");
-        assert_eq!(source_row.props.get("selected"), Some(&Value::Bool(false)));
-        assert_eq!(destination_row.props.get("selected"), Some(&Value::Bool(true)));
-        assert_eq!(
-            destination_row.props.get("selected-background-color"),
-            Some(&Value::Keyword("mixer-strip-selected-bg".to_string()))
-        );
-        assert_eq!(
-            runtime.eval_str("gvr-selected-neuron").expect("selected neuron"),
-            Some(Value::Number(3.0))
-        );
-        runtime
-            .invoke(
-                cell_release,
-                vec![Value::Number(2.0), Value::Number(3.0)],
-            )
-            .expect("release destination neuron 3");
-        runtime.run_reactive_cycle();
-        let layout = latest_layout(&mut runtime);
-        let released_row = find_by_stable_key(&layout, "graph-variable-reset-row-3")
-            .expect("released destination row");
-        assert_eq!(released_row.props.get("selected"), Some(&Value::Bool(false)));
-        assert_eq!(
-            runtime.eval_str("gvr-selected-neuron").expect("released neuron"),
-            Some(Value::Number(-1.0))
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 0 \"active\")))",
-            1.0,
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 0 \"r\")))",
-            0.96,
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph gvr-name 0 :seed-route))")
-                .expect("default seed route"),
-            Some(Value::Number(0.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph gvr-name 0 :seed-on-reset))")
-                .expect("default reset seed"),
-            Some(Value::Number(0.0))
-        );
-        let route_change = find_by_stable_key(&layout, "graph-variable-reset-route-4")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("route callback");
-        runtime
-            .invoke(route_change.clone(), vec![Value::String("Track 3".into())])
-            .expect("route node 4 to track 3");
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"active\")))",
-            1.0,
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"r\")))",
-            0.28,
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"g\")))",
-            0.84,
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"b\")))",
-            0.54,
-        );
-        runtime
-            .invoke(route_change, vec![Value::String("Off".into())])
-            .expect("route node 4 off");
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"active\")))",
-            0.0,
-        );
-        assert_reactive_number(
-            &mut runtime,
-            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"r\")))",
-            0.20,
-        );
-        let seed_route_change = find_by_stable_key(&layout, "graph-variable-reset-seed-route-1")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("seed route callback");
-        runtime
-            .invoke(seed_route_change.clone(), vec![Value::Bool(true)])
-            .expect("enable node 1 routed seeding");
-        assert_eq!(
-            runtime
-                .eval_str("(graph-node-value gvr-name 1 :seed-route)")
-                .expect("node 1 seed route enabled"),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(graph-node-value gvr-name 1 :seed-from)")
-                .expect("node 1 seed-from routed track"),
-            Some(value_list(vec![Value::Number(0.0)]))
-        );
-        runtime
-            .invoke(seed_route_change, vec![Value::Bool(false)])
-            .expect("disable node 1 routed seeding");
-        assert_eq!(
-            runtime
-                .eval_str("(graph-node-value gvr-name 1 :seed-route)")
-                .expect("node 1 seed route disabled"),
-            Some(Value::Number(0.0))
-        );
-        let reset_seed_change = find_by_stable_key(&layout, "graph-variable-reset-reset-seed-7")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("reset seed callback");
-        runtime
-            .invoke(reset_seed_change, vec![Value::Bool(true)])
-            .expect("enable node 7 reset seeding");
-        assert_eq!(
-            runtime
-                .eval_str("(graph-node-value gvr-name 7 :seed-on-reset)")
-                .expect("node 7 reset seed enabled"),
-            Some(Value::Number(1.0))
-        );
-        let threshold_change = find_by_stable_key(&layout, "graph-variable-reset-threshold")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("threshold callback");
-        runtime
-            .invoke(threshold_change, vec![Value::Number(0.8)])
-            .expect("set graph threshold");
-        assert_eq!(
-            runtime
-                .eval_str("(graph-param-value gvr-name 0 :threshold)")
-                .expect("node 0 threshold"),
-            Some(Value::Number(0.8))
-        );
-        let selection_change =
-            find_by_stable_key(&layout, "graph-variable-reset-max-poly-selection")
-                .and_then(|node| node.props.get("on-change"))
-                .cloned()
-                .expect("max-poly-selection callback");
-        runtime
-            .invoke(selection_change, vec![Value::String("random".to_string())])
-            .expect("set max-poly-selection");
-        assert_eq!(
-            runtime
-                .eval_str("(graph-config-value gvr-name :max-poly-selection)")
-                .expect("max-poly-selection value"),
-            Some(Value::String("random".to_string()))
-        );
-        let node_count_change = find_by_stable_key(&layout, "graph-variable-reset-node-count")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("node-count callback");
-
-        runtime
-            .invoke(node_count_change.clone(), vec![Value::Number(16.0)])
-            .expect("grow to 16");
-        runtime.run_reactive_cycle();
-        let layout = latest_layout(&mut runtime);
-        assert_active_layout(&layout, 16);
-        assert_eq!(
-            runtime
-                .eval_str("(graph-param-value gvr-name 14 :threshold)")
-                .expect("restored capacity threshold"),
-            Some(Value::Number(0.8))
-        );
-
-        runtime
-            .eval_str("(graph-param gvr-name 14 :transpose 7)")
-            .expect("write node 14 override");
-        runtime
-            .eval_str("(graph-edge gvr-name :from 14 :to 3 :weight 0.5)")
-            .expect("write edge 14->3 override");
-
-        runtime
-            .invoke(node_count_change.clone(), vec![Value::Number(12.0)])
-            .expect("shrink to 12");
-        runtime.run_reactive_cycle();
-        let layout = latest_layout(&mut runtime);
-        assert_active_layout(&layout, 12);
-        assert!(find_by_stable_key(&layout, "graph-variable-reset-transpose-14").is_none());
-
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-variable-reset-demo")
-            .expect("variable graph overrides");
-        assert_eq!(graph.node_count, Some(12));
-        assert_eq!(
-            graph.max_poly_selection,
-            Some(NeuralMaxPolySelection::Random)
-        );
-        assert!(graph
-            .node_params
-            .iter()
-            .any(|param| param.instance == 14 && param.param == "threshold" && param.value == 0.8));
-        assert!(graph
-            .node_params
-            .iter()
-            .any(|param| param.instance == 14 && param.param == "transpose" && param.value == 7.0));
-        assert!(graph
-            .edge_params
-            .iter()
-            .any(|edge| edge.from == 14 && edge.to == 3 && edge.value == 0.5));
-        assert!(graph.node_intrinsics.iter().any(|node| {
-            node.instance == 7 && node.seed_on_reset == Some(1.0) && node.seed_from.is_none()
-        }));
-        let shrunk = manifest.runtime_config_with_overrides(Some(graph));
-        assert_eq!(shrunk.nodes.len(), 12);
-        assert_eq!(shrunk.nodes[7].seed_on_reset, 1.0);
-        assert!(shrunk.nodes[7].trigger_on_reset);
-        assert!(shrunk
-            .edges
-            .iter()
-            .all(|edge| edge.from < 12 && edge.to < 12));
-
-        runtime
-            .invoke(node_count_change, vec![Value::Number(16.0)])
-            .expect("restore to 16");
-        runtime.run_reactive_cycle();
-        let layout = latest_layout(&mut runtime);
-        assert_active_layout(&layout, 16);
-        assert!(find_by_stable_key(&layout, "graph-variable-reset-transpose-14").is_some());
-        assert_eq!(
-            runtime
-                .eval_str("(graph-param-value gvr-name 14 :transpose)")
-                .expect("read restored node 14"),
-            Some(Value::Number(7.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(graph-edge-value gvr-name :from 14 :to 3 :weight)")
-                .expect("read restored edge 14->3"),
-            Some(Value::Number(0.5))
-        );
-    }
-
-    #[test]
-    fn graph_group_matrix_demo_loads_and_edits_group_matrix_cells() {
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        let state = Arc::new(SequencerState::new(
-            16,
-            (0..16).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str(
-                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
-            )
-            .expect("install script sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-group-matrix-demo.lisp"))
-        .expect("read graph group matrix demo script");
-        runtime
-            .eval_str(&source)
-            .expect("evaluate graph group matrix demo");
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the group matrix demo must not write pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published group matrix graph manifest");
-        assert_eq!(manifest.name, "neural-group-matrix-demo");
-
-        // The matrix reader sees the engine's inert defaults: G all-ones, H all-zeros.
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth (ggm-read-group-matrix \"group-gain\") 0) 1)")
-                .expect("read G cell default"),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth (ggm-read-group-matrix \"group-coupling\") 0) 1)")
-                .expect("read H cell default"),
-            Some(Value::Number(0.0))
-        );
-
-        // The two group matrices render with the fixed 4×4 shape and cell-edit hooks.
-        let tree = runtime
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 64.0)))
-            .expect("group matrix widget tree should lay out");
-        for key in [
-            "graph-group-matrix-weight-matrix",
-            "graph-group-matrix-group-gain-matrix",
-            "graph-group-matrix-group-coupling-matrix",
-            "graph-group-matrix-group-activity-matrix",
-            "graph-group-matrix-group-suppression-matrix",
-        ] {
-            assert!(
-                find_by_stable_key(&layout, key).is_some(),
-                "missing {key}"
-            );
-        }
-        let gain_change = find_by_stable_key(&layout, "graph-group-matrix-group-gain-matrix")
-            .and_then(|node| node.props.get("on-cell-change"))
-            .cloned()
-            .expect("G matrix cell-change callback");
-        runtime
-            .invoke(
-                gain_change,
-                vec![Value::Number(0.0), Value::Number(1.0), Value::Number(0.25)],
-            )
-            .expect("edit G[A][B]");
-        let coupling_change =
-            find_by_stable_key(&layout, "graph-group-matrix-group-coupling-matrix")
-                .and_then(|node| node.props.get("on-cell-change"))
-                .cloned()
-                .expect("H matrix cell-change callback");
-        runtime
-            .invoke(
-                coupling_change,
-                vec![Value::Number(1.0), Value::Number(0.0), Value::Number(-1.5)],
-            )
-            .expect("edit H[B][A]");
-
-        // One drag = one persisted cell, resolved back through graph-config-value.
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-group-matrix-demo")
-            .expect("group matrix overrides");
-        let k = crate::graph::NEURAL_GROUP_MAX as usize;
-        assert_eq!(graph.group_gain.as_ref().expect("gain written")[1], 0.25);
-        assert_eq!(
-            graph.group_coupling.as_ref().expect("coupling written")[k],
-            -1.5
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(graph-config-value ggm-name :group-gain-0-1)")
-                .expect("read back G cell"),
-            Some(Value::Number(0.25))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(graph-config-value ggm-name :group-coupling-1-0)")
-                .expect("read back H cell"),
-            Some(Value::Number(-1.5))
-        );
-    }
-
-    #[test]
-    fn graph_markov_8x8_demo_loads_weight_matrix_and_node_delays() {
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        let state = Arc::new(SequencerState::new(
-            8,
-            (0..8).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
-            .expect("install sequencer tab registration test stub");
-        runtime
-            .eval_str(
-                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
-            )
-            .expect("install script sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-markov-8x8-demo.lisp"))
-        .expect("read markov 8x8 demo script");
-        runtime.eval_str(&source).expect("evaluate markov 8x8 demo");
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the markov demo must not write pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published markov graph manifest");
-        assert_eq!(manifest.name, "markov-8x8-demo");
-        assert_eq!(manifest.shape.num_nodes(), 8);
-        assert_eq!(
-            manifest.edge_sets[0].distribution,
-            crate::graph::EdgeDistribution::WeightedChoice
-        );
-
-        let pending = runtime.take_pending_buffer_widget_trees();
-        let tree = pending
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("markov script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((70.0, 70.0)))
-            .expect("markov widget tree should lay out");
-
-        let mut matrices = Vec::new();
-        collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(
-            matrices.len(),
-            3,
-            "expected trigger/energy telemetry plus editable weight matrix"
-        );
-        for key in [
-            "markov-8x8-trigger-matrix",
-            "markov-8x8-energy-matrix",
-            "markov-8x8-weight-matrix",
-        ] {
-            let widget =
-                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
-            assert_measured(widget);
-        }
-        let mut pickers = Vec::new();
-        collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(
-            pickers.len(),
-            8 * 3 + 1,
-            "expected delay/transpose/vel-scale per node plus max-poly"
-        );
-        let mut dropdowns = Vec::new();
-        collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(
-            dropdowns.len(),
-            24,
-            "expected route + resolution + quantize per node"
-        );
-
-        runtime
-            .eval_str("(m8-init-defaults)")
-            .expect("explicitly initialize markov defaults");
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "markov-8x8-demo")
-            .expect("markov graph overrides after explicit init");
-        assert_eq!(
-            graph.edge_params.len(),
-            64,
-            "explicit init should write only the weight matrix"
-        );
-        assert!(graph.edge_params.iter().any(|edge| {
-            edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 0.65
-        }));
-        assert!(graph.node_intrinsics.iter().any(|node| {
-            node.instance == 0
-                && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
-        }));
-        assert!(graph
-            .node_intrinsics
-            .iter()
-            .any(|node| { node.instance == 4 && node.delay_steps == Some(3) }));
-    }
-
-    #[test]
-    fn graph_16_demo_ui_exposes_all_node_controls_and_ring_defaults() {
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        fn assert_number_prop(node: &eseqlisp::layout::LayoutNode, prop: &str, expected: f64) {
-            assert_eq!(
-                node.props.get(prop),
-                Some(&Value::Number(expected)),
-                "expected {} {:?} to be {expected}",
-                node.widget_type,
-                prop
-            );
-        }
-
-        let state = Arc::new(SequencerState::new(
-            16,
-            (0..16).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str(
-                r#"
-                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
-                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer)
-                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
-                    (append
-                      (filter (lambda (tab) (not (= (nth tab 1) buffer)))
-                        eseq.seq-step-tabs/seq-registered-step-tabs)
-                      (list (list label buffer)))))
-                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon)
-                  (eseq.seq-step-tabs/seq-register-step-sequencer-tab label buffer))
-                "#,
-            )
-            .expect("install sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-16-demo.lisp"))
-        .expect("read graph 16 demo script");
-        runtime.eval_str(&source).expect("evaluate graph 16 demo");
-        assert_eq!(
-            runtime
-                .eval_str("eseq.seq-step-tabs/seq-registered-step-tabs")
-                .expect("read registered step tabs"),
-            Some(gv_list(vec![gv_list(vec![
-                Value::String("16x16".to_string()),
-                Value::String("*16x16*".to_string()),
-            ])])),
-            "graph 16 demo should register a step-panel tab like the 8x8 demo"
-        );
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the graph demo must publish graph/UI without writing pattern overrides"
-        );
-        let manifest = state
-            .published_sequencers()
-            .into_iter()
-            .find_map(|published| published.graph)
-            .expect("published graph manifest");
-        assert_eq!(
-            manifest.shape.num_nodes(),
-            16,
-            "the demo matrix must cover every materialized node"
-        );
-
-        let pending = runtime.take_pending_buffer_widget_trees();
-        let tree = pending
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("graph 16 script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 56.0)))
-            .expect("graph 16 widget tree should lay out");
-
-        let mut matrices = Vec::new();
-        collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(
-            matrices.len(),
-            4,
-            "expected editable weight matrix plus trigger/energy/dampening telemetry"
-        );
-        for matrix in &matrices {
-            assert_measured(matrix);
-        }
-        for key in [
-            "graph-16-trigger-matrix",
-            "graph-16-energy-matrix",
-            "graph-16-weight-matrix",
-            "graph-16-dampening-matrix",
-            "graph-16-event-view",
-        ] {
-            let widget =
-                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
-            assert_measured(widget);
-        }
-        let mut event_views = Vec::new();
-        collect_widgets(&layout, "event-view", &mut event_views);
-        assert_eq!(event_views.len(), 1, "expected one event-view");
-        let trigger_matrix =
-            find_by_stable_key(&layout, "graph-16-trigger-matrix").expect("trigger matrix");
-        assert_number_prop(trigger_matrix, "height", 24.0);
-        let energy_matrix =
-            find_by_stable_key(&layout, "graph-16-energy-matrix").expect("energy matrix");
-        assert_number_prop(energy_matrix, "height", 24.0);
-        let weight_matrix =
-            find_by_stable_key(&layout, "graph-16-weight-matrix").expect("weight matrix");
-        assert_number_prop(weight_matrix, "width", 52.0);
-        assert_number_prop(weight_matrix, "height", 24.0);
-
-        let mut pickers = Vec::new();
-        collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(
-            pickers.len(),
-            16 * 8 + 4,
-            "expected delay/transpose/reset/vel/dampening/recovery per node + reset-bars/max-poly/dur-factor/swing"
-        );
-        let mut dropdowns = Vec::new();
-        collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(
-            dropdowns.len(),
-            16 * 3,
-            "expected route + resolution + quantize per node"
-        );
-        for idx in 0..16 {
-            for key in [
-                format!("graph-16-route-{idx}"),
-                format!("graph-16-delay-{idx}"),
-                format!("graph-16-transpose-{idx}"),
-                format!("graph-16-transpose-reset-{idx}"),
-                format!("graph-16-vel-decay-{idx}"),
-                format!("graph-16-vel-reset-{idx}"),
-                format!("graph-16-state-reset-{idx}"),
-                format!("graph-16-dampening-{idx}"),
-                format!("graph-16-recovery-{idx}"),
-                format!("graph-16-resolution-{idx}"),
-                format!("graph-16-quantize-{idx}"),
-            ] {
-                let widget = find_by_stable_key(&layout, &key)
-                    .unwrap_or_else(|| panic!("missing control {key}"));
-                assert_measured(widget);
-            }
-        }
-
-        let transpose_reset_change = find_by_stable_key(&layout, "graph-16-transpose-reset-5")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("transpose-reset callback");
-        runtime
-            .invoke(transpose_reset_change, vec![Value::Number(1.0)])
-            .expect("invoke transpose-reset callback");
-        let vel_reset_change = find_by_stable_key(&layout, "graph-16-vel-reset-6")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("vel-reset callback");
-        runtime
-            .invoke(vel_reset_change, vec![Value::Number(1.0)])
-            .expect("invoke vel-reset callback");
-        let state_reset_change = find_by_stable_key(&layout, "graph-16-state-reset-7")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("state-reset callback");
-        runtime
-            .invoke(state_reset_change, vec![Value::Number(1.0)])
-            .expect("invoke state-reset callback");
-        let dur_factor_change = find_by_stable_key(&layout, "graph-16-dur-factor")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("dur-factor callback");
-        runtime
-            .invoke(dur_factor_change, vec![Value::Number(2.0)])
-            .expect("invoke dur-factor callback");
-        let swing_change = find_by_stable_key(&layout, "graph-16-swing")
-            .and_then(|node| node.props.get("on-change"))
-            .cloned()
-            .expect("swing callback");
-        runtime
-            .invoke(swing_change, vec![Value::Number(64.0)])
-            .expect("invoke swing callback");
-
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-16-demo")
-            .expect("graph overrides after reset control edits");
-        assert!(
-            graph.node_params.iter().any(|param| {
-                param.instance == 5 && param.param == "transpose-reset" && param.value == 1.0
-            }),
-            "transpose-reset knob should write a node param override"
-        );
-        assert!(
-            graph.node_params.iter().any(|param| {
-                param.instance == 6 && param.param == "vel-reset" && param.value == 1.0
-            }),
-            "vel-reset knob should write a node param override"
-        );
-        assert!(
-            graph.node_params.iter().any(|param| {
-                param.instance == 7 && param.param == "state-reset" && param.value == 1.0
-            }),
-            "state-reset knob should write a node param override"
-        );
-        assert!(
-            (0..16).all(|idx| {
-                graph.node_params.iter().any(|param| {
-                    param.instance == idx && param.param == "dur-factor" && param.value == 2.0
-                })
-            }),
-            "dur-factor global knob should write every node param override"
-        );
-        assert!(
-            (0..16).all(|idx| {
-                graph.node_params.iter().any(|param| {
-                    param.instance == idx && param.param == "swing" && param.value == 64.0
-                })
-            }),
-            "swing global knob should write every node param override"
-        );
-
-        runtime
-            .eval_str("(g16-init-ring-defaults)")
-            .expect("explicitly initialize graph 16 demo defaults");
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-16-demo")
-            .expect("graph overrides after explicit init");
-        assert_eq!(
-            graph.edge_params.len(),
-            16 * 16,
-            "explicit init should write the full ring weight matrix"
-        );
-        assert!(
-            graph.edge_params.iter().any(|edge| {
-                edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 1.0
-            }),
-            "explicit init should write the first ring edge"
-        );
-        assert!(
-            graph.edge_params.iter().any(|edge| {
-                edge.from == 15 && edge.to == 0 && edge.param == "weight" && edge.value == 1.0
-            }),
-            "explicit init should wrap the ring from the final node to node 0"
-        );
-        assert!(
-            graph.node_intrinsics.iter().any(|node| {
-                node.instance == 0
-                    && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
-            }),
-            "explicit init should seed node 0 from track 0"
-        );
-    }
-
-    #[test]
-    fn graph_16_cycle_demo_round_trips_resolution_and_quantize_cycles() {
-        let state = Arc::new(SequencerState::new(
-            16,
-            (0..16).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str(
-                r#"
-                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
-                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer)
-                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
-                    (append eseq.seq-step-tabs/seq-registered-step-tabs (list (list label buffer)))))
-                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon)
-                  (eseq.seq-step-tabs/seq-register-step-sequencer-tab label buffer))
-                "#,
-            )
-            .expect("install sequencer tab registration test stub");
-
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-16-cycle-demo.lisp"))
-        .expect("read graph 16 cycle demo script");
-        runtime
-            .eval_str(&source)
-            .expect("evaluate graph 16 cycle demo");
-
-        // The panel must render (exercises the text-input + g16c-sync-cycles body): lay it
-        // out and confirm a resolution + quantize cycle text field per node.
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-        let tree = runtime
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("cycle demo should publish a widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((44.0, 56.0)))
-            .expect("cycle demo widget tree should lay out");
-        let event_view =
-            find_by_stable_key(&layout, "graph-16c-event-view").expect("cycle event-view");
-        assert!(
-            event_view.rect.width > 0.0 && event_view.rect.height > 0.0,
-            "{:?}",
-            event_view.rect
-        );
-        let mut event_views = Vec::new();
-        collect_widgets(&layout, "event-view", &mut event_views);
-        assert_eq!(event_views.len(), 1, "expected one event-view");
-        let mut text_inputs = Vec::new();
-        collect_widgets(&layout, "text-input", &mut text_inputs);
-        assert_eq!(
-            text_inputs.len(),
-            16 * 2,
-            "expected a resolution + quantize cycle text field per node"
-        );
-        for idx in 0..16 {
-            for key in [
-                format!("graph-16c-resolution-{idx}"),
-                format!("graph-16c-quantize-{idx}"),
-            ] {
-                let widget = find_by_stable_key(&layout, &key)
-                    .unwrap_or_else(|| panic!("missing cycle field {key}"));
-                assert!(widget.rect.width > 0.0 && widget.rect.height > 0.0);
-            }
-        }
-
-        // Loading must not write overrides (matches the other demos).
-        assert!(
-            state.current_graph_overrides().is_empty(),
-            "loading the cycle demo must not write pattern overrides"
-        );
-
-        // Explicit init writes the showcase cycles onto nodes 0 and 1.
-        runtime
-            .eval_str("(script-init-fn)")
-            .expect("initialize cycle demo defaults");
-
-        let read_cycle = |runtime: &mut Runtime, node: usize, field: &str| {
-            runtime
-                .eval_str(&format!("(graph-node-value g16c-name {node} {field})"))
-                .expect("read cycle")
-        };
-        assert_eq!(
-            read_cycle(&mut runtime, 0, ":resolution-cycle"),
-            Some(Value::String("16 16 16 16 16 4".to_string())),
-            "node 0 should round-trip the showcase resolution cycle"
-        );
-        assert_eq!(
-            read_cycle(&mut runtime, 1, ":resolution-cycle"),
-            Some(Value::String("16 8 16".to_string())),
-            "node 1 should round-trip its 3-slot lurch cycle"
-        );
-
-        // The stored override is a list of timebase indices (16->Sixteenth=4, 4->Quarter=2).
-        let overrides = state.current_graph_overrides();
-        let graph = overrides
-            .iter()
-            .find(|graph| graph.sequencer_name == "neural-16-cycle-demo")
-            .expect("cycle demo graph overrides");
-        let node0 = graph
-            .node_intrinsics
-            .iter()
-            .find(|node| node.instance == 0)
-            .expect("node 0 intrinsic override");
-        assert_eq!(
-            node0.resolution,
-            Some(vec![4, 4, 4, 4, 4, 2]),
-            "resolution override should store the full cycle as timebase indices"
-        );
-
-        // The UI edit path (g16c-edit-cycle -> graph-node string parse) is lenient: extra
-        // whitespace collapses and unparseable tokens drop, then it re-serializes canonically.
-        runtime
-            .eval_str(r#"(g16c-edit-cycle 2 :resolution "16  4 garbage 8")"#)
-            .expect("edit node 2 resolution cycle");
-        assert_eq!(
-            read_cycle(&mut runtime, 2, ":resolution-cycle"),
-            Some(Value::String("16 4 8".to_string())),
-            "lenient parse drops junk tokens and collapses whitespace"
-        );
-
-        // Quantize accepts a cycle too; a whole-field "off" collapses to a single off slot.
-        runtime
-            .eval_str(r#"(g16c-edit-cycle 4 :quantize "16 8 16")"#)
-            .expect("edit node 4 quantize cycle");
-        assert_eq!(
-            read_cycle(&mut runtime, 4, ":quantize-cycle"),
-            Some(Value::String("16 8 16".to_string())),
-            "quantize cycle should round-trip"
-        );
-        runtime
-            .eval_str(r#"(g16c-edit-cycle 4 :quantize "off")"#)
-            .expect("clear node 4 quantize cycle");
-        assert_eq!(
-            read_cycle(&mut runtime, 4, ":quantize-cycle"),
-            Some(Value::String("off".to_string())),
-            "a whole-field off collapses to a single off slot"
-        );
-    }
-
-    #[test]
-    fn graph_8x8_demo_scratch_load_preserves_saved_overrides() {
-        let state = Arc::new(SequencerState::new(
-            8,
-            (0..8).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let expected = crate::graph::ProjectGraphOverrides {
-            sequencer_id: super::stable_sequencer_id("neural-8x8-demo"),
-            sequencer_name: "neural-8x8-demo".to_string(),
-            owner_rack: None,
-            node_intrinsics: vec![
-                crate::graph::ProjectGraphNodeIntrinsicOverride {
-                    group: "nrn".to_string(),
-                    instance: 0,
-                    resolution: None,
-                    delay_steps: None,
-                    quantize: None,
-                    route: None,
-                    seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
-                    seed_on_reset: None,
-                    duration: None,
-                    swing: None,
-                    neural_group: None,
-                    process_chain: None,
-                },
-                crate::graph::ProjectGraphNodeIntrinsicOverride {
-                    group: "nrn".to_string(),
-                    instance: 3,
-                    resolution: None,
-                    delay_steps: Some(6),
-                    quantize: None,
-                    route: None,
-                    seed_from: None,
-                    seed_on_reset: None,
-                    duration: None,
-                    swing: None,
-                    neural_group: None,
-                    process_chain: None,
-                },
-                crate::graph::ProjectGraphNodeIntrinsicOverride {
-                    group: "nrn".to_string(),
-                    instance: 4,
-                    resolution: None,
-                    delay_steps: None,
-                    quantize: None,
-                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
-                    seed_from: None,
-                    seed_on_reset: None,
-                    duration: None,
-                    swing: None,
-                    neural_group: None,
-                    process_chain: None,
-                },
-            ],
-            node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
-                group: "nrn".to_string(),
-                instance: 2,
-                param: "transpose".to_string(),
-                value: -12.0,
-            }],
-            edge_params: vec![crate::graph::ProjectGraphEdgeParamOverride {
-                group: "nrn->nrn".to_string(),
-                from: 0,
-                to: 1,
-                param: "weight".to_string(),
-                value: 0.25,
-            }],
-            reset_every_beats: None,
-            max_poly: None,
-            max_poly_selection: None,
-            node_count: None,
-            group_gain: None,
-            group_coupling: None,
-            group_trace_decay: None,
-            group_coupling_scale: None,
-            group_excite_floor: None,
-        };
-        state
-            .edit_current_graph_overrides(|overrides| {
-                *overrides = vec![expected.clone()];
-                Ok(())
-            })
-            .unwrap();
-
-        let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("graph-visualizations", Value::List(Vec::new())),
-            ],
-            true,
-        );
-        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|crates_dir| crates_dir.parent())
-            .expect("sequencer crate should live under workspace crates dir")
-            .join(".eseqlisp-scratch");
-        let report = runtime.eval_source_transactional(
-            Some(workspace_root),
-            r#"
-            (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
-            (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-            (load "content/scripts/sequencers/graph-neural-8x8-demo.lisp")
-            "#,
-            Vec::new(),
-        );
-        assert!(
-            report.success,
-            "scratch-style load failed: {}",
-            report.failure_message()
-        );
-        assert_eq!(
-            runtime.eval_str("g8-name").expect("read loaded graph handle"),
-            Some(Value::Number(super::graph_instance_id("neural-8x8-demo", None) as f64)),
-            "scratch-style load should define the graph demo UI state (the handle)"
-        );
-
-        assert!(
-            state
-                .published_sequencers()
-                .into_iter()
-                .any(|published| published.name == "neural-8x8-demo" && published.graph.is_some()),
-            "scratch load should republish the graph manifest"
-        );
-        assert_eq!(
-            state.current_graph_overrides(),
-            vec![expected],
-            "scratch load must not clobber saved graph overrides"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 2 :transpose))")
-                .expect("read bound transpose value"),
-            Some(Value::Number(-12.0)),
-            "loaded UI should sync node params from saved overrides"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 3 :delay))")
-                .expect("read bound delay value"),
-            Some(Value::Number(6.0)),
-            "loaded UI should sync node intrinsics from saved overrides"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph g8-name 4 :route (g8-route-options)))")
-                .expect("read bound route index"),
-            Some(Value::Number(0.0)),
-            "loaded UI should display saved internal route 0 as Track 1 (index 0)"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(nth (nth g8-weights 0) 1)")
-                .expect("read synced weight"),
-            Some(Value::Number(0.25)),
-            "loaded UI should sync matrix weights from saved overrides"
-        );
-    }
-
-    #[test]
     fn graph_authoring_natives_write_current_pattern_overrides() {
         use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
         use crate::sequencer::{PublishedSequencer, Timebase};
@@ -3994,28 +1473,20 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .iter()
             .any(|edge| edge.param == "delay" && edge.value == 7.0));
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :delay)")
-                .expect("graph-node-value delay"),
-            Some(Value::Number(3.0))
+            graph_api::node_value(&state, "neural", 1, "delay"),
+            Ok(Value::Number(3.0))
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :route)")
-                .expect("graph-node-value route"),
-            Some(Value::Number(0.0))
+            graph_api::node_value(&state, "neural", 1, "route"),
+            Ok(Value::Number(0.0))
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :seed-route)")
-                .expect("graph-node-value seed route"),
-            Some(Value::Number(1.0))
+            graph_api::node_value(&state, "neural", 1, "seed-route"),
+            Ok(Value::Number(1.0))
         );
         assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph \"neural\" 1 :seed-on-reset))")
-                .expect("bound seed-on-reset"),
-            Some(Value::Number(1.0))
+            graph_api::node_value(&state, "neural", 1, "seed-on-reset"),
+            Ok(Value::Number(1.0))
         );
         runtime
             .eval_str("(graph-node \"neural\" 1 :group 2)")
@@ -4025,442 +1496,50 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Some(2)
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :group)")
-                .expect("graph-node-value group"),
-            Some(Value::Number(2.0))
+            graph_api::node_value(&state, "neural", 1, "group"),
+            Ok(Value::Number(2.0))
         );
-        // Unassigned nodes stay in group A, and the numeric bind path serves the value.
+        // Unassigned nodes stay in group A.
         assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph \"neural\" 0 :group))")
-                .expect("bound group default"),
-            Some(Value::Number(0.0))
+            graph_api::node_value(&state, "neural", 0, "group"),
+            Ok(Value::Number(0.0))
         );
         runtime
             .eval_str("(graph-node \"neural\" 1 :seed-from :off :seed-on-reset 0)")
             .expect("disable seeding");
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :seed-route)")
-                .expect("graph-node-value seed route off"),
-            Some(Value::Number(0.0))
+            graph_api::node_value(&state, "neural", 1, "seed-route"),
+            Ok(Value::Number(0.0))
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :seed-from)")
-                .expect("graph-node-value seed-from off"),
-            Some(Value::List(Vec::new()))
+            graph_api::node_value(&state, "neural", 1, "seed-from"),
+            Ok(Value::List(Vec::new()))
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-node-value \"neural\" 1 :seed-on-reset)")
-                .expect("graph-node-value seed-on-reset off"),
-            Some(Value::Number(0.0))
+            graph_api::node_value(&state, "neural", 1, "seed-on-reset"),
+            Ok(Value::Number(0.0))
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-param-value \"neural\" 1 :threshold)")
-                .expect("graph-param-value threshold"),
-            Some(Value::Number(0.75))
+            graph_api::param_value(&state, "neural", 1, "threshold"),
+            Some(0.75)
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-edge-value \"neural\" :from 0 :to 1 :weight)")
-                .expect("graph-edge-value keyword syntax"),
-            Some(Value::Number(0.5))
+            graph_api::edge_value(&state, "neural", 0, 1, "weight"),
+            Some(0.5)
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-edge-value \"neural\" 0 1 :weight)")
-                .expect("graph-edge-value positional syntax"),
-            Some(Value::Number(0.5))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(graph-edge-value \"neural\" 0 1 :delay)")
-                .expect("graph-edge-value delay"),
-            Some(Value::Number(7.0))
+            graph_api::edge_value(&state, "neural", 0, 1, "delay"),
+            Some(7.0)
         );
     }
 
+    /// docs/graph-node-processes-spec.md §5: `graph-node-process-add` /
+    /// `-inlet` and the node chain edits (enable, move, remove; through
+    /// `edit_graph_node_process_chain_now`, the host kinds' path since the
+    /// test-only natives went, eseq-0l17.81) edit the node's override chain,
+    /// and the chain reaches the resolved runtime config.
     #[test]
-    fn bind_graph_seeds_reactive_slots_and_keys_round_trip() {
-        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
-        use crate::sequencer::{PublishedSequencer, Timebase};
-
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let manifest = GraphManifest {
-            id: 77,
-            name: "neural".into(),
-            owner_rack: None,
-            shape: ShapeSpec::Line(2),
-            energy_decay: 1.0,
-            reset_every_beats: 0.0,
-            seed_on_reset: 0.0,
-            max_poly: 2,
-            max_poly_selection: NeuralMaxPolySelection::Deterministic,
-            duration: crate::graph::GraphDurationSpec::default(),
-            swing: crate::graph::GraphSwingSpec::default(),
-            node: NodeProto {
-                name: "nrn".into(),
-                params: vec![ParamSpec {
-                    name: "transpose".into(),
-                    min: -48.0,
-                    max: 48.0,
-                    default: 0.0,
-                    is_int: true,
-                }],
-                ..NodeProto::default()
-            },
-            edge_sets: vec![EdgeSetSpec {
-                from: "nrn".into(),
-                to: "nrn".into(),
-                topology: Topology::AllToAll,
-                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
-                gather_source: None,
-                params: vec![ParamSpec {
-                    name: "weight".into(),
-                    min: -1.0,
-                    max: 1.0,
-                    default: 0.0,
-                    is_int: false,
-                }],
-            }],
-        };
-        state.publish_sequencer(PublishedSequencer {
-            id: manifest.id,
-            name: manifest.name.clone(),
-            resolution: Timebase::Sixteenth as u8,
-            tick_source: String::new(),
-            requires: Vec::new(),
-            graph: Some(manifest),
-            owner_rack: None,
-        });
-
-        let mut runtime = Runtime::new();
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime
-            .eval_str("(graph-node \"neural\" 1 :delay 4 :route 2)")
-            .expect("graph-node");
-        runtime
-            .eval_str("(graph-param \"neural\" 1 :transpose -7)")
-            .expect("graph-param");
-        runtime
-            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :weight 0.5)")
-            .expect("graph-edge");
-        runtime
-            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :delay 6)")
-            .expect("graph-edge delay");
-
-        // Numeric intrinsic + param bind-graph handles read the resolved value from the slot.
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph \"neural\" 1 :delay))")
-                .expect("bind-graph delay"),
-            Some(Value::Number(4.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph \"neural\" 1 :transpose))")
-                .expect("bind-graph transpose"),
-            Some(Value::Number(-7.0))
-        );
-        // Enum intrinsic binds to the dropdown index within the supplied options
-        // (route 2 -> "Track 3" -> index 2).
-        assert_eq!(
-            runtime
-                .eval_str(
-                    "(reactive-value (bind-graph \"neural\" 1 :route \
-                     (list \"Track 1\" \"Track 2\" \"Track 3\" \"Off\")))"
-                )
-                .expect("bind-graph route index"),
-            Some(Value::Number(2.0))
-        );
-        // Edge handle.
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph-edge \"neural\" 0 1 :weight))")
-                .expect("bind-graph-edge weight"),
-            Some(Value::Number(0.5))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph-edge \"neural\" 0 1 :delay))")
-                .expect("bind-graph-edge delay"),
-            Some(Value::Number(6.0))
-        );
-
-        // graph-key / graph-edge-key name the exact slot a reactive-set dirties, so a
-        // plain `bind` to that key observes the new value (this is the edit-writeback path).
-        runtime
-            .eval_str("(reactive-set \"GRAPH\" (graph-key \"neural\" 1 :delay) 9)")
-            .expect("reactive-set node key");
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind \"GRAPH\" (graph-key \"neural\" 1 :delay)))")
-                .expect("read node slot"),
-            Some(Value::Number(9.0))
-        );
-        runtime
-            .eval_str("(reactive-set \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight) 0.2)")
-            .expect("reactive-set edge key");
-        assert_eq!(
-            runtime
-                .eval_str(
-                    "(reactive-value (bind \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight)))"
-                )
-                .expect("read edge slot"),
-            Some(Value::Number(0.2))
-        );
-    }
-
-    fn graph_read_tracking_fixture() -> (Arc<SequencerState>, Runtime) {
-        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
-        use crate::sequencer::{PublishedSequencer, Timebase};
-
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let manifest = GraphManifest {
-            id: 91,
-            name: "neural".into(),
-            owner_rack: None,
-            shape: ShapeSpec::Line(3),
-            energy_decay: 1.0,
-            reset_every_beats: 16.0,
-            seed_on_reset: 0.0,
-            max_poly: 4,
-            max_poly_selection: NeuralMaxPolySelection::Deterministic,
-            duration: crate::graph::GraphDurationSpec::default(),
-            swing: crate::graph::GraphSwingSpec::default(),
-            node: NodeProto {
-                name: "nrn".into(),
-                params: vec![ParamSpec {
-                    name: "threshold".into(),
-                    min: 0.0,
-                    max: 4.0,
-                    default: 1.0,
-                    is_int: false,
-                }],
-                ..NodeProto::default()
-            },
-            edge_sets: vec![EdgeSetSpec {
-                from: "nrn".into(),
-                to: "nrn".into(),
-                topology: Topology::AllToAll,
-                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
-                gather_source: None,
-                params: vec![ParamSpec {
-                    name: "weight".into(),
-                    min: -1.0,
-                    max: 1.0,
-                    default: 0.0,
-                    is_int: false,
-                }],
-            }],
-        };
-        state.publish_sequencer(PublishedSequencer {
-            id: manifest.id,
-            name: manifest.name.clone(),
-            resolution: Timebase::Sixteenth as u8,
-            tick_source: String::new(),
-            requires: Vec::new(),
-            graph: Some(manifest),
-            owner_rack: None,
-        });
-        let mut runtime = Runtime::new();
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        (state, runtime)
-    }
-
-    /// Tags of the subtrees a batch of UI updates replaced; panics on a full
-    /// repaint, which is the failure mode tracked reads exist to prevent.
-    fn replaced_graph_read_tags(
-        updates: Vec<eseqlisp::vm::PendingUiUpdate>,
-        tags: &[&str],
-        label: &str,
-    ) -> Vec<String> {
-        let mut replaced = updates
-            .into_iter()
-            .map(|update| match update {
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => {
-                    let text = eseqlisp::vm::format_lisp_value(&tree);
-                    tags.iter()
-                        .find(|tag| text.contains(&format!("<{tag}>")))
-                        .unwrap_or_else(|| panic!("{label}: unknown subtree {text}"))
-                        .to_string()
-                }
-                eseqlisp::vm::PendingUiUpdate::FullTree(_) => {
-                    panic!("{label} must not repaint the full tree")
-                }
-            })
-            .collect::<Vec<_>>();
-        replaced.sort();
-        replaced
-    }
-
-    /// docs/instance-kinds-spec.md §6: graph reads inside a rendering effect
-    /// are tracked per graph field, and `graph-*` writes re-run exactly the
-    /// readers whose value changed, with no `reactive-set "GRAPH"` echo or
-    /// version-bump defstate.
-    #[test]
-    fn graph_reads_track_per_field_and_graph_writes_dirty_only_their_readers() {
-        let (state, mut runtime) = graph_read_tracking_fixture();
-        const TAGS: &[&str] = &[
-            "edge01", "edge01kw", "edge10", "node1", "param1", "cfg", "proc1", "static",
-        ];
-        runtime
-            .eval_str(
-                r#"
-                (effect-buffer "*graph-reads*"
-                  (h-stack
-                    (subtree :key "edge01"
-                      (label (str "<edge01>" (graph-edge-value "neural" 0 1 :weight))))
-                    (subtree :key "edge01kw"
-                      (label (str "<edge01kw>" (graph-edge-value "neural" :from 0 :to 1 :weight))))
-                    (subtree :key "edge10"
-                      (label (str "<edge10>" (graph-edge-value "neural" 1 0 :weight))))
-                    (subtree :key "node1"
-                      (label (str "<node1>" (graph-node-value "neural" 1 :delay))))
-                    (subtree :key "param1"
-                      (label (str "<param1>" (graph-param-value "neural" 1 :threshold))))
-                    (subtree :key "cfg"
-                      (label (str "<cfg>" (graph-config-value "neural" :max-poly))))
-                    (subtree :key "proc1"
-                      (label (str "<proc1>" (len (graph-node-process-chain "neural" 1)))))
-                    (subtree :key "static" (label "<static>"))))
-                "#,
-            )
-            .expect("render graph readers");
-        let initial = runtime.take_pending_buffer_widget_trees();
-        assert!(
-            matches!(initial.as_slice(), [eseqlisp::vm::PendingUiUpdate::FullTree(_)]),
-            "initial render publishes one full tree, got {} updates",
-            initial.len()
-        );
-        let step = |runtime: &mut Runtime, code: &str| {
-            runtime.eval_str(code).unwrap_or_else(|e| panic!("{code}: {e:?}"));
-            replaced_graph_read_tags(runtime.take_pending_buffer_widget_trees(), TAGS, code)
-        };
-
-        assert_eq!(
-            step(&mut runtime, r#"(graph-edge "neural" :from 0 :to 1 :weight 0.5)"#),
-            vec!["edge01", "edge01kw"],
-            "an edge write re-runs every reader of that edge param and nothing else"
-        );
-        assert!(
-            step(&mut runtime, r#"(graph-edge "neural" :from 0 :to 1 :weight 0.5)"#).is_empty(),
-            "an equal write dirties nothing"
-        );
-        assert_eq!(
-            step(&mut runtime, r#"(graph-edge "neural" :from 1 :to 0 :weight -0.25)"#),
-            vec!["edge10"]
-        );
-        assert!(
-            step(&mut runtime, r#"(graph-edge "neural" :from 0 :to 2 :weight 0.75)"#).is_empty(),
-            "a write to an edge nobody reads dirties nothing"
-        );
-        assert_eq!(
-            step(&mut runtime, r#"(graph-param "neural" 1 :threshold 2.5)"#),
-            vec!["param1"]
-        );
-        assert!(
-            step(&mut runtime, r#"(graph-param "neural" 0 :threshold 3)"#).is_empty(),
-            "another node's param write leaves node 1's readers alone"
-        );
-        assert_eq!(
-            step(&mut runtime, r#"(graph-node "neural" 1 :delay 3)"#),
-            vec!["node1"]
-        );
-        assert_eq!(
-            step(&mut runtime, r#"(graph-config "neural" :max-poly 2)"#),
-            vec!["cfg"],
-            "config writes re-resolve the whole graph but re-run only changed reads"
-        );
-        assert_eq!(
-            step(&mut runtime, r#"(graph-node-process-add "neural" 1 "lane-prob")"#),
-            vec!["proc1"],
-            "a node patch edit re-runs its chain readers without a version defstate"
-        );
-        assert!(
-            step(&mut runtime, r#"(graph-node-process-add "neural" 0 "lane-prob")"#).is_empty(),
-            "another node's patch edit leaves node 1's chain readers alone"
-        );
-
-        // A change made outside this VM's graph natives (another VM, a Rust
-        // edit, a pattern switch) is caught by the host sweep.
-        let mut other = Runtime::new();
-        register_graph_authoring_natives(&mut other, Arc::clone(&state));
-        other
-            .eval_str(r#"(graph-edge "neural" :from 1 :to 0 :weight 0.9)"#)
-            .expect("external edge write");
-        assert!(runtime.take_pending_buffer_widget_trees().is_empty());
-        assert!(
-            super::queue_graph_read_invalidations(&mut runtime, &state),
-            "subscribed graph reads are queued"
-        );
-        runtime.run_reactive_cycle();
-        assert_eq!(
-            replaced_graph_read_tags(runtime.take_pending_buffer_widget_trees(), TAGS, "sweep"),
-            vec!["edge10"],
-            "the sweep re-runs only readers whose resolved value moved"
-        );
-        assert!(super::queue_graph_read_invalidations(&mut runtime, &state));
-        runtime.run_reactive_cycle();
-        assert!(
-            runtime.take_pending_buffer_widget_trees().is_empty(),
-            "a sweep with nothing changed re-runs nothing"
-        );
-    }
-
-    /// Plain (non-rendering) graph reads resolve without keeping a dependency.
-    #[test]
-    fn graph_reads_outside_render_retain_no_dependency() {
-        let (state, mut runtime) = graph_read_tracking_fixture();
-        assert_eq!(
-            runtime
-                .eval_str(r#"(graph-edge-value "neural" 0 1 :weight)"#)
-                .expect("plain read"),
-            Some(Value::Number(0.0))
-        );
-        assert!(
-            !super::queue_graph_read_invalidations(&mut runtime, &state),
-            "a read outside rendering subscribes nothing"
-        );
-    }
-
-    /// `graph-*` writes keep numeric `bind-graph*` handles in step, so Lisp
-    /// no longer echoes them with `reactive-set "GRAPH"`.
-    #[test]
-    fn graph_writes_echo_numeric_bind_graph_handles() {
-        let (_state, mut runtime) = graph_read_tracking_fixture();
-        let read = |runtime: &mut Runtime, code: &str| runtime.eval_str(code).expect(code);
-        read(&mut runtime, r#"(def bw (bind-graph-edge "neural" 0 1 :weight))"#);
-        read(&mut runtime, r#"(def bt (bind-graph "neural" 1 :threshold))"#);
-        read(&mut runtime, r#"(def bd (bind-graph "neural" 1 :delay))"#);
-        read(&mut runtime, r#"(def bmp (bind-graph-config "neural" :max-poly))"#);
-        read(&mut runtime, r#"(graph-edge "neural" :from 0 :to 1 :weight 0.5)"#);
-        read(&mut runtime, r#"(graph-param "neural" 1 :threshold 2.5)"#);
-        read(&mut runtime, r#"(graph-node "neural" 1 :delay 3)"#);
-        read(&mut runtime, r#"(graph-config "neural" :max-poly 2)"#);
-        assert_eq!(read(&mut runtime, "(reactive-value bw)"), Some(Value::Number(0.5)));
-        assert_eq!(read(&mut runtime, "(reactive-value bt)"), Some(Value::Number(2.5)));
-        assert_eq!(read(&mut runtime, "(reactive-value bd)"), Some(Value::Number(3.0)));
-        assert_eq!(read(&mut runtime, "(reactive-value bmp)"), Some(Value::Number(2.0)));
-        // An options-bound handle holds a dropdown index, never an echoed number.
-        read(
-            &mut runtime,
-            r#"(def bo (bind-graph "neural" 2 :delay (list "0" "3" "5")))"#,
-        );
-        assert_eq!(read(&mut runtime, "(reactive-value bo)"), Some(Value::Number(0.0)));
-        read(&mut runtime, r#"(graph-node "neural" 2 :delay 5)"#);
-        assert_eq!(read(&mut runtime, "(reactive-value bo)"), Some(Value::Number(0.0)));
-    }
-
-    /// docs/graph-node-processes-spec.md §5: the node-side process natives edit
-    /// the node's override chain, the read reports it, and the chain reaches the
-    /// resolved runtime config.
-    #[test]
-    fn graph_node_process_natives_edit_the_node_patch_and_reach_runtime() {
+    fn graph_node_process_edits_change_the_node_patch_and_reach_runtime() {
         use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
         use crate::sequencer::{PublishedSequencer, Timebase};
 
@@ -4516,16 +1595,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
 
         // Empty until something is added.
-        assert_eq!(
-            runtime.eval_str("(len (graph-node-process-chain \"neural\" 1))").unwrap(),
-            Some(Value::Number(0.0))
-        );
+        assert!(graph_api::chain(&state, "neural", 1).slots.is_empty());
         // Builtin lane classes are accepted without a published def; unknown
         // classes are not.
         let _ = runtime.eval_str("(graph-node-process-add \"neural\" 1 \"lane-nope\")");
-        assert_eq!(
-            runtime.eval_str("(len (graph-node-process-chain \"neural\" 1))").unwrap(),
-            Some(Value::Number(0.0)),
+        assert!(
+            graph_api::chain(&state, "neural", 1).slots.is_empty(),
             "an unknown class adds nothing"
         );
         let first = runtime
@@ -4542,30 +1617,19 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
             .eval_str(&format!("(graph-node-process-inlet \"neural\" 1 {first} :prob 0.25)"))
             .unwrap();
-        runtime
-            .eval_str(&format!("(graph-node-process-enable \"neural\" 1 {second} false)"))
-            .unwrap();
+        let (first, second) = (first as u64, second as u64);
+        graph_api::enable(&state, "neural", 1, second, false);
 
-        let chain = runtime
-            .eval_str("(graph-node-process-chain \"neural\" 1)")
-            .unwrap();
-        let Some(Value::List(slots)) = chain else { panic!("chain is a list") };
+        let slots = graph_api::chain(&state, "neural", 1).slots;
         assert_eq!(slots.len(), 2);
-        let slot0 = slots[0].borrow().clone();
-        let Value::Map(slot0) = slot0 else { panic!("slot map") };
-        assert_eq!(*slot0["class"].borrow(), Value::String("lane-prob".into()));
-        assert_eq!(*slot0["enabled"].borrow(), Value::Bool(true));
-        let Value::Map(inlets) = slot0["inlets"].borrow().clone() else { panic!("inlets map") };
-        assert_eq!(*inlets["prob"].borrow(), Value::Number(0.25));
-        let slot1 = slots[1].borrow().clone();
-        let Value::Map(slot1) = slot1 else { panic!("slot map") };
-        assert_eq!(*slot1["enabled"].borrow(), Value::Bool(false));
+        assert_eq!(slots[0].class_name, "lane-prob");
+        assert!(slots[0].enabled);
+        assert_eq!(slots[0].inlets["prob"].to_value(), Value::Number(0.25));
+        assert!(!slots[1].enabled);
 
         // Move the veto first, then the chain order flips; remove it and only
         // prob remains.
-        runtime
-            .eval_str(&format!("(graph-node-process-move \"neural\" 1 {second} -1)"))
-            .unwrap();
+        graph_api::edit(&state, "neural", 1, |chain| chain.slots.swap(0, 1));
         let overrides = state.current_graph_overrides();
         let chain = overrides[0].node_intrinsics[0].process_chain.as_ref().unwrap();
         assert_eq!(chain.slots[0].class_name, "lane-veto");
@@ -4574,16 +1638,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(config.nodes[1].process_chain.slots.len(), 2);
         assert!(config.nodes[0].process_chain.slots.is_empty());
 
-        runtime
-            .eval_str(&format!("(graph-node-process-remove \"neural\" 1 {second})"))
-            .unwrap();
+        graph_api::remove(&state, "neural", 1, second);
         let overrides = state.current_graph_overrides();
         let chain = overrides[0].node_intrinsics[0].process_chain.as_ref().unwrap();
         assert_eq!(chain.slots.len(), 1);
         assert_eq!(chain.slots[0].class_name, "lane-prob");
-        runtime
-            .eval_str(&format!("(graph-node-process-remove \"neural\" 1 {first})"))
-            .unwrap();
+        graph_api::remove(&state, "neural", 1, first);
         let overrides = state.current_graph_overrides();
         assert!(overrides[0].node_intrinsics[0].process_chain.is_none(), "empty chain is dropped");
     }
@@ -4611,9 +1671,38 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!((max_any as u64) < (1u64 << 53));
     }
 
-    /// in ports, readers on the out port), then removal in both directions.
+    /// eseq-0l17.81: the removed graph natives fail with a hint naming their
+    /// eseq.kinds replacement, and neither the in-app native docs nor
+    /// completion list them (the remaining node patch natives keep theirs).
     #[test]
-    fn graph_node_lane_patch_projection_and_fanout_natives() {
+    fn removed_graph_natives_fail_with_a_migration_hint_and_have_no_docs() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        for (name, hint) in super::REMOVED_GRAPH_NATIVES {
+            runtime.take_status_message();
+            let _ = runtime.eval_str(&format!("({name} \"g\" 0 :delay)"));
+            let status = runtime.take_status_message().unwrap_or_default();
+            assert!(status.contains(hint), "{name}: {status}");
+            assert!(hint.contains("was removed") && hint.contains("eseq.kinds"), "{name}: {hint}");
+            assert!(!runtime.symbol_metadata().contains_key(*name), "{name} is documented");
+        }
+        let completed = runtime.completion_symbols();
+        for (name, _) in super::REMOVED_GRAPH_NATIVES {
+            assert!(!completed.iter().any(|symbol| symbol == name), "{name} is completed");
+        }
+        for kept in ["graph-node-process-add", "graph-node-process-expr-set", "graph-config-value"] {
+            assert!(runtime.symbol_metadata().contains_key(kept), "{kept} keeps its docs");
+        }
+    }
+
+    /// A node's patch: its namespace is per graph; removing a slot drops the
+    /// fan-out cable into it (`remove_slot_and_wires`), and its id (minted by
+    /// `graph-node-process-add`) is never minted again. (Wiring itself goes
+    /// through the host kinds' `edit-process`, tested in
+    /// `host_kinds::tests::graph`.)
+    #[test]
+    fn graph_node_process_removed_slot_drops_its_cables_and_id() {
         use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
         use crate::sequencer::{PublishedSequencer, Timebase};
 
@@ -4665,8 +1754,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             graph: Some(manifest.clone()),
             owner_rack: None,
         });
-        // The wire natives look the port up on the published def, as the app
-        // does once the builtin library has loaded.
+        // Adds look the class up on the published def, as the app does once
+        // the builtin library has loaded.
         let mut publisher = crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
         publisher
             .eval(&crate::lisp_host::load_process_library_source())
@@ -4678,33 +1767,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         let id = |value: Option<Value>| match value {
-            Some(Value::Number(id)) => id,
+            Some(Value::Number(id)) => id as u64,
             other => panic!("expected an id, got {other:?}"),
         };
         let rand = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"lane-rand\")").unwrap());
         let cmp = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"lane-cmp\")").unwrap());
         let mask = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"prob-mask\")").unwrap());
-        assert_eq!(
-            runtime.eval_str(&format!("(graph-node-process-wire \"neural\" 2 {rand} :wire {cmp} :a)")).unwrap(),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            runtime.eval_str(&format!("(graph-node-process-fanout-add \"neural\" 2 {rand} :wire {mask} :prob)")).unwrap(),
-            Some(Value::Number(0.0))
-        );
 
-        let patch = runtime.eval_str("(graph-node-lane-patch \"neural\" 2)").unwrap();
-        let Some(Value::List(entries)) = patch else { panic!("entry list") };
-        assert_eq!(entries.len(), 3);
-        let entry = |index: usize| -> std::collections::HashMap<String, Value> {
-            let Value::Map(map) = entries[index].borrow().clone() else { panic!("entry map") };
-            map.into_iter().map(|(k, v)| (k, v.borrow().clone())).collect()
-        };
-        let rand_entry = entry(0);
-        assert_eq!(rand_entry["class"], Value::String("lane-rand".into()));
-        let Value::List(outs) = rand_entry["out-ports"].clone() else { panic!("out ports") };
-        assert_eq!(outs.len(), 1, "lane-rand has one connectable port");
-        let Value::Map(out) = outs[0].borrow().clone() else { panic!("out map") };
         // Node 2's namespace is derived from the graph id (91), so node 2 of
         // another graph never shares it (instance-kinds spec §7).
         let ns: usize = 1024 + 91 * 4096 + 2;
@@ -4712,43 +1781,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             runtime.eval_str("(graph-node-patch-namespace \"neural\" 2)").unwrap(),
             Some(Value::Number(ns as f64))
         );
-        let expected_port_id = (ns * 4096 + 0) * 16 + 0;
-        assert_eq!(*out["port-id"].borrow(), Value::Number(expected_port_id as f64));
-        assert_eq!(*out["primary-free"].borrow(), Value::Bool(false));
-        let Value::List(readers) = out["readers"].borrow().clone() else { panic!("readers") };
-        assert_eq!(readers.len(), 2, "primary + fan-out reader");
-        let cmp_entry = entry(1);
-        let Value::List(ins) = cmp_entry["in-ports"].clone() else { panic!("in ports") };
-        let Value::Map(a) = ins[0].borrow().clone() else { panic!("in map") };
-        assert_eq!(*a["name"].borrow(), Value::String("a".into()));
-        let Value::List(writers) = a["writers"].borrow().clone() else { panic!("writers") };
-        assert_eq!(writers.len(), 1);
-        assert_eq!(*writers[0].borrow(), Value::Number(expected_port_id as f64));
-        let mask_entry = entry(2);
-        let Value::List(ins) = mask_entry["in-ports"].clone() else { panic!("in ports") };
-        let Value::Map(prob) = ins[0].borrow().clone() else { panic!("in map") };
-        let Value::List(writers) = prob["writers"].borrow().clone() else { panic!("writers") };
-        assert_eq!(writers.len(), 1, "the fan-out cable lands on prob");
-
-        // Remove both cables; the port frees up and the in ports go quiet.
-        runtime.eval_str(&format!("(graph-node-process-fanout-remove \"neural\" 2 {rand} :wire 0)")).unwrap();
-        runtime.eval_str(&format!("(graph-node-process-unwire \"neural\" 2 {rand} :wire)")).unwrap();
-        let patch = runtime.eval_str("(graph-node-lane-patch \"neural\" 2)").unwrap();
-        let Some(Value::List(entries)) = patch else { panic!("entry list") };
-        let Value::Map(rand_entry) = entries[0].borrow().clone() else { panic!("entry map") };
-        let Value::List(outs) = rand_entry["out-ports"].borrow().clone() else { panic!("out ports") };
-        let Value::Map(out) = outs[0].borrow().clone() else { panic!("out map") };
-        assert_eq!(*out["primary-free"].borrow(), Value::Bool(true));
-        let Value::List(readers) = out["readers"].borrow().clone() else { panic!("readers") };
-        assert!(readers.is_empty());
-
-        // Removing a fan-out target drops the cable into it, and the removed
-        // (highest) id is never minted again, so a re-added slot of the same
-        // class starts clean instead of inheriting the old cable and state.
-        runtime
-            .eval_str(&format!("(graph-node-process-fanout-add \"neural\" 2 {rand} :wire {mask} :prob)"))
-            .unwrap();
-        runtime.eval_str(&format!("(graph-node-process-remove \"neural\" 2 {mask})")).unwrap();
         let fanout_left = |state: &SequencerState| {
             state
                 .edit_current_graph_overrides(|graphs| {
@@ -4762,7 +1794,19 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 })
                 .unwrap()
         };
+        // Removing a fan-out target drops the cable into it, and the removed
+        // (highest) id is never minted again, so a re-added slot of the same
+        // class starts clean instead of inheriting the old cable and state.
+        graph_api::wire(&state, "neural", 2, rand, "wire", cmp, "a");
+        graph_api::fanout_add(&state, "neural", 2, rand, "wire", mask, "prob");
+        assert_eq!(fanout_left(&state), 1);
+        graph_api::remove(&state, "neural", 2, mask);
         assert_eq!(fanout_left(&state), 0, "the fan-out cable into the removed slot is gone");
+        let wire = graph_api::chain(&state, "neural", 2).slots[0].bindings.get("wire").cloned();
+        assert!(
+            matches!(wire, Some(Some(crate::process::ParamTarget::ProcessInlet { instance_id: Some(id), .. })) if id.0 == cmp),
+            "the wire into a kept slot stays: {wire:?}"
+        );
         let readded = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"prob-mask\")").unwrap());
         assert_ne!(readded, mask, "a removed slot's id is not reused");
     }
@@ -4869,8 +1913,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(
             runtime
-                .eval_str("(reactive-value (bind-graph-config \"neural\" :max-poly))")
-                .expect("bound max-poly"),
+                .eval_str("(graph-config-value \"neural\" :max-poly)")
+                .expect("max-poly override"),
             Some(Value::Number(1.0))
         );
         assert_eq!(
@@ -4878,15 +1922,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .eval_str("(graph-config-value \"neural\" :max-poly-selection)")
                 .expect("max-poly-selection override"),
             Some(Value::String("random".to_string()))
-        );
-        assert_eq!(
-            runtime
-                .eval_str(
-                    "(reactive-value (bind-graph-config \"neural\" :max-poly-selection \
-                     (list \"deterministic\" \"propagation\" \"random\")))"
-                )
-                .expect("bound max-poly-selection"),
-            Some(Value::Number(2.0))
         );
 
         // The overrides actually reach the materialized runtime config.
@@ -4944,8 +1979,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(overrides[0].group_trace_decay, Some(0.8));
         assert_eq!(
             runtime
-                .eval_str("(reactive-value (bind-graph-config \"neural\" :group-gain-0-1))")
-                .expect("bound group-gain cell"),
+                .eval_str("(graph-config-value \"neural\" :group-gain-0-1)")
+                .expect("group-gain cell"),
             Some(Value::Number(0.25))
         );
         let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
@@ -5046,12 +2081,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .expect("node-count default"),
             Some(Value::Number(8.0))
         );
-        assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph-config \"variable\" :node-count))")
-                .expect("bound node-count default"),
-            Some(Value::Number(8.0))
-        );
         let before_fixed_reject = state.current_graph_overrides();
         let fixed_result = runtime
             .eval_str("(graph-config \"fixed\" :node-count 4)")
@@ -5070,10 +2099,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
             .eval_str("(graph-edge \"variable\" :from 14 :to 3 :weight 0.5)")
             .expect("write dormant edge");
-        let inactive_bind = runtime
-            .eval_str("(reactive-value (bind-graph \"variable\" 14 :threshold))")
-            .expect("inactive bind diagnostic should not abort the VM");
-        assert_ne!(inactive_bind, Some(Value::Number(0.75)));
 
         let overrides = state.current_graph_overrides();
         let graph = overrides
@@ -5101,16 +2126,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .eval_str("(graph-config \"variable\" :node-count 16)")
             .expect("grow node-count");
         assert_eq!(
-            runtime
-                .eval_str("(reactive-value (bind-graph \"variable\" 14 :threshold))")
-                .expect("read restored dormant node"),
-            Some(Value::Number(0.75))
+            graph_api::param_value(&state, "variable", 14, "threshold"),
+            Some(0.75)
         );
         assert_eq!(
-            runtime
-                .eval_str("(graph-edge-value \"variable\" :from 14 :to 3 :weight)")
-                .expect("read restored dormant edge"),
-            Some(Value::Number(0.5))
+            graph_api::edge_value(&state, "variable", 14, 3, "weight"),
+            Some(0.5)
         );
 
         runtime
@@ -5122,126 +2143,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .find(|graph| graph.sequencer_name == "variable")
             .expect("variable graph overrides after clamp");
         assert_eq!(graph.node_count, Some(16));
-    }
-
-    /// The graph panel sizes its row loop from `:node-count` and every row
-    /// calls `bind-graph`, which range-checks against the memoized runtime
-    /// config. An override edit that reaches the scene bank without a
-    /// scheduler publish (rack clip plumbing) must not let the two disagree:
-    /// the rows a panel loops over are exactly the rows it can bind.
-    #[test]
-    fn graph_node_count_read_agrees_with_bind_graph_range_after_unpublished_edit() {
-        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
-        use crate::sequencer::{PublishedSequencer, Timebase};
-
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let manifest = GraphManifest {
-            id: 190,
-            name: "variable".into(),
-            owner_rack: None,
-            shape: ShapeSpec::VariableLine {
-                default: 8,
-                min: 1,
-                max: 16,
-            },
-            energy_decay: 1.0,
-            reset_every_beats: 0.0,
-            seed_on_reset: 0.0,
-            max_poly: 4,
-            max_poly_selection: NeuralMaxPolySelection::Deterministic,
-            duration: crate::graph::GraphDurationSpec::default(),
-            swing: crate::graph::GraphSwingSpec::default(),
-            node: NodeProto {
-                name: "nrn".into(),
-                params: vec![ParamSpec {
-                    name: "threshold".into(),
-                    min: 0.0,
-                    max: 4.0,
-                    default: 1.0,
-                    is_int: false,
-                }],
-                ..NodeProto::default()
-            },
-            edge_sets: vec![EdgeSetSpec {
-                from: "nrn".into(),
-                to: "nrn".into(),
-                topology: Topology::AllToAll,
-                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
-                gather_source: None,
-                params: vec![ParamSpec {
-                    name: "weight".into(),
-                    min: -1.0,
-                    max: 1.0,
-                    default: 0.0,
-                    is_int: false,
-                }],
-            }],
-        };
-        state.publish_sequencer(PublishedSequencer {
-            id: manifest.id,
-            name: manifest.name.clone(),
-            resolution: Timebase::Sixteenth as u8,
-            tick_source: String::new(),
-            requires: Vec::new(),
-            graph: Some(manifest.clone()),
-            owner_rack: None,
-        });
-        let mut runtime = Runtime::new();
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-
-        let agree = |runtime: &mut Runtime, label: &str| -> usize {
-            runtime.take_status_message();
-            let Some(Value::Number(count)) = runtime
-                .eval_str("(graph-config-value \"variable\" :node-count)")
-                .expect("node-count")
-            else {
-                panic!("{label}: node-count is not a number");
-            };
-            let count = count as usize;
-            let last = runtime
-                .eval_str(&format!(
-                    "(reactive-value (bind-graph \"variable\" {} :threshold))",
-                    count - 1
-                ))
-                .expect("bind last row");
-            assert!(
-                matches!(last, Some(Value::Number(_))),
-                "{label}: row {} of {count} must bind, got {last:?} ({:?})",
-                count - 1,
-                runtime.take_status_message()
-            );
-            let beyond = runtime
-                .eval_str(&format!(
-                    "(reactive-value (bind-graph \"variable\" {count} :threshold))"
-                ))
-                .expect("bind past the last row is a diagnostic, not an abort");
-            assert_eq!(beyond, Some(Value::Bool(false)), "{label}: row {count} is out of range");
-            count
-        };
-
-        runtime
-            .eval_str("(graph-config \"variable\" :node-count 6)")
-            .expect("shrink node-count");
-        assert_eq!(agree(&mut runtime, "published 6"), 6);
-
-        // Grow the override behind the scheduler's back: no publish, so the
-        // memo key is unchanged.
-        let version = state.scheduler_snapshot_version();
-        state.with_scenes_mut(|scenes| {
-            let scene_idx = scenes.current_scene;
-            let mut composed = scenes.composed_graph_overrides(scene_idx);
-            let graph = composed
-                .iter_mut()
-                .find(|graph| graph.sequencer_id == manifest.id)
-                .expect("variable overrides");
-            graph.node_count = Some(16);
-            scenes.store_composed_graph_overrides(scene_idx, composed);
-        });
-        assert_eq!(state.scheduler_snapshot_version(), version, "edit stayed unpublished");
-        agree(&mut runtime, "unpublished 16");
-
-        state.publish_scheduler_snapshot();
-        assert_eq!(agree(&mut runtime, "published 16"), 16);
     }
 
     /// Rack membership rides in every scheduler snapshot (member routes are
@@ -5622,6 +2523,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -5673,6 +2575,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -6136,6 +3039,54 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn parse_manifest_sizes_outputs_by_highest_channel() {
+        // Mono audio on channel 1 with an `@amp` flag on channel 3: the
+        // generated code writes output index 2, so three buffers are needed.
+        let manifest = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0, "name": "audio"}, {"channel": 2, "name": "amp"}],
+                "ampOutput": {"channel": 2, "name": "amp"}}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 3);
+    }
+
+    #[test]
+    fn parse_manifest_reads_probes_and_sizes_outputs_past_them() {
+        // Probe channels are compiler-assigned after every user channel and
+        // may be missing from `outputs[]`; buffers must still reach them.
+        let manifest = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0, "name": "audio"}],
+                "probes": [
+                  {"id": "cut", "occurrence": 0, "channel": 1, "view": "scope", "name": null},
+                  {"id": "env", "occurrence": 0, "channel": 2}
+                ]}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 3);
+        assert_eq!(
+            manifest.probes,
+            vec![
+                crate::lisp_host::DGenProbe { id: "cut".into(), occurrence: 0, channel: 1, view: crate::lisp_host::ProbeView::Scope },
+                crate::lisp_host::DGenProbe { id: "env".into(), occurrence: 0, channel: 2, view: crate::lisp_host::ProbeView::Number },
+            ]
+        );
+        // A mono effect with a probe tap stays mono to its chain neighbours.
+        assert_eq!(manifest.audio_output_channels(), vec![0]);
+        assert_eq!(manifest.audio_output_count(), 1);
+
+        let without = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0}, {"channel": 1}]}"#,
+        )
+        .expect("manifest parses");
+        assert!(without.probes.is_empty());
+        assert_eq!(without.audio_output_channels(), vec![0, 1]);
+        assert_eq!(without.audio_output_count(), 2);
+    }
+
+    #[test]
     fn parse_manifest_reads_modulation_outputs() {
         let json = r#"
         {
@@ -6375,19 +3326,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .collect(),
         ));
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("current-pattern", Value::Number(0.0)),
-                    ("groups", Value::List(Vec::new())),
-                ("neural-networks", Value::List(Vec::new())),
-                ("neural-energy-matrix", Value::List(Vec::new())),
-                ("neural-trigger-matrix", Value::List(Vec::new())),
-                ("neural-dampening-matrix", Value::List(Vec::new())),
-                ("selected-neural-neurons", Value::List(Vec::new())),
-            ],
-            true,
-        );
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
@@ -6403,7 +3341,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
@@ -7188,536 +4125,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let neuron = &networks[0].neurons[0];
         assert!(neuron.output_overrides.instrument.is_empty());
         assert!(neuron.output_overrides.effects.is_empty());
-    }
-
-    #[test]
-    fn neural_lisp_track_router_script_is_idempotent_and_routes_tracks() {
-        let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
-        .expect("read neural router script");
-
-        let first = runtime.eval_str(&source).unwrap();
-        let first_status = runtime.take_status_message();
-        assert!(
-            matches!(first, Some(Value::Map(_))),
-            "expected first script eval to return map, got {first:?}; status {first_status:?}"
-        );
-        let second = runtime.eval_str(&source).unwrap();
-        assert!(
-            matches!(second, Some(Value::Map(_))),
-            "expected second script eval to return map, got {second:?}"
-        );
-
-        let networks = state.current_neural_networks();
-        assert_eq!(networks.len(), 1);
-        let network = &networks[0];
-        assert_eq!(network.name, "8x8-track-router2");
-        assert_eq!(network.num_neurons, 8);
-        assert_eq!(network.reset_interval_bars, 4.0);
-        assert_eq!(network.energy_decay, 0.994);
-        assert_eq!(network.max_poly, 2);
-        assert_eq!(
-            network.max_poly_selection,
-            NeuralMaxPolySelection::Deterministic
-        );
-        assert_eq!(
-            network.weights,
-            vec![
-                vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            ]
-        );
-        let routes = network
-            .neurons
-            .iter()
-            .map(|neuron| neuron.route)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            routes,
-            vec![
-                Some(0),
-                Some(1),
-                Some(2),
-                Some(3),
-                Some(4),
-                Some(5),
-                Some(6),
-                Some(7),
-            ]
-        );
-        assert_eq!(
-            network
-                .neurons
-                .iter()
-                .map(|neuron| neuron.delay_steps)
-                .collect::<Vec<_>>(),
-            vec![1, 1, 1, 1, 1, 1, 1, 1]
-        );
-        assert!(network
-            .neurons
-            .iter()
-            .all(|neuron| neuron.quantize_timebase().is_none()));
-        assert!(network.neurons.iter().all(|neuron| neuron.transpose == 0.0));
-        assert!(network.neurons.iter().all(|neuron| neuron.threshold == 1.0));
-        assert!(network
-            .neurons
-            .iter()
-            .all(|neuron| neuron.dampening_amount == 0.0));
-        assert!(network
-            .neurons
-            .iter()
-            .all(|neuron| (neuron.dampening_recovery - 0.98).abs() < f32::EPSILON));
-        assert!(!state.pattern.neural_reset_patterns[0].is_active(0));
-    }
-
-    #[test]
-    fn neural_lisp_track_router_route_dropdown_supports_track_16() {
-        let (state, mut runtime) = neural_test_runtime(16);
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
-        .expect("read neural router script");
-
-        runtime.eval_str(&source).unwrap();
-        let options = runtime
-            .eval_str("neural-8x8-track-router-route-options")
-            .unwrap()
-            .expect("route options");
-        let Value::List(options) = options else {
-            panic!("expected route options list, got {options:?}");
-        };
-        assert!(
-            options.iter().any(
-                |option| matches!(&*option.borrow(), Value::String(value) if value == "Track 16")
-            ),
-            "route dropdown should include Track 16"
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(neural-8x8-track-router-route-index \"Track 16\")")
-                .unwrap(),
-            Some(Value::Number(15.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("(neural-8x8-track-router-route-label 15)")
-                .unwrap(),
-            Some(Value::String("Track 16".to_string()))
-        );
-
-        runtime
-            .eval_str(
-                "(do
-                  (set! neural-8x8-track-router-route-0 \"Track 16\")
-                  (neural-8x8-track-router-apply-neuron-0))",
-            )
-            .unwrap();
-        assert_eq!(
-            state.current_neural_networks()[0].neurons[0].route,
-            Some(15)
-        );
-    }
-
-    #[test]
-    fn neural_lisp_track_router_reuses_existing_named_network() {
-        let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
-        .expect("read neural router script");
-
-        runtime.eval_str(&source).unwrap();
-        let initial = state.current_neural_networks();
-        assert_eq!(initial.len(), 1);
-        let id = initial[0].id;
-
-        runtime
-            .eval_str(&format!("(neural-weight {id} :from 0 :to 1 :value 0.25)"))
-            .unwrap();
-        runtime
-            .eval_str(&format!(
-                "(neural-set {id} :reset-bars 2 :energy-decay 0.5 :max-poly 4 :max-poly-selection :random)"
-            ))
-            .unwrap();
-        runtime
-            .eval_str(&format!(
-                "(neural-neuron {id} 1 :route 7 :threshold 1.5 :delay 4 :quantize :4 :transpose -7 :dampening 0.25 :recovery 0.75)"
-            ))
-            .unwrap();
-
-        let second = runtime.eval_str(&source).unwrap();
-        assert!(
-            matches!(second, Some(Value::Map(_))),
-            "expected router script to describe reused network, got {second:?}"
-        );
-
-        let networks = state.current_neural_networks();
-        assert_eq!(networks.len(), 1);
-        let network = &networks[0];
-        assert_eq!(network.id, id);
-        assert_eq!(network.name, "8x8-track-router2");
-        assert_eq!(network.reset_interval_bars, 2.0);
-        assert_eq!(network.energy_decay, 0.5);
-        assert_eq!(network.max_poly, 4);
-        assert_eq!(network.max_poly_selection, NeuralMaxPolySelection::Random);
-        assert_eq!(network.weights[0][1], 0.25);
-        assert_eq!(network.neurons[1].route, Some(7));
-        assert_eq!(network.neurons[1].threshold, 1.5);
-        assert_eq!(network.neurons[1].delay_steps, 4);
-        assert_eq!(
-            network.neurons[1].quantize_timebase(),
-            Some(crate::sequencer::Timebase::Quarter)
-        );
-        assert_eq!(network.neurons[1].transpose, -7.0);
-        assert_eq!(network.neurons[1].dampening_amount, 0.25);
-        assert_eq!(network.neurons[1].dampening_recovery, 0.75);
-    }
-
-    #[test]
-    fn neural_lisp_track_router_reactive_refresh_loads_model_state() {
-        let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
-        .expect("read neural router script");
-
-        runtime.eval_str(&source).unwrap();
-        let id = state.current_neural_networks()[0].id;
-        let _ = runtime.take_pending_buffer_widget_trees();
-
-        state
-            .edit_current_neural_networks(|networks| {
-                let network = networks
-                    .iter_mut()
-                    .find(|network| network.id == id)
-                    .expect("router network");
-                network.reset_interval_bars = 3.0;
-                network.energy_decay = 0.5;
-                network.max_poly = 5;
-                network.max_poly_selection = NeuralMaxPolySelection::Random;
-                network.weights[0][1] = 0.75;
-                network.neurons[0].threshold = 1.75;
-                network.neurons[1].route = Some(6);
-                network.neurons[1].threshold = 2.5;
-                network.neurons[1].delay_steps = 5;
-                network.neurons[1].quantize = Some(crate::sequencer::Timebase::Eighth as u8);
-                network.neurons[1].transpose = 12.0;
-                network.neurons[1].dampening_amount = 0.33;
-                network.neurons[1].dampening_recovery = 0.44;
-                Ok(())
-            })
-            .unwrap();
-
-        let epoch_before_refresh = state.transport.pattern_epoch.load(Ordering::Relaxed);
-        let outcome = runtime.set_reactive(
-            "SEQ",
-            "neural-networks",
-            Value::List(vec![Rc::new(RefCell::new(Value::Number(id as f64)))]),
-        );
-        assert!(
-            outcome.effects_dirty,
-            "router panel should subscribe to SEQ.neural-networks"
-        );
-        runtime.run_reactive_cycle();
-        assert_eq!(
-            state.transport.pattern_epoch.load(Ordering::Relaxed),
-            epoch_before_refresh,
-            "reactive panel refresh should not write back unchanged network data"
-        );
-
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-reset-bars")
-                .unwrap(),
-            Some(Value::Number(3.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-energy-decay")
-                .unwrap(),
-            Some(Value::Number(0.5))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-max-poly")
-                .unwrap(),
-            Some(Value::Number(5.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-max-poly-selection")
-                .unwrap(),
-            Some(Value::String("random".to_string()))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-threshold")
-                .unwrap(),
-            Some(Value::Number(1.75))
-        );
-        assert_eq!(
-            runtime.eval_str("neural-8x8-track-router-route-1").unwrap(),
-            Some(Value::String("Track 7".to_string()))
-        );
-        assert_eq!(
-            runtime.eval_str("neural-8x8-track-router-delay-1").unwrap(),
-            Some(Value::Number(5.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-quantize-1")
-                .unwrap(),
-            Some(Value::String("8".to_string()))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-transpose-1")
-                .unwrap(),
-            Some(Value::Number(12.0))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-dampening-1")
-                .unwrap(),
-            Some(Value::Number(0.33_f32 as f64))
-        );
-        assert_eq!(
-            runtime
-                .eval_str("neural-8x8-track-router-recovery-1")
-                .unwrap(),
-            Some(Value::Number(0.44_f32 as f64))
-        );
-        assert!(
-            !runtime.take_pending_buffer_widget_trees().is_empty(),
-            "reactive refresh should rebuild the matrix buffer"
-        );
-    }
-
-    #[test]
-    fn neural_lisp_track_router_controls_align_with_matrix_rows() {
-        fn collect_widgets<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
-        ) {
-            if node.widget_type == widget_type {
-                out.push(node);
-            }
-            for child in &node.children {
-                collect_widgets(child, widget_type, out);
-            }
-        }
-
-        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
-            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
-            assert!(node.rect.width > 0.0, "{:?}", node.rect);
-            assert!(node.rect.height > 0.0, "{:?}", node.rect);
-        }
-
-        fn find_by_stable_key<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            key: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.stable_key.as_deref() == Some(key) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_by_stable_key(child, key))
-        }
-
-        fn assert_width(node: &eseqlisp::layout::LayoutNode, expected: f32, label: &str) {
-            assert!(
-                (node.rect.width - expected).abs() <= 0.05,
-                "{label} should measure to width {expected}, got {:?}",
-                node.rect
-            );
-        }
-
-        let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
-        .expect("read neural router script");
-
-        runtime.eval_str(&source).unwrap();
-        let pending = runtime.take_pending_buffer_widget_trees();
-        let tree = pending
-            .into_iter()
-            .rev()
-            .find_map(|pending| match pending {
-                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
-            })
-            .expect("router script should publish widget tree");
-        let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 18.0)))
-            .expect("router widget tree should lay out");
-
-        for (key, text, width) in [
-            ("neural-router-column-label-route", "route", 7.68),
-            ("neural-router-column-label-delay", "delay", 5.04),
-            ("neural-router-column-label-quantize", "quant", 5.76),
-            ("neural-router-column-label-transpose", "transp", 5.04),
-            ("neural-router-column-label-dampening", "damp", 5.04),
-            ("neural-router-column-label-recovery", "recov", 5.04),
-        ] {
-            let label = find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("{key}"));
-            assert_eq!(label.widget_type, "label", "{key}");
-            assert_eq!(
-                label.props.get("text"),
-                Some(&Value::String(text.to_string())),
-                "{key}"
-            );
-            assert_measured(label);
-            assert_width(label, width, key);
-        }
-
-        let mut matrices = Vec::new();
-        collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(
-            matrices.len(),
-            4,
-            "expected trigger, energy, weight, and dampening matrix widgets"
-        );
-        matrices.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
-        for matrix in &matrices {
-            assert_measured(matrix);
-        }
-        let matrix = matrices[2];
-        for (idx, visualization_matrix) in matrices.iter().enumerate() {
-            assert!(
-                (matrix.rect.row - visualization_matrix.rect.row).abs() <= 0.05
-                    && (matrix.rect.height - visualization_matrix.rect.height).abs() <= 0.05,
-                "visualization matrix {idx} should align with weight matrix; weight={:?} visualization={:?}",
-                matrix.rect,
-                visualization_matrix.rect
-            );
-        }
-
-        let label_3 =
-            find_by_stable_key(&layout, "neural-router-row-label-3").expect("row 3 label");
-        let label_click = label_3
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("row label on-click");
-        runtime
-            .invoke(label_click, vec![Value::Bool(true)])
-            .expect("invoke row label click");
-        assert_eq!(
-            runtime
-                .eval_str("(neural-neuron-selected? neural-8x8-track-router-id 2)")
-                .unwrap(),
-            Some(Value::Bool(true))
-        );
-        let row_3 = find_by_stable_key(&layout, "neural-router-row-3").expect("selected row 3");
-        let mut row_3_dropdowns = Vec::new();
-        collect_widgets(row_3, "dropdown", &mut row_3_dropdowns);
-        assert_eq!(
-            row_3_dropdowns.len(),
-            2,
-            "row 3 should contain route and quantize dropdowns"
-        );
-        row_3_dropdowns.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
-        assert_width(row_3_dropdowns[0], 7.68, "row route dropdown");
-        assert_width(row_3_dropdowns[1], 5.76, "row quantize dropdown");
-
-        let mut row_3_pickers = Vec::new();
-        collect_widgets(row_3, "number-picker", &mut row_3_pickers);
-        assert_eq!(
-            row_3_pickers.len(),
-            4,
-            "row 3 should contain delay, transpose, dampening, and recovery pickers"
-        );
-        for picker in row_3_pickers {
-            assert_width(picker, 5.04, "row number picker");
-        }
-
-        let expected_selected_field = format!(
-            "neural-neuron-selected-0-{}-2",
-            state.current_neural_networks()[0].id
-        );
-        assert!(
-            matches!(
-                row_3.props.get("selected"),
-                Some(Value::ReactiveRef { namespace, field, .. })
-                    if namespace == "SEQ" && field == &expected_selected_field
-            ),
-            "row 3 should bind selected state to its targeted neural selection field"
-        );
-        assert_eq!(
-            row_3.props.get("selected-background-color"),
-            Some(&Value::Keyword("fx-panel-header-selected-bg".to_string()))
-        );
-
-        let clear_callback = layout
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("outer panel click clears selection");
-        runtime
-            .invoke(clear_callback, vec![Value::Bool(true)])
-            .expect("invoke outer panel click");
-        assert_eq!(
-            runtime.eval_str("(neural-selected-neurons)").unwrap(),
-            Some(Value::List(vec![]))
-        );
-
-        let mut dropdowns = Vec::new();
-        collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(
-            dropdowns.len(),
-            17,
-            "expected one global max-poly dropdown plus route and quantize dropdowns"
-        );
-        for dropdown in &dropdowns {
-            assert_measured(dropdown);
-        }
-
-        let mut pickers = Vec::new();
-        collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(
-            pickers.len(),
-            36,
-            "expected four global pickers and four pickers per neuron"
-        );
-        for picker in &pickers {
-            assert_measured(picker);
-        }
-
-        let mut row_pickers = pickers
-            .into_iter()
-            .filter(|picker| {
-                let center = picker.rect.row + picker.rect.height * 0.5;
-                center >= matrix.rect.row && center <= matrix.rect.row + matrix.rect.height
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            row_pickers.len(),
-            32,
-            "expected four row-aligned pickers per neuron"
-        );
-        row_pickers.sort_by(|left, right| {
-            left.rect
-                .row
-                .total_cmp(&right.rect.row)
-                .then(left.rect.col.total_cmp(&right.rect.col))
-        });
-
-        let matrix_row_height = matrix.rect.height / 8.0;
-        for (idx, picker) in row_pickers.iter().enumerate() {
-            let row_idx = idx / 4;
-            let expected_center = matrix.rect.row + matrix_row_height * (row_idx as f32 + 0.5);
-            let actual_center = picker.rect.row + picker.rect.height * 0.5;
-            assert!(
-                (actual_center - expected_center).abs() <= 0.05,
-                "row picker {idx} center {actual_center} should align with matrix row center {expected_center}; picker={:?} matrix={:?}",
-                picker.rect,
-                matrix.rect
-            );
-        }
     }
 
     #[test]
@@ -10112,44 +6519,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
     }
 
-    /// Two jakis sharing a label get distinct route menu entries, and
-    /// picking the second one's entry routes to the second jaki: the
-    /// dropdown hands back only the label text.
-    #[test]
-    fn neural_route_menu_disambiguates_jakis_with_the_same_label() {
-        let mut runtime = jaki_runtime();
-        let menu = runtime
-            .eval(
-                r#"(import alez.neural.variable-reset)
-                   (module test.gvr-route-menu)
-                   (override alez.neural.variable-reset/gvr-route-options (self)
-                     (list "1 kick" "Off"))
-                   (override alez.neural.variable-reset/gvr-jakis (self)
-                     (list (dict :id 7 :label "drums") (dict :id 9 :label "drums")
-                           (dict :id 11 :label "bass")))
-                   (alez.neural.variable-reset/gvr-route-menu nil)"#,
-            )
-            .expect("route menu")
-            .expect("value");
-        assert_eq!(
-            eseqlisp::vm::format_lisp_value(&menu),
-            r#"("1 kick" "→ drums #7" "→ drums #9" "→ bass" "↺ drums #7" "↺ drums #9" "↺ bass" "Off")"#
-        );
-        let pick = |runtime: &mut ScratchControlRuntime, label: &str| {
-            let value = runtime
-                .eval(&format!(
-                    "(alez.neural.variable-reset/gvr-route-menu->internal nil \"{label}\")"
-                ))
-                .expect("route pick")
-                .expect("value");
-            eseqlisp::vm::format_lisp_value(&value)
-        };
-        assert_eq!(pick(&mut runtime, "→ drums #9"), "(:gen 9)");
-        assert_eq!(pick(&mut runtime, "↺ drums #9"), "(:restart 9)");
-        assert_eq!(pick(&mut runtime, "→ drums #7"), "(:gen 7)");
-        assert_eq!(pick(&mut runtime, "↺ bass"), "(:restart 11)");
-    }
-
     fn jaki_nums(value: &Value) -> Vec<f64> {
         let Value::List(items) = value else {
             panic!("expected a list of numbers, got {value:?}");
@@ -12388,11 +8757,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         let mut runtime = jaki_authoring_runtime(Arc::clone(&state));
         super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
-        runtime.register_reactive(
-            "SEQ",
-            vec![("current-pattern", Value::Number(0.0))],
-            true,
-        );
         runtime
             .eval_str(
                 "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab \
@@ -12559,7 +8923,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         runtime.eval_str("(jb-bake)").expect("bake current body");
         let baked = runtime
-            .eval_str("jb-baked-code")
+            .eval_str("jaki-builder.baked")
             .expect("read baked source")
             .expect("baked source value");
         assert!(
@@ -17466,15 +13830,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             (0..16).map(|_| default_empty_effect_chain()).collect(),
         ));
         let mut authoring = Runtime::new();
-        authoring.register_reactive(
-            "SEQ",
-            vec![
-                ("track-events", Value::List(Vec::new())),
-                ("track-event-current-beat", Value::Number(0.0)),
-                ("track-colors", Value::List(Vec::new())),
-            ],
-            true,
-        );
         authoring
             .eval_str(
                 r#"
@@ -17649,16 +14004,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             (0..4).map(|_| default_empty_effect_chain()).collect(),
         ));
         let mut authoring = Runtime::new();
-        authoring.register_reactive(
-            "SEQ",
-            vec![
-                ("track-events", Value::List(Vec::new())),
-                ("track-event-current-beat", Value::Number(0.0)),
-                ("track-colors", Value::List(Vec::new())),
-                ("track-process-slots", Value::List(Vec::new())),
-            ],
-            true,
-        );
         authoring
             .eval_str(
                 r#"
@@ -20040,7 +16385,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     /// The node picker offers only classes that do something on a fire, and
     /// no two entries share a label: `lane-reset` used to show as "reset" next
-    /// to `neural-reset`, and picking it wired a port that never sends.
+    /// to `neural-reset`, and picking it wired a port that never sends. The
+    /// picker lists `process-library.classes` minus `node-hidden` (the
+    /// `GRAPH_NODE_HIDDEN_PROCESS_CLASSES`) under `node-label`
+    /// (`graph_node_process_label`); the library already leaves out the
+    /// compiled expr bodies.
     #[test]
     fn graph_node_process_classes_hide_lane_only_classes_and_keep_labels_unique() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -20051,20 +16400,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         state.publish_process_authoring(
             publisher.process_authoring_snapshot().to_published().expect("publishable"),
         );
-        let mut runtime = Runtime::new();
-        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
-        let Some(Value::List(entries)) = runtime.eval_str("(graph-node-process-classes)").unwrap() else {
-            panic!("graph-node-process-classes returns a list");
-        };
-        let field = |entry: &Rc<RefCell<Value>>, key: &str| match &*entry.borrow() {
-            Value::Map(map) => match map.get(key).map(|cell| cell.borrow().clone()) {
-                Some(Value::String(text)) => text,
-                other => panic!("{key}: {other:?}"),
-            },
-            other => panic!("class entry is a map: {other:?}"),
-        };
-        let classes: Vec<String> = entries.iter().map(|entry| field(entry, "class")).collect();
-        let labels: Vec<String> = entries.iter().map(|entry| field(entry, "label")).collect();
+        let classes: Vec<String> = (state.published_process_authoring().defs.into_iter())
+            .map(|def| def.name)
+            .filter(|name| !super::GRAPH_NODE_HIDDEN_PROCESS_CLASSES.contains(&name.as_str()))
+            .filter(|name| !crate::process::is_expr_process_class(name))
+            .collect();
+        let labels: Vec<String> = classes.iter().map(|class| super::graph_node_process_label(class)).collect();
         assert!(classes.iter().any(|class| class == "neural-reset"), "{classes:?}");
         for hidden in ["lane-reset", "lane-roll", "repeater", "lane-grab", "lane-length"] {
             assert!(!classes.iter().any(|class| class == hidden), "{hidden} hidden: {classes:?}");

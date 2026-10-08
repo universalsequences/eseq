@@ -507,6 +507,16 @@ impl WidgetDefinition for TimelineWidget {
             "selected-id",
             "bound-id",
             "placement-active",
+            // Lane ownership (see `lane_owns`): every lane binds the same
+            // view-state slots and draws a channel only while it owns it.
+            "lane-key",
+            "cursor-lane",
+            "selected-lane",
+            "bound-lane",
+            "ghost-lane-a",
+            "ghost-lane-b",
+            "region-lane-a",
+            "region-lane-b",
         ]
     }
 
@@ -721,7 +731,7 @@ impl WidgetDefinition for TimelineWidget {
         local_row: f32,
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return Some(action_map(vec![("kind", keyword(":placement"))]));
         }
@@ -741,7 +751,7 @@ impl WidgetDefinition for TimelineWidget {
         _cell_h: f32,
     ) -> MouseEventOutcome {
         let local_row = scroll_adjusted_row(local_row);
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         let placing = get_num(&node.props, "placement-active", 0.0) > 0.0;
         if placing {
             let time = view.snap_time(view.time_at_col(local_col)).max(0.0);
@@ -808,7 +818,7 @@ impl WidgetDefinition for TimelineWidget {
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return super::WidgetCursor::DragCopy;
         }
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         match view.hit_test(local_col, scroll_adjusted_row(local_row)) {
             Some(HitRegion::ItemEdgeEnd { .. })
             | Some(HitRegion::ItemEdgeStart { .. })
@@ -828,7 +838,7 @@ impl WidgetDefinition for TimelineWidget {
                 ("type", keyword(":cancel-placement")),
             ])));
         }
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         view.handle_key(key).map(WidgetEvent::Custom)
     }
 
@@ -837,11 +847,12 @@ impl WidgetDefinition for TimelineWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return None;
         }
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         view.handle_double_click(local_col, scroll_adjusted_row(local_row))
             .map(WidgetEvent::Custom)
     }
@@ -853,7 +864,7 @@ impl WidgetDefinition for TimelineWidget {
         local_row: f32,
         delta: f64,
     ) -> Option<WidgetEvent> {
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         view.handle_magnify(local_col, scroll_adjusted_row(local_row), delta)
             .map(WidgetEvent::Custom)
     }
@@ -866,7 +877,7 @@ impl WidgetDefinition for TimelineWidget {
         delta_x: f32,
         delta_y: f32,
     ) -> Option<WidgetEvent> {
-        let view = TimelineView::from_props(&node.props, node.rect);
+        let view = TimelineView::from_node(node);
         view.handle_touchpad_scroll(local_col, scroll_adjusted_row(local_row), delta_x, delta_y)
             .map(WidgetEvent::Custom)
     }
@@ -906,7 +917,7 @@ impl WidgetDefinition for TimelineWidget {
 /// and `:grid` snapping quantize to. This exists so a test can assert that
 /// across instances, which no public render output makes checkable.
 pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
-    let view = TimelineView::from_props(&node.props, node.rect);
+    let view = TimelineView::from_node(node);
     let vp = view.time_viewport();
     (
         view.alignment_helper_grid_step(),
@@ -927,7 +938,7 @@ fn build_primitives(
     }
 
     let rect = node.rect;
-    let mut view = TimelineView::from_props(&node.props, rect);
+    let mut view = TimelineView::from_node(node);
     if get_num(&node.props, "placement-active", 0.0) > 0.0
         && super::pointer_hovered(node.widget_id)
     {
@@ -2272,7 +2283,18 @@ impl TimelineView {
         }
     }
 
+    /// The view of a laid-out timeline: its items parsed once per items
+    /// list ([`cached_items`]), so a repaint for a bound channel reparses
+    /// nothing.
+    fn from_node(node: &LayoutNode) -> Self {
+        Self::build(&node.props, node.rect, Some(node.widget_id))
+    }
+
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
+        Self::build(props, rect, None)
+    }
+
+    fn build(props: &HashMap<String, Value>, rect: Rect, widget_id: Option<u64>) -> Self {
         let view_duration = get_num(props, "view-duration", 16.0).max(0.0001);
         let view_start = get_num(props, "view-start", 0.0).max(0.0);
         let header_height = get_num(props, "header-height", 1.0).max(0.0) as f32;
@@ -2329,7 +2351,7 @@ impl TimelineView {
             cursor_time: props
                 .get("cursor-time")
                 .and_then(as_number)
-                .filter(|time| *time >= 0.0),
+                .filter(|time| *time >= 0.0 && lane_owns(props, "cursor-lane", "cursor-lane")),
             cursor_marker_visible: props
                 .get("cursor-marker-visible")
                 .and_then(as_bool)
@@ -2413,7 +2435,10 @@ impl TimelineView {
             vertical_scroll_passthrough: vertical_scroll_passthrough(props),
             tool: get_tool(props),
             lanes: get_lanes(props),
-            items: get_items(props),
+            items: match widget_id {
+                Some(widget_id) => cached_items(widget_id, props),
+                None => get_items(props),
+            },
             selection: get_selection(props),
             selection_rect: get_selection_rect(props),
             selection_rect_style: match props.get("selection-rect-style") {
@@ -2453,11 +2478,19 @@ impl TimelineView {
                 self.selection.push(Value::Number(id));
             }
         };
-        select(get_num(props, "selected-id", -1.0));
-        select(get_num(props, "bound-id", -1.0));
+        if lane_owns(props, "selected-lane", "selected-lane") {
+            select(get_num(props, "selected-id", -1.0));
+        }
+        if lane_owns(props, "bound-lane", "bound-lane") {
+            select(get_num(props, "bound-id", -1.0));
+        }
         let ghost_region_a = get_num(props, "ghost-region-a", f64::NAN);
         let ghost_region_b = get_num(props, "ghost-region-b", f64::NAN);
-        let ghost_kind = get_num(props, "ghost-kind", 0.0);
+        let ghost_kind = if lane_owns(props, "ghost-lane-a", "ghost-lane-b") {
+            get_num(props, "ghost-kind", 0.0)
+        } else {
+            0.0
+        };
         // Region highlight: the in-flight marquee/region ghost wins over the
         // committed region; either overrides a static :selection-rect prop.
         if ghost_kind >= 3.5 && ghost_kind < 4.5 && ghost_region_a.is_finite() {
@@ -2467,7 +2500,9 @@ impl TimelineView {
                 lane_a: 0,
                 lane_b: 0,
             });
-        } else if get_num(props, "region-on", 0.0) > 0.5 {
+        } else if get_num(props, "region-on", 0.0) > 0.5
+            && lane_owns(props, "region-lane-a", "region-lane-b")
+        {
             self.selection_rect = Some(TimelineSelectionRect {
                 time_a: get_num(props, "region-a", 0.0),
                 time_b: get_num(props, "region-b", 0.0),
@@ -4203,6 +4238,21 @@ fn get_sidebar_style(props: &HashMap<String, Value>) -> SidebarStyle {
     }
 }
 
+/// Whether this lane owns a per-lane channel. Lanes that share one set of
+/// view-state slots (the arrangement's track lanes) pass their own
+/// `:lane-key` and, per channel, the lane or inclusive lane range that owns
+/// it (`lo` and `hi` may be the same prop, or in either order); a lane
+/// outside it draws the channel as unset. Without `:lane-key`, or without
+/// the owner props, every lane owns every channel.
+fn lane_owns(props: &HashMap<String, Value>, lo: &str, hi: &str) -> bool {
+    let lane = get_num(props, "lane-key", f64::NAN);
+    let (a, b) = (get_num(props, lo, f64::NAN), get_num(props, hi, f64::NAN));
+    if lane.is_nan() || a.is_nan() || b.is_nan() {
+        return true;
+    }
+    a.min(b) <= lane && lane <= a.max(b)
+}
+
 fn get_num(props: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
     match props.get(key) {
         Some(Value::Number(n)) => *n,
@@ -4241,10 +4291,73 @@ fn get_lanes(props: &HashMap<String, Value>) -> Vec<TimelineLane> {
         .collect()
 }
 
+/// One widget's parsed `:items`, under the list cells they came from.
+struct ParsedItems {
+    cells: Vec<Rc<RefCell<Value>>>,
+    items: Rc<Vec<TimelineItem>>,
+}
+
+/// Widgets with a parse kept at most; past it the cache starts over.
+const PARSED_ITEMS_CAP: usize = 512;
+
+thread_local! {
+    /// Parsed items per timeline widget id.
+    static PARSED_ITEMS: RefCell<HashMap<u64, ParsedItems>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Item lists parsed (tests: a channel repaint parses none).
+    static ITEM_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Widget `widget_id`'s items. A bound channel's repaint (a drag ghost, the
+/// selection, the cursor, on every lane that binds it) keeps the props, and
+/// so the same items list: its parse is reused while the list holds the same
+/// item cells (kept alive here, so their addresses cannot be reused). A
+/// re-render builds new item values and parses once.
+fn cached_items(widget_id: u64, props: &HashMap<String, Value>) -> Vec<TimelineItem> {
+    let Some(Value::List(cells)) = props.get("items") else {
+        return vec![];
+    };
+    let same = |kept: &ParsedItems| {
+        kept.cells.len() == cells.len()
+            && kept.cells.iter().zip(cells).all(|(a, b)| Rc::ptr_eq(a, b))
+    };
+    let kept = PARSED_ITEMS.with(|cache| {
+        let cache = cache.borrow();
+        cache
+            .get(&widget_id)
+            .filter(|kept| same(kept))
+            .map(|kept| kept.items.clone())
+    });
+    let items = kept.unwrap_or_else(|| {
+        let items = Rc::new(get_items(props));
+        PARSED_ITEMS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= PARSED_ITEMS_CAP && !cache.contains_key(&widget_id) {
+                cache.clear();
+            }
+            let cells = cells.clone();
+            cache.insert(
+                widget_id,
+                ParsedItems {
+                    cells,
+                    items: items.clone(),
+                },
+            );
+        });
+        items
+    });
+    items.as_ref().clone()
+}
+
 fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
     let Some(Value::List(items)) = props.get("items") else {
         return vec![];
     };
+    #[cfg(test)]
+    ITEM_PARSES.with(|parses| parses.set(parses.get() + 1));
     items
         .iter()
         .filter_map(|item| {
@@ -4271,6 +4384,15 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
         .collect()
 }
 
+/// The sound-identity dot of a patch without a palette color (takes spec
+/// §17.11's name-only gray fallback).
+pub const SOUND_DOT_GRAY: crate::backend::Color = crate::backend::Color {
+    r: 0.62,
+    g: 0.62,
+    b: 0.66,
+    a: 1.0,
+};
+
 /// Lenient `:sound-dot` parse: an `(r g b)` list becomes the dot color, a
 /// bare `true` the name-only gray fallback (takes spec §17.11); anything
 /// else is no dot, never a render error.
@@ -4285,12 +4407,7 @@ fn parse_sound_dot(value: &Value) -> Option<crate::backend::Color> {
                 a: 1.0,
             })
         }
-        Value::Bool(true) => Some(crate::backend::Color {
-            r: 0.62,
-            g: 0.62,
-            b: 0.66,
-            a: 1.0,
-        }),
+        Value::Bool(true) => Some(SOUND_DOT_GRAY),
         _ => None,
     }
 }
@@ -4633,7 +4750,11 @@ mod tests {
         }).expect("Escape cancels placement");
         let WidgetEvent::Custom(cancel) = cancel else { panic!("cancel action"); };
         assert_eq!(get_map(&cancel).unwrap().get("type"), Some(&keyword(":cancel-placement")));
-        assert!(TIMELINE_WIDGET.double_click_event(&node, 10.0, 1.0).is_none());
+        assert!(
+            TIMELINE_WIDGET
+                .double_click_event(&node, 10.0, 1.0, KeyModifiers::empty())
+                .is_none()
+        );
         let event = TIMELINE_WIDGET.mouse_event(&node, MouseEventKind::Up(MouseButton::Left),
             10.0, 1.0, None, None, KeyModifiers::NONE, 10.0, 20.0);
         let MouseEventOutcome::Dispatch(WidgetEvent::Custom(action)) = event else {
@@ -4752,6 +4873,116 @@ mod tests {
         assert!(view.selection.iter().any(|id| id == &number_value(7.0)));
         let view = view_with(vec![("selected-id", number_value(-1.0))]);
         assert!(view.selection.is_empty());
+
+        // Lane ownership: a lane draws a shared channel only while its
+        // :lane-key is the owner (or within the owner range).
+        let lane = |key: f64, mut props: Vec<(&'static str, Value)>| {
+            props.push(("lane-key", number_value(key)));
+            view_with(props)
+        };
+        let selected = vec![
+            ("selected-id", number_value(7.0)),
+            ("selected-lane", number_value(2.0)),
+        ];
+        assert!(!lane(2.0, selected.clone()).selection.is_empty());
+        assert!(lane(1.0, selected).selection.is_empty());
+        let bound = vec![
+            ("bound-id", number_value(7.0)),
+            ("bound-lane", number_value(0.0)),
+        ];
+        assert!(!lane(0.0, bound.clone()).selection.is_empty());
+        assert!(lane(3.0, bound).selection.is_empty());
+        let moved = vec![
+            ("ghost-kind", number_value(1.0)),
+            ("ghost-id", number_value(7.0)),
+            ("ghost-time", number_value(20.0)),
+            ("ghost-lane-a", number_value(3.0)),
+            ("ghost-lane-b", number_value(1.0)),
+        ];
+        assert_eq!(
+            lane(2.0, moved.clone()).items[0].start,
+            20.0,
+            "within the range"
+        );
+        assert_eq!(lane(4.0, moved).items[0].start, 8.0, "outside it");
+        let region = vec![
+            ("region-on", number_value(1.0)),
+            ("region-a", number_value(4.0)),
+            ("region-b", number_value(12.0)),
+            ("region-lane-a", number_value(0.0)),
+            ("region-lane-b", number_value(1.0)),
+        ];
+        assert!(lane(1.0, region.clone()).selection_rect.is_some());
+        assert!(lane(2.0, region.clone()).selection_rect.is_none());
+        assert!(
+            view_with(region).selection_rect.is_some(),
+            "no :lane-key, no gate"
+        );
+        let cursor = |key: f64| {
+            lane(
+                key,
+                vec![
+                    ("cursor-time", number_value(6.0)),
+                    ("cursor-lane", number_value(1.0)),
+                ],
+            )
+            .cursor_time
+        };
+        assert_eq!((cursor(1.0), cursor(0.0)), (Some(6.0), None));
+    }
+
+    /// A bound channel's repaint keeps the props' items list, so the widget
+    /// reuses its parse: N lanes repainting for one ghost write parse
+    /// nothing, and a re-render's new list parses once.
+    #[test]
+    fn a_channel_repaint_reuses_the_parsed_items() {
+        let parses = || ITEM_PARSES.with(std::cell::Cell::get);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 64.0,
+            height: 3.0,
+        };
+        let item = |id: f64| {
+            map_value_raw(vec![
+                ("id", number_value(id)),
+                ("start", number_value(id * 4.0)),
+                ("end", number_value(id * 4.0 + 2.0)),
+            ])
+        };
+        let mut props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![item(1.0), item(2.0)]),
+            ),
+            ("view-duration".to_string(), number_value(64.0)),
+        ]);
+        let before = parses();
+        let view = TimelineView::build(&props, rect, Some(4242));
+        assert_eq!(view.items.len(), 2);
+        assert_eq!(parses(), before + 1, "the first paint parses");
+        // A channel write: only a bound prop moves (here as a plain value).
+        props.insert("ghost-kind".to_string(), number_value(1.0));
+        props.insert("ghost-id".to_string(), number_value(2.0));
+        props.insert("ghost-time".to_string(), number_value(20.0));
+        for _ in 0..3 {
+            let view = TimelineView::build(&props, rect, Some(4242));
+            assert_eq!(view.items[1].start, 20.0, "the ghost still applies");
+            assert_eq!(view.items[0].start, 4.0);
+        }
+        let view = TimelineView::build(&props, rect, Some(4242));
+        assert_eq!(
+            view.items[1].start, 20.0,
+            "the kept parse is not moved by a ghost"
+        );
+        assert_eq!(parses(), before + 1, "repaints parse nothing");
+        // Another widget, or a re-render's new list, parses again.
+        TimelineView::build(&props, rect, Some(4243));
+        assert_eq!(parses(), before + 2);
+        props.insert("items".to_string(), list_value_raw(vec![item(1.0)]));
+        let view = TimelineView::build(&props, rect, Some(4242));
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(parses(), before + 3);
     }
 
     fn keyword_value(name: &str) -> Value {

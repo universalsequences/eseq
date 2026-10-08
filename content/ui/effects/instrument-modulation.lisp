@@ -1,12 +1,13 @@
 ;; Instrument modulation source selection and editor controls.
 (module eseq.effects.instrument-modulation)
 
-(import eseq.effects.state :refer (instrument-selected-mod-slot))
+(import eseq.effects.state :refer (instrument-view))
 (import eseq.effects.param-controls :as pc)
+(import eseq.effects.devices :as dv)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-lego :as lego)
 
-(export source-type
+(export section-phase
         mod-control-panel)
 
 ;; Migration alias (module spec §10): the unconverted panel-bodies.lisp and
@@ -69,11 +70,11 @@
           :width 3.9 :height 1.1
           :padding 0
           :font-size 9
-          :background-color (if (= eseq.effects.state/instrument-selected-mod-slot slot)
+          :background-color (if (= instrument-view.mod-slot slot)
             (rgba 0.95 0.48 0.18 0.82)
             :instrument-control-bg)
-          :color (if (= eseq.effects.state/instrument-selected-mod-slot slot) :white :dim)
-          :on-click (lambda (info) (set! eseq.effects.state/instrument-selected-mod-slot slot)))
+          :color (if (= instrument-view.mod-slot slot) :white :dim)
+          :on-click (lambda (info) (set! instrument-view.mod-slot slot)))
         (dropdown :value (if source-p (pc/fx-param-text-value-for false source-p) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))
@@ -109,7 +110,7 @@
   (if p (pc/instrument-set-param-control-value p v) false))
 
 (def source-button (p title width)
-  (let ((active (> (reactive-value (source-param-value p 0)) 0.5)))
+  (let ((active (> (source-param-value p 0) 0.5)))
     (v-stack :width width :height 1.72 :gap 0.10 :align :start
       (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
       (button (if active "ON" "OFF")
@@ -204,7 +205,7 @@
     :shape (source-param-value shape 0)
     :pw (source-param-value pulse-width 0.5)
     :phase-offset (source-param-value phase 0)
-    :phase (if (get section :phase-field) (bind-seq (get section :phase-field)) -1)
+    :phase (section-phase false section)
     :background-color :instrument-control-bg
     :grid-color :dim
     :curve-color (lego/ui-accent-orange)
@@ -240,7 +241,7 @@
               (source-button retrigger "retrig" 4.4))
             (if pulse-width
               (source-compact-knob pulse-width
-                (if (= (reactive-value (source-param-value shape 0)) 0) "peak" "pw") 2)
+                (if (= (source-param-value shape 0) 0) "peak" "pw") 2)
               (box :width 4.4 :height 1.72))))
         (box :debug-name "instrument-lfo-curve-wrapper"
              :width 12.2 :height 5.7 :padding 0.22
@@ -248,9 +249,12 @@
              :corner-radius 8
           (lfo-shape-curve section shape pulse-width phase 11.7 5.25))))))
 
-(def source-type (section)
-  (let ((source-p (get section :source-param)))
-    (if source-p (pc/fx-param-text-value-for false source-p) "off")))
+;; The cycle position of section's modulation source (its type param's
+;; param.mod-phase, of an effect's section when fx is given), the curve's
+;; playhead; -1 (none) without a type param.
+(def section-phase (fx section)
+  (let ((prm (dv/param-of fx (get section :source-param))))
+    (if prm #'prm.mod-phase -1)))
 
 (def selected-mod-source-editor (inst)
   (let ((slot (pc/instrument-mod-selected-slot)))
@@ -260,7 +264,8 @@
          :padding 0.35
       (let ((section (selected-mod-source-section inst)))
         (if section
-          (let ((kind (source-type section)))
+          (let ((source-p (get section :source-param))
+                (kind (if source-p (pc/fx-param-text-value-for false source-p) "off")))
             (v-stack :width :fill :height 4 :gap 0.3 :align :start
               (if (= kind "env")
                 (env-source-editor section)

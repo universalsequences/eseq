@@ -3,19 +3,21 @@ use std::collections::{HashMap, HashSet};
 use crate::layout::Rect;
 
 use super::display::{
-    node_display_label, node_display_label_arg_spans, node_font_size, node_size_for_ports,
+    node_display_label_arg_spans, node_font_size, node_header_label, node_size_for_ports,
+    node_size_for_ports_with_probe,
 };
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HANDLE_MAX_SPAN_FRACTION,
-    CABLE_HIT_RADIUS_CELLS, CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT,
-    NODE_RESIZE_HANDLE_HIT_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PATCH_ORIGIN_COL_OFFSET,
-    PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
-    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+    CABLE_HIT_RADIUS_CELLS, CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_RESIZE_HANDLE_HIT_SIZE_CELLS,
+    NODE_TEXT_COL_OFFSET, PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET,
+    PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+    VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
     ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
     PatchConnection, PatchNode, connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
+use super::probe::{ProbeAttrs, probe_attrs_by_node};
 use super::state::{NodeResizeCorner, PatcherPanState, source_connection_id};
 use super::text_metrics::measured_cursor_offset;
 
@@ -67,6 +69,17 @@ pub(super) fn patch_node_rects(
     rect: Rect,
     pan_state: &PatcherPanState,
 ) -> HashMap<String, Rect> {
+    patch_node_rects_with_probes(patch, rect, pan_state, &probe_attrs_by_node(patch))
+}
+
+/// [`patch_node_rects`] with each probe node's [`ProbeAttrs`] already parsed
+/// (painting parses them once and reuses them for the header and value).
+pub(super) fn patch_node_rects_with_probes(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    probe_attrs: &HashMap<&str, ProbeAttrs>,
+) -> HashMap<String, Rect> {
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let input_indices = patch_input_indices(patch);
@@ -78,8 +91,9 @@ pub(super) fn patch_node_rects(
         .iter()
         .filter(|node| !hidden_node_ids.contains(&node.id))
         .map(|node| {
-            let size = node_size_for_ports(
+            let size = node_size_for_ports_with_probe(
                 node,
+                probe_attrs.get(node.id.as_str()),
                 input_slot_counts.get(&node.id).copied().unwrap_or(0),
                 output_counts.get(&node.id).copied().unwrap_or(0),
             );
@@ -290,8 +304,30 @@ pub(super) fn rect_from_points(
     }
 }
 
+/// Port centre on a node drawn at `rect`, inferring the zoom from the rect's
+/// height. Only valid for a standard-height node; tests use it as shorthand.
+#[cfg(test)]
 pub(super) fn port_center(rect: Rect, index: usize, count: usize, top: bool) -> (f32, f32) {
-    let zoom = (rect.height / NODE_HEIGHT).max(MIN_ZOOM);
+    port_center_at(
+        rect,
+        index,
+        count,
+        top,
+        (rect.height / super::metrics::NODE_HEIGHT).max(MIN_ZOOM),
+    )
+}
+
+/// Port centre on a node drawn at `rect` under `zoom`. The zoom has to be
+/// passed in: a node's height is not always `NODE_HEIGHT` (a probe scope is
+/// resizable), so it cannot be recovered from the rect.
+pub(super) fn port_center_at(
+    rect: Rect,
+    index: usize,
+    count: usize,
+    top: bool,
+    zoom: f32,
+) -> (f32, f32) {
+    let zoom = zoom.max(MIN_ZOOM);
     let x = rect.col + port_x_offset(index, count, rect.width / zoom) * zoom;
     let y = if top {
         rect.row
@@ -329,13 +365,14 @@ pub(super) fn hit_patcher_output_port(
     cell_h: f32,
 ) -> Option<OutputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
     let threshold_px = radius_px * radius_px;
     ordered_nodes.iter().rev().find_map(|node| {
         let node_rect = *node_rects.get(&node.id)?;
         let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
         (0..output_count).find_map(|output_index| {
-            let center = port_center(node_rect, output_index, output_count, false);
+            let center = port_center_at(node_rect, output_index, output_count, false, zoom);
             let dx_px = (center.0 - local_col) * cell_w.max(1.0);
             let dy_px = (center.1 - local_row) * cell_h.max(1.0);
             (dx_px * dx_px + dy_px * dy_px <= threshold_px).then(|| OutputPortRef {
@@ -359,6 +396,7 @@ pub(super) fn hit_patcher_input_port(
     cell_h: f32,
 ) -> Option<InputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
     let threshold_px = radius_px * radius_px;
     ordered_nodes.iter().rev().find_map(|node| {
@@ -366,7 +404,7 @@ pub(super) fn hit_patcher_input_port(
         let input_indices = input_indices.get(&node.id)?;
         let input_slot_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
         input_indices.iter().find_map(|input_index| {
-            let center = port_center(node_rect, *input_index, input_slot_count, true);
+            let center = port_center_at(node_rect, *input_index, input_slot_count, true, zoom);
             let dx_px = (center.0 - local_col) * cell_w.max(1.0);
             let dy_px = (center.1 - local_row) * cell_h.max(1.0);
             (dx_px * dx_px + dy_px * dy_px <= threshold_px).then(|| InputPortRef {
@@ -398,7 +436,7 @@ pub(super) fn hit_patcher_label_arg(
         if !rect_contains(node_rect, local_col, local_row) {
             return None;
         }
-        let label = node_display_label(node);
+        let label = node_header_label(node);
         let font_size = node_font_size(node);
         let text_col = node_rect.col + NODE_TEXT_COL_OFFSET * zoom;
         node_display_label_arg_spans(node)
@@ -425,7 +463,8 @@ pub(super) fn nearest_patcher_output_port(
     local_row: f32,
 ) -> Option<OutputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * patcher_zoom(pan_state);
+    let zoom = patcher_zoom(pan_state);
+    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * zoom;
     let threshold = threshold_radius * threshold_radius;
     patch
         .nodes
@@ -437,7 +476,7 @@ pub(super) fn nearest_patcher_output_port(
             let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
             (0..output_count)
                 .filter_map(move |output_index| {
-                    let center = port_center(node_rect, output_index, output_count, false);
+                    let center = port_center_at(node_rect, output_index, output_count, false, zoom);
                     let distance = distance_squared(center, (local_col, local_row));
                     (distance <= threshold).then(|| {
                         (
@@ -466,7 +505,8 @@ pub(super) fn nearest_patcher_input_port(
     local_row: f32,
 ) -> Option<InputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * patcher_zoom(pan_state);
+    let zoom = patcher_zoom(pan_state);
+    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * zoom;
     let threshold = threshold_radius * threshold_radius;
     patch
         .nodes
@@ -483,7 +523,7 @@ pub(super) fn nearest_patcher_input_port(
             input_indices
                 .iter()
                 .filter_map(move |input_index| {
-                    let center = port_center(node_rect, *input_index, slot_count, true);
+                    let center = port_center_at(node_rect, *input_index, slot_count, true, zoom);
                     let distance = distance_squared(center, (local_col, local_row));
                     (distance <= threshold).then(|| {
                         (
@@ -501,6 +541,9 @@ pub(super) fn nearest_patcher_input_port(
         .map(|(_, port)| port)
 }
 
+/// [`connection_endpoints_at`] with the zoom inferred from standard-height
+/// node rects; test shorthand only.
+#[cfg(test)]
 pub(super) fn connection_endpoints(
     connection: &PatchConnection,
     node_rects: &HashMap<String, Rect>,
@@ -508,9 +551,31 @@ pub(super) fn connection_endpoints(
     input_slot_counts: &HashMap<String, usize>,
     output_counts: &HashMap<String, usize>,
 ) -> Option<((f32, f32), (f32, f32))> {
+    let zoom = node_rects
+        .get(&connection.from_node)
+        .map(|rect| rect.height / super::metrics::NODE_HEIGHT)
+        .unwrap_or(1.0);
+    connection_endpoints_at(
+        connection,
+        node_rects,
+        input_indices,
+        input_slot_counts,
+        output_counts,
+        zoom,
+    )
+}
+
+pub(super) fn connection_endpoints_at(
+    connection: &PatchConnection,
+    node_rects: &HashMap<String, Rect>,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+    zoom: f32,
+) -> Option<((f32, f32), (f32, f32))> {
     let from = *node_rects.get(&connection.from_node)?;
     let to = *node_rects.get(&connection.to_node)?;
-    let start = port_center(
+    let start = port_center_at(
         from,
         connection.from_output,
         output_counts
@@ -518,10 +583,11 @@ pub(super) fn connection_endpoints(
             .copied()
             .unwrap_or(1),
         false,
+        zoom,
     );
     let to_input_indices = input_indices.get(&connection.to_node)?;
     let semantic_input = visible_input_slot(to_input_indices, connection.to_input)?;
-    let end = port_center(
+    let end = port_center_at(
         to,
         semantic_input,
         input_slot_counts
@@ -529,6 +595,7 @@ pub(super) fn connection_endpoints(
             .copied()
             .unwrap_or(to_input_indices.len()),
         true,
+        zoom,
     );
     Some((start, end))
 }
@@ -560,12 +627,13 @@ pub(super) fn hit_patcher_cable(
         .filter(|connection| connection.presentation == InputPresentation::Cable)
         .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
         .filter_map(|connection| {
-            let (start, end) = connection_endpoints(
+            let (start, end) = connection_endpoints_at(
                 connection,
                 &node_rects,
                 input_indices,
                 input_slot_counts,
                 output_counts,
+                zoom,
             )?;
             let distance = match connection.segment {
                 Some(segment)
@@ -650,12 +718,13 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
             if !segment.is_segmented {
                 return None;
             }
-            let (start, end) = connection_endpoints(
+            let (start, end) = connection_endpoints_at(
                 connection,
                 &node_rects,
                 input_indices,
                 input_slot_counts,
                 output_counts,
+                zoom,
             )?;
             if !super::super::cable::should_render_segmented_cable(start, end) {
                 return None;
@@ -699,12 +768,13 @@ pub(super) fn hit_patcher_cable_handle(
             if cable_id != selected_cable {
                 return None;
             }
-            let (start, end) = connection_endpoints(
+            let (start, end) = connection_endpoints_at(
                 connection,
                 &node_rects,
                 input_indices,
                 input_slot_counts,
                 output_counts,
+                zoom,
             )?;
             let (from_handle, to_handle) =
                 connection_cable_edit_points(connection, start, end, zoom);
