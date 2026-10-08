@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal B (.77) built, .11, .14 (groups A–D: .14, .61, .74), .20, .64 and legacy removal A (.78: the host's `SEQ` / `SEQV` gone, the host-less test mailbox left) in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal B (.77) and D (.79: the buffer-name liveness gates collapsed onto the observed bits) built, .11, .14 (groups A–D: .14, .61, .74), .20, .64 and legacy removal A (.78: the host's `SEQ` / `SEQV` gone, the host-less test mailbox left) in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -494,8 +494,8 @@ Built (stage 4):
   to the track's length (like the legacy step-selection publish);
   `step.playing` from `track_active_playhead_step` while the transport
   plays; `peak` from the reactive tick's track meter cache
-  (`MeterCache::cached_track_peak_levels`, polled at the meter cadence,
-  also while only a host-kinds `peak` is observed: `HostKinds::wants_peaks`);
+  (`MeterCache::cached_track_peak_levels`, polled at the meter cadence
+  only while a `peak` is observed: `HostKinds::wants_peaks`, eseq-0l17.79);
   scenes and banks from `with_project_scenes` (labels from
   `scene_bank_label`, shared with `SEQ.scene-banks`), the queued scene from
   `queued_transport_scene` (shared with `SEQ.queued-scene`),
@@ -511,8 +511,9 @@ Built (stage 4):
   launch quantization, push observed live fields, and run one reactive
   cycle when anything changed.
   Every push compares with the cell first (`Runtime::instance_field`), so
-  only changed values reach readers and slots. Legacy `SEQ` fields and their
-  buffer-name gates are untouched.
+  only changed values reach readers and slots. The legacy `SEQ` fields are
+  gone (.78), and their buffer-name gates with them (.79): every meter and
+  modulation poll is gated on these observed bits.
 
 ## 4. Keyed instances
 
@@ -3519,7 +3520,84 @@ its instance and field.
      from it. Port them to a test-local map and the `seed_kind_*` helpers,
      then drop the registrations (79 registrations, about 270
      `"SEQ"` sites in the tests). The ignored project-92
-     perf probes still assert two stale legacy fields (since .66).
+     perf probes still assert two stale legacy fields (since .66); the
+     replay probe's reopened-meter check waits two ticks since .79 (the
+     observing sync, then the rising-edge poll).
+   Built (stage 8, eseq-0l17.79, legacy removal D of eseq-0l17.22): the
+   buffer-name liveness gates are gone (D3); every remaining poll is gated
+   on the host kinds' observed bits.
+   - **Meters** (`reactive_tick::poll_observed_meters`): the track, bus
+     and master peaks, the modulator envelopes and the mod port levels
+     poll only while `HostKinds::wants_peaks` / `wants_bus_peaks` /
+     `wants_master_peaks` / `wants_modulator_meters` / `wants_mod_levels`
+     is set (as of the last sync). An observed cache polls at the meter
+     cadence (unchanged), and at once when newly observed (the rising edge
+     of `FrameDiffState::prev_meter_demand`, a `MeterDemand`) or sized for
+     another topology. A meter first observed in sync N therefore reads
+     the cache's last value in N and a fresh sample from N+1 (the old
+     visible-buffer path sampled the tick a panel appeared); a released
+     peak or mod level cache is zeroed, so that one frame shows silence,
+     not an old peak. The ignored saved-project replay probe
+     (`ui_replay_probe`) now runs two ticks after reopening the panels
+     before asserting the master meter sampled. The
+     modulation display sample polls only while `wants_mod_display`, and
+     releases its watchlist otherwise. With nothing observed an idle tick
+     reads no meter (before, a visible mixer, grid, arrangement, transport
+     or fx panel polled its meters whether or not anything bound them),
+     and the six per-tick tile scans (and the step-tab registry read)
+     behind the gates are gone: only `*arrangement*`'s remains, for
+     `set_arrangement_view_visible` (edit focus, not a publish gate).
+   - **Active notes, playhead:** the tick already scans only drum rack
+     members' active notes (.78; `track.active-notes` reads its own while
+     observed); the playhead feeds the kinds' `step.playing` /
+     `track.playhead-row`. The p-lock variant preview's staleness check on a
+     playhead step or a transport flip no longer waits for the fx, step or
+     mixer panel (`drop_stale_plock_preview`).
+   - **Invalidations** (`apply_ui_invalidations`): the whole-track pattern,
+     panel topology and bus effect invalidations run the reactive cycle
+     unconditionally (edits only; the host kinds diff the rest), and with
+     it the `accumulator_names` rebuild, which the scene launches
+     (`host_commands/scenes.rs`) now also do without the `*fx*` check.
+   - **Layout refreshes** kept: `refresh_visible_layouts_for_buffer_named`
+     and `refresh_visible_mixer_layouts` skip a buffer no tile shows, so the
+     tick requests them without a visibility check; the scene launches
+     keep their `editor_has_visible_mixer_buffer` guard;
+     `registered_sequencer_view_buffers` stays (the track topology refresh).
+   - **Deleted:** `MeterVisibility` (now `MeterDemand`, observed bits only)
+     and `prev_meter_visibility`, `track_and_bus_meter_bindings_visible`,
+     `editor_has_visible_sequencer_view`, the tick's `mixer_visible` /
+     `sequencer_visible` / `fx_visible` / `step_visible` /
+     `transport_visible` / `arrangement_visible` / `master_meter_visible`
+     / `track_and_bus_meter_visible` locals, `UiInvalidationApplyCtx`'s
+     `fx_visible` / `sequencer_visible` / `mixer_visible`, and the
+     `fx_visible` branches in `host_commands/scenes.rs`. Grep: none of
+     these names is left in `crates/` outside test-harness locals
+     (`ui/tests.rs` keeps local `fx_visible` / `mixer_visible` layout
+     checks; `editor_has_visible_buffer` remains
+     for the arrangement focus, the instrument source buffer check and
+     tests).
+   - **Tests.** `host_kinds::tests::mixer::the_tick_polls_each_meter_only_while_a_kind_field_observes_it`
+     and `panel::the_tick_samples_modulation_only_while_a_kind_field_observes_it`
+     run the production tick (`Harness::tick`): nothing observed, nothing
+     polled with the cadence due; a newly observed field polls at once,
+     then only at the cadence; released, polling stops. The two
+     visibility-helper tests are gone; the step-tab registry test checks
+     `registered_sequencer_view_buffers`. The "only repaints" suites
+     (`solo_binding_tests`, `mixer_view`, `transport`) pass unchanged.
+     Full suite (sequencer, eseqlisp): 6944 run, 6934 passed, the 10
+     failures all known (the process_on / process_tap regular-runtime pair,
+     the scheduler channel and rack groove emission tests, the selected
+     p-lock row delete key, the three metal_seq_browser editor tests,
+     idle_ui_polls and the drift track switch smoke).
+   - **Perf.** An idle-tick probe (`Harness::tick`, 12 batches of 500,
+     debug build) before / after: bare root 84.5 / 83.2 µs per tick
+     (min), Distro root 631 / 625 µs: no extra idle work (the Harness tiles
+     show no buffer, so the scans saved are small there).
+   - **Captures.** 42 jobs (sequencer, mixer and transport views of 11
+     fixtures, the modulator and mods panels): the 39 that render are
+     byte-identical; the three rack-sampler jobs fail before and after
+     alike (a missing IR). Capture syncs the host kinds without the tick, so it bounds only
+     the view side.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 

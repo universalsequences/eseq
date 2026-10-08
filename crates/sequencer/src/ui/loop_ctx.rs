@@ -71,14 +71,33 @@ pub(crate) struct EditSessionState {
     >,
 }
 
-/// Demand at the previous display poll. Newly shown panels sample immediately,
-/// even when the ordinary meter cadence is not due yet.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct MeterVisibility {
+/// The meter caches a kind field observed at a display poll
+/// (`HostKinds::wants_*`). A newly observed one samples immediately, even
+/// when the ordinary meter cadence is not due yet.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct MeterDemand {
+    /// `master.peak-l` / `-r`.
     pub(crate) master: bool,
+    /// A track's `peak`.
     pub(crate) tracks: bool,
-    pub(crate) fx: bool,
-    pub(crate) mixer: bool,
+    /// A bus's `peak`.
+    pub(crate) buses: bool,
+    /// A modulator track instrument's `modulator-phase` / `-level`.
+    pub(crate) modulators: bool,
+    /// A track's or bus's mod port level.
+    pub(crate) mod_levels: bool,
+}
+
+impl MeterDemand {
+    pub(crate) fn of(host_kinds: &super::host_kinds::HostKinds) -> Self {
+        Self {
+            master: host_kinds.wants_master_peaks(),
+            tracks: host_kinds.wants_peaks(),
+            buses: host_kinds.wants_bus_peaks(),
+            modulators: host_kinds.wants_modulator_meters(),
+            mod_levels: host_kinds.wants_mod_levels(),
+        }
+    }
 }
 
 /// Meter/CPU/modulator polling caches: values read from the audio graph at a
@@ -97,8 +116,8 @@ pub(crate) struct MeterCache {
     /// meter rate off the modulator nodes (eseq-dtx.13, eseq-hpc, eseq-6mva).
     pub(crate) cached_mod_display_values: ModDisplayValues,
     /// Modulator nodes this poller currently holds on the audiograph
-    /// watchlist. Only modulated, visible effects and instruments appear
-    /// here.
+    /// watchlist. Only modulated effects and instruments appear here, and
+    /// only while the sample is observed (`HostKinds::wants_mod_display`).
     pub(crate) watched_display_modulators: HashSet<i32>,
     /// `fx_epoch` the effective values were last sampled at. A change forces
     /// an off-cadence poll so a newly built panel is seeded with its base
@@ -118,7 +137,7 @@ pub(crate) struct MeterCache {
 /// reactives to republish.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
-    pub(crate) prev_meter_visibility: MeterVisibility,
+    pub(crate) prev_meter_demand: MeterDemand,
     pub(crate) prev_editor_macro_action: (String, String),
     /// Hash of the macro-action query's inputs (edit-session path/source/
     /// validity plus the patcher's open macro view); the origin lookup only

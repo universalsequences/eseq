@@ -20,12 +20,12 @@ pub(crate) struct KindsMeters<'a> {
     /// Drum rack pad lights by track position (`pad.triggered`).
     pub(crate) pad_triggers: &'a [bool],
     /// The modulation display sample (`param.mod-offset`, …,
-    /// `device.mod-phases`): the tick polls it while the fx panel shows or
-    /// a kind field observes it (`HostKinds::wants_mod_display`).
+    /// `device.mod-phases`): the tick polls it only while a kind field
+    /// observes it (`HostKinds::wants_mod_display`).
     pub(crate) mod_display: &'a ModDisplayValues,
     /// A modulator instrument's envelope phase and level by track position
     /// (0 for any other track; `device.modulator-phase`, `-level`): the tick
-    /// polls them while the fx panel shows or one is observed
+    /// polls them only while one is observed
     /// (`HostKinds::wants_modulator_meters`).
     pub(crate) modulator_phases: &'a [f64],
     pub(crate) modulator_levels: &'a [f64],

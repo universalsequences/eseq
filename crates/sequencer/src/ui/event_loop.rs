@@ -378,7 +378,7 @@ pub(crate) fn run_event_loop(
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
-        prev_meter_visibility: MeterVisibility::default(),
+        prev_meter_demand: MeterDemand::default(),
         prev_editor_macro_action: (String::new(), String::new()),
         prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,

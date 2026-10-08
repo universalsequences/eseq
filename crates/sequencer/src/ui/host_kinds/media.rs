@@ -7,8 +7,8 @@
 //!   ([`sync_device_modulators`]).
 //! - **Modulator envelope** (`device.modulator-phase`, `-level`): a
 //!   modulator instrument's, from the tick's meter cache (copied into
-//!   [`KindsShared`]); live, and an observed one keeps the cache polled with
-//!   the fx panel hidden (`HostKinds::wants_modulator_meters`).
+//!   [`KindsShared`]); live, and only an observed one keeps the cache
+//!   polled (`HostKinds::wants_modulator_meters`).
 //! - **Effect tables** (`device.table-name`, `table-options`, `table-mode`,
 //!   `table-engine`, `table-data-key`, `ir-name`): a Filter Table's and a
 //!   Convolution Reverb's, from the effect node's registries (no `App`;

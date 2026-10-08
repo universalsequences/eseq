@@ -1785,3 +1785,45 @@ fn a_rack_macro_row_carries_its_macro_before_the_rack_panel_shows() {
     );
     assert!(close(h.eval_panel("r.rack-macro.value"), 0.25));
 }
+
+/// The tick samples the modulation display (and holds the modulators on the
+/// audio graph's watchlist) only while a kind field reads the sample
+/// (docs/kind-bindings-spec.md D3, eseq-0l17.79).
+#[test]
+fn the_tick_samples_modulation_only_while_a_kind_field_observes_it() {
+    let (mut h, _) = Harness::with_devices();
+    h.eval_panel(SAMPLER);
+    let unpolled = ModDisplayValues {
+        instrument: Some(InstrumentModValues {
+            track: 99,
+            values: Vec::new(),
+            slot_phases: [9.0; 4],
+        }),
+        ..ModDisplayValues::default()
+    };
+    h.meters.cached_mod_display_values = unpolled.clone();
+    h.meters.last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL * 2;
+    h.tick();
+    h.tick();
+    assert_eq!(h.meters.cached_mod_display_values, unpolled, "nothing observed, nothing sampled");
+    assert_eq!(h.meters.mod_display_poll_track, None);
+    assert!(h.meters.watched_display_modulators.is_empty());
+    // Observed: sampled at once (the cadence is not due), for the current
+    // track.
+    h.eval_panel("(def cutoff-offset #'cutoff.mod-offset) (def start-offset #'start.mod-offset)");
+    h.meters.last_meter_poll_at = Instant::now() + Duration::from_secs(3600);
+    h.tick();
+    h.tick();
+    assert_ne!(h.meters.cached_mod_display_values, unpolled, "observed, sampled");
+    assert_eq!(h.meters.mod_display_poll_track, Some(0));
+    // Released: the sample stops and the watchlist is released.
+    h.eval_panel("(set! cutoff-offset nil) (set! start-offset nil)");
+    h.tick();
+    h.tick();
+    assert_eq!(h.meters.mod_display_poll_track, None);
+    assert!(h.meters.watched_display_modulators.is_empty());
+    h.meters.cached_mod_display_values = unpolled.clone();
+    h.meters.last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL * 2;
+    h.tick();
+    assert_eq!(h.meters.cached_mod_display_values, unpolled, "released, nothing sampled");
+}

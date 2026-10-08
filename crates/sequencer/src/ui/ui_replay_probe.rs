@@ -238,8 +238,10 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         }
         target.save_png(&out.with_file_name(format!("{}-{phase}.png", out.file_stem().unwrap().to_string_lossy()))).unwrap();
     }
-    // Restore the real panel layout and verify its first sync samples meters
-    // even though their ordinary wall-clock interval has not elapsed.
+    // Restore the real panel layout and verify the meters sample before
+    // their ordinary wall-clock interval elapses: the first tick's sync
+    // observes the reopened views' meter fields, the second polls on that
+    // rising edge (`poll_observed_meters`, eseq-0l17.79).
     editor.runtime_mut().eval_str("(eseq.seq-layout/apply-fx-layout)").unwrap();
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(cols as u16, rows as u16);
@@ -247,11 +249,16 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     meters.cached_peak_l_level = -1.0;
     meters.cached_track_peak_levels.clear();
     meters.last_meter_poll_at = Instant::now();
-    sync_reactive_tick(app, editor, &mut LoopCtx {
-        sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
-        gesture: &mut gesture, track_names: &mut track_names, shared,
-    }, &mut stats);
-    assert!(meters.cached_peak_l_level >= 0.0, "reopened master meter samples immediately");
+    for _ in 0..2 {
+        sync_reactive_tick(app, editor, &mut LoopCtx {
+            sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
+            gesture: &mut gesture, track_names: &mut track_names, shared,
+        }, &mut stats);
+    }
+    assert!(
+        meters.cached_peak_l_level >= 0.0,
+        "reopened master meter samples on the tick after the sync that observes it"
+    );
     assert_eq!(meters.cached_track_peak_levels.len(), app.tracks.len());
     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
     backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render reopened panels"));

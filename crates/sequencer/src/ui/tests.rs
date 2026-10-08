@@ -23,7 +23,7 @@
         pull_shared_bus_state, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        track_and_bus_meter_bindings_visible, ActiveDeleteTarget,
+        ActiveDeleteTarget,
         FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
         NEW_INSTRUMENT_STARTER_DSP,
     };
@@ -1253,21 +1253,6 @@
             !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
             "non-track-navigation tab shortcuts should not reveal the sequencer row"
         );
-    }
-
-    #[test]
-    fn sequencer_visibility_keeps_track_and_drum_rack_bus_meter_bindings_live_without_mixer() {
-        assert!(track_and_bus_meter_bindings_visible(true, false, false));
-        assert!(track_and_bus_meter_bindings_visible(false, true, false));
-        assert!(track_and_bus_meter_bindings_visible(true, true, false));
-        assert!(!track_and_bus_meter_bindings_visible(false, false, false));
-    }
-
-    #[test]
-    fn arrangement_visibility_keeps_track_meter_bindings_live_without_mixer_or_sequencer() {
-        // The arrangement track rows reuse the sequencer track header, whose
-        // inline meter reads the shared track-peak bindings.
-        assert!(track_and_bus_meter_bindings_visible(false, false, true));
     }
 
     #[test]
@@ -3326,8 +3311,6 @@
                     }
                 }
             };
-            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -3341,9 +3324,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -3974,9 +3954,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -5097,9 +5074,6 @@
                             bus_state: &bus_state,
                             current_track_idx: track,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -6862,9 +6836,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -7474,9 +7445,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -8393,9 +8361,6 @@
                             bus_state: &bus_state,
                             current_track_idx: ct,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -9521,9 +9486,6 @@
                             bus_state: &bus_state,
                             current_track_idx: ct,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -10892,9 +10854,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -11268,8 +11227,6 @@
             let retained_run_indices =
                 eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
             let step_clipboard = Arc::new(Mutex::new(None));
-            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
                 let cell = find_layout_node_by_stable_key_suffix(
@@ -11376,9 +11333,6 @@
                             bus_state: &bus_state,
                             current_track_idx: TRACK,
                             accumulator_names: &accumulator_names,
-                            fx_visible,
-                            sequencer_visible: true,
-                            mixer_visible,
                         },
                     );
                 }
@@ -12378,9 +12332,6 @@
                         bus_state: &bus_state,
                         current_track_idx: TRACK,
                         accumulator_names: &accumulator_names,
-                        fx_visible: true,
-                        sequencer_visible: true,
-                        mixer_visible: true,
                     },
                 );
                 editor.runtime_mut().run_reactive_cycle();
@@ -12473,9 +12424,6 @@
                         bus_state: &bus_state,
                         current_track_idx: TRACK,
                         accumulator_names: &accumulator_names,
-                        fx_visible: true,
-                        sequencer_visible: true,
-                        mixer_visible: true,
                     },
                 );
                 editor.runtime_mut().run_reactive_cycle();

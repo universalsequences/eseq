@@ -12,9 +12,8 @@
 //! - **Modulation display** (`param.mod-offset`, `mod-value`, `mod-scale`,
 //!   `device.mod-phases`): the tick's modulation sample (`ModDisplayValues`,
 //!   copied into [`KindsShared`] while one of these fields is observed),
-//!   which the tick polls while the fx panel shows or one of these fields
-//!   of a device the sample covers is observed
-//!   (`HostKinds::wants_mod_display`).
+//!   which the tick polls only while one of these fields of a device the
+//!   sample covers is observed (`HostKinds::wants_mod_display`).
 //!   The sample covers what the panel shows: every effect, the current
 //!   track's instrument and its drum rack's selected slot; anything else
 //!   reads no modulation (offset 0, value `param.value`, scale 1).
@@ -603,7 +602,7 @@ pub(crate) struct PanelState {
 
 impl HostKinds {
     /// Whether a kind field reads the modulation sample: the tick then
-    /// keeps polling it with the fx panel hidden.
+    /// keeps polling it (and nothing else does).
     pub(crate) fn wants_mod_display(&self) -> bool {
         self.panel.mod_display_observed
     }

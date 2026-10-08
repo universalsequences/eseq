@@ -444,9 +444,6 @@ pub(super) struct UiInvalidationApplyCtx<'a> {
     pub(super) bus_state: &'a Arc<Mutex<Vec<app::BusChannelState>>>,
     pub(super) current_track_idx: usize,
     pub(super) accumulator_names: &'a Arc<Mutex<Vec<String>>>,
-    pub(super) fx_visible: bool,
-    pub(super) sequencer_visible: bool,
-    pub(super) mixer_visible: bool,
 }
 
 /// Apply the tick's typed UI invalidations to the host-side state they
@@ -470,9 +467,6 @@ pub(super) fn apply_ui_invalidations(
         bus_state,
         current_track_idx,
         accumulator_names,
-        fx_visible,
-        sequencer_visible,
-        mixer_visible,
     } = ctx;
 
     let mut needs_reactive_cycle = false;
@@ -533,7 +527,7 @@ pub(super) fn apply_ui_invalidations(
                 needs_reactive_cycle = true;
             }
             UiInvalidation::Pattern(PatternInvalidation::WholeTrack { .. }) => {
-                needs_reactive_cycle |= sequencer_visible;
+                needs_reactive_cycle = true;
             }
             UiInvalidation::Pattern(PatternInvalidation::AllTracks)
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { .. }) => {
@@ -590,31 +584,28 @@ pub(super) fn apply_ui_invalidations(
                 // The waveform binds device.playhead (live).
                 | InstrumentInvalidation::Playhead => {}
                 InstrumentInvalidation::PanelTopology | InstrumentInvalidation::Analysis => {
-                    needs_reactive_cycle |= fx_visible && track == current_track_idx;
+                    needs_reactive_cycle |= track == current_track_idx;
                 }
             },
             UiInvalidation::TrackFx { track, change } => match change {
                 // The panels bind the effect's params (the host kinds).
                 TrackFxInvalidation::Param { .. } | TrackFxInvalidation::Plock { .. } => {}
                 TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
-                    needs_reactive_cycle |= fx_visible && track == current_track_idx;
+                    needs_reactive_cycle |= track == current_track_idx;
                 }
             },
             UiInvalidation::MidiFx { track, change } => match change {
                 // The panels bind the MIDI effect's params (the host kinds).
                 MidiFxInvalidation::Param { .. } => {}
                 MidiFxInvalidation::Topology => {
-                    needs_reactive_cycle |= fx_visible && track == current_track_idx;
+                    needs_reactive_cycle |= track == current_track_idx;
                 }
             },
             UiInvalidation::BusFx { change, .. } => match change {
                 // The panels bind the bus effect's params (the host kinds).
                 BusFxInvalidation::Param { .. } => {}
-                BusFxInvalidation::Topology => {
-                    needs_reactive_cycle |= mixer_visible || fx_visible;
-                }
-                BusFxInvalidation::PanelTree => {
-                    needs_reactive_cycle |= fx_visible;
+                BusFxInvalidation::Topology | BusFxInvalidation::PanelTree => {
+                    needs_reactive_cycle = true;
                 }
             },
             UiInvalidation::Sidebar { track, .. } => {

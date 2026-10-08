@@ -637,3 +637,122 @@ fn earlier_number_setters_follow_the_value_rule() {
     h.share_buses_and_groups();
     assert_eq!(model(&h), (1.0, -1.0, 0.0, Some(1.0), 300, 0.0));
 }
+
+/// A value no meter read returns: a cache still holding it was not polled.
+const UNPOLLED: f64 = 9.0;
+
+/// Fill every meter cache with [`UNPOLLED`].
+fn seed_meters(h: &mut Harness) {
+    let (tracks, buses) = (h.app.tracks.len(), h.app.buses.len());
+    let meters = &mut h.meters;
+    meters.cached_peak_l_level = UNPOLLED;
+    meters.cached_peak_r_level = UNPOLLED;
+    meters.cached_track_peak_levels = vec![UNPOLLED; tracks];
+    meters.cached_bus_peak_levels = vec![UNPOLLED; buses];
+    meters.cached_modulator_phases = vec![UNPOLLED; tracks];
+    meters.cached_modulator_levels = vec![UNPOLLED; tracks];
+    meters.cached_mod_port_levels.track_outputs = vec![UNPOLLED; tracks];
+}
+
+/// Which meter caches the tick rewrote since [`seed_meters`].
+fn polled_meters(h: &Harness) -> MeterDemand {
+    let meters = &h.meters;
+    MeterDemand {
+        master: meters.cached_peak_l_level != UNPOLLED,
+        tracks: meters.cached_track_peak_levels[0] != UNPOLLED,
+        buses: meters.cached_bus_peak_levels[0] != UNPOLLED,
+        modulators: meters.cached_modulator_phases[0] != UNPOLLED,
+        mod_levels: meters.cached_mod_port_levels.track_outputs[0] != UNPOLLED,
+    }
+}
+
+/// Make the meter cadence due (`true`) or never due within the test.
+fn meter_cadence_due(h: &mut Harness, due: bool) {
+    h.meters.last_meter_poll_at = if due {
+        Instant::now() - METER_POLL_INTERVAL * 2
+    } else {
+        Instant::now() + Duration::from_secs(3600)
+    };
+}
+
+/// The tick reads a meter cache only while a kind field observes it
+/// (docs/kind-bindings-spec.md D3, eseq-0l17.79): with nothing observed it
+/// polls nothing, due or not; a newly observed meter samples at once, then
+/// at the meter cadence; a released one stops.
+#[test]
+fn the_tick_polls_each_meter_only_while_a_kind_field_observes_it() {
+    let mut h = Harness::new();
+    h.add_bus("FX");
+    h.app
+        .graph_controller()
+        .add_modulator_track()
+        .expect("modulator track");
+    h.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    h.tick();
+    h.tick();
+    let none = MeterDemand::default();
+    // Nothing observed: no meter is read, though the cadence is due.
+    seed_meters(&mut h);
+    meter_cadence_due(&mut h, true);
+    h.tick();
+    h.tick();
+    assert_eq!(polled_meters(&h), none, "nothing observed, nothing polled");
+    assert_eq!(h.frame.prev_meter_demand, none);
+    // One track's peak: its cache samples once observed (the sync that
+    // first pushes the field sets the demand the next tick polls on),
+    // without waiting for the cadence.
+    h.eval_all(
+        "(def t0 (track 0)) (def fx (nth (buses) (- (len (buses)) 1))) \
+         (def lfo (let ((t (track 2))) (first t.devices))) (def p0 #'t0.peak)",
+    );
+    seed_meters(&mut h);
+    meter_cadence_due(&mut h, false);
+    h.tick();
+    h.tick();
+    let tracks = MeterDemand { tracks: true, ..none };
+    assert_eq!(polled_meters(&h), tracks, "a newly observed meter polls at once");
+    // Then at the cadence only.
+    seed_meters(&mut h);
+    h.tick();
+    assert_eq!(polled_meters(&h), none, "the cadence is not due");
+    meter_cadence_due(&mut h, true);
+    h.tick();
+    assert_eq!(polled_meters(&h), tracks, "the cadence polls the observed meter");
+    // Every meter observed.
+    h.eval_all(
+        "(def bp #'fx.peak) (def ml #'master.peak-l) (def mo #'t0.mod-out-level) \
+         (def lp #'lfo.modulator-phase)",
+    );
+    seed_meters(&mut h);
+    meter_cadence_due(&mut h, false);
+    h.tick();
+    h.tick();
+    let all = MeterDemand {
+        master: true,
+        tracks: true,
+        buses: true,
+        modulators: true,
+        mod_levels: true,
+    };
+    assert_eq!(h.frame.prev_meter_demand, all);
+    assert_eq!(
+        polled_meters(&h),
+        MeterDemand { tracks: false, ..all },
+        "the newly observed ones poll at once"
+    );
+    // Released: polling stops, and the released peaks and levels fall to
+    // silence (a reopened meter never flashes an old peak).
+    seed_meters(&mut h);
+    h.eval_all("(set! p0 nil) (set! bp nil) (set! ml nil) (set! mo nil) (set! lp nil)");
+    h.tick();
+    h.tick();
+    assert_eq!(h.frame.prev_meter_demand, none);
+    assert_eq!(h.meters.cached_peak_l_level, 0.0);
+    assert!(h.meters.cached_track_peak_levels.iter().all(|level| *level == 0.0));
+    assert!(h.meters.cached_bus_peak_levels.iter().all(|level| *level == 0.0));
+    assert!(h.meters.cached_mod_port_levels.track_outputs.iter().all(|level| *level == 0.0));
+    seed_meters(&mut h);
+    meter_cadence_due(&mut h, true);
+    h.tick();
+    assert_eq!(polled_meters(&h), none, "released, nothing polled");
+}

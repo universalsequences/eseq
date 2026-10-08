@@ -2012,9 +2012,6 @@ mod tests {
                     bus_state: &self.bus_state,
                     current_track_idx: TRACK,
                     accumulator_names: &self.accumulator_names,
-                    fx_visible: true,
-                    sequencer_visible: true,
-                    mixer_visible: true,
                 },
             );
         }

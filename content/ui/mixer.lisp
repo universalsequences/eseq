@@ -1673,8 +1673,8 @@
         (when t (patch-mixer-strip t))))
     (track-context-menu)))
 
-;; The *mixer* buffer keeps its name (the host keys meter/peak liveness and
-;; delete-target routing on it) but its whole body is one overridable
+;; The *mixer* buffer keeps its name (the host keys delete-target routing on
+;; it) but its whole body is one overridable
 ;; function, so a package can replace the strip-per-track view with its own
 ;; (e.g. a grid of compact channels) via (override eseq.mixer/mixer-body …).
 (def mixer-body ()

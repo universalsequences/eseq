@@ -125,134 +125,8 @@ pub(crate) fn sync_reactive_tick(
         }
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
-        let mixer_visible = editor_has_visible_mixer_buffer(&editor);
-        let sequencer_visible = editor_has_visible_sequencer_view(&mut editor);
-        let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
-        let step_visible = editor_has_visible_buffer(&editor, "*step*");
-        let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
-        let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
-        let master_meter_visible = transport_visible || mixer_visible;
-        let track_and_bus_meter_visible = track_and_bus_meter_bindings_visible(
-            mixer_visible,
-            sequencer_visible,
-            arrangement_visible,
-        );
         let current_track_playhead_changed = playhead != ctx.frame.prev_playhead;
-        let meter_polled = ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL;
-        let was_visible = ctx.frame.prev_meter_visibility;
-        if (master_meter_visible && (meter_polled || !was_visible.master))
-            || (ctx.frame.host_kinds.wants_master_peaks() && meter_polled)
-        {
-            ctx.meters.cached_peak_l_level = meter_display_level(f32::from_bits(
-                ctx.shared.state.transport.peak_l.load(Ordering::Relaxed),
-            ));
-            ctx.meters.cached_peak_r_level = meter_display_level(f32::from_bits(
-                ctx.shared.state.transport.peak_r.load(Ordering::Relaxed),
-            ));
-        }
-        if track_and_bus_meter_visible && (meter_polled || !was_visible.tracks) {
-            ctx.meters.cached_track_peak_levels =
-                read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
-            ctx.meters.cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-        } else if ctx.frame.host_kinds.wants_peaks()
-            && (meter_polled || ctx.meters.cached_track_peak_levels.len() != app.tracks.len())
-        {
-            // A host-kinds `t.peak` is observed while no mixer, grid or
-            // arrangement is visible: keep the track meters polled at the
-            // same cadence.
-            ctx.meters.cached_track_peak_levels =
-                read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
-        }
-        if !track_and_bus_meter_visible
-            && ctx.frame.host_kinds.wants_bus_peaks()
-            && (meter_polled || ctx.meters.cached_bus_peak_levels.len() != app.buses.len())
-        {
-            // Likewise for an observed `b.peak`.
-            ctx.meters.cached_bus_peak_levels =
-                read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-        }
-        if fx_visible && (meter_polled || !was_visible.fx) {
-            (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
-                read_modulator_display_values(app.graph.lg, &app);
-        } else if !fx_visible
-            && ctx.frame.host_kinds.wants_modulator_meters()
-            && (meter_polled
-                || ctx.meters.cached_modulator_phases.len()
-                    != (app.graph.track_node_ids.len()).min(app.graph.track_instrument_types.len()))
-        {
-            // An observed host-kinds `device.modulator-phase` / `-level`
-            // with the fx panel hidden: keep them polled at the meter
-            // cadence.
-            (
-                ctx.meters.cached_modulator_phases,
-                ctx.meters.cached_modulator_levels,
-            ) = read_modulator_display_values(app.graph.lg, &app);
-        }
-        // The mixer shows the mod port levels; with it hidden, an observed
-        // host-kinds level keeps them polled at the meter cadence.
-        let mod_levels_due = if mixer_visible {
-            meter_polled || !was_visible.mixer
-        } else {
-            ctx.frame.host_kinds.wants_mod_levels()
-                && (meter_polled
-                    || ctx.meters.cached_mod_port_levels.track_outputs.len() != app.tracks.len())
-        };
-        if mod_levels_due {
-            ctx.meters.cached_mod_port_levels = read_mod_port_levels(app.graph.lg, &app);
-        }
-        if meter_polled {
-            ctx.meters.last_meter_poll_at = Instant::now();
-        }
-        ctx.frame.prev_meter_visibility = MeterVisibility {
-            master: master_meter_visible, tracks: track_and_bus_meter_visible,
-            fx: fx_visible, mixer: mixer_visible,
-        };
-        // Effective (post-modulation) effect param values (eseq-dtx.13,
-        // generalized in eseq-hpc). Hidden panels release their modulator
-        // watchlist and skip value conversion. Reopening samples immediately;
-        // stopping modulation while visible still settles readouts to base.
-        //
-        // Also polled off-cadence whenever fx_epoch moves, so a freshly
-        // inserted effect publishes its base values in the same tick its panel
-        // is built. Without that seed `bind-seq` vivifies 0.0 and e.g. a Filter
-        // Table renders frame=0 / cutoff=0 Hz (off the 40..18000 log axis) for
-        // up to a meter interval.
-        //
-        // The same pass samples the selected track's instrument (eseq-6mva),
-        // whose per-voice modulators are read through the audio thread's
-        // published last-triggered voice; the track is part of the poll gate so
-        // switching instruments republishes immediately rather than leaving the
-        // previous one's modulation on the panel.
-        let mod_display_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        // A host kind's modulation field (param.mod-offset, …) keeps the
-        // sample live with the panel hidden; publishing stays the panel's.
-        let mod_display_live = fx_visible || ctx.frame.host_kinds.wants_mod_display();
-        if !mod_display_live {
-            // Releasing the watchlist also removes audio-thread snapshot work.
-            // Keep the last published values for the next visible delta.
-            for node in ctx.meters.watched_display_modulators.drain() {
-                unsafe { sequencer::audiograph::remove_node_from_watchlist(app.graph.lg.0, node); }
-            }
-            ctx.meters.mod_display_poll_track = None;
-        } else if meter_polled
-            || (fx_visible && !was_visible.fx)
-            || ctx.meters.mod_display_poll_track.is_none()
-            || mod_display_epoch != ctx.meters.mod_display_poll_fx_epoch
-            || Some(ct) != ctx.meters.mod_display_poll_track
-        {
-            ctx.meters.mod_display_poll_fx_epoch = mod_display_epoch;
-            ctx.meters.mod_display_poll_track = Some(ct);
-            let mod_display_selected_step = selected_plock_step(&ctx.shared.selected_steps);
-            ctx.meters.cached_mod_display_values = read_mod_display_values(
-                app.graph.lg,
-                &app,
-                &ctx.shared.state,
-                Some(ct),
-                mod_display_selected_step,
-                mod_display_live,
-                &mut ctx.meters.watched_display_modulators,
-            );
-        }
+        poll_observed_meters(&app, ctx, ct);
         let mut needs_reactive_cycle = false;
         // The drum rack pad lights hold while a member's note sounds, so the
         // rack members' active notes are scanned every tick (hidden too);
@@ -314,12 +188,8 @@ pub(crate) fn sync_reactive_tick(
             editor.blur_all_widget_focus();
             ctx.frame.prev_playing = playing;
             needs_reactive_cycle = true;
-            if (fx_visible || step_visible) && !app.tracks.is_empty() {
-                if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
-                    *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
-                }) {
-                    ctx.gesture.preview_plock_variant = None;
-                }
+            if !app.tracks.is_empty() {
+                drop_stale_plock_preview(ctx, ct);
             }
         }
         if bpm != ctx.frame.prev_bpm {
@@ -344,10 +214,10 @@ pub(crate) fn sync_reactive_tick(
         // frame; the arrangement is re-read only on committed-song revision
         // change, and the lane surfaces derived from it diff by value.
         // The render-rate song position drives the transport readout and the
-        // arrangement playhead, so it publishes while either is visible.
+        // arrangement playhead (kind fields, pushed while observed).
         // Clip selection is dormant while the timeline is off screen (takes
         // spec 16.6), so the binding needs the view state before it resolves.
-        app.set_arrangement_view_visible(arrangement_visible);
+        app.set_arrangement_view_visible(editor_has_visible_buffer(&editor, "*arrangement*"));
         // Sound binding (takes spec 16.2): keep the live device mirror on the
         // bound source before anything reads it. This is where a song row
         // transition (rule 2) re-binds the panel and the monitor sound, and
@@ -386,15 +256,8 @@ pub(crate) fn sync_reactive_tick(
         // snapshot the host commands compare against is kept here.
         ctx.frame.prev_track_playheads = track_playheads_snapshot(&ctx.shared.state, &app);
         ctx.frame.prev_playhead = playhead;
-        if (fx_visible || step_visible || mixer_visible)
-            && current_track_playhead_changed
-            && !app.tracks.is_empty()
-        {
-            if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
-                *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
-            }) {
-                ctx.gesture.preview_plock_variant = None;
-            }
+        if current_track_playhead_changed && !app.tracks.is_empty() {
+            drop_stale_plock_preview(ctx, ct);
         }
         let mut profile_pattern_reactive_cycle = false;
         let mut refresh_visible_sequencer_after_cycle = false;
@@ -411,9 +274,6 @@ pub(crate) fn sync_reactive_tick(
                 bus_state: &ctx.shared.bus_state,
                 current_track_idx: ct,
                 accumulator_names: &ctx.shared.accumulator_names,
-                fx_visible,
-                sequencer_visible,
-                mixer_visible,
             },
         ) {
             needs_reactive_cycle = true;
@@ -512,11 +372,7 @@ pub(crate) fn sync_reactive_tick(
             refresh_track_names_cache(&mut *ctx.track_names, &app);
             sync_scene_slot_state(editor.runtime_mut(), &ctx.shared.state);
             *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-            if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
-                *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
-            }) {
-                ctx.gesture.preview_plock_variant = None;
-            }
+            drop_stale_plock_preview(ctx, ct);
             sync_sidebar_browser(&app, ct);
             if profile_switch {
                 eprintln!(
@@ -530,7 +386,8 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_song_row_mirror_epoch = mirror_epoch;
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&ctx.shared.state);
             needs_reactive_cycle = true;
-            refresh_visible_mixer_after_cycle |= mixer_visible;
+            // The layout refreshes skip a buffer no tile shows.
+            refresh_visible_mixer_after_cycle = true;
             profile_pattern_reactive_cycle = profile_switch;
         }
         // Delete-target arm/clear rides its own version counter instead of
@@ -574,12 +431,9 @@ pub(crate) fn sync_reactive_tick(
         if ui_ep != ctx.frame.prev_ui_epoch {
             if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
                 eprintln!(
-                    "[ui-trace][metal_seq] ui_epoch {}->{} visible mixer={} sequencer={} fx={} ct={}",
+                    "[ui-trace][metal_seq] ui_epoch {}->{} ct={}",
                     ctx.frame.prev_ui_epoch,
                     ui_ep,
-                    mixer_visible,
-                    sequencer_visible,
-                    fx_visible,
                     ct
                 );
             }
@@ -600,11 +454,7 @@ pub(crate) fn sync_reactive_tick(
                 sync_scene_slot_state(editor.runtime_mut(), &ctx.shared.state);
             } else {
                 *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
-                    *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
-                }) {
-                    ctx.gesture.preview_plock_variant = None;
-                }
+                drop_stale_plock_preview(ctx, ct);
             }
             // Sync recording state
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);
@@ -632,9 +482,8 @@ pub(crate) fn sync_reactive_tick(
                     app.graph.record_armed[i] = *a;
                 }
             }
-            refresh_visible_sequencer_after_cycle = sequencer_visible;
-            refresh_visible_mixer_after_cycle |=
-                mixer_visible && (record_armed_changed || track_buttons_changed);
+            refresh_visible_sequencer_after_cycle = true;
+            refresh_visible_mixer_after_cycle |= record_armed_changed || track_buttons_changed;
             if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
                 eprintln!(
                     "[ui-trace][metal_seq] refresh_after_cycle sequencer={} mixer={} record_armed_changed={} track_buttons_changed={}",
@@ -868,6 +717,129 @@ pub(crate) fn sync_reactive_tick(
         editor.mark_needs_redraw();
     }
     ui_loop_stats.note_sync(reactive_sync_started.elapsed());
+}
+
+/// Drop a p-lock variant preview (`GestureState::preview_plock_variant`)
+/// that no longer matches the current track with no step selected.
+fn drop_stale_plock_preview(ctx: &mut LoopCtx<'_>, ct: usize) {
+    if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
+        *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
+    }) {
+        ctx.gesture.preview_plock_variant = None;
+    }
+}
+
+/// Poll the meter caches the host kinds read (`KindsMeters`), each only
+/// while a kind field observes it (`HostKinds::wants_*`, as of the last
+/// sync; docs/kind-bindings-spec.md D3): the track, bus and master peaks,
+/// the modulator envelopes, the mod port levels and the modulation display
+/// sample. An observed cache polls at the meter cadence, and at once when
+/// it is newly observed or sized for another topology. With nothing
+/// observed nothing is read, and the modulation sample releases its
+/// audio-graph watchlist.
+pub(crate) fn poll_observed_meters(app: &app::App, ctx: &mut LoopCtx<'_>, ct: usize) {
+    let demand = MeterDemand::of(&ctx.frame.host_kinds);
+    let was = std::mem::replace(&mut ctx.frame.prev_meter_demand, demand);
+    let meters = &mut *ctx.meters;
+    let meter_polled = meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL;
+    let due = |wanted: bool, was_wanted: bool, resized: bool| {
+        wanted && (meter_polled || !was_wanted || resized)
+    };
+    let lg = app.graph.lg;
+    if due(demand.master, was.master, false) {
+        meters.cached_peak_l_level = meter_display_level(f32::from_bits(
+            ctx.shared.state.transport.peak_l.load(Ordering::Relaxed),
+        ));
+        meters.cached_peak_r_level = meter_display_level(f32::from_bits(
+            ctx.shared.state.transport.peak_r.load(Ordering::Relaxed),
+        ));
+    }
+    if due(
+        demand.tracks,
+        was.tracks,
+        meters.cached_track_peak_levels.len() != app.tracks.len(),
+    ) {
+        meters.cached_track_peak_levels = read_track_peak_levels(lg, &app.graph.track_node_ids);
+    }
+    if due(
+        demand.buses,
+        was.buses,
+        meters.cached_bus_peak_levels.len() != app.buses.len(),
+    ) {
+        meters.cached_bus_peak_levels = read_bus_peak_levels(lg, &app.graph.bus_node_ids);
+    }
+    let modulator_tracks =
+        (app.graph.track_node_ids.len()).min(app.graph.track_instrument_types.len());
+    if due(
+        demand.modulators,
+        was.modulators,
+        meters.cached_modulator_phases.len() != modulator_tracks,
+    ) {
+        (meters.cached_modulator_phases, meters.cached_modulator_levels) =
+            read_modulator_display_values(lg, app);
+    }
+    if due(
+        demand.mod_levels,
+        was.mod_levels,
+        meters.cached_mod_port_levels.track_outputs.len() != app.tracks.len(),
+    ) {
+        meters.cached_mod_port_levels = read_mod_port_levels(lg, app);
+    }
+    if meter_polled {
+        meters.last_meter_poll_at = Instant::now();
+    }
+    // Released meters fall to silence, so a reopened one shows silence, not
+    // an old peak, for the one frame before its first fresh sample.
+    if was.master && !demand.master {
+        meters.cached_peak_l_level = 0.0;
+        meters.cached_peak_r_level = 0.0;
+    }
+    if was.tracks && !demand.tracks {
+        meters.cached_track_peak_levels.fill(0.0);
+    }
+    if was.buses && !demand.buses {
+        meters.cached_bus_peak_levels.fill(0.0);
+    }
+    if was.mod_levels && !demand.mod_levels {
+        let levels = &mut meters.cached_mod_port_levels;
+        levels.track_inputs.iter_mut().for_each(|inputs| inputs.fill(0.0));
+        levels.track_outputs.fill(0.0);
+        levels.bus_inputs.iter_mut().for_each(|(_, inputs)| inputs.fill(0.0));
+    }
+    // Effective (post-modulation) param values (eseq-dtx.13, generalized in
+    // eseq-hpc): every effect plus the selected track's instrument
+    // (eseq-6mva), whose per-voice modulators are read through the audio
+    // thread's published last-triggered voice. Also sampled off-cadence
+    // when `fx_epoch` moves (a freshly inserted effect is seeded with its
+    // base values in the tick that builds its panel) and on a track switch
+    // (never the previous instrument's modulation).
+    if !ctx.frame.host_kinds.wants_mod_display() {
+        // Releasing the watchlist also removes audio-thread snapshot work.
+        // The last values stay for the next observer; releasing clears the
+        // poll track, so that observer samples at once.
+        for node in meters.watched_display_modulators.drain() {
+            unsafe { sequencer::audiograph::remove_node_from_watchlist(lg.0, node); }
+        }
+        meters.mod_display_poll_track = None;
+        return;
+    }
+    let mod_display_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
+    if meter_polled
+        || mod_display_epoch != meters.mod_display_poll_fx_epoch
+        || Some(ct) != meters.mod_display_poll_track
+    {
+        meters.mod_display_poll_fx_epoch = mod_display_epoch;
+        meters.mod_display_poll_track = Some(ct);
+        meters.cached_mod_display_values = read_mod_display_values(
+            lg,
+            app,
+            &ctx.shared.state,
+            Some(ct),
+            selected_plock_step(&ctx.shared.selected_steps),
+            true,
+            &mut meters.watched_display_modulators,
+        );
+    }
 }
 
 pub(crate) fn reactive_tick_and_render(

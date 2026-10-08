@@ -228,6 +228,26 @@ impl Harness {
         host_kinds.sync(&self.app, self.editor.runtime_mut(), &self.shared, &meters)
     }
 
+    /// One production reactive tick (`sync_reactive_tick`): the meter
+    /// polls, the frame diffs and the host-kinds sync.
+    fn tick(&mut self) {
+        let mut ctx = LoopCtx {
+            sessions: &mut self.sessions,
+            meters: &mut self.meters,
+            frame: &mut self.frame,
+            gesture: &mut self.gesture,
+            track_names: &mut self.track_names,
+            shared: &self.shared,
+        };
+        let mut stats = UiLoopStats::new();
+        crate::reactive_tick::sync_reactive_tick(
+            &mut self.app,
+            &mut self.editor,
+            &mut ctx,
+            &mut stats,
+        );
+    }
+
     /// Evaluate `code` as a view would: with eseq.kinds referred (an
     /// import's `:refer` covers the source it heads).
     fn eval(&mut self, code: &str) -> Value {

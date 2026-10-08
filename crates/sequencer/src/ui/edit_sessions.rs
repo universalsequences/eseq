@@ -1340,7 +1340,7 @@ pub(super) fn registered_sequencer_view_buffers(editor: &Editor) -> Vec<String> 
     let mut names = vec!["*sequencer*".to_string()];
     // Read the authoritative registration data, not its presentation accessor.
     // Invoking Lisp also processes dirty effects and flushes widget trees; a
-    // per-tick visibility query must be a read-only operation.
+    // layout refresh's lookup must be a read-only operation.
     if let Some(Value::List(tabs)) = editor
         .runtime()
         .state_value("eseq.seq-step-tabs/seq-registered-step-tabs")
@@ -1365,16 +1365,6 @@ pub(super) fn registered_sequencer_view_buffers(editor: &Editor) -> Vec<String> 
     names
 }
 
-/// Whether any sequencer view is on screen: `*sequencer*` or a registered
-/// step-tab buffer showing in its place. Per-frame sequencer publishes
-/// (step lists, playhead fields, expanded viewports) are gated on this, so
-/// a custom tab that replaces the factory grid keeps receiving state.
-pub(super) fn editor_has_visible_sequencer_view(editor: &Editor) -> bool {
-    registered_sequencer_view_buffers(editor)
-        .iter()
-        .any(|name| editor_has_visible_buffer(editor, name))
-}
-
 pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
         editor
@@ -1383,18 +1373,6 @@ pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
             .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
             .is_some_and(|buffer| buffer.name == name && buffer.view_mode != ViewMode::TextOnly)
     })
-}
-
-/// Track meters are rendered by the sequencer and arrangement track headers
-/// (the arrangement reuses `eseq.sequencer/track-header`), while bus meters
-/// are also rendered by mixer strips and drum-rack headers. Keep the shared
-/// bindings live while any consumer buffer is visible.
-pub(super) fn track_and_bus_meter_bindings_visible(
-    mixer_visible: bool,
-    sequencer_visible: bool,
-    arrangement_visible: bool,
-) -> bool {
-    mixer_visible || sequencer_visible || arrangement_visible
 }
 
 /// `*patch-mixer*` (the reduced strip in the patch editor) renders the same

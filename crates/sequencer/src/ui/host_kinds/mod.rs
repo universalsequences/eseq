@@ -2738,8 +2738,7 @@ pub(crate) struct HostKinds {
 
 impl HostKinds {
     /// Whether any track's `peak` was observed at the last sync: the tick
-    /// then keeps the track meter cache polled even with no legacy meter
-    /// on screen.
+    /// polls the track meter cache only then (`poll_observed_meters`).
     pub(crate) fn wants_peaks(&self) -> bool {
         self.peaks_observed
     }
@@ -2760,8 +2759,8 @@ impl HostKinds {
     }
 
     /// Whether a modulator track's instrument's `modulator-phase` or
-    /// `-level` was observed at the last sync: the tick then keeps the
-    /// modulator envelopes polled with the fx panel hidden.
+    /// `-level` was observed at the last sync: the tick polls the
+    /// modulator envelopes only then.
     pub(crate) fn wants_modulator_meters(&self) -> bool {
         self.panel.modulator_meters_observed
     }

@@ -322,7 +322,7 @@ use panel_kinds_seed::*;
     }
 
     #[test]
-    fn sequencer_visibility_reads_live_registry_without_invoking_lisp() {
+    fn sequencer_view_registry_reads_live_without_invoking_lisp() {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let calls = Rc::new(RefCell::new(0));
         let recorded = calls.clone();
@@ -339,18 +339,18 @@ use panel_kinds_seed::*;
         editor.runtime_mut().eval_str(
             "(module eseq.seq-step-tabs) (defstate seq-registered-step-tabs '())"
         ).unwrap();
-        let visible = super::super::edit_sessions::editor_has_visible_sequencer_view;
-        assert!(!visible(&editor));
+        let registered = |editor: &eseqlisp::Editor| {
+            super::super::edit_sessions::registered_sequencer_view_buffers(editor)
+                .contains(&"*custom-seq*".to_string())
+        };
+        assert!(!registered(&editor));
         editor.runtime_mut().eval_str(
             r#"(set! eseq.seq-step-tabs/seq-registered-step-tabs '(("Custom" "*custom-seq*")))"#
         ).unwrap();
-        assert!(visible(&editor), "new package registration is observed immediately");
-        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::TextOnly;
-        assert!(!visible(&editor));
-        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        assert!(registered(&editor), "new package registration is observed immediately");
         editor.runtime_mut().eval_str("(set! eseq.seq-step-tabs/seq-registered-step-tabs '())").unwrap();
-        assert!(!visible(&editor), "unregistered views stop receiving sequencer publishes");
-        assert_eq!(*calls.borrow(), 0, "visibility must never invoke or flush the Lisp runtime");
+        assert!(!registered(&editor), "unregistered views stop counting as the sequencer");
+        assert_eq!(*calls.borrow(), 0, "the lookup must never invoke or flush the Lisp runtime");
     }
 
     #[test]
@@ -46941,10 +46941,11 @@ use panel_kinds_seed::*;
         );
 
         // eseq-4b5.22: the rack header's meter reads the rack's BACKING BUS
-        // peak, not a track peak, so `bus-peak-*` has a live consumer in
+        // peak, not a track peak, so `b.peak` has a live consumer in
         // *sequencer* even when the mixer is hidden. This pins the binding
-        // that `track_and_bus_meter_bindings_visible` exists to keep synced —
-        // re-gating bus peaks on mixer visibility alone freezes this meter.
+        // whose observation keeps the bus meters polled
+        // (`HostKinds::wants_bus_peaks`) — gating bus peaks on mixer
+        // visibility instead would freeze this meter.
         let rack_meter = find_layout_node_by_stable_key_suffix(&layout, "/rack-volume-control-7")
             .expect("rack header should render its volume/meter control");
         assert_eq!(

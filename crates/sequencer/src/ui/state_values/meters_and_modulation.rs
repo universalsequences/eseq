@@ -644,8 +644,9 @@ fn effect_mod_values_for_slot(
 
 /// Sample every live effect instance's effective parameter values.
 ///
-/// `live` is the panel-visibility gate: while the FX panel is hidden the
-/// modulator nodes are dropped from the watchlist and base values are reported,
+/// `live` false drops the modulator nodes from the watchlist and reports base
+/// values (the tick samples only while a kind field observes the sample,
+/// `HostKinds::wants_mod_display`, and releases the watchlist itself),
 /// which is also what makes the display settle back to base when modulation is
 /// switched off.
 ///

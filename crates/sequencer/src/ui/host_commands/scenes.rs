@@ -718,14 +718,11 @@ pub(super) fn handle(
             app.observe_manual_clip_launch(track, PatternId(pattern_id));
 
             let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
-            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let rt = editor.runtime_mut();
             sync_shared_track_collapsed(&track_collapsed, &app);
             refresh_track_names_cache(&mut *ctx.track_names, &app);
             sync_scene_slot_state(rt, &state);
-            if fx_visible {
-                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-            }
+            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
             sync_sidebar_browser(&app, ct);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -816,7 +813,6 @@ pub(super) fn handle(
                     let pattern_changed = switched.is_ok();
                     if switched.is_ok() {
                         let ct = current_track.load(Ordering::Relaxed);
-                        let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
                         let rt = editor.runtime_mut();
                         let started = Instant::now();
                         sync_shared_track_collapsed(&track_collapsed, &app);
@@ -824,12 +820,9 @@ pub(super) fn handle(
                         sync_scene_slot_state(rt, &state);
                         sync_names_pattern_elapsed = started.elapsed();
                         let started = Instant::now();
-                        if fx_visible {
-                            let sub_started = Instant::now();
-                            *accumulator_names.lock().unwrap() =
-                                build_accumulator_names(&app);
-                            sync_accumulators_elapsed = sub_started.elapsed();
-                        }
+                        let sub_started = Instant::now();
+                        *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                        sync_accumulators_elapsed = sub_started.elapsed();
                         sync_fx_lists_elapsed = started.elapsed();
                         let started = Instant::now();
                         sync_sidebar_browser(&app, ct);
