@@ -1,5 +1,7 @@
 # Arrangement Timeline UI Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft / design (rev 2 — verified against widget + piano-roll wiring)
 Author: design pass, 2026-07-20
 Related: `docs/song-mode-spec.md`, `crates/eseqlisp/src/widget_render/timeline.rs`,

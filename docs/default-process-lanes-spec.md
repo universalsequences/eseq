@@ -1,5 +1,7 @@
 # Default Process Lanes: Cirklon parity out of the box
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 6, 2026-09-15 (rev 8, 2026-09-23: length lane). Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7); rev 7, 2026-09-15, per-bar transpose and the `+B` family (epic eseq-m14x). Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (normative process model) and
 `docs/cirklon-endgame-trajectory.md`. Design canvas (approved):

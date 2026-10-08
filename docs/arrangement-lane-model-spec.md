@@ -1,5 +1,7 @@
 # Arrangement Lane Model — Author in Lanes, Compile to Rows
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft (rev 3, 2026-09-05 — scene state is independent of clip placement; see 6.2)
 Supersedes: the *authoring/storage* portions of docs/song-mode-spec.md §5
 (`ProjectSong` as the stored model, §5.6 row primitives). Playback (§7-§9),

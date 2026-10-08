@@ -195,7 +195,8 @@ impl InstanceOverridesState {
 
 /// One graph node's process chain (docs/graph-node-processes-spec.md) before
 /// and after an edit made through a `graph-node-process-*` native
-/// (eseq-waa9.23). The native applies the edit; the host records this patch.
+/// (eseq-waa9.23) or the host kinds' `edit-process`. The native or the
+/// setter applies the edit; the host records this patch.
 /// Replay writes the recorded chain back into the scene the edit was made in
 /// and leaves every other override of the graph alone.
 #[derive(Clone, Debug, PartialEq)]

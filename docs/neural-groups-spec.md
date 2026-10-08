@@ -1,5 +1,7 @@
 # Neural Groups: Cluster-Level Control for Graph Sequencers
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft spec, 2026-08-05. Companion to
 `docs/graph-homeostat-spec.md` (the delta overlay — normative for the nudge
 layer, already landed in `runtime/graph.rs`) and

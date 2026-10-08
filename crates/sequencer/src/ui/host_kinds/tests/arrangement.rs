@@ -176,27 +176,17 @@ fn arrangement_fields_read_after_sync_and_match_the_model() {
     assert_eq!(h.eval_7d("cl.active"), Value::Bool(true));
     assert_eq!(h.eval_7d("cl.queued"), Value::Bool(false));
     assert_eq!(h.eval_7d("cl.banks"), h.eval_7d("(list (first (banks)))"));
-    // The region, the bound clip and the edit error follow the commands.
-    let region = map_value([
-        ("track-a", Value::Number(1.0)),
-        ("track-b", Value::Number(0.0)),
-        ("start", Value::Number(2.0)),
-        ("end", Value::Number(6.0)),
-    ]);
-    h.command("song-set-region", region);
+    // The region, the bound clip and the edit error follow their setters.
+    h.eval_7d("(select-region! t1 t0 2 6)");
+    h.drain();
     h.sync();
     assert_eq!(h.eval_7d("song.region"), h.eval_7d("region"));
     assert_eq!(h.eval_7d("region.tracks"), h.eval_7d("(list t0 t1)"));
     assert_eq!(h.eval_7d("region.start"), Value::Number(2.0));
     assert_eq!(h.eval_7d("region.end"), Value::Number(6.0));
     assert_eq!(h.eval_7d("region.scene-lane"), Value::Bool(false));
-    let select = map_value([
-        ("track", Value::Number(0.0)),
-        ("clip-id", Value::Number(b.0 as f64)),
-        ("start", Value::Number(8.0)),
-        ("end", Value::Number(12.0)),
-    ]);
-    h.command("song-select-clip", select);
+    h.eval_7d("(set! song.bound-clip (nth t0.clips 1))");
+    h.drain();
     h.sync();
     assert_eq!(h.eval_7d("song.bound-clip"), h.eval_7d("(nth t0.clips 1)"));
     h.command(

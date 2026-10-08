@@ -1,5 +1,7 @@
 # Track Groups Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Goal
 
 Let a user fold a set of related tracks (e.g. ten drum samples that make up one

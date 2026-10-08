@@ -1,5 +1,7 @@
 # Clip Edit Target — Unified Focus, Double-Click-to-Piano-Roll, Clip Panel
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 4, 2026-07-29 — **all four slices shipped** on branch
 `clip-edit-target` (unmerged), each through a multi-agent review gate with
 fixes applied. Slice A: `app/focus.rs` (EditFocus over the sound binding),

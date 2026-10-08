@@ -12377,11 +12377,6 @@ use panel_kinds_seed::*;
             .register_native("seq-set-step-param", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
-            .register_native("seq-set-process-lane-step", |_args, _ctx| {
-                Ok(Value::Bool(true))
-            });
-        editor
-            .runtime_mut()
             .register_native("seq-set-process-inlet", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()

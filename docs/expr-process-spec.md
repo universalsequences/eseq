@@ -1,5 +1,7 @@
 # Expr processes
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 1, 2026-09-27. eseq-waa9.10 (headless core, nodes) and eseq-waa9.11 (card, edit buffer, overflow; nodes) and eseq-waa9.12 (context
 variables, direct writes, inlet shadowing) and eseq-waa9.13 (state, stateful helpers) and eseq-waa9.15 (presets, shaping helpers, `->`) and eseq-waa9.16 (`*processes*` dock) and eseq-waa9.17 (promote + edit as expr) BUILT uncommitted 2026-09-27; see the "As shipped" notes. Epic: `eseq-waa9` (graph node
 processes); slices are children `eseq-waa9.10`–`eseq-waa9.17` (§11).

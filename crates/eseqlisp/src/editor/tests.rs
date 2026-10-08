@@ -18079,3 +18079,21 @@ fn a_context_menu_in_an_inactive_tile_keeps_its_focus_across_relayouts() {
         crate::widget_render::clear_overlay();
     }
 }
+
+#[test]
+fn removed_natives_fail_with_their_hint_and_stay_out_of_completion() {
+    let mut runtime = Runtime::new();
+    runtime.register_native("kept-native", |_args, _ctx| Ok(Value::Nil));
+    // Populate the cache first: registering a removed native refreshes it.
+    runtime.completion_symbols();
+    runtime.register_removed_natives([("old-native", "old-native was removed; use new-native")]);
+    let symbols = runtime.completion_symbols();
+    assert!(symbols.iter().any(|name| name == "kept-native"));
+    assert!(!symbols.iter().any(|name| name == "old-native"), "removed names are not completed");
+    assert!(runtime.is_removed_native("old-native"));
+    assert!(!runtime.completion_metadata().contains_key("old-native"), "no docs");
+    runtime.take_status_message();
+    let _ = runtime.eval_str("(old-native 1)");
+    let status = runtime.take_status_message().unwrap_or_default();
+    assert!(status.contains("old-native was removed; use new-native"), "{status}");
+}

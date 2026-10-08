@@ -1,5 +1,7 @@
 # Microtonal scales + scale editor — spec rev 1
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Epic: `eseq-th7i` (filed 2026-10-02), children `.1`–`.7` map to §7 phases 1–7.
 
 ## 1. Goal

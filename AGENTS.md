@@ -289,15 +289,17 @@ Capture scripts contain exactly one declarative project form, followed by ordina
 (capture-project
   (track :sampler :name "Sampler"))
 
-(load "../../scripts/processes/process-inlet-patch-demo.lisp")
+(load "@/scripts/processes/process-inlet-patch-demo.lisp")
 (process-inlet-demo-attach-track 0)
 
-;; Optional: runs after project/process state has populated SEQ.
+;; Optional: runs after the project has loaded and the host kinds
+;; (eseq.kinds) have synced, so t.processes is populated.
 (def capture-after-sync ()
-  (process-panel-select-slot (nth SEQ.process-slots 0)))
+  (let ((t (eseq.effects.devices/track-at 0)))
+    (eseq.effects.process-panel/select-slot (first t.processes))))
 ```
 
-Supported track kinds are `:sampler`, `:instrument`, `:modulator`, `:drum-rack`, and `:layer-rack`; tracks may also declare `:midi-fx` and built-in `:audio-fx`. Use `capture-after-sync` for UI state that depends on populated reactive data, such as selecting a process row or opening an instrument tab. Add durable fixtures under `crates/sequencer/ui/capture-fixtures/`. Full usage is documented in `docs/metal-seq-ui-capture.md`. The capture path is macOS-only because it uses Metal.
+Supported track kinds are `:sampler`, `:instrument`, `:modulator`, `:drum-rack`, and `:layer-rack`; tracks may also declare `:midi-fx` and built-in `:audio-fx`. Use `capture-after-sync` for UI state that depends on populated host state (kind instances), such as selecting a process row or opening an instrument tab. Add durable fixtures under `crates/sequencer/ui/capture-fixtures/`. Full usage is documented in `docs/metal-seq-ui-capture.md`. The capture path is macOS-only because it uses Metal.
 
 ### Patcher visual capture
 

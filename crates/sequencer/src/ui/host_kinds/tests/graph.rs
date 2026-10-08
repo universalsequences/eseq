@@ -92,10 +92,65 @@ impl Harness {
         read(&self.frame.host_kinds.shared.borrow().graphs)
     }
 
-    /// The same expression through the kinds and through the legacy native.
+    /// The same expression through the kinds and through the legacy native
+    /// (`graph-config-value`, a plain read).
     fn same(&mut self, kinds: &str, legacy: &str) {
         let (a, b) = (self.eval_graph(kinds), self.eval_graph(legacy));
         assert_eq!(a, b, "{kinds} vs {legacy}");
+    }
+
+    /// `kinds` reads `model` (one of the model reads below).
+    fn same_as(&mut self, kinds: &str, model: Value) {
+        assert_eq!(self.eval_graph(kinds), model, "{kinds}");
+    }
+
+    /// Graph `gid`'s manifest, its current scene's overrides and the current
+    /// pattern's resolved config.
+    fn graph_model(
+        &self,
+        gid: u64,
+    ) -> (
+        sequencer::graph::GraphManifest,
+        Option<sequencer::graph::ProjectGraphOverrides>,
+        sequencer::graph::GraphRuntimeConfig,
+    ) {
+        let state = &self.shared.state;
+        let manifest = sequencer::lisp_host::published_graph_manifest(state, |id| id == gid)
+            .expect("a published graph");
+        let overrides = sequencer::lisp_host::resolved_graph_overrides_for_manifest(state, &manifest);
+        let config = manifest.runtime_config_with_overrides(overrides.as_ref());
+        (manifest, overrides, config)
+    }
+
+    /// Node `node`'s resolved intrinsic `field` off the model: what the
+    /// removed `graph-node-value` native read (eseq-0l17.81).
+    fn node_value(&self, gid: u64, node: usize, field: &str) -> Value {
+        let (manifest, overrides, config) = self.graph_model(gid);
+        let seed_route = || {
+            sequencer::lisp_host::graph_seed_follows_route(&manifest, overrides.as_ref(), node)
+        };
+        sequencer::lisp_host::graph_node_intrinsic_value(&config.nodes[node], seed_route, field)
+            .unwrap_or_else(|error| panic!("{field}: {error}"))
+    }
+
+    /// Node `node`'s resolved param (else its default): the removed
+    /// `graph-param-value`.
+    fn param_value(&self, gid: u64, node: usize, param: &str) -> Value {
+        let (manifest, _, config) = self.graph_model(gid);
+        number(
+            sequencer::lisp_host::graph_node_param_value(&manifest, &config, node, param)
+                .unwrap_or_else(|| panic!("{param}")),
+        )
+    }
+
+    /// The resolved `param` of edge `from` -> `to`: the removed
+    /// `graph-edge-value`.
+    fn edge_value(&self, gid: u64, from: usize, to: usize, param: &str) -> Value {
+        let (_, _, config) = self.graph_model(gid);
+        let edge = (config.edges.iter())
+            .find(|edge| edge.from == from && edge.to == to)
+            .expect("the edge");
+        number(sequencer::lisp_host::graph_edge_param_value(edge, param).expect(param))
     }
 }
 
@@ -109,9 +164,10 @@ fn map_value<const N: usize>(entries: [(&str, Value); N]) -> Value {
 }
 
 #[test]
-fn graph_fields_read_like_the_legacy_graph_reads() {
+fn graph_fields_read_like_the_model() {
     let mut h = Harness::new();
     let id = h.neural("nn");
+    let nn = id;
     h.eval_graph(
         "(def g (graph-of nn)) (def n0 (nth g.nodes 0)) (def n1 (nth g.nodes 1))
          (def thr (lambda (n) (graph-param-named n \"threshold\")))",
@@ -145,19 +201,13 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
         "(graph-config-value nn :group-coupling-1-2)",
     );
     for field in ["delay", "resolution", "quantize", "seed-on-reset", "group"] {
-        h.same(
-            &format!("n1.{field}"),
-            &format!("(graph-node-value nn 1 :{field})"),
-        );
+        let model = h.node_value(nn, 1, field);
+        h.same_as(&format!("n1.{field}"), model);
     }
-    h.same(
-        "(if n0.seed-route 1 0)",
-        "(graph-node-value nn 0 :seed-route)",
-    );
-    h.same(
-        "(if n1.seed-route 1 0)",
-        "(graph-node-value nn 1 :seed-route)",
-    );
+    let model = h.node_value(nn, 0, "seed-route");
+    h.same_as("(if n0.seed-route 1 0)", model);
+    let model = h.node_value(nn, 1, "seed-route");
+    h.same_as("(if n1.seed-route 1 0)", model);
     // The ring default (:on-create): node 0 seeds from its route, track 0.
     assert_eq!(h.eval_graph("n0.seed-route"), Value::Bool(true));
     assert_eq!(h.eval_graph("(= n0.route (track 0))"), Value::Bool(true));
@@ -169,16 +219,12 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
         h.eval_graph("(list n0.generator n0.restart)"),
         h.eval_graph("(list -1 false)")
     );
-    h.same(
-        "n1.resolution-cycle",
-        "(list (graph-node-value nn 1 :resolution))",
-    );
+    let model = list_value([h.node_value(nn, 1, "resolution")]);
+    h.same_as("n1.resolution-cycle", model);
     // Params and edges register on first read.
     assert!(h.graph_shared(|g| g.node_params.is_empty() && g.node_edges.is_empty()));
-    h.same(
-        "(let ((p (thr n1))) p.value)",
-        "(graph-param-value nn 1 :threshold)",
-    );
+    let model = h.param_value(nn, 1, "threshold");
+    h.same_as("(let ((p (thr n1))) p.value)", model);
     assert_eq!(
         h.eval_graph("(map (lambda (p) p.name) n1.params)"),
         h.eval_graph(
@@ -201,11 +247,13 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
         h.eval_graph("(list (= e01.from n0) (= e01.to n1))"),
         h.eval_graph("(list true true)")
     );
-    h.same("w01.value", "(graph-edge-value nn 0 1 :weight)");
+    let model = h.edge_value(nn, 0, 1, "weight");
+    h.same_as("w01.value", model);
     assert_eq!(h.eval_graph("w01.value"), number(1.0), "the ring");
-    h.same(
+    let model = h.edge_value(nn, 1, 0, "weight");
+    h.same_as(
         "(let ((p (graph-param-named (graph-edge-to n1 0) \"weight\"))) p.value)",
-        "(graph-edge-value nn 1 0 :weight)",
+        model,
     );
     assert_eq!(
         h.eval_graph("(list (= w01.edge e01) w01.node)"),
@@ -222,10 +270,8 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
     );
     h.sync();
     for field in ["delay", "resolution", "quantize", "group"] {
-        h.same(
-            &format!("n1.{field}"),
-            &format!("(graph-node-value nn 1 :{field})"),
-        );
+        let model = h.node_value(nn, 1, field);
+        h.same_as(&format!("n1.{field}"), model);
     }
     assert_eq!(h.eval_graph("n1.delay"), number(3.0));
     assert_eq!(h.eval_graph("(= n1.route (track 1))"), Value::Bool(true));
@@ -234,11 +280,10 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
         h.eval_graph("(list 0 1)")
     );
     assert_eq!(h.eval_graph("n1.seed-route"), Value::Bool(false));
-    h.same(
-        "(let ((p (thr n1))) p.value)",
-        "(graph-param-value nn 1 :threshold)",
-    );
-    h.same("w01.value", "(graph-edge-value nn 0 1 :weight)");
+    let model = h.param_value(nn, 1, "threshold");
+    h.same_as("(let ((p (thr n1))) p.value)", model);
+    let model = h.edge_value(nn, 0, 1, "weight");
+    h.same_as("w01.value", model);
     assert_eq!(h.eval_graph("w01.value"), number(0.25));
     h.same("g.max-poly", "(graph-config-value nn :max-poly)");
     assert_eq!(h.eval_graph("(nth g.group-gain 6)"), number(1.5));
@@ -293,7 +338,7 @@ fn graph_fields_read_like_the_legacy_graph_reads() {
 #[test]
 fn graph_setters_go_through_history_follow_the_value_rule_and_undo() {
     let mut h = Harness::new();
-    h.neural("nn");
+    let nn = h.neural("nn");
     h.eval_graph(
         "(def g (graph-of nn)) (def n1 (nth g.nodes 1))
          (def thr (graph-param-named n1 \"threshold\"))
@@ -306,25 +351,25 @@ fn graph_setters_go_through_history_follow_the_value_rule_and_undo() {
     };
     set(&mut h, "(set! n1.delay 5)");
     assert_eq!(
-        h.eval_graph("(list n1.delay (graph-node-value nn 1 :delay))"),
-        h.eval_graph("(list 5 5)")
+        (h.eval_graph("n1.delay"), h.node_value(nn, 1, "delay")),
+        (number(5.0), number(5.0))
     );
     assert_eq!(h.app.history.undo_len(), entries + 1, "one entry");
     // The current value is no edit.
     set(&mut h, "(set! n1.delay 5)");
     assert_eq!(h.app.history.undo_len(), entries + 1);
     set(&mut h, "(set! n1.resolution \"8t\")");
-    assert_eq!(h.eval_graph("(graph-node-value nn 1 :resolution)"), s("8T"));
+    assert_eq!(h.node_value(nn, 1, "resolution"), s("8T"));
     set(&mut h, "(set! n1.quantize-cycle (list \"16\" \"4\"))");
     assert_eq!(
-        h.eval_graph("(graph-node-value nn 1 :quantize-cycle)"),
+        h.node_value(nn, 1, "quantize-cycle"),
         s("16 4")
     );
     set(&mut h, "(set! n1.route (track 1))");
-    assert_eq!(h.eval_graph("(graph-node-value nn 1 :route)"), number(1.0));
+    assert_eq!(h.node_value(nn, 1, "route"), number(1.0));
     set(&mut h, "(set! n1.seeds (list (track 1) (track 0)))");
     assert_eq!(
-        h.eval_graph("(graph-node-value nn 1 :seed-from)"),
+        h.node_value(nn, 1, "seed-from"),
         h.eval_graph("(list 0 1)")
     );
     set(&mut h, "(set! n1.seed-route true)");
@@ -333,12 +378,12 @@ fn graph_setters_go_through_history_follow_the_value_rule_and_undo() {
     set(&mut h, "(set! n1.seed-on-reset 0.5)");
     set(&mut h, "(set! thr.value 2.5)");
     assert_eq!(
-        h.eval_graph("(graph-param-value nn 1 :threshold)"),
+        h.param_value(nn, 1, "threshold"),
         number(2.5)
     );
     set(&mut h, "(set! w12.value -0.5)");
     assert_eq!(
-        h.eval_graph("(graph-edge-value nn 1 2 :weight)"),
+        h.edge_value(nn, 1, 2, "weight"),
         number(-0.5)
     );
     set(&mut h, "(set! g.max-poly-selection \"Markov\")");
@@ -385,14 +430,15 @@ fn graph_setters_go_through_history_follow_the_value_rule_and_undo() {
         h.graph_undo();
     }
     assert_eq!(h.app.history.undo_len(), entries);
-    h.same("n1.delay", "(graph-node-value nn 1 :delay)");
+    let model = h.node_value(nn, 1, "delay");
+    h.same_as("n1.delay", model);
     assert_eq!(h.eval_graph("n1.delay"), number(1.0));
     assert_eq!(
-        h.eval_graph("(graph-param-value nn 1 :threshold)"),
+        h.param_value(nn, 1, "threshold"),
         number(0.55)
     );
     assert_eq!(
-        h.eval_graph("(graph-edge-value nn 1 2 :weight)"),
+        h.edge_value(nn, 1, 2, "weight"),
         number(1.0),
         "the ring"
     );
@@ -659,6 +705,7 @@ fn a_rack_owned_graph_routes_through_the_racks_members() {
     h.command("instance-create", payload);
     h.sync();
     h.eval_graph("(def g (first (graphs))) (def n2 (nth g.nodes 2))");
+    let gid = num(h.eval_graph("g.gid")) as u64;
     let owner = h.graph_instance("g.owner");
     assert_eq!(h.rt().instance_kind(owner), Some(GROUP));
     assert_eq!(h.eval_graph("g.owner.gid"), number(group as f64));
@@ -668,14 +715,14 @@ fn a_rack_owned_graph_routes_through_the_racks_members() {
     let track = members[1] as f64;
     assert_eq!(h.eval_graph("n2.route.index"), number(track));
     assert_eq!(
-        h.eval_graph("(graph-node-value g.gid 2 :route)"),
+        h.node_value(gid, 2, "route"),
         number(1.0)
     );
     // A set! names a track; the host stores its member index.
     h.eval_graph(&format!("(set! n2.route (track {}))", members[0]));
     h.graph_drain();
     assert_eq!(
-        h.eval_graph("(graph-node-value g.gid 2 :route)"),
+        h.node_value(gid, 2, "route"),
         number(0.0)
     );
     assert_eq!(h.eval_graph("n2.route.index"), number(members[0] as f64));
@@ -694,7 +741,7 @@ fn a_rack_owned_graph_routes_through_the_racks_members() {
 #[test]
 fn graph_undo_restores_only_the_edited_field() {
     let mut h = Harness::new();
-    h.neural("nn");
+    let nn = h.neural("nn");
     h.eval_graph("(def g (graph-of nn)) (def n1 (nth g.nodes 1))");
     let set = |h: &mut Harness, code: &str| {
         h.eval_graph(code);
@@ -713,14 +760,14 @@ fn graph_undo_restores_only_the_edited_field() {
     h.graph_undo();
     assert_eq!(h.eval_graph("n1.delay"), delay);
     assert_eq!(
-        h.eval_graph("(graph-node-value nn 1 :route)"),
+        h.node_value(nn, 1, "route"),
         number(2.0),
         "the route is kept"
     );
     h.graph_redo();
     assert_eq!(
-        h.eval_graph("(list n1.delay (graph-node-value nn 1 :route))"),
-        h.eval_graph("(list 7 2)")
+        (h.eval_graph("n1.delay"), h.node_value(nn, 1, "route")),
+        (number(7.0), number(2.0))
     );
     // A config field.
     let poly = h.eval_graph("g.max-poly");
@@ -780,17 +827,20 @@ fn graph_undo_restores_only_the_edited_field() {
 #[test]
 fn legacy_graph_writes_record_one_entry_per_pass() {
     let mut h = Harness::new();
-    h.neural("nn");
+    let nn = h.neural("nn");
     h.eval_graph(
         "(def g (graph-of nn)) (def n1 (nth g.nodes 1))
          (def thr (graph-param-named n1 \"threshold\"))",
     );
     let read = |h: &mut Harness| {
-        h.eval_graph(
-            "(list (graph-param-value nn 0 :threshold) (graph-param-value nn 1 :threshold)
-                   (graph-node-value nn 1 :delay) (graph-node-value nn 1 :resolution)
-                   (graph-edge-value nn :from 0 :to 1 :weight) (graph-config-value nn :reset-bars))",
-        )
+        list_value([
+            h.param_value(nn, 0, "threshold"),
+            h.param_value(nn, 1, "threshold"),
+            h.node_value(nn, 1, "delay"),
+            h.node_value(nn, 1, "resolution"),
+            h.edge_value(nn, 0, 1, "weight"),
+            h.eval_graph("(graph-config-value nn :reset-bars)"),
+        ])
     };
     let original = read(&mut h);
     let entries = h.app.history.undo_len();
@@ -923,14 +973,21 @@ fn graph_params_keep_their_handles_by_name_across_re_evaluation() {
     assert_eq!(h.graph_instance("(nth n0.params 1)"), pa);
 }
 
-/// Node 2 of `nn`'s patch built through the legacy natives (rand wired into
-/// cmp's `a`, fanned out into mask's `prob`; node 1 one prob slot), and
-/// the kinds' handles on them.
+/// Node 2 of `nn`'s patch: slots added through `graph-node-process-add`
+/// (the expr buffer's native), cables laid through the host kinds'
+/// `edit-process` command as `bind-port!` / `add-fanout!` send it, by id, so
+/// nothing reads (registers) a node's processes (rand wired into cmp's `a`,
+/// fanned out into mask's `prob`; node 1 one prob slot), and the kinds'
+/// handles on them.
 const NODE_PATCH: &str = r#"(def rand-id (graph-node-process-add nn 2 "lane-rand"))
     (def cmp-id (graph-node-process-add nn 2 "lane-cmp"))
     (def mask-id (graph-node-process-add nn 2 "prob-mask"))
-    (graph-node-process-wire nn 2 rand-id :wire cmp-id :a)
-    (graph-node-process-fanout-add nn 2 rand-id :wire mask-id :prob)
+    (def node2-proc (lambda (id) (dict :graph-id nn.id :node 2 :proc-id id)))
+    (def node2-inlet (lambda (id inlet) (merge (node2-proc id) :kind "inlet" :inlet inlet)))
+    (host-command "edit-process"
+      (merge (node2-proc rand-id) :port "wire" :op "bind" :target (node2-inlet cmp-id "a") :all false))
+    (host-command "edit-process"
+      (merge (node2-proc rand-id) :port "wire" :op "add-fanout" :target (node2-inlet mask-id "prob") :all false))
     (def prob-id (graph-node-process-add nn 1 "lane-prob"))"#;
 
 const NODE_HANDLES: &str = r#"(def g (graph-of nn)) (def n1 (nth g.nodes 1)) (def n2 (nth g.nodes 2))
@@ -952,14 +1009,52 @@ impl Harness {
         h
     }
 
-    /// Node `node`'s chain as the legacy native reads it.
-    fn node_chain(&mut self, node: usize) -> Vec<Value> {
-        items(&self.eval_graph(&format!("(graph-node-process-chain nn {node})")))
+    /// `nn`'s graph id.
+    fn nn(&mut self) -> u64 {
+        num(self.eval_graph("nn.id")) as u64
+    }
+
+    /// Node `node`'s chain of graph `gid` off the model (the current
+    /// pattern's resolved config).
+    fn node_chain(&self, gid: u64, node: usize) -> sequencer::process::TrackProcessChain {
+        self.graph_model(gid).2.nodes[node].process_chain.clone()
+    }
+
+    /// Edit node `node`'s chain of graph `gid` from Rust, unrecorded (an
+    /// edit the kinds did not make: they pick it up at the next sync).
+    fn edit_node_chain(
+        &self,
+        gid: u64,
+        node: usize,
+        edit: impl FnOnce(&mut sequencer::process::TrackProcessChain),
+    ) {
+        let state = &self.shared.state;
+        let manifest = sequencer::lisp_host::published_graph_manifest(state, |id| id == gid)
+            .expect("a published graph");
+        sequencer::lisp_host::edit_graph_node_process_chain_now(state, &manifest, node, |chain, _| {
+            edit(chain);
+            Ok(())
+        })
+        .expect("node chain edit");
     }
 }
 
+/// Slot `id` of `chain`.
+fn slot_of(
+    chain: &mut sequencer::process::TrackProcessChain,
+    id: u64,
+) -> &mut sequencer::process::TrackProcessSlot {
+    (chain.slots.iter_mut())
+        .find(|slot| slot.instance_id.0 == id)
+        .expect("the slot")
+}
+
+/// The kinds' node processes read like the model: each slot's identity and
+/// class (the label and as-expr helpers the removed
+/// `graph-node-process-chain` read used), its scalar inlets as the class
+/// declares them, the wiring.
 #[test]
-fn node_processes_read_like_the_legacy_node_patch() {
+fn node_processes_read_like_the_node_patch() {
     let mut h = Harness::node_patch();
     // Nothing reads a node's processes: none is registered.
     let registered = |h: &Harness| h.frame.host_kinds.shared.borrow().lanes.nodes.len();
@@ -967,12 +1062,16 @@ fn node_processes_read_like_the_legacy_node_patch() {
     h.eval_graph(NODE_HANDLES);
     h.sync();
     assert_eq!(registered(&h), 1, "only the node read");
-    let legacy = h.node_chain(2);
+    let gid = h.nn();
+    let model = h.node_chain(gid, 2);
+    let defs = h.shared.state.published_process_authoring().defs;
     assert_eq!(
         h.eval_graph("(len n2.processes)"),
-        number(legacy.len() as f64)
+        number(model.slots.len() as f64)
     );
-    for (index, slot) in legacy.iter().enumerate() {
+    for (index, slot) in model.slots.iter().enumerate() {
+        let def = defs.iter().find(|def| def.name == slot.class_name);
+        let (promoted, reason) = sequencer::lisp_host::process_slot_as_expr(slot, def);
         let p = format!("(nth n2.processes {index})");
         assert_eq!(
             h.eval_graph(&format!(
@@ -981,14 +1080,14 @@ fn node_processes_read_like_the_legacy_node_patch() {
                                       (len p.lanes)))"
             )),
             list_value([
-                get(slot, "instance-id"),
-                get(slot, "class"),
-                get(slot, "label"),
-                get(slot, "enabled"),
-                get(slot, "expr"),
-                get(slot, "known"),
-                get(slot, "promoted-expr"),
-                get(slot, "as-expr-reason"),
+                number(slot.instance_id.0 as f64),
+                s(&slot.class_name),
+                s(&sequencer::lisp_host::graph_node_process_label(&slot.class_name)),
+                Value::Bool(slot.enabled),
+                Value::Bool(sequencer::lisp_host::is_expr_slot(slot)),
+                Value::Bool(def.is_some()),
+                Value::Bool(promoted),
+                reason.map_or(Value::Nil, |reason| s(&reason)),
                 number(index as f64),
                 Value::Bool(true),
                 Value::Nil,
@@ -997,19 +1096,23 @@ fn node_processes_read_like_the_legacy_node_patch() {
             "{p}"
         );
         // Every inlet is a scalar on a node (the class's lane inlets too).
-        let defs = items(&get(slot, "inlet-defs"));
         let inlets = h.eval_graph(&format!(
             "(let ((p {p})) (map (lambda (i) (list i.name i.type i.value i.options)) p.inlets))"
         ));
-        let expected = defs.iter().map(|def| {
-            let options = match get(def, "options") {
-                Value::Nil => list_value([]),
-                options => options,
+        let expected = def.expect("a library class").inlets.iter().map(|inlet| {
+            let value = (slot.inlets.get(&inlet.name))
+                .map(|value| value.to_value())
+                .unwrap_or_else(|| inlet.default.to_value());
+            let options = match &inlet.kind {
+                sequencer::process::ProcessInletKind::Enum(options) => {
+                    list_value(options.iter().map(|option| s(option)))
+                }
+                _ => list_value([]),
             };
             list_value([
-                get(def, "name"),
-                get(def, "kind"),
-                get(def, "value"),
+                s(&inlet.name),
+                s(crate::process_inlet_kind_name(&inlet.kind)),
+                value,
                 options,
             ])
         });
@@ -1045,12 +1148,16 @@ fn node_processes_read_like_the_legacy_node_patch() {
         number(0.0)
     );
 
-    // Legacy edits flow into the kinds at the next sync, on the same
-    // instances.
+    // Edits the kinds did not make (the expr buffer's native, a Rust edit)
+    // flow into the kinds at the next sync, on the same instances.
     let rnd = h.graph_instance("rnd");
-    h.eval_graph("(graph-node-process-enable nn 2 rand-id false)");
+    let (rand_id, mask_id) = (num(h.eval_graph("rand-id")) as u64, num(h.eval_graph("mask-id")) as u64);
+    h.edit_node_chain(gid, 2, |chain| slot_of(chain, rand_id).enabled = false);
     h.eval_graph("(graph-node-process-inlet nn 2 rand-id :lo 3)");
-    h.eval_graph("(graph-node-process-move nn 2 mask-id -2)");
+    h.edit_node_chain(gid, 2, |chain| {
+        let mask = chain.slots.remove(2);
+        chain.slots.insert(0, mask);
+    });
     h.sync();
     assert_eq!(
         h.eval_graph("(list rnd.enabled lo.value rnd.index mask.index)"),
@@ -1059,14 +1166,16 @@ fn node_processes_read_like_the_legacy_node_patch() {
     assert_eq!(h.graph_instance("(nth n2.processes 1)"), rnd);
     // Removing a slot drops its instance and the cables into it.
     let mask = h.graph_instance("mask");
-    h.eval_graph("(graph-node-process-remove nn 2 mask-id)");
+    h.edit_node_chain(gid, 2, |chain| {
+        let id = sequencer::process::ProcessInstanceId(mask_id);
+        assert!(chain.remove_slot_and_wires(id));
+    });
     h.sync();
     assert!(!h.rt().instance_is_live(mask));
     assert_eq!(h.eval_graph("(len wire.fanout)"), number(0.0));
 
     // The latest run error of a slot reads under its own id (the node
     // runner's).
-    let rand_id = num(h.eval_graph("rand-id")) as u64;
     let errors = std::collections::BTreeMap::from([(rand_id, "boom".to_string())]);
     h.shared.state.publish_process_run_errors(errors);
     h.sync();
@@ -1078,13 +1187,19 @@ fn node_process_setters_record_the_node_chain_and_follow_the_value_rule() {
     let mut h = Harness::node_patch();
     h.eval_graph(NODE_HANDLES);
     h.sync();
+    let gid = h.nn();
+    // Where slot 0's (rnd's) `out` port writes, on the model.
+    let out_target = |h: &Harness| match h.node_chain(gid, 2).slots[0].bindings.get("out") {
+        Some(Some(sequencer::process::ParamTarget::StepParam { param })) => s(param),
+        other => panic!("out is mapped: {other:?}"),
+    };
     let entries = h.app.history.undo_len();
     let set = |h: &mut Harness, code: &str| {
         h.eval_graph(code);
         h.graph_drain();
     };
     set(&mut h, "(set! rnd.enabled false)");
-    assert_eq!(get(&h.node_chain(2)[0], "enabled"), Value::Bool(false));
+    assert!(!h.node_chain(gid, 2).slots[0].enabled);
     assert_eq!(h.app.history.undo_len(), entries + 1, "one entry");
     // The current value is no edit.
     set(&mut h, "(set-process-enabled! rnd false)");
@@ -1098,17 +1213,11 @@ fn node_process_setters_record_the_node_chain_and_follow_the_value_rule() {
     );
     set(&mut h, "(bind-port! out \"Vel\")");
     assert_eq!(h.eval_graph("out.target-step-param"), s("velocity"));
-    assert_eq!(
-        get(&items(&get(&h.node_chain(2)[0], "ports"))[0], "mapped-to"),
-        s("velocity")
-    );
+    assert_eq!(out_target(&h), s("velocity"));
     // `delay` is a payload field, not a step param.
     set(&mut h, "(bind-port! out \"delay\")");
     assert_eq!(h.eval_graph("out.target-step-param"), s("delay"));
-    assert_eq!(
-        get(&items(&get(&h.node_chain(2)[0], "ports"))[0], "mapped-to"),
-        s("delay")
-    );
+    assert_eq!(out_target(&h), s("delay"));
     set(&mut h, "(bind-port! wire (part mask.inlets \"prob\"))");
     assert_eq!(
         h.eval_graph("(list (= wire.target-process mask) wire.target-inlet)"),
@@ -1224,12 +1333,16 @@ fn node_processes_sync_with_their_node_and_go_with_it() {
     for _ in 0..3 {
         h.sync();
     }
-    h.eval_graph("(graph-node-process-enable nn 1 prob-id false)");
+    let gid = h.nn();
+    let id = |h: &mut Harness, name: &str| num(h.eval_graph(name)) as u64;
+    let prob_id = id(&mut h, "prob-id");
+    h.edit_node_chain(gid, 1, |chain| slot_of(chain, prob_id).enabled = false);
     h.eval_graph("(graph-param nn 2 :threshold 1.5)");
     h.sync();
     assert_eq!(process_syncs(&h), synced, "node 2's chain did not move");
     // Its own chain moving re-derives it once.
-    h.eval_graph("(graph-node-process-enable nn 2 cmp-id false)");
+    let cmp_id = id(&mut h, "cmp-id");
+    h.edit_node_chain(gid, 2, |chain| slot_of(chain, cmp_id).enabled = false);
     h.sync();
     h.sync();
     assert_eq!(process_syncs(&h), synced + 3);
@@ -1326,7 +1439,11 @@ fn node_process_errors_and_scopes_are_live_observed_gated_and_drop_with_their_sl
     // A removed slot's process and cells go stale, and the loop reads
     // nothing more for them.
     let rnd = h.graph_instance("rnd");
-    h.eval_graph("(graph-node-process-remove nn 2 rand-id)");
+    let gid = h.nn();
+    h.edit_node_chain(gid, 2, |chain| {
+        let id = sequencer::process::ProcessInstanceId(rand_id);
+        assert!(chain.remove_slot_and_wires(id));
+    });
     h.graph_drain();
     assert!(!h.rt().instance_is_live(rnd) && !h.rt().instance_is_live(held));
     let gone = (

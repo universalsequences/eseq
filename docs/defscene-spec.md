@@ -1,5 +1,7 @@
 # defscene Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 A scene-varying storage class for eseqlisp values. `defscene` declares a named
 slot whose value is stored **per pattern**, serialized with the project, read
 as a bare symbol, and written with `set!`:

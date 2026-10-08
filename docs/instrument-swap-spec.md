@@ -1,5 +1,7 @@
 # Spec: Ableton-style instrument swap (rev 1)
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Replace the instrument on an *existing* track — by dragging an instrument from
 the browser onto the track, or by double-clicking an instrument in the
 Instruments tab — instead of today's only option of adding a whole new track

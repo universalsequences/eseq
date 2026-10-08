@@ -1,5 +1,7 @@
 # Jaki Trig Modes — neural (and other) sequencers play jaki
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 2, 2026-09-29 — §2-§6 BUILT (eseq-jtrg.1-.5). Epic `eseq-jtrg`;
 §7 is `eseq-jtrg.6`.
 

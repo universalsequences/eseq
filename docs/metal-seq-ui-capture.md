@@ -82,9 +82,11 @@ cargo run -p sequencer --bin metal_seq -- capture \
 (load "@/scripts/processes/process-inlet-patch-demo.lisp")
 (process-inlet-demo-attach-track 0)
 
-;; Optional: runs after the project has been synchronized into SEQ.
+;; Optional: runs after the project has loaded and the host kinds
+;; (eseq.kinds) have synced, so t.processes is populated.
 (def capture-after-sync ()
-  (process-panel-select-slot (nth SEQ.process-slots 0)))
+  (let ((t (eseq.effects.devices/track-at 0)))
+    (eseq.effects.process-panel/select-slot (first t.processes))))
 ```
 
 Supported track forms are:

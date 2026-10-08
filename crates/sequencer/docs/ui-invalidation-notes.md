@@ -1,5 +1,7 @@
 # UI Invalidation Notes
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Goal: keep large declarative Lisp UIs fast without requiring hand-tuned buffer structure.
 
 ## Core idea

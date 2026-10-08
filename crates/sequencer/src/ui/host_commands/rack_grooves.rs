@@ -2,7 +2,7 @@ use crate::*;
 
 use sequencer::app::rack_grooves::RackGrooveExtractRequest;
 use sequencer::groove::library::{
-    delete_library_groove, load_library_groove, rename_library_groove,
+    load_library_groove,
 };
 use sequencer::groove::{
     GrooveChoice, GrooveExtractOptions, RackGrooveSettings, GROOVE_PERIOD_ONE_BAR,
@@ -17,30 +17,18 @@ use sequencer::groove::{
 pub(super) const COMMANDS: &[&str] = &[
     "extract-rack-groove",
     "set-rack-groove",
-    "set-rack-groove-amount",
-    "set-rack-groove-enabled",
-    "set-rack-groove-scale",
-    "set-rack-clip-own-groove",
     "apply-rack-groove-to-all-clips",
-    "set-rack-groove-pad-amount",
-    "set-rack-groove-pad-enabled",
-    "rename-rack-groove",
     "duplicate-pool-groove",
     "delete-rack-groove",
     "save-groove-to-library",
-    "rename-library-groove",
-    "delete-library-groove",
 ];
 
 /// Commands that act on the pool or the library, not on one rack: no
 /// `group-id` needed.
 const POOL_COMMANDS: &[&str] = &[
-    "rename-rack-groove",
     "duplicate-pool-groove",
     "delete-rack-groove",
     "save-groove-to-library",
-    "rename-library-groove",
-    "delete-library-groove",
 ];
 
 /// What an applied groove command changed, so the caller republishes only
@@ -56,8 +44,7 @@ pub(crate) enum RackGrooveEdit {
 }
 
 /// Which groove amount an amount edit sets: the rack's timing, velocity or
-/// random amount, or one pad's share (by its note). Shared by
-/// `set-rack-groove-amount` / `set-rack-groove-pad-amount` and the kinds'
+/// random amount, or one pad's share (by its note): the kinds'
 /// `set-groove`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Amount {
@@ -170,19 +157,6 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
     let target = |app: &app::App| {
         rack_of(app, group).map(|rack| rack.groove_for_clip(clip).clone())
     };
-    // An edit to a clip that still follows the rack gives it its own groove
-    // (copy-on-write): a new entry the buffer must learn about, so even an
-    // amount drag's first step republishes the structure.
-    let follows_rack = |app: &app::App| {
-        clip.is_some_and(|clip| rack_of(app, group).is_some_and(|rack| rack.clip_groove(clip).is_none()))
-    };
-    let amount_edit = |changed: bool, forked: bool| {
-        if changed && forked {
-            RackGrooveEdit::Structure
-        } else {
-            RackGrooveEdit::Amount(changed)
-        }
-    };
     match name {
         "extract-rack-groove" => {
             let request = extract_request_from_payload(payload)?;
@@ -213,83 +187,6 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
                 app.set_rack_active_groove_recorded(group, clip, active)?;
             }
             Ok(RackGrooveEdit::Structure)
-        }
-        // `amount` is "timing", "velocity" or "random"; the value is clamped
-        // into the amount's range. A knob drag coalesces into one undo step.
-        "set-rack-groove-amount" => {
-            let key = extract_string_from_payload(payload, "amount").unwrap_or_default();
-            let amount =
-                Amount::from_key(&key).ok_or_else(|| format!("Unknown groove amount {key:?}"))?;
-            let value = extract_f32_from_payload(payload, "value")
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| format!("{name} needs a finite value"))?;
-            let forked = follows_rack(app);
-            let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
-                amount.set(settings, value)
-            })?;
-            Ok(amount_edit(changed, forked))
-        }
-        // The rack groove buffer's on/off switch (keeps the selection).
-        "set-rack-groove-enabled" => {
-            let enabled = extract_bool_from_payload(payload, "enabled");
-            match app.set_rack_groove_enabled_recorded(group, clip, enabled) {
-                Ok(()) => Ok(RackGrooveEdit::Structure),
-                Err(_) if target(app).is_some_and(|settings| settings.enabled == enabled) => {
-                    Ok(RackGrooveEdit::Structure)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        // The groove's time scale: 0.5, 1 or 2 (the buffer's Scale dropdown).
-        "set-rack-groove-scale" => {
-            let scale = extract_f32_from_payload(payload, "scale")
-                .ok_or_else(|| format!("{name} needs a scale"))?;
-            match app.set_rack_groove_scale_recorded(group, clip, scale) {
-                Ok(()) => Ok(RackGrooveEdit::Structure),
-                Err(_) if target(app).is_some_and(|settings| settings.scale == scale) => {
-                    Ok(RackGrooveEdit::Structure)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        // One pad's share of the groove, 0..1 (the buffer's Amt column). A
-        // drag coalesces with the rack's amount knobs into one undo step.
-        "set-rack-groove-pad-amount" => {
-            let pad_note = pad_note(payload, name)?;
-            let value = extract_f32_from_payload(payload, "value")
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| format!("{name} needs a finite value"))?;
-            require_pad(app, group, pad_note)?;
-            let forked = follows_rack(app);
-            let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
-                Amount::Pad(pad_note).set(settings, value)
-            })?;
-            Ok(amount_edit(changed, forked))
-        }
-        // Include a pad in the groove or leave it straight.
-        "set-rack-groove-pad-enabled" => {
-            let pad_note = pad_note(payload, name)?;
-            let enabled = extract_bool_from_payload(payload, "enabled");
-            match app.set_rack_groove_pad_enabled_recorded(group, clip, pad_note, enabled) {
-                Ok(()) => Ok(RackGrooveEdit::Structure),
-                Err(_) if target(app).is_some_and(|settings| settings.pad(pad_note).enabled == enabled) => {
-                    Ok(RackGrooveEdit::Structure)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        // Give the clip its own groove (`own` true), or return it to the
-        // rack's.
-        "set-rack-clip-own-groove" => {
-            let clip = clip.ok_or_else(|| format!("{name} needs a clip id"))?;
-            let own = extract_bool_from_payload(payload, "own");
-            match app.set_rack_clip_own_groove_recorded(group, clip, own) {
-                Ok(()) => Ok(RackGrooveEdit::Structure),
-                Err(_) if rack_of(app, group).is_some_and(|rack| rack.clip_groove(clip).is_some() == own) => {
-                    Ok(RackGrooveEdit::Structure)
-                }
-                Err(error) => Err(error),
-            }
         }
         // The groove `clip` plays becomes the rack's, for every clip.
         "apply-rack-groove-to-all-clips" => {
@@ -322,26 +219,18 @@ fn require_pad(app: &app::App, group: u64, pad_note: i32) -> Result<(), String> 
 }
 
 
-/// Pool and library edits. `rename-rack-groove` / `delete-rack-groove` act
-/// on the project pool (deleting a groove turns it off on every rack using
-/// it, in one undo step); the library commands edit user `.groove` files,
-/// which is not undoable.
+/// Pool and library edits. `duplicate-pool-groove` / `delete-rack-groove`
+/// act on the project pool (deleting a groove turns it off on every rack
+/// using it, in one undo step); `save-groove-to-library` writes a user
+/// `.groove` file. (The legacy rename / amount / pad / library-file
+/// commands went in eseq-0l17.81: the kinds' `set-groove` and
+/// `set-pool-groove` replace them.)
 fn apply_pool_command(
     name: &str,
     payload: &Value,
     app: &mut app::App,
 ) -> Result<RackGrooveEdit, String> {
-    let stem = || {
-        extract_string_from_payload(payload, "stem")
-            .filter(|stem| !stem.trim().is_empty())
-            .ok_or_else(|| format!("{name} needs a library groove stem"))
-    };
     match name {
-        "rename-rack-groove" => {
-            let groove = groove_id(payload, name)?;
-            let new_name = extract_string_from_payload(payload, "name").unwrap_or_default();
-            app.rename_pool_groove_recorded(groove, &new_name)?;
-        }
         "duplicate-pool-groove" => {
             let groove = groove_id(payload, name)?;
             app.duplicate_pool_groove_recorded(groove)?;
@@ -354,15 +243,6 @@ fn apply_pool_command(
             let groove = groove_id(payload, name)?;
             let new_name = extract_string_from_payload(payload, "name");
             app.save_pool_groove_to_library(groove, new_name.as_deref())?;
-        }
-        "rename-library-groove" => {
-            let new_name = extract_string_from_payload(payload, "name").unwrap_or_default();
-            rename_library_groove(&stem()?, &new_name)
-                .map_err(|error| format!("Could not rename the groove: {error}"))?;
-        }
-        "delete-library-groove" => {
-            delete_library_groove(&stem()?)
-                .map_err(|error| format!("Could not delete the groove: {error}"))?;
         }
         other => return Err(format!("Unknown groove command {other}")),
     }
@@ -390,14 +270,9 @@ pub(crate) fn delete_pool_groove_confirm_message(groove: &str, racks: &[String])
     )
 }
 
-/// "Delete library groove 'X'? Its file is deleted; this cannot be undone."
-pub(crate) fn delete_library_groove_confirm_message(groove: &str) -> String {
-    format!("Delete library groove '{groove}'? Its file is deleted; this cannot be undone.")
-}
-
 /// Commands the host confirms first (docs/rack-groove-spec.md, "Rev 2
 /// UI"): deleting a pool groove some rack plays (the message lists the
-/// racks) and deleting a user library file (not undoable). Returns the
+/// racks). Returns the
 /// confirm message and the Lisp payload that reruns the command with
 /// `:confirmed true`; `None` runs the command at once.
 pub(crate) fn confirm_before(
@@ -425,23 +300,6 @@ pub(crate) fn confirm_before(
                 delete_pool_groove_confirm_message(&groove.name, &racks),
                 format!(
                     "(host-command \"delete-rack-groove\" (dict :groove-id {id} :confirmed true))"
-                ),
-            ))
-        }
-        "delete-library-groove" => {
-            let stem = extract_string_from_payload(payload, "stem")?;
-            let label = sequencer::groove::library::list_groove_library()
-                .into_iter()
-                .find(|entry| {
-                    entry.tier == sequencer::groove::library::GrooveLibraryTier::User
-                        && entry.stem == stem
-                })
-                .map_or_else(|| stem.clone(), |entry| entry.name);
-            Some((
-                delete_library_groove_confirm_message(&label),
-                format!(
-                    "(host-command \"delete-library-groove\" (dict :stem {} :confirmed true))",
-                    super::file_menu::lisp_string(&stem)
                 ),
             ))
         }

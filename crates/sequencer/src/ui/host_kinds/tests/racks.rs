@@ -634,16 +634,14 @@ fn the_racks_own_groove_is_clip_0_in_every_command() {
     assert_eq!(h.editor.minibuffer, None);
     assert_eq!(h.eval_7h("rc.own-groove"), Value::Bool(false));
     assert_eq!(h.rack(gid).groove.timing_amount, 1.25);
-    // The legacy commands take 0 for the rack's own too (and -1, as the
-    // buffer sends it).
-    for (clip, timing) in [(0, 0.5), (-1, 0.25)] {
-        h.run_7h(&format!(
-            "(host-command \"set-rack-groove-amount\"
-               (dict :group-id g.gid :clip-id {clip} :amount \"timing\" :value {timing}))"
-        ));
-        app::edit::finish_active_gesture(&mut h.app);
-        assert_eq!(h.rack(gid).groove.timing_amount, timing, "clip-id {clip}");
-    }
+    // `set-groove` names the rack's own as clip 0 (what `groove-clip-id`
+    // sends for a rack groove).
+    h.run_7h(
+        "(host-command \"set-groove\"
+           (dict :group-id g.gid :clip-id 0 :field \"timing\" :value 0.5))",
+    );
+    app::edit::finish_active_gesture(&mut h.app);
+    assert_eq!(h.rack(gid).groove.timing_amount, 0.5, "clip-id 0");
 }
 
 #[test]

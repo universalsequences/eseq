@@ -204,8 +204,8 @@ pub(super) fn apply_process_edit(
     }
 }
 
-/// `edit` on slot `instance_id` of a graph node's `chain`, as the legacy
-/// `graph-node-process-*` natives edit it: the chain is the node's own (no
+/// `edit` on slot `instance_id` of a graph node's `chain` (as the removed
+/// `graph-node-process-*` wiring natives did): the chain is the node's own (no
 /// project layer to fork, no roster), so every edit writes the slot itself.
 /// Returns whether the chain changed; a slot, fan-out entry or move target
 /// that is gone is an error.

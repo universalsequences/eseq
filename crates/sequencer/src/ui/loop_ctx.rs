@@ -160,9 +160,6 @@ pub(crate) struct FrameDiffState {
     /// transitions (which never bump the real pattern epoch) still trigger
     /// the full pattern-switch resync.
     pub(crate) prev_song_row_mirror_epoch: u64,
-    /// (scheduler snapshot version, published sequencers version, pattern)
-    /// at the last sweep of tracked graph reads (`queue_graph_read_invalidations`).
-    pub(crate) prev_graph_read_key: (u64, u64, usize),
     /// (instance revision, kind registry version) at the last instance sync.
     pub(crate) prev_instance_key: (u64, u64, u64, u64),
     pub(crate) prev_current_track: usize,

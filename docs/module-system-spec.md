@@ -1,5 +1,7 @@
 # Module System — Namespaces, Imports, and Packages for eseqlisp
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 3, 2026-08-11 — surface syntax locked (`module` / `import` /
 `/` qualifier / explicit exports); slice 1 scoped with the sdf stdlib conversion
 as the acceptance test; §6.1 adds `override` (advice-style, survives owner

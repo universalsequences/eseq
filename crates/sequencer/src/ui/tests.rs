@@ -13059,7 +13059,7 @@
         };
         // Apply drained host commands the way the production loop seams do:
         // song editing primitives through apply_song_edit_command, the
-        // transport-side selection/region commands through their app methods.
+        // selection/region setters through the arrangement host commands.
         let apply_pending_song_commands = |editor: &mut Editor, app: &mut app::App| {
             let commands = editor.drain_host_commands();
             for command in commands {
@@ -13076,39 +13076,12 @@
                     }
                 };
                 match name.as_str() {
-                    "song-select-clip" => {
-                        let track = field("track").expect("select track") as usize;
-                        let clip_id = sequencer::sequencer::ClipId(
-                            field("clip-id").expect("select clip id") as u64,
-                        );
-                        let span = match (field("start"), field("end")) {
-                            (Some(start), Some(end)) => Some((start, end)),
-                            _ => None,
-                        };
-                        app.select_song_clip_span(track, clip_id, span)
-                            .expect("select song clip");
-                    }
-                    "song-deselect-clip" => {
-                        app.set_song_clip_selection(None);
-                    }
-                    "song-set-region" => {
-                        let scene_lane = matches!(
-                            &payload,
-                            Value::Map(map) if matches!(
-                                map.get("scene-lane").map(|cell| cell.borrow().clone()),
-                                Some(Value::Bool(true))
-                            )
-                        );
-                        app.set_song_region(app::song_region::SongRegionSelection::new_in_lane(
-                            field("track-a").expect("region track-a") as usize,
-                            field("track-b").expect("region track-b") as usize,
-                            field("start").expect("region start"),
-                            field("end").expect("region end"),
-                            scene_lane,
-                        ));
-                    }
-                    "song-clear-region" => {
-                        app.clear_song_region();
+                    // The arrangement kinds' selection setters
+                    // (`song.bound-clip`, `select-region!`).
+                    "set-song" | "set-song-region" => {
+                        crate::host_commands::apply_capture_selection_command(&name, &payload, app)
+                            .expect("a selection command")
+                            .expect("apply the selection");
                     }
                     "song-set-arr-cursor" => {
                         let beat = field("time").expect("cursor time");

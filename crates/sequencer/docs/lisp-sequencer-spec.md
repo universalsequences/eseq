@@ -1,5 +1,7 @@
 # Lisp Sequencer Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Goal
 
 Generalize the sequencing model so that arbitrary sequencers — from a four-line chord sequencer to a Jaki-Liebezeit dot-dash rhythm engine to something as complex as the neural sequencer — can be authored **in lisp, in a single file, with their UI controls and visualizations declared inline next to the logic**. The neural sequencer (`neural.rs`, [neural-sequencer-spec.md](neural-sequencer-spec.md)) becomes the first *native* instance of a shared substrate; the lisp tier becomes the *open* instance of the same substrate. The two are deliberately kept as two faces of one system, not two separate features.

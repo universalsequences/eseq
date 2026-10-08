@@ -1,5 +1,7 @@
 # Macro / Parameter-Mapping Spec & Implementation Plan
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft / not yet implemented (rev 2 — updated after the def-process layer
 landed; seams re-verified 2026-07-11)
 Scope: Phases 1–4 (engine override, write path + commands, mapping-mode UI,

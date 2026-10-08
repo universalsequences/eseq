@@ -1,5 +1,11 @@
 # UI Performance Tuning
 
+> The dated investigations below name the legacy reactive layer (`SEQ.*`
+> fields, `SEQV`, `reactive-get`, the tracked `graph-*-value` reads): it was
+> removed in eseq-0l17.22 (kind bindings, docs/kind-bindings-spec.md). Read
+> those names as history; a trace filter today names the kind fields a view
+> reads, not `SEQ.*`.
+
 Use this process when a UI action feels slow. The goal is not merely to make a
 function faster; it is to make the exact user-visible interaction faster without
 skipping required state, layout, or render work.

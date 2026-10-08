@@ -1,5 +1,7 @@
 # Process lane editing — 2026-09-14
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Tracked as `eseq-y5pa`.
 
 Expanded sequencer process lanes previously issued one host command and one

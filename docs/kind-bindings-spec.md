@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal A (.78: the host's `SEQ` / `SEQV` gone), B (.77), D (.79: the buffer-name liveness gates collapsed onto the observed bits) and E (.80: the legacy binding language forms removed, the host-less test mailbox moved to a Rust map) built, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal A (.78: the host's `SEQ` / `SEQV` gone), B (.77), D (.79: the buffer-name liveness gates collapsed onto the observed bits), E (.80: the legacy binding language forms removed, the host-less test mailbox moved to a Rust map) and F (.81: the legacy-only natives and docs) built, eseq-0l17.22 (the legacy reactive layer) done, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -1026,11 +1026,16 @@ Built (eseq-0l17.23):
 
 ## 11. Migration
 
-- `SEQ.x`, `bind-seq`, `bind-seq-nth`, `bind`, `reactive-get` kept working
-  while content was ported; the host published both the legacy names and
-  the kind fields, then removed the legacy names per area. Removed since
-  eseq-0l17.78 (the `SEQ`/`SEQV` publishers) and .80 (the language forms):
-  each is now a compile error with a migration hint (§13 stage 8 .80 note).
+- Removed in eseq-0l17.22 (done; its chunks .76–.81). `SEQ.x`, `bind-seq`,
+  `bind-seq-nth`, `bind`, `reactive-get` kept working while content was
+  ported; the host published both the legacy names and the kind fields,
+  then removed the legacy names per area. Removed since eseq-0l17.78 (the
+  `SEQ`/`SEQV` publishers) and .80 (the language forms): each is now a
+  compile error with a migration hint (§13 stage 8 .80 note). The
+  legacy-only natives went in .81 (the tracked `graph-*-value` reads and
+  their `__graph` namespace, the test-only `graph-node-process-*` natives,
+  `graph-route-tracks`, the song selection natives): each fails with a
+  message naming its kind replacement (§13 stage 8 .81 note).
 - Existing `def-kind`s (`neural`, `jaki`) are unaffected; their numeric
   `:state` fields additionally become bindable (§3.3).
 - `:bindable` is accepted and ignored (§7.3); since eseq-0l17.80 it warns
@@ -1542,7 +1547,8 @@ its instance and field.
      `song-loop-enabled`, `song-capture-failed` / `-error`); the natives
      `seq-song-select-clip`, `-deselect-clip`, `-set-region`,
      `-clear-region` and `seq-arrangement-clip-set-source` (script API, no
-     factory caller now).
+     factory caller now; done: removed in eseq-0l17.81 with their host
+     commands).
    - **Tests.** `host_kinds::tests::arrangement_view` (Distro root): the
      file uses no legacy form; the lanes bind `song.position` and the four
      view singletons; a title-bar click binds the clip and lights only its
@@ -2192,7 +2198,10 @@ its instance and field.
      registration, test seeds; `engine.compiling` covers it).
      `PENDING_MACRO_IMPORTS` is empty: track-panels calls no
      `eseq.materials` macro, so it takes no import.
-   - **Remains (eseq-0l17.22, after eseq-0l17.19):** the panels still lay
+   - **Remains (eseq-0l17.22, after eseq-0l17.19; done: the structure
+     lists went with `SEQ` in .78, the param value publishers with them;
+     only the host-less seeds still key on the test dicts' `*-field`
+     strings, see the .22 closing note):** the panels still lay
      out from `SEQ.instrument-panel` / `effects` / `midi-effects` /
      `bus-effects`: `buffers.lisp`, their reader, is the drum rack lane's
      (.19), and `eseq.effects/device-panel` shares its dicts; the param
@@ -2914,7 +2923,9 @@ its instance and field.
      `NODE_SOUNDING_STRIDE`, `SequencerState::graph_node_sounding_at`); the
      `graph-node-lane-patch` native and its builder; the Rust tests that
      pinned them (ported to value reads or deleted as parity checks).
-   - **Kept** (eseq-0l17.22): the tracked value reads `graph-node-value`,
+   - **Kept** (eseq-0l17.22; done in eseq-0l17.81: all removed but
+     `graph-config-value`, now a plain read, and the expr-buffer natives):
+     the tracked value reads `graph-node-value`,
      `graph-param-value`, `graph-edge-value` (no content reader; Rust tests
      and scripts) and `graph-config-value` (the demos' and the kind's
      on-create inits); the node-process natives no content calls any more,
@@ -3095,7 +3106,7 @@ its instance and field.
      `track-colors`, `current-track`, `playing` (many), the
      `set-track-plock-entry` / `clear-track-plock-entry` commands
      (effects/track-panels), `seq-set-process-lane-step`
-     (step-grid-interactions) and the `track-<t>-rack-macro-<k>-name`
+     (step-grid-interactions; removed in eseq-0l17.81) and the `track-<t>-rack-macro-<k>-name`
      fields (macro-state, track-panels).
    - **Tests.** `host_kinds::tests::tracker_view` (Distro root): the file
      uses no legacy form and no SEQV channel; the import installs and
@@ -3249,17 +3260,20 @@ its instance and field.
      content reader left; published with the mixer and per-track list
      families), `SEQ.track-names` (the param words' track list rides it),
      `SEQ.scene-launch-quantize` (the host kinds' launch-quantize source),
-     `track-colors`, `current-track`, `num-tracks` (step-grid, unloaded), and
-     the legacy pad map and groove host commands. Capture applies the kind
-     setters too (`rack_kinds::apply_command`), so these have no production
-     sender left (content, scripts, tools or capture fixtures):
-     `set-rack-pad-note`, `set-rack-pad-choke-group`, `set-rack-pad-role`,
-     `rename-rack-clip`, `set-rack-groove-amount`,
+     `track-colors`, `current-track`, `num-tracks` (step-grid, unloaded)
+     (done: gone with `SEQ`, .78), and the legacy pad map and groove host
+     commands (done: removed in eseq-0l17.81 with their capture routing;
+     no sender was left in content, scripts, tools, capture fixtures,
+     the agent tools or replays; the one test that sent one,
+     `racks::the_racks_own_groove_is_clip_0_in_every_command`, now sends
+     `set-groove`): `set-rack-pad-note`, `set-rack-pad-choke-group`,
+     `set-rack-pad-role`, `rename-rack-clip`, `set-rack-groove-amount`,
      `set-rack-groove-enabled`, `set-rack-groove-scale`,
      `set-rack-clip-own-groove`, `set-rack-groove-pad-amount`,
      `set-rack-groove-pad-enabled`, `rename-rack-groove`,
-     `rename-library-groove` and `delete-library-groove`; the groove
-     actions still send `set-rack-groove` (`use-library-groove!`),
+     `rename-library-groove` and `delete-library-groove` (with its confirm;
+     a user library file has no rename or delete in the UI now, as before:
+     nothing sent them). The groove actions still send `set-rack-groove` (`use-library-groove!`),
      `extract-rack-groove`, `apply-rack-groove-to-all-clips`,
      `duplicate-pool-groove`, `delete-rack-groove` and
      `save-groove-to-library`.
@@ -3519,7 +3533,7 @@ its instance and field.
      (`ESEQ_CONFIG_DIR` pointing at a copy) all five match. A user init
      that reads `SEQ` must move to the kinds (`track.active-notes`,
      `track.color`).
-   - **Remains (eseq-0l17.22):** the host-less test harnesses
+   - **Remains (eseq-0l17.22; done in .80, the mailbox is a Rust map):** the host-less test harnesses
      (`full_grid_editor_*`, the panel seeds, `state_values::tests` and the
      `*_ui_tests.rs` panel tests) still register a test-local `SEQ`
      namespace as their seed mailbox: `panel_kinds_seed` reads the
@@ -3666,6 +3680,149 @@ its instance and field.
      moved to `#'APP.x`, `APP.x` and `(set! APP.x v)`; the `bind-nth` meter
      tests use a test native over `ReactiveBindingStore::indexed_float_ref`;
      the generic reactive store tests stay.
+   Built (stage 8, eseq-0l17.81, legacy removal F): the legacy-only
+   natives and the docs.
+   - **Graph reads.** `graph-node-value`, `graph-param-value` and
+     `graph-edge-value` are gone with the `__graph` tracked-read machinery
+     (`GRAPH_READ_REACTIVE_NAMESPACE`, the read keys and scopes, the
+     per-write `invalidate_graph_reads`, the tick's
+     `queue_graph_read_invalidations` sweep and its
+     `FrameDiffState::prev_graph_read_key`, and the per-thread runtime
+     config memo that only those reads needed). eseqlisp's
+     `NativeContext::track_reactive_read_with_generation` and
+     `invalidate_subscribed_reactive_fields` (and the VM's
+     `inject_reactive_read_with_generation`) had no other user and went
+     too; plain `track_reactive_read` and the queued namespace
+     invalidation (scene slots) stay. `graph-config-value` stays as a
+     plain read: its three content callers (the group-matrix and
+     variable-reset demos, alez.neural's `:on-create` ring) read it once,
+     so nothing to port. The legacy `graph-*` writes no longer re-run
+     readers; the kinds pick the change up at their next sync, as they did.
+   - **Node patch natives.** `graph-node-process-chain`, `-classes`,
+     `-enable`, `-remove`, `-move`, `-wire`, `-unwire`, `-fanout-add`,
+     `-fanout-remove` and `-map` are gone (ten natives; the plan's
+     `-history` is the undo host command the remaining natives still
+     queue, not a native), with `graph_node_process_slot_value`. The
+     expr buffer's natives stay (`-add`, `-inlet`, `-expr-set`,
+     `-expr-source`, `-promote(-check)`, `-rebind-class`, `-edit-as-expr`,
+     `-slot?`, `graph-node-patch-namespace`), now untracked reads.
+     `graph-route-tracks` is gone.
+   - **Song natives.** `seq-song-select-clip`, `-deselect-clip`,
+     `-set-region`, `-clear-region`, `seq-arrangement-clip-set-source` and
+     `seq-set-process-lane-step` are gone (setting a lane clip's source to
+     empty, `seq-arrangement-clip-set-source clip nil`, has no kind
+     equivalent yet: `c.cell` takes a cell), and with them the host commands
+     only they sent (`song-select-clip`, `song-deselect-clip`,
+     `song-set-region`, `song-clear-region`, `arrangement-clip-set-source`;
+     `song.bound-clip`, `select-region!` / `clear-region!` and `c.cell` send
+     `set-song`, `set-song-region` and `set-clip`).
+     `seq-set-process-lane-steps` (a list) stays.
+   - **Pad map and groove commands.** The thirteen legacy host commands
+     the rack kind setters replaced, which nothing sent any more, are
+     gone with their capture routing: `set-rack-pad-note` / `-choke-group`
+     / `-role`, `rename-rack-clip`, `set-rack-groove-amount` / `-enabled` /
+     `-scale` / `-pad-amount` / `-pad-enabled`, `set-rack-clip-own-groove`,
+     `rename-rack-groove`, `rename-library-groove`, `delete-library-groove`
+     (and its confirm). `racks::the_racks_own_groove_is_clip_0_in_every_command`
+     sends `set-groove` with clip 0 instead.
+   - **Migration hints.** Every removed name stays registered as a removed
+     native (eseqlisp's `Runtime::register_removed_native(s)`; the tables
+     `REMOVED_GRAPH_NATIVES` and, in `ui/natives.rs`, the song ones):
+     neither the in-app native docs nor completion
+     (`completion_symbols` filters the removed-names set) list it, and a call
+     fails with a message naming the eseq.kinds replacement, e.g.
+     "graph-node-process-wire was removed; (bind-port! pt i): pt a port of
+     p.ports, i an inlet of another process's p.inlets (eseq.kinds)".
+     Grep evidence: no `content/`, `packages/`, `tools/`, capture fixture
+     or Rust test calls a removed name (the only hits are the tombstone
+     tables, `the_neural_panel_uses_no_legacy_binding_forms`' deny list
+     and docs).
+   - **Tests ported.** Library tests read and edit through a `#[cfg(test)]`
+     direct API (`lisp_host::graph_test_api`: `node_value` / `param_value`
+     / `edge_value` through the helpers the kinds use, and node chain
+     edits through `edit_graph_node_process_chain_now`, the kinds'
+     `edit-process` path): the graph override tests keep asserting the
+     resolved values after each write; the node patch tests keep add /
+     enable / move / remove reaching the overrides and the runtime config,
+     the empty chain dropped, a removed slot's cables and id (the wiring
+     itself is the Harness tests'); the scheduler's expr card and node patch tests lay their cables
+     with the API (a declarative `Cable` list in the variable-reset
+     harness) and read slot labels, as-expr state and error dots through
+     the kinds' helpers (`node1_slot_views`); the history round-trip test
+     makes its cables directly, then two recorded inlet edits. The Harness
+     tests (`host_kinds::tests::graph`) compare the kind fields with the
+     model (`node_value` / `param_value` / `edge_value` /
+     `node_chain`), build `NODE_PATCH`'s cables with `edit-process` host
+     commands by id (so no read registers the node), and make the
+     "edits the kinds did not make" with Rust chain edits; `neural_panel`
+     wires and removes through `bind-port!` / `remove-process!`;
+     `arrangement` selects through `select-region!` and `song.bound-clip`.
+     Deleted as tests of the deleted machinery: the two tracked-read tests
+     (per-field reruns, plain reads retain nothing). New:
+     `removed_graph_natives_fail_with_a_migration_hint_and_have_no_docs`.
+   - **Capture fixtures.** `graph-node-patchbay`, `graph-node-map-arm`,
+     `graph-node-expr-cards` and `processes-dock` cable their slots with a
+     `node-cable` helper sending `edit-process`, which capture setup now
+     applies for a graph node (`host_commands::lanes::apply_capture_command`).
+   - **Docs.** GUIDE.md (writes through setters and actions, the removed
+     natives and `graph-config-value`, "Bindings for hot values"),
+     AGENTS.md and docs/metal-seq-ui-capture.md (the capture example reads
+     `t.processes`), docs/application-menus.md, UI_PERFORMANCE_TUNING.md (a
+     history note), process-channels-spec.md; 35 historical specs under
+     `docs/` and `crates/sequencer/docs/` that name legacy forms carry
+     "Names below predate kind bindings (eseq-0l17)" at the top.
+   - **Captures.** 41 jobs (the seven graph demos with and without their
+     init, the neural panel fixtures, the four node patch fixtures, the
+     processes dock, the process panels, the arrangement fixtures): the 26
+     deterministic ones byte-identical; the 15 with a running graph view
+     differ run to run before the change too (the auto-rotating event
+     views), and show the same patch, cables and cards after it.
+
+   **eseq-0l17.22 closed.** The legacy reactive layer was the
+   string-keyed host state that views read before kinds: the host
+   published hundreds of `SEQ.*` fields (and `SEQV`, `EXPORT`, `AGENT`,
+   `GRAPH`) from per-area publishers on every tick or epoch, views read them
+   with `SEQ.x`, bound them with `bind-seq` / `bind` / `reactive-get`, and
+   built field names from strings; graph reads were tracked through a
+   private `__graph` namespace, and buffer-name visibility gates decided
+   what to publish. It is gone: the publishers and namespaces (.78), the
+   mirror and unported areas (.76), the content leftovers (.77), the
+   visibility gates (.79, now the kinds' observed bits), the language forms
+   (.80) and the legacy-only natives (.81).
+
+   Audit of the "Kept (eseq-0l17.22)" and "Remains" lists above (each now
+   marked done or covered here): every `SEQ.*`, `SEQV.*`, `GRAPH.*`,
+   `RETRO`, `AUDIO`, `RESAMPLE` field they name went with its namespace
+   (.78, .80; a read is a compile error); `eseq.bindings` (.77),
+   `macro-state`'s COMPAT `macro-name` read, the param value
+   publishers and panel structure lists (.78), the tracker's
+   `piano-roll-automation-refresh` (.65), the tracked graph reads, the
+   node patch natives, `graph-route-tracks`, the song selection natives,
+   `seq-arrangement-clip-set-source`, `seq-set-process-lane-step` and the
+   pad map and groove host commands (.81) are gone. What those lists named
+   that stays, on purpose, because it is not the legacy layer:
+   - `THEME` (and `MIDI.ports`), the live host namespaces; `#'THEME.x`
+     compiles to `__ns-ref`.
+   - The `defstate`s of `ui/processes-buffer.lisp` and `ui/expr-buffer.lisp`
+     (buffer-local view state, a language form the corpus test allows).
+   - `:bindable` and `reactive-value`: deprecated, warn once per session.
+   - The p-lock table's `set-track-plock-entry` / `-option` /
+     `clear-track-plock-entry`, addressed by `plock-row.address` (a kind
+     field), and the scripting natives (`graph-node`, `graph-param`,
+     `graph-edge`, `graph-config`, which the on-create rings use; the expr
+     buffer's `graph-node-process-*`; `graph-config-value`, a plain read;
+     `seq-set-process-lane-steps`).
+   - The host-less test seeds: `panel_kinds_seed` still reads a test
+     dict's `value-field` / `name-field` string as a key into the test's
+     Rust seed map (`seed_values`); no production code writes or reads
+     those strings.
+   - No kind equivalent yet: setting a lane clip's source to empty
+     (`seq-arrangement-clip-set-source clip nil`; `c.cell` takes a cell,
+     not nil), and renaming or deleting a user groove library file (no UI
+     sent either). Host and view state is read, bound and
+   written through `def-kind` instances only; `THEME` (and `MIDI.ports`)
+   are the live host namespaces left, and `:bindable` / `reactive-value`
+   warn until their removal.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -3948,7 +4105,9 @@ the other port beads follow it):
    rows of names the port removed, and port the Rust tests that asserted
    it to the kind field (or delete a pure parity check); fix the docs that
    describe it. Still read elsewhere → keep it and list it on
-   eseq-0l17.22. Mark the §14.4 rows.
+   eseq-0l17.22 (closed since eseq-0l17.81: nothing legacy is left to
+   keep, so a port removes what it unreads; what stays by design is listed
+   in the .22 closing note). Mark the §14.4 rows.
 5. **Tests.** Port the area's Rust tests: tests on the host-less editor
    (`full_grid_editor_for_scroll_tests`) push kind fields with
    `set_kind_field` / `seed_kind_scene_banks` (they mirror the host's

@@ -389,7 +389,6 @@ pub(crate) fn run_event_loop(
         prev_playhead: u32::MAX,
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
-        prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
         prev_current_track: usize::MAX,
         cpu_overload: CpuOverloadIndicator::default(),

@@ -239,22 +239,36 @@ was removed; read the eseq.kinds instance fields, e.g. (map (lambda (t)
 t.color) (tracks))". `THEME` is the one host namespace a view still reads
 directly.
 
-Writes go through host commands, not `set!`:
+Write a field with `set!` when the kind gives it a setter, or call one of
+the kinds' actions; either becomes a host command, applied (and recorded for
+undo) by the host:
 
 ```lisp
-(host-command "toggle-step" (dict :track 0 :step 4))
-(seq-set-step-param 4 :velocity 0.9)
-(seq-set-effect-param slot param-index 800)   ; on the current track
+(set! t.volume 0.5)
+(set! n.delay 3)                            ; n a graph node, (nth g.nodes 1)
+(select-region! (track 0) (track 2) 0 16)   ; song.region
+(bind-port! out "velocity")                 ; a process port, p.ports
 ```
 
-Roughly three hundred host commands exist; the names are the `COMMANDS`
-arrays under `crates/sequencer/src/ui/host_commands/`. An unknown name shows
-"Unknown host command" in the status line and does nothing.
+Underneath, roughly three hundred host commands exist; the names are the
+`COMMANDS` arrays under `crates/sequencer/src/ui/host_commands/`, and
+`(host-command "toggle-step" (dict :track 0 :step 4))` sends one directly.
+An unknown name shows "Unknown host command" in the status line and does
+nothing. A native removed with the legacy layer (eseq-0l17.81:
+`graph-node-value`, `graph-param-value`, `graph-edge-value`,
+`graph-route-tracks`, the `graph-node-process-*` wiring natives, the song
+selection natives `seq-song-select-clip`, `-deselect-clip`, `-set-region`
+and `-clear-region`, and `seq-arrangement-clip-set-source` and
+`seq-set-process-lane-step`) fails with a message naming its kind
+replacement, and completion no longer offers it. (Setting a lane clip's
+source to empty has no kind equivalent yet.) `graph-config-value` remains, as a
+plain read: a view that should follow a graph's config reads the `graph`
+kind (`g.reset-bars`, `g.node-count`, …) instead.
 
-### Float bindings for hot values
+### Bindings for hot values
 
 A meter or a knob that follows audio should not rerun a view sixty times a
-second. Bind the prop to a float reference instead:
+second. Bind the prop to the field instead of reading it:
 
 ```lisp
 (meter :level #'master.peak-l)

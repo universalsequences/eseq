@@ -344,22 +344,6 @@ pub(crate) fn sync_reactive_tick(
                 replaced,
             );
         }
-        // Tracked graph reads (`graph-edge-value` & co., instance-kinds spec
-        // §6): Lisp `graph-*` writes dirty their readers synchronously; this
-        // sweep catches everything else that can move a resolved graph value.
-        // Generations are the resolved values, so unchanged reads stay clean.
-        let graph_read_key = (
-            ctx.shared.state.scheduler_snapshot_version(),
-            ctx.shared.state.published_sequencers_version(),
-            ctx.shared.state.current_pattern_index(),
-        );
-        if graph_read_key != ctx.frame.prev_graph_read_key {
-            ctx.frame.prev_graph_read_key = graph_read_key;
-            needs_reactive_cycle |= sequencer::lisp_host::queue_graph_read_invalidations(
-                editor.runtime_mut(),
-                &ctx.shared.state,
-            );
-        }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch
             || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)

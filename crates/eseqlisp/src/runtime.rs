@@ -1034,15 +1034,10 @@ pub(crate) struct RuntimeBridgeState {
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
 
-/// Generation callback for [`NativeContext::invalidate_subscribed_reactive_fields`]:
-/// `Some(generation)` advances the field, `None` leaves it alone.
-pub type ReactiveFieldGeneration = Box<dyn FnMut(&str) -> Option<Value>>;
-
 pub struct NativeContext {
     shared: SharedBridgeState,
-    reactive_reads: Vec<(ReactiveFieldKey, Option<Value>)>,
+    reactive_reads: Vec<ReactiveFieldKey>,
     reactive_invalidations: Vec<(ReactiveFieldKey, Value)>,
-    namespace_invalidations: Vec<(String, ReactiveFieldGeneration)>,
     reactive_sets: Vec<(String, String, Value)>,
     instance_kinds: Vec<crate::vm::InstanceKindSchema>,
 }
@@ -1053,7 +1048,6 @@ impl NativeContext {
             shared,
             reactive_reads: Vec::new(),
             reactive_invalidations: Vec::new(),
-            namespace_invalidations: Vec::new(),
             reactive_sets: Vec::new(),
             instance_kinds: Vec::new(),
         }
@@ -1070,36 +1064,7 @@ impl NativeContext {
     /// Inject a reactive dependency for the currently rendering effect.
     /// Calls made outside reactive rendering are intentionally inert.
     pub fn track_reactive_read(&mut self, namespace: impl Into<String>, field: impl Into<String>) {
-        self.reactive_reads
-            .push((ReactiveFieldKey::new(namespace, field), None));
-    }
-
-    /// Like [`Self::track_reactive_read`], but also states the generation the
-    /// read observed. When the host-owned source has no other reader yet, the
-    /// source adopts that generation, so the first later invalidation that
-    /// hands over the same generation dirties nothing. Hosts whose
-    /// generation is the resolved value itself get value-equality
-    /// suppression for free.
-    pub fn track_reactive_read_with_generation(
-        &mut self,
-        namespace: impl Into<String>,
-        field: impl Into<String>,
-        generation: Value,
-    ) {
-        self.reactive_reads
-            .push((ReactiveFieldKey::new(namespace, field), Some(generation)));
-    }
-
-    /// After the native returns, advance every currently subscribed field of a
-    /// host-owned namespace for which `generation` returns `Some`. Fields
-    /// whose generation is unchanged dirty nothing.
-    pub fn invalidate_subscribed_reactive_fields(
-        &mut self,
-        namespace: impl Into<String>,
-        generation: impl FnMut(&str) -> Option<Value> + 'static,
-    ) {
-        self.namespace_invalidations
-            .push((namespace.into(), Box::new(generation)));
+        self.reactive_reads.push(ReactiveFieldKey::new(namespace, field));
     }
 
     /// The host-side equivalent of `(set! NS.field value)`,
@@ -1535,6 +1500,9 @@ pub struct Runtime {
     pub(crate) shared: SharedBridgeState,
     sync_theme_to_global: bool,
     symbol_metadata: HashMap<String, SymbolMetadata>,
+    /// Names registered as removed natives ([`Self::register_removed_native`]):
+    /// still callable (to fail with a migration hint), never completed.
+    removed_names: std::collections::HashSet<String>,
     symbol_revision: u64,
     cached_completion_symbols: Option<Rc<Vec<String>>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
@@ -1610,6 +1578,7 @@ impl Runtime {
             shared,
             sync_theme_to_global: true,
             symbol_metadata: HashMap::new(),
+            removed_names: std::collections::HashSet::new(),
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
@@ -1911,6 +1880,32 @@ impl Runtime {
         F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
     {
         self.register_native_impl(name, None, None, f);
+    }
+
+    /// Register `name` as a removed native: a call fails with `message` (a
+    /// migration hint), it has no docs, and completion leaves it out. An
+    /// old script then learns what replaced the name instead of hitting an
+    /// unbound symbol.
+    pub fn register_removed_native(&mut self, name: &str, message: impl Into<String>) {
+        let message = message.into();
+        self.register_native(name, move |_args, _ctx| Err(message.clone()));
+        self.removed_names.insert(name.to_string());
+        self.invalidate_symbol_cache();
+    }
+
+    /// [`Self::register_removed_native`] for each `(name, message)`.
+    pub fn register_removed_natives<'a>(
+        &mut self,
+        removed: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) {
+        for (name, message) in removed {
+            self.register_removed_native(name, message);
+        }
+    }
+
+    /// Whether `name` was registered as a removed native.
+    pub fn is_removed_native(&self, name: &str) -> bool {
+        self.removed_names.contains(name)
     }
 
     pub fn register_native_with_docs<F>(
@@ -2261,15 +2256,8 @@ impl Runtime {
             let result = f(args, &mut ctx);
             // A read that failed still depended on its source: when the
             // source changes, the failing reader must get another chance.
-            for (field, generation) in std::mem::take(&mut ctx.reactive_reads) {
-                match generation {
-                    Some(generation) => vm.inject_reactive_read_with_generation(
-                        &field.namespace,
-                        &field.field,
-                        generation,
-                    ),
-                    None => vm.inject_reactive_read(&field.namespace, &field.field),
-                }
+            for field in std::mem::take(&mut ctx.reactive_reads) {
+                vm.inject_reactive_read(&field.namespace, &field.field);
             }
             let result = result.and_then(|value| {
                 for schema in std::mem::take(&mut ctx.instance_kinds) {
@@ -2288,17 +2276,6 @@ impl Runtime {
                             &field.field,
                             generation,
                         );
-                    }
-                    for (namespace, mut generation_for_field) in ctx.namespace_invalidations {
-                        for field in vm.subscribed_injected_reactive_fields(&namespace) {
-                            if let Some(generation) = generation_for_field(&field) {
-                                vm.invalidate_injected_reactive_source(
-                                    &namespace,
-                                    &field,
-                                    generation,
-                                );
-                            }
-                        }
                     }
                     value
                 }
@@ -3847,6 +3824,7 @@ impl Runtime {
                 symbols.extend(keys.into_iter().map(|key| format!("{display}.{key}")));
             }
         }
+        symbols.retain(|symbol| !self.removed_names.contains(symbol));
         symbols.sort();
         symbols.dedup();
         let symbols = Rc::new(symbols);

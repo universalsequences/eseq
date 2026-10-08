@@ -29,8 +29,9 @@
 //!
 //! A graph node's process (§14.2m) is addressed by its node (`:graph-id`,
 //! the graph's sequencer id, and `:node`, an active node's index) instead
-//! of a track, and edited as the legacy `graph-node-process-*` natives edit
-//! it ([`super::process_edit::apply_to_node_chain`] on the current scene's
+//! of a track, and edited as the `graph-node-process-*` natives edit it
+//! (the wiring ones are gone since eseq-0l17.81: this is the only way to
+//! cable a node patch; [`super::process_edit::apply_to_node_chain`] on the current scene's
 //! node chain), recorded as their history records it
 //! (`EditPatch::GraphNodeProcessChain`, undo restores the node's chain in
 //! the scene it was made in). Its ports bind another process of the node
@@ -628,6 +629,39 @@ fn edit_node_process(
     let changed = matches!(result, Ok(true));
     script.end(app, ctx, changed);
     result.map(|_| ())
+}
+
+/// A graph node's `edit-process` during capture setup (no event loop, no
+/// history): the request [`handle`] builds, applied to the node's chain
+/// directly, so a fixture can wire a node patch the way `bind-port!` /
+/// `add-fanout!` do (by id: the kinds list a slot added in the same setup
+/// only after a sync). `None` for any other command; a track's process is
+/// an error.
+pub(crate) fn apply_capture_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    if !COMMANDS.contains(&name) {
+        return None;
+    }
+    let Value::Map(map) = payload else {
+        return Some(Err("the payload is not a dict".to_string()));
+    };
+    Some(Owner::of(app, map).and_then(|owner| {
+        let Owner::Node(graph, node) = &owner else {
+            return Err("capture setup edits a graph node's processes only".to_string());
+        };
+        let all = SetValue::of(map, "all", "all").flag_or(false)?;
+        let Some((id, edit)) = process_request(app, &owner, all, map)? else {
+            return Ok(());
+        };
+        let manifest = &graph.manifest;
+        sequencer::lisp_host::edit_graph_node_process_chain_now(&app.state, manifest, *node, |chain, next_id| {
+            apply_to_node_chain(chain, id.unwrap_or(ProcessInstanceId(next_id)), edit)
+        })
+        .map(|_| ())
+    }))
 }
 
 pub(super) fn handle(

@@ -1,5 +1,7 @@
 # Modulation source editor rework (drift, phase, waveform display)
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 1, slices 1–4 built 2026-09-02. Follow-ups tracked under the
 `eseq-modsrc` epic.
 

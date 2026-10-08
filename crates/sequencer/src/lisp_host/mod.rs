@@ -86,8 +86,8 @@ pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) ->
 pub use eseq::graph_authoring::{
     GRAPH_NODE_HIDDEN_PROCESS_CLASSES, GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_NODE_PAYLOAD_FIELDS,
     GRAPH_NODE_PROCESS_HISTORY_COMMAND, GRAPH_OVERRIDE_HISTORY_COMMAND,
-    GRAPH_READ_REACTIVE_NAMESPACE, GraphNodeProcessReminter, graph_node_lane_patch_namespace,
-    queue_graph_read_invalidations, register_graph_authoring_natives,
+    GraphNodeProcessReminter, REMOVED_GRAPH_NATIVES, graph_node_lane_patch_namespace,
+    register_graph_authoring_natives, register_removed_natives,
     restore_graph_node_process_chain, ensure_graph_overrides, graph_config_field_value,
     graph_edge_param_value, graph_node_intrinsic_value, graph_node_param_value,
     graph_seed_follows_route, published_graph_manifest, resolved_graph_overrides_for_manifest,
@@ -95,6 +95,10 @@ pub use eseq::graph_authoring::{
     graph_node_process_inlet_merge_key, graph_node_process_label,
     process_slot_as_expr,
 };
+/// Direct graph reads and node patch edits for the library's tests
+/// (eseq-0l17.81).
+#[cfg(test)]
+pub(crate) use eseq::graph_authoring::test_api as graph_test_api;
 pub use eseq::graph_manifest::{
     current_graph_owner_rack, graph_instance_id, graph_mode_present, parse_graph_manifest,
     parse_graph_manifest_owned, with_graph_owner_rack,

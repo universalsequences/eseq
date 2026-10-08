@@ -6,7 +6,7 @@ mod customize;
 mod devices;
 mod dispatch;
 mod drum_rack_v2;
-pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequencer_source};
+pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
 mod effects;
 pub(crate) mod export;
 mod file_menu;
@@ -58,6 +58,7 @@ pub(crate) use learn::open_patch_learn_buffer;
 pub(crate) use tracks::apply_rename_group_host_command;
 pub(crate) use song::{apply_song_edit_command, apply_sound_palette_view_command};
 pub(crate) use arrangement::apply_capture_selection_command;
+pub(crate) use lanes::apply_capture_command as apply_capture_process_command;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

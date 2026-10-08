@@ -1,5 +1,7 @@
 # Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste/Duplicate, Move
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 3, 2026-07-27 — **all four slices shipped.** Slice 4 (move)
 landed on `arrangement-timeline`: `song_region_move` in `song_region.rs`, the
 `region-move` lowering case, the `:track-move` / `:region-move` ghosts in

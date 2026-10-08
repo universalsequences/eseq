@@ -9117,17 +9117,40 @@
     }
 
     fn variable_reset_track1_hits_with_prob_mask_over_seconds(prob: f64, seconds: u64) -> usize {
-        variable_reset_track1_transposes(prob, seconds, "").len()
+        variable_reset_track1_transposes(prob, seconds, "", &[]).len()
+    }
+
+    /// A cable the node patch tests lay on node 1 after `extra` runs,
+    /// straight on the chain (the `graph-node-process-map` / `-wire` natives
+    /// went, eseq-0l17.81). Slots are named by their index in the list of
+    /// slot ids `extra` returns.
+    #[derive(Clone, Copy)]
+    enum Cable {
+        /// Map slot `.0`'s port `.1` onto fire payload field `.2`.
+        Map(usize, &'static str, &'static str),
+        /// Wire slot `.0`'s port `.1` into slot `.2`'s inlet `.3`.
+        Wire(usize, &'static str, usize, &'static str),
     }
 
     /// Node 1's emitted transposes; `extra` is more UI-native Lisp run after
-    /// the prob-mask slot is installed (`g` = graph handle, `id` = its slot).
-    fn variable_reset_track1_transposes(prob: f64, seconds: u64, extra: &'static str) -> Vec<f32> {
-        variable_reset_track1_hits(prob, seconds, extra).into_iter().map(|(_, t)| t).collect()
+    /// the prob-mask slot is installed (`g` = graph handle, `id` = its slot),
+    /// returning the ids `cables` name.
+    fn variable_reset_track1_transposes(
+        prob: f64,
+        seconds: u64,
+        extra: &'static str,
+        cables: &'static [Cable],
+    ) -> Vec<f32> {
+        variable_reset_track1_hits(prob, seconds, extra, cables).into_iter().map(|(_, t)| t).collect()
     }
 
     /// Node 1's emissions as (sample time, transpose), in time order.
-    fn variable_reset_track1_hits(prob: f64, seconds: u64, extra: &'static str) -> Vec<(u64, f32)> {
+    fn variable_reset_track1_hits(
+        prob: f64,
+        seconds: u64,
+        extra: &'static str,
+        cables: &'static [Cable],
+    ) -> Vec<(u64, f32)> {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 3,
@@ -9238,8 +9261,30 @@
                 ui.eval_str(&format!("(graph-node-process-inlet \"variable-reset\" 1 {id} :prob {prob})"))
                     .expect("set prob through the native");
                 if !extra.is_empty() {
-                    ui.eval_str(&format!("(let ((g \"variable-reset\") (id {id})) {extra})"))
+                    let ids = ui
+                        .eval_str(&format!("(let ((g \"variable-reset\") (id {id})) {extra})"))
                         .expect("extra node patch setup");
+                    let ids: Vec<u64> = match ids {
+                        Some(Value::List(items)) => items
+                            .iter()
+                            .map(|item| match *item.borrow() {
+                                Value::Number(id) => id as u64,
+                                ref other => panic!("a slot id: {other:?}"),
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    use crate::lisp_host::graph_test_api as graph_api;
+                    for cable in cables {
+                        match *cable {
+                            Cable::Map(slot, port, param) => {
+                                graph_api::map(&state, "variable-reset", 1, ids[slot], port, Some(param));
+                            }
+                            Cable::Wire(from, port, to, inlet) => {
+                                graph_api::wire(&state, "variable-reset", 1, ids[from], port, ids[to], inlet);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -9324,7 +9369,8 @@
                  (do
                    (graph-edge g :from 1 :to 1 :weight 1)
                    (graph-node-process-inlet g 1 acc :amount 1)
-                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+                   (list acc)))"#,
+            &[Cable::Map(0, "out", "transpose")],
         );
         assert!(climbing.len() >= 3, "self-loop keeps firing: {climbing:?}");
         assert!(climbing[1].0 - climbing[0].0 < 96_000, "self-loop re-fires within the bar: {climbing:?}");
@@ -9339,9 +9385,9 @@
                  (do
                    (graph-edge g :from 1 :to 1 :weight 1)
                    (graph-node-process-inlet g 1 rst :trigger 1)
-                   (graph-node-process-wire g 1 rst :fired acc :reset)
                    (graph-node-process-inlet g 1 acc :amount 1)
-                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+                   (list rst acc)))"#,
+            &[Cable::Wire(0, "fired", 1, "reset"), Cable::Map(1, "out", "transpose")],
         );
         assert!(resetting.len() >= 2, "the track re-seeds node 1 each bar: {resetting:?}");
         let gaps: Vec<u64> = resetting.windows(2).map(|w| w[1].0 - w[0].0).collect();
@@ -9364,9 +9410,9 @@
             r#"(let ((rst (graph-node-process-add g 1 "neural-reset"))
                      (acc (graph-node-process-add g 1 "lane-acc")))
                  (do
-                   (graph-node-process-wire g 1 rst :fired acc :reset)
                    (graph-node-process-inlet g 1 acc :amount 1)
-                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+                   (list rst acc)))"#,
+            &[Cable::Wire(0, "fired", 1, "reset"), Cable::Map(1, "out", "transpose")],
         );
         let before: Vec<&(u64, f32)> = hits.iter().filter(|(s, _)| *s < 768_000).collect();
         let after: Vec<&(u64, f32)> = hits.iter().filter(|(s, _)| *s >= 768_000).collect();
@@ -9388,7 +9434,8 @@
                  (do
                    (graph-edge g :from 1 :to 1 :weight 1)
                    (graph-node-process-inlet g 1 acc :amount 1)
-                   (graph-node-process-map g 1 acc :out :delay)))"#,
+                   (list acc)))"#,
+            &[Cable::Map(0, "out", "delay")],
         );
         let gaps: Vec<u64> = hits.windows(2).map(|w| w[1].0 - w[0].0).collect();
         assert!(gaps.len() >= 3, "node 1 keeps re-firing itself: {hits:?}");
@@ -9409,6 +9456,7 @@
                    (graph-node-process-inlet g 1 xp :amount 3)
                    (graph-node-process-inlet g 1 sc :scale 9)
                    (graph-node-process-inlet g 1 sc :root 0)))"#,
+            &[],
         );
         assert!(!snapped.is_empty() && snapped.iter().all(|t| (t - 4.0).abs() < 1e-6),
             "F snaps to E in C major pentatonic: {snapped:?}");
@@ -9421,12 +9469,13 @@
                    (graph-node-process-inlet g 1 xp :amount 3)
                    (graph-node-process-inlet g 1 sc :scale 9)
                    (graph-node-process-inlet g 1 sc :gate 0)))"#,
+            &[],
         );
         assert!(!open.is_empty() && open.iter().all(|t| (t - 5.0).abs() < 1e-6),
             "gate low leaves F alone: {open:?}");
     }
 
-    /// A mappable port mapped onto the payload (`graph-node-process-map`):
+    /// A mappable port mapped onto the payload (its binding a step param):
     /// lane-count stepping by 5 with its `out` on :transpose adds 5, then 10,
     /// to the seed note 2 on successive node-1 fires.
     #[test]
@@ -9438,7 +9487,8 @@
                  (do
                    (graph-node-process-inlet g 1 count :step 5)
                    (graph-node-process-inlet g 1 count :hi 100)
-                   (graph-node-process-map g 1 count :out :transpose)))"#,
+                   (list count)))"#,
+            &[Cable::Map(0, "out", "transpose")],
         );
         assert_eq!(transposes.len(), 2, "two node-1 fires in 4s: {transposes:?}");
         assert!((transposes[0] - 7.0).abs() < 1e-6 && (transposes[1] - 12.0).abs() < 1e-6,

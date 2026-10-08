@@ -1,5 +1,7 @@
 # Graph Homeostat: Process-Driven Delta Regulation for Neural Sequencers
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft spec, 2026-07-20. Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (process engine, normative),
 `docs/cirklon-endgame-trajectory.md` (landed-slice inventory), and

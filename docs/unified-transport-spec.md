@@ -1,5 +1,7 @@
 # One Transport — Killing the SONG/SESSION Mode
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: BUILT (rev 2, 2026-08-02; §10 records what the build refined)
 Builds on: docs/empty-arrangement-spec.md (prerequisite — always-present
 arrangement, silent `scene: None` rows, capture always splices) and

@@ -1,5 +1,7 @@
 # Graph node processes
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 3, 2026-09-21. BUILT uncommitted 2026-09-22: `.1` engine hook, `.2` natives (no `def-node :process` default yet), `.4` expanded neuron editor in `alez.neural.variable-reset` (dropdown wiring, not drag cables). `.3` neuron harmony source BUILT 2026-09-22 (negative `:source` = neuron k, `(neuron k :note|:chord|:key)` reads). Open: `.5` lane-shift + lane-choke, `.6` drag cables. Bead: `eseq-waa9` (epic; children eseq-waa9.1 eseq-waa9.2 eseq-waa9.3 eseq-waa9.4).
 
 ## 1. Problem

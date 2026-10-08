@@ -1,5 +1,7 @@
 # Scene Banks Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: **BUILT** — implemented and acceptance-swept 2026-08-27 (epic `eseq-doy`).
 Rev 2 (2026-08-27, `eseq-doy.9`) adds §10: the mixer clip grid is bank-scoped
 too, which rev 1 had excluded.

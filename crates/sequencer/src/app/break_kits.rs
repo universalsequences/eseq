@@ -1146,9 +1146,10 @@ mod tests {
         owned[0].id
     }
 
-    fn weight(runtime: &mut Runtime, id: u64) -> Option<Value> {
-        runtime.set_global_value("probe", Value::Instance(id));
-        runtime.eval_str("(graph-edge-value probe :from 0 :to 1 :weight)").expect("read weight")
+    /// Instance `id`'s resolved edge 0 -> 1 weight (as the `graph-param`
+    /// kind reads it; the `graph-edge-value` native went, eseq-0l17.81).
+    fn weight(app: &App, id: u64) -> Option<f64> {
+        crate::lisp_host::graph_test_api::edge_value(&app.state, &id.to_string(), 0, 1, "weight")
     }
 
     fn published_owner(app: &App, id: u64) -> Option<Option<u64>> {
@@ -1193,9 +1194,9 @@ mod tests {
         for (id, rack) in [(a, loaded_a), (b, loaded_b), (a2, loaded_a2)] {
             assert_eq!(published_owner(&app, id), Some(Some(rack)), "published, owned by its rack");
         }
-        assert_eq!(weight(&mut runtime, a), Some(Value::Number(0.25)), "kit A's weight came along");
-        assert_eq!(weight(&mut runtime, a2), Some(Value::Number(0.25)));
-        assert_eq!(weight(&mut runtime, b), Some(Value::Number(0.5)), "kit B's weight came along");
+        assert_eq!(weight(&app, a), Some(0.25), "kit A's weight came along");
+        assert_eq!(weight(&app, a2), Some(0.25));
+        assert_eq!(weight(&app, b), Some(0.5), "kit B's weight came along");
         // The route came back through pad space onto the new rack's member.
         let route = app
             .state
@@ -1214,10 +1215,10 @@ mod tests {
         // Editing one leaves every other instance alone.
         runtime.set_global_value("edit", Value::Instance(a));
         runtime.eval_str("(graph-edge edit :from 0 :to 1 :weight 0.9)").expect("edit a");
-        assert_eq!(weight(&mut runtime, a), Some(Value::Number(0.9)));
-        assert_eq!(weight(&mut runtime, a2), Some(Value::Number(0.25)), "same kit, other load");
-        assert_eq!(weight(&mut runtime, b), Some(Value::Number(0.5)), "other kit");
-        assert_eq!(weight(&mut runtime, source_a), Some(Value::Number(0.25)), "the exporting rack");
+        assert_eq!(weight(&app, a), Some(0.9));
+        assert_eq!(weight(&app, a2), Some(0.25), "same kit, other load");
+        assert_eq!(weight(&app, b), Some(0.5), "other kit");
+        assert_eq!(weight(&app, source_a), Some(0.25), "the exporting rack");
 
         // One undo takes the last load back, instance and all.
         assert!(matches!(
@@ -1733,7 +1734,7 @@ mod tests {
         assert!(app.state.current_graph_overrides().iter().all(|graph| graph.sequencer_id != id));
         applied(crate::app::edit::undo(&mut app));
         assert_eq!(app.instances.get(id).unwrap().owner, ProjectInstanceOwner::Rack(rack));
-        assert_eq!(weight(&mut runtime, id), Some(Value::Number(0.25)), "overrides come back");
+        assert_eq!(weight(&app, id), Some(0.25), "overrides come back");
     }
 
     /// A plain (non-rack) member's clips keep their own sound through a kit

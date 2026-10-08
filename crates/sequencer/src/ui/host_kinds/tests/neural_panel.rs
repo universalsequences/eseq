@@ -46,7 +46,7 @@ fn the_neural_panel_uses_no_legacy_binding_forms() {
 const NEURAL_KIND: &str = "alez/neural:neural";
 const PANEL_REFER: &str =
     "(import eseq.kinds :refer (graph-of graph-param-named graph-edge-to tracks
-                                                       process-library))
+                                                       process-library bind-port! remove-process!))
                            (import eseq.view-kit :refer (named))";
 
 /// A `neural` instance's panel in the factory DAW, shown alone in the
@@ -118,6 +118,20 @@ impl Panel {
             Value::Number(id) => id as u64,
             other => panic!("add {class}: {other:?}"),
         }
+    }
+
+    /// Wire node 1's process `source`'s `port` into process `target`'s
+    /// `inlet`, as the bay's cable drag does (`bind-port!`).
+    fn wire(&mut self, source: u64, port: &str, target: u64, inlet: &str) {
+        self.eval(&format!(
+            "(let ((a (proc {source})) (b (proc {target})))
+               (bind-port! (named a.ports \"{port}\") (named b.inlets \"{inlet}\")))"
+        ));
+    }
+
+    /// Remove node 1's process `id`, as the card's delete does.
+    fn remove(&mut self, id: u64) {
+        self.eval(&format!("(remove-process! (proc {id}))"));
     }
 
     /// Select card `id` in node 1's bay, as a click on the card does.
@@ -1917,9 +1931,7 @@ fn processes_buffer_delete_undo_restores_the_card_and_redo_deletes_it() {
     let base = p.undo_len();
     let source = p.add("lane-rand");
     let target = p.add("lane-rand");
-    p.eval(&format!(
-        "(graph-node-process-wire nn 1 {source} \"wire\" {target} \"hi\")"
-    ));
+    p.wire(source, "wire", target, "hi");
     assert_eq!(p.undo_len(), base + 3, "two adds and a wire: one step each");
     let wire = p.wired_to(source, "wire");
     assert_eq!(wire, list_value([number(target as f64), s("hi")]));
@@ -2235,7 +2247,7 @@ fn expr_card_edit_buffer_commits_reports_errors_and_survives_removal() {
     );
 
     // The card goes away: a later commit changes nothing and says so.
-    p.eval(&format!("(graph-node-process-remove nn 1 {expr})"));
+    p.remove(expr);
     p.activate(name);
     p.type_body("(* x 2)");
     p.commit_chord();
@@ -2268,9 +2280,7 @@ fn expr_card_overflow_badge_keeps_wired_in_ports() {
     measured(&layout, &badge);
 
     // A cable onto `e` keeps its port on the card.
-    p.eval(&format!(
-        "(graph-node-process-wire nn 1 {rand} \"wire\" {expr} \"e\")"
-    ));
+    p.wire(rand, "wire", expr, "e");
     let layout = p.layout_of(&bay);
     assert!(
         in_port(&layout, "a") && in_port(&layout, "e"),

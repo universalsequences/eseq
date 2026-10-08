@@ -1,5 +1,7 @@
 # Record Quantize (Unquantized Recording) + Metronome Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 ## Goal
 
 Live keyboard recording currently hard-snaps every note to the integer step the

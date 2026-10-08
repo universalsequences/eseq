@@ -1017,12 +1017,6 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
-        // The legacy pad map edits (note, choke, role).
-        if let Some(result) = crate::host_commands::apply_rack_pad_map_command(&name, &payload, app) {
-            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
-            applied = true;
-            continue;
-        }
         // Rack grooves (extract / pick / amounts), so a fixture can show the
         // drum rack panel's Groove section with a real extracted groove.
         if let Some(result) = crate::host_commands::apply_rack_groove_command(&name, &payload, app) {
@@ -1034,6 +1028,15 @@ fn apply_capture_macro_host_commands(
         // region), so a fixture can drive the arrangement view's gestures.
         if let Some(result) =
             crate::host_commands::apply_capture_selection_command(&name, &payload, app)
+        {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
+        // A graph node's process setters (`edit-process` by id), so a fixture
+        // can cable a node patch it just built.
+        if let Some(result) =
+            crate::host_commands::apply_capture_process_command(&name, &payload, app)
         {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;

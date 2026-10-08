@@ -1,5 +1,7 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 2. Slices 1–7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, record/roll unwind, kit carry and cross-rack). Rev 2 (§Groove pool, library and pad roles; slices 8–11 = beads `.9`–`.12`) moves grooves off the rack into a project pool backed by a factory/user groove library, adds typed pad roles for cross-kit row matching, and adds a Grooves sidebar tab. Where rev 2 contradicts the rev-1 text below (rack-owned `grooves`, `GrooveRef::Rack`, built-ins in code, the rack-panel heatmap), rev 2 wins. Epic: `eseq-groove`.
 
 ## Problem

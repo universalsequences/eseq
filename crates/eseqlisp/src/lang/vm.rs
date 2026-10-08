@@ -7424,33 +7424,6 @@ impl VM {
         self.dag.add_edge(source_id, effect_id);
     }
 
-    /// [`Self::inject_reactive_read`] plus the generation the read observed.
-    /// A source with no other reader adopts it without dirtying anything, so
-    /// a later invalidation carrying the same generation is a no-op. A source
-    /// that already has readers keeps its generation: one of them may have
-    /// rendered an older value that only a pending invalidation will fix.
-    pub(crate) fn inject_reactive_read_with_generation(
-        &mut self,
-        namespace: &str,
-        field: &str,
-        generation: Value,
-    ) {
-        let Some(effect_id) = self.tracking_stack.last().copied() else {
-            return;
-        };
-        self.record_reactive_read(namespace, field);
-        let source_id = self.get_or_create_source_node(namespace, field);
-        if let Some(ReactiveNode::Source {
-            value, dependents, ..
-        }) = self.dag.nodes.get_mut(&source_id)
-        {
-            if dependents.is_empty() || (dependents.len() == 1 && dependents.contains(&effect_id)) {
-                *value = generation;
-            }
-        }
-        self.dag.add_edge(source_id, effect_id);
-    }
-
     /// Return the fields in a host-owned namespace which currently have
     /// reactive readers. Detached subtree readers remain subscribers so a
     /// change while they are hidden is observed when they are reattached.

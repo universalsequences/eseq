@@ -1,5 +1,7 @@
 # Takes, Clip Phase Anchoring, and Additive Arrangement Recording Spec
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft / design, 2026-07-23
 Related: `docs/song-mode-spec.md`, `docs/arrangement-timeline-ui-spec.md`,
 `docs/record-quantize-spec.md`,

@@ -27,7 +27,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-clip-move",
     "arrangement-clip-resize",
     "arrangement-clip-split",
-    "arrangement-clip-set-source",
     "song-set-end",
     "song-set-loop",
     // Row path: the declarative/capture commit surface only (lane spec 9 —
@@ -52,15 +51,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-back-to-song-track",
     "song-toggle-record",
     "song-status",
-    // Sound binding (takes spec 16): timeline clip selection is the explicit
-    // binding gesture, plus the two explicit propagation gestures.
-    "song-select-clip",
-    "song-deselect-clip",
-    // Region selection (docs/arrangement-region-editing-spec.md 4.1): pure
-    // selection state — no song mutation, no undo entry, and legal while
-    // song editing is locked.
-    "song-set-region",
-    "song-clear-region",
+    // The arrangement edit cursor mirror (region spec 5.3). The clip binding
+    // and the region selection are the arrangement kinds' setters (`set-song`
+    // :bound-clip, `set-song-region`; host_commands/arrangement.rs).
     "song-set-arr-cursor",
     // Region copy/paste/delete (region spec 5.2). Copy and paste need the
     // clipboard handle, so all three are applied in `handle` below where the
@@ -528,13 +521,6 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 clip_id.0, right.0
             ))
         }
-        "arrangement-clip-set-source" => {
-            let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map)?;
-            let source = parse_source(map)?;
-            app.arr_clip_set_source(clip_id, source)?;
-            Ok(format!("Set clip {} source", clip_id.0))
-        }
         "song-set-end" => {
             let map = payload_map(payload)?;
             let end_beat = require_number(map, "end-beat")?;
@@ -688,55 +674,6 @@ fn run_transport(
             app.set_song_record_engaged(engaged)
         }
         "song-status" => Ok(Some(song_status_summary(app))),
-        // Selecting a clip re-binds the track's device panel, monitor sound
-        // and record-clone template in one move (takes spec 16.2/16.6), so
-        // it lives with the transport commands: it changes what is sounding.
-        "song-select-clip" => {
-            let map = payload_map(payload)?;
-            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
-            let clip_id = resolve_clip(map)?;
-            // The timeline sends the clip's drawn span alongside its id so
-            // the selection is also a one-clip region (region spec 4.1,
-            // amended): selecting a clip lights its body and gives
-            // copy/delete a target. Absent span = clear the region.
-            let span = match (map_number(map, "start"), map_number(map, "end")) {
-                (Some(start), Some(end)) if start.is_finite() && end.is_finite() => {
-                    Some((start, end))
-                }
-                _ => None,
-            };
-            app.select_song_clip_span(track, clip_id, span)?;
-            Ok(app.track_binding_label(track).map(|label| format!("Bound: {label}")))
-        }
-        "song-deselect-clip" => {
-            app.set_song_clip_selection(None);
-            Ok(None)
-        }
-        // Region selection (region spec 4.1). It rides with the transport
-        // commands because setting it releases the sound binding, i.e. it
-        // changes what the device panel and monitor are pointed at.
-        "song-set-region" => {
-            let map = payload_map(payload)?;
-            let track_a = map_usize(map, "track-a").ok_or("missing or invalid :track-a")?;
-            let track_b = map_usize(map, "track-b").ok_or("missing or invalid :track-b")?;
-            let start = require_number(map, "start")?;
-            let end = require_number(map, "end")?;
-            if !start.is_finite() || !end.is_finite() {
-                return Err("region bounds must be finite".to_string());
-            }
-            // `:scene-lane` marks a marquee swept in the SCENE lane (region
-            // spec 4.2, lane spec 8): the same rectangle, but copy/paste/
-            // delete carry the scene EVENTS inside it as well as the clips.
-            let scene_lane = map_bool(map, "scene-lane");
-            app.set_song_region(app::song_region::SongRegionSelection::new_in_lane(
-                track_a, track_b, start, end, scene_lane,
-            ));
-            Ok(None)
-        }
-        "song-clear-region" => {
-            app.clear_song_region();
-            Ok(None)
-        }
         // Arrangement edit-cursor mirror (region spec 5.3): the paste target
         // for the Rust-side Cmd-V seam. Pure state, no undo entry.
         "song-set-arr-cursor" => {
@@ -898,10 +835,6 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-back-to-song-track",
     "song-toggle-record",
     "song-status",
-    "song-select-clip",
-    "song-deselect-clip",
-    "song-set-region",
-    "song-clear-region",
     "song-set-arr-cursor",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",

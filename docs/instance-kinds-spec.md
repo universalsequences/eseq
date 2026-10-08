@@ -1,5 +1,7 @@
 # Instance kinds
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: spec rev 1, 2026-09-24. Stages 1-7 built (see the
 "Built" notes under §5, §6, §7, §8.1, §8.3, §9, §10 and §11). Bead: see the `instance-kinds`
 epic (`bd list --label instance-kinds`).

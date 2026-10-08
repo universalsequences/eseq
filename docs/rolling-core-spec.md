@@ -1,5 +1,7 @@
 # Rolling — core track roll + sequencer roll
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: draft (rev 1)
 Provenance: reverse-engineered from `~/code/visual-sampler/sequencer/src/` (the browser
 DAW whose roll feel this spec must reproduce), mapped onto eseq's Rust scheduler.

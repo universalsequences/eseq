@@ -1010,7 +1010,35 @@ pub(crate) fn register_transport_toggle_play_native(
     });
 }
 
+/// The song and arrangement natives removed with the legacy reactive
+/// layer (eseq-0l17.81; no factory caller since the arrangement's kind port)
+/// and what replaces each: registered without docs as natives that fail
+/// with the hint.
+const REMOVED_SONG_NATIVES: &[(&str, &str)] = &[
+    (
+        "seq-song-select-clip",
+        "seq-song-select-clip was removed; (set! song.bound-clip c) with c a clip of t.clips (eseq.kinds); it also selects the clip's span",
+    ),
+    (
+        "seq-song-deselect-clip",
+        "seq-song-deselect-clip was removed; (set! song.bound-clip nil) (eseq.kinds)",
+    ),
+    (
+        "seq-song-set-region",
+        "seq-song-set-region was removed; (select-region! t1 t2 start end [:scene-lane true]) (eseq.kinds)",
+    ),
+    (
+        "seq-song-clear-region",
+        "seq-song-clear-region was removed; (clear-region!) (eseq.kinds)",
+    ),
+    (
+        "seq-arrangement-clip-set-source",
+        "seq-arrangement-clip-set-source was removed; (set! c.cell cell) with cell one of the track's t.cells (eseq.kinds). Setting a clip's source to empty (the old nil pattern-id) has no kind equivalent yet",
+    ),
+];
+
 pub(crate) fn register_song_natives(runtime: &mut Runtime) {
+    sequencer::lisp_host::register_removed_natives(runtime, REMOVED_SONG_NATIVES);
     // Arrangement editing primitives (docs/arrangement-lane-model-spec.md 8).
     // Scene-lane ops address a scene change by its beat; clip ops address a
     // clip by its stable id.
@@ -1236,35 +1264,6 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
-        "seq-arrangement-clip-set-source",
-        "(seq-arrangement-clip-set-source clip-id [pattern-id])",
-        "Swap a clip's content in place, keeping its span and identity. The \
-         phase anchor resets to the new source's step 0.",
-        move |args, ctx| {
-            let clip_id =
-                song_row_id_arg("seq-arrangement-clip-set-source: clip-id", args.first())?;
-            let pattern_id = match args.get(1) {
-                None | Some(Value::Nil) => Value::Nil,
-                Some(Value::Number(id)) => Value::Number(*id),
-                Some(_) => {
-                    return Err(
-                        "seq-arrangement-clip-set-source: pattern-id must be a number or nil"
-                            .into(),
-                    )
-                }
-            };
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "arrangement-clip-set-source".to_string(),
-                payload: song_payload(vec![
-                    ("clip-id", Value::Number(clip_id as f64)),
-                    ("pattern-id", pattern_id),
-                ]),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
         "seq-arrangement-clear",
         "(seq-arrangement-clear)",
         "Remove the committed arrangement (and with it the compiled song) \
@@ -1457,120 +1456,6 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-back-to-song-track".to_string(),
                 payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-select-clip",
-        "(seq-song-select-clip track clip-id [start end])",
-        "Bind a track's device panel, monitor sound and take punch-in \
-         template to the stored clip `clip-id` on `track` (takes spec \
-         16.2/16.6). With the clip's beat span, ALSO select that span as a \
-         one-track region (region spec 4.1) so the clip body lights up and \
-         copy/delete have a target. Call with no arguments (or \
-         seq-song-deselect-clip) to fall back to the playing/scene source.",
-        move |args, ctx| {
-            let (Some(Value::Number(track)), Some(Value::Number(clip_id))) =
-                (args.first(), args.get(1))
-            else {
-                return Err("seq-song-select-clip: expected track and clip-id".into());
-            };
-            let mut payload = HashMap::new();
-            payload.insert(
-                "track".to_string(),
-                Rc::new(RefCell::new(Value::Number(*track))),
-            );
-            payload.insert(
-                "clip-id".to_string(),
-                Rc::new(RefCell::new(Value::Number(*clip_id))),
-            );
-            if let (Some(Value::Number(start)), Some(Value::Number(end))) =
-                (args.get(2), args.get(3))
-            {
-                payload.insert(
-                    "start".to_string(),
-                    Rc::new(RefCell::new(Value::Number(*start))),
-                );
-                payload.insert("end".to_string(), Rc::new(RefCell::new(Value::Number(*end))));
-            }
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-select-clip".to_string(),
-                payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-deselect-clip",
-        "(seq-song-deselect-clip)",
-        "Clear the timeline clip selection (takes spec 16.6 cause 1): every \
-         track falls back to the song-audible source, else its scene pattern.",
-        move |_args, ctx| {
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-deselect-clip".to_string(),
-                payload: Value::Nil,
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-set-region",
-        "(seq-song-set-region track-a track-b start end [scene-lane])",
-        "Select an arrangement REGION — the inclusive model-track span \
-         `track-a`..`track-b` over the half-open beat span `[start, end)` \
-         (region spec 4.1). Rust-owned, so it survives view switches; \
-         published as song.region. A region names no single clip, so it \
-         clears the clip selection and releases the sound binding. Pass a \
-         truthy `scene-lane` for a marquee swept in the SCENE lane: \
-         copy/paste/delete then carry the scene EVENTS inside the rectangle \
-         as well as the clips (lane spec 8).",
-        move |args, ctx| {
-            let (
-                Some(Value::Number(track_a)),
-                Some(Value::Number(track_b)),
-                Some(Value::Number(start)),
-                Some(Value::Number(end)),
-            ) = (args.first(), args.get(1), args.get(2), args.get(3))
-            else {
-                return Err(
-                    "seq-song-set-region: expected track-a, track-b, start and end".into(),
-                );
-            };
-            let mut payload = HashMap::new();
-            for (key, value) in [
-                ("track-a", *track_a),
-                ("track-b", *track_b),
-                ("start", *start),
-                ("end", *end),
-            ] {
-                payload.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
-            }
-            let scene_lane = matches!(args.get(4), Some(Value::Bool(true)));
-            payload.insert(
-                "scene-lane".to_string(),
-                Rc::new(RefCell::new(Value::Bool(scene_lane))),
-            );
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-set-region".to_string(),
-                payload: Value::Map(payload),
-            });
-            Ok(Value::Bool(true))
-        },
-    );
-
-    runtime.register_native_with_docs(
-        "seq-song-clear-region",
-        "(seq-song-clear-region)",
-        "Clear the arrangement region selection (region spec 4.1): \
-         song.region goes nil and every lane drops its region highlight.",
-        move |_args, ctx| {
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-clear-region".to_string(),
-                payload: Value::Nil,
             });
             Ok(Value::Bool(true))
         },
@@ -3908,13 +3793,23 @@ pub(crate) fn init_runtime(
         Ok(Value::Nil)
     });
 
-    for name in ["seq-set-process-lane-step", "seq-set-process-lane-steps"] {
+    // `seq-set-process-lane-step` (one step) went with the legacy layer
+    // (eseq-0l17.81): `set-lane-steps!` (eseq.kinds) or this with a list.
+    sequencer::lisp_host::register_removed_natives(
+        &mut runtime,
+        &[(
+            "seq-set-process-lane-step",
+            "seq-set-process-lane-step was removed; (set-lane-steps! l steps v) with l a lane of t.lanes and steps step instances (eseq.kinds), or seq-set-process-lane-steps with a list of step indices",
+        )],
+    );
+    {
+        let name = "seq-set-process-lane-steps";
         runtime.register_native(name, move |args, ctx| {
             let (Some(Value::Number(track)), Some(Value::Number(instance_id)),
                 Some(inlet), Some(targets), Some(Value::Number(value))) =
                 (args.first(), args.get(1), args.get(2), args.get(3), args.get(4))
             else {
-                return Err(format!("{name}: expected (track instance-id inlet step(s) value)"));
+                return Err(format!("{name}: expected (track instance-id inlet steps value)"));
             };
             let inlet = value_symbol_name(inlet)
                 .ok_or_else(|| format!("{name}: inlet must be a name"))?;
@@ -3922,10 +3817,8 @@ pub(crate) fn init_runtime(
                 Value::Number(step) if step.is_finite() && *step >= 0.0
                     && step.fract() == 0.0 && *step < MAX_STEPS as f64);
             let steps = match targets {
-                Value::Number(_) if name == "seq-set-process-lane-step" && valid_step(targets) =>
-                    Value::List(vec![Rc::new(RefCell::new(targets.clone()))]),
-                Value::List(steps) if name == "seq-set-process-lane-steps"
-                    && !steps.is_empty() && steps.iter().all(|step| valid_step(&step.borrow())) =>
+                Value::List(steps)
+                    if !steps.is_empty() && steps.iter().all(|step| valid_step(&step.borrow())) =>
                     targets.clone(),
                 _ => return Err(format!("{name}: invalid step targets")),
             };
@@ -7475,11 +7368,6 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-step-param",
             "(seq-set-step-param step :param value)",
             "Set a per-step parameter on the current track.",
-        ),
-        (
-            "seq-set-process-lane-step",
-            "(seq-set-process-lane-step track instance-id inlet step value)",
-            "Set one value in an attached process lane.",
         ),
         (
             "seq-set-process-lane-steps",

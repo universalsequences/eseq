@@ -1,5 +1,7 @@
 # Rack Clips and Break Kits
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 **Status:** rev 4. All four phases built: §7.1 kit bus chain, §5 rack-owned
 sequencers, §2–4 + §6 rack clips, §7 break kits.
 **Epic:** `bd show eseq-172r` (children .1 bus chain, .2 rack-owned sequencers,

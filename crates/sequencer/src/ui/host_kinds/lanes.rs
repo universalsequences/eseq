@@ -3,7 +3,7 @@
 //! `SEQ.process-slots`), its lanes (`lane`, `t.lanes`; legacy
 //! `SEQ.track-process-lanes`, `SEQ.track-process-lane-values`,
 //! `SEQ.process-lanes`), a graph node's process patch (`process`,
-//! `graph-node.processes`; legacy `graph-node-process-chain` and the removed
+//! `graph-node.processes`; the removed `graph-node-process-chain` and
 //! `graph-node-lane-patch`), each process's numeric inlets (`inlet`), ports and
 //! their fan-out entries (`port`, `fanout`; with `process.in-ports` the
 //! patchbay, legacy `SEQ.track-lane-patch`), its state cells and their

@@ -1,5 +1,7 @@
 # Realtime Arrangement Feedback — Recording You Can See, Editing While It Plays
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 3, 2026-07-27 — **design, nothing built; all questions resolved.**
 Raised while testing clip move (`docs/arrangement-region-editing-spec.md` §6):
 edits and recordings only become visible when they commit, which for

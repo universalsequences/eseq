@@ -1,5 +1,7 @@
 # Jaki P-locks — per-hit parameter sequences with track-aware completion
 
+> Names below predate kind bindings (eseq-0l17); see docs/kind-bindings-spec.md.
+
 Status: rev 1, 2026-09-30 — design only, nothing built. Epic `eseq-jplk`
 (children listed in §10).
 
