@@ -16,9 +16,6 @@ fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
         }
         apply_group_bindings(&mut editor, group);
         for collapsed in [false, true] {
-            editor.runtime_mut().set_reactive(
-                "SEQ", "track-collapsed", test_bool_list(&[collapsed; 3]),
-            );
             for track in 0..3 {
                 let track = kind_track(editor.runtime(), track);
                 set_field(editor.runtime_mut(), track, "collapsed", Value::Bool(collapsed));
@@ -219,7 +216,6 @@ fn assert_lower_panel(editor: &mut Editor, buffer: &str) {
 fn track_badge_double_click_toggles_panel_and_clears_delete_arm() {
     let mut editor = full_grid_editor_for_scroll_tests();
     for collapsed in [false, true] {
-        editor.runtime_mut().set_reactive("SEQ", "track-collapsed", test_bool_list(&[collapsed]));
         let track = kind_track(editor.runtime(), 0);
         set_field(editor.runtime_mut(), track, "collapsed", Value::Bool(collapsed));
         editor.runtime_mut().run_reactive_cycle();
@@ -305,12 +301,13 @@ fn group_badge_clicks_ignore_routes_from_unavailable_mod_outputs() {
     rack.pads.truncate(1);
     rack.choke_groups.truncate(1);
     apply_group_bindings(&mut editor, group);
-    editor.runtime_mut().set_reactive("SEQ", "track-instrument-types", test_string_list(&["sampler"]));
-    // The mixer's view: track 0 has no mod output, yet a route leaves it
-    // for the group bus's first input.
+    // The mixer's view: track 0 (a sampler) has no mod output, yet a route
+    // leaves it for the group bus's first input.
     {
         let rt = editor.runtime_mut();
         let track = kind_track(rt, 0);
+        set_field(rt, track, "instrument-type", Value::String("sampler".into()));
+        set_field(rt, track, "mod-output", Value::Bool(false));
         let group_bus = rt.keyed_instance("eseq.kinds:bus", &[2]).unwrap();
         let route = rt.register_keyed_instance("eseq.kinds:route", &[0]).unwrap();
         set_field(rt, route, "source", Value::Instance(track));

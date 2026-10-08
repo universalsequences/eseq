@@ -35,19 +35,10 @@ fn melt_context_pages_have_bound_controls_and_editable_envelopes() {
         midi_effects: test_list(vec![]),
         bus_effects: test_list(vec![]),
     };
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-        ],
-        true,
-    );
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()

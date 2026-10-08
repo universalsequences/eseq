@@ -3380,9 +3380,9 @@ fn tab_accepts_completion_from_runtime_symbols() {
 #[test]
 fn shader_completion_in_defwidget_includes_macros_and_native_forms() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    let source = "(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  :bindable (playing)\n  :paint-margin 0.4\n  :shader\n  (sdf";
+    let source = "(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  :paint-margin 0.4\n  :shader\n  (sdf";
     editor.open_scratch_buffer("*shader*", source);
-    editor.active_buffer_mut().cursor = (6, "  (sdf".len());
+    editor.active_buffer_mut().cursor = (5, "  (sdf".len());
     editor.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
 
     let completion = editor.completion_state().expect("SDF completion");
@@ -3418,7 +3418,7 @@ fn shader_completion_keywords_follow_defwidget_and_nested_material_context() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     for (source, keywords) in [
         ("(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  ",
-            &[":width", ":height", ":state", ":bindable", ":paint-margin", ":shader", ":animates"][..]),
+            &[":width", ":height", ":state", ":paint-margin", ":shader", ":animates"][..]),
         ("(defwidget xyz :shader (sdf/fill (sdf/rounded-rect width width 0.06)\n  (material ",
             &[":color", ":shadow", ":lighting"][..]),
         ("(defwidget xyz :shader (sdf/fill (sdf/circle 1)\n  (material :color (rgba 1 1 1 1) :shadow (shadow ",
@@ -8507,11 +8507,11 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
             (effect-buffer "*controls*"
               (knob-number :label "cut"
                 :value 0 :min -1 :max 1 :decimals 2
-                :origin (bind "APP" "origin")
-                :base-value (bind "APP" "base") :base-min -1 :base-max 1
+                :origin #'APP.origin
+                :base-value #'APP.base :base-min -1 :base-max 1
                 :selected-mod-slot 1
                 :mod-range-0-slot 1
-                :mod-range-0-depth (bind "APP" "depth-1")
+                :mod-range-0-depth #'APP.depth-1
                 :mod-ranges (list
                   (dict :slot 2 :depth -0.25))
                 :width 4 :height 2.8
@@ -10469,7 +10469,7 @@ fn visible_inactive_tile_binding_write_marks_editor_for_redraw() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -10537,7 +10537,7 @@ fn tiled_frame_routes_binding_dirty_ids_to_inactive_tile() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -10597,7 +10597,7 @@ fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
             r#"
             (effect-buffer "*meters*"
               (mixer-meter
-                :level-l (bind "APP" "peak")
+                :level-l #'APP.peak
                 :level-r 0.0
                 :width 2.22
                 :height 4.24))
@@ -17759,7 +17759,7 @@ fn context_menu_long_submenu_scrolls_and_keyboard_reaches_last_choice() {
 }
 
 /// A package channel strip (the `~/.eseq.d` autechre mixer) reads
-/// `(nth (or SEQ.field (list)) i)` inside a keyed subtree, living in a visible
+/// `(nth (or APP.field (list)) i)` inside a keyed subtree, living in a visible
 /// *inactive* tile (the mixer sits beside the fx panel, which holds focus).
 /// Republishing the list of device dicts, and growing the outer list, must
 /// rerun the strip and land in the inactive tile's cached layout.
@@ -17803,7 +17803,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     }
     let mut runtime = Runtime::new();
     runtime.register_reactive(
-        "SEQ",
+        "APP",
         vec![
             ("track-names", Value::List(vec![
                 Rc::new(RefCell::new(Value::String("a".into()))),
@@ -17832,12 +17832,12 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
                       (if device (get device :name) nil)
                       (if device (get device :enabled) false))))))
             (def track-cell (i)
-              (let ((devices (nth (or SEQ.track-device-chains (list)) i)))
+              (let ((devices (nth (or APP.track-device-chains (list)) i)))
                 (box :key (str "au-track-" i) :width 12 :height 5
                   (device-strip (str "au-track-" i) devices (lambda (d) d)))))
             (effect-buffer "*strip*"
               (h-stack
-                (each (range 0 (len SEQ.track-names)) |i idx|
+                (each (range 0 (len APP.track-names)) |i idx|
                   (subtree :key (str "au-track-sub-" i) (track-cell i)))))
             (split-window-right "*strip*")
             "#,
@@ -17870,7 +17870,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     assert_eq!(leaf_labels(&editor), vec!["Space Echo", "", "", "", "", ""]);
 
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-device-chains",
         chains(&[&[("Space Echo", true)], &[("808 Kick", true), ("Reverb", false)]]),
     );
@@ -17884,7 +17884,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     );
 
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-names",
         Value::List(vec![
             Rc::new(RefCell::new(Value::String("a".into()))),
@@ -17896,7 +17896,7 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(80, 20);
     editor.runtime_mut().set_reactive(
-        "SEQ",
+        "APP",
         "track-device-chains",
         chains(&[
             &[("Space Echo", true)],

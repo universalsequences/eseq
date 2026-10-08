@@ -39,12 +39,9 @@ fn check_resonant_surface_at(root: &std::path::Path, dsp_file: &str, instrument:
         midi_effects: test_list(vec![]),
         bus_effects: test_list(vec![]),
     };
-    editor.runtime_mut().register_reactive("SEQ", vec![
-        ("num-tracks", Value::Number(1.0)),
-        ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
-        ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-    ], true);
-    for (field, value) in values { editor.runtime_mut().set_reactive("SEQ", &field, value); }
+    seed_values(vec![
+    ]);
+    for (field, value) in values { seed_value(&field, value); }
     editor.runtime_mut().eval_str(r#"
         (def eseq.seq-core-state/selected-bus-name () "Mix")
         (def seq-has-selection? () false)

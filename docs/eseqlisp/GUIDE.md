@@ -232,9 +232,12 @@ selection.track.name  transport.playing  (len (tracks))
 ```
 
 A read subscribes to that field of that instance only, so a view reruns
-when what it read changed and not otherwise. The legacy `SEQ` and `SEQV`
-namespaces are gone (eseq-0l17.78); `THEME` is the one host namespace a view
-still reads directly.
+when what it read changed and not otherwise. The legacy `SEQ`, `SEQV`,
+`EXPORT` and `AGENT` namespaces are gone (eseq-0l17.78, .80): `SEQ.x` (or
+`#'SEQ.x`) is a compile error that points at the kinds, e.g. "SEQ.track-colors
+was removed; read the eseq.kinds instance fields, e.g. (map (lambda (t)
+t.color) (tracks))". `THEME` is the one host namespace a view still reads
+directly.
 
 Writes go through host commands, not `set!`:
 
@@ -260,7 +263,20 @@ second. Bind the prop to a float reference instead:
 
 Only props a widget lists as bindable accept references. A view's own
 hot state (a cursor, a highlight) is a view-local kind's `:state` field,
-bound the same way (`#'h.selected`).
+bound the same way (`#'h.selected`). On a live host namespace, `#'THEME.accent`
+binds that field's float slot.
+
+`#'` and a field read are the whole binding API. The string-keyed forms
+`bind`, `bind-seq`, `bind-nth`, `bind-seq-nth`, `reactive-get` and
+`reactive-set` were removed (eseq-0l17.80); each is a compile error naming
+its replacement (unless your own code defines that name). Two forms are
+deprecated and warn once per session (per VM), naming the file of the
+first use:
+
+- `(reactive-value x)` is just `x`: a value position reads a binding already.
+- `defwidget`'s `:bindable (…)` is ignored: every `:state` accepts a binding.
+
+Drop both; they will be removed.
 
 ### `subtree`
 
@@ -743,12 +759,12 @@ map filter reduce for-each each
 ```lisp
 (effect-buffer "*name*" body)  (effect body…)  (observe body…)
 (subtree :key k body)
-(bind "NS" "field")  (bind-seq "field")  (bind-nth "NS" "field" i)  (bind-seq-nth "field" i)
-(reactive-get "NS" "f")  (reactive-set "NS" "f" v)  (reactive-value ref)
+#'t.volume  #'THEME.accent      ; bind a field (kind instance, live namespace)
+t.volume  (set! t.volume 0.5)   ; read (subscribes) and write a field
 (host-command "name" payload)  (status "text")
 (apply-theme (dict :slot '(r g b a) …))  (ui/style :pressed (dict …) :hover (dict …))
 (defwidget name :width w :height h [:paint-margin m] [:animates b]
-  :state (s…) :bindable (p…) :shader sdf-expr)
+  :state (s…) :shader sdf-expr)    ; every state accepts #' bindings
 (define-mode "m" [:read-only b] [:live-keys b] [:inherit "p"] [:on-enter "f"] [:on-key "f"])
 (bind-key "K" "f")  (mode-bind-key "m" "K" "f")  (set-buffer-mode-for "*b*" "m")
 ```

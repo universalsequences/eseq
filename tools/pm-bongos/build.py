@@ -187,7 +187,7 @@ def ui_source(data):
 
 ;; Normalized two-pole contact force over 0-1.5 ms, as the DSP computes it.
 (defwidget pm-bongo-hand
-  :width 35.3 :height 3.1 :state (hardness dynamics) :bindable (hardness dynamics)
+  :width 35.3 :height 3.1 :state (hardness dynamics)
   :shader
   (let ((time (* 0.0015 0.5 (+ 1 (/ x aspect))))
         (hard (* 0.00025 (pow 2 (* 3 (- 0.5 hardness)))))
@@ -207,7 +207,7 @@ def ui_source(data):
 
 ;; Low-head fundamental ring (measured 11.5/s) with decay and muffle loss.
 (defwidget pm-bongo-head
-  :width 35.3 :height 3.1 :state (decay muffle glide) :bindable (decay muffle glide)
+  :width 35.3 :height 3.1 :state (decay muffle glide)
   :shader
   (let ((time (* 0.6 0.5 (+ 1 (/ x aspect))))
         (rate (+ (/ 11.5 decay) (* 90 muffle muffle)))
@@ -225,7 +225,7 @@ def ui_source(data):
 
 ;; Skin noise band: level and centre shift around a 2 kHz reference.
 (defwidget pm-bongo-skin
-  :width 35.3 :height 3.1 :state (skin tone) :bindable (skin tone)
+  :width 35.3 :height 3.1 :state (skin tone)
   :shader
   (let ((octave (* 4 (/ x aspect)))
         (centre (* 1.5 tone))

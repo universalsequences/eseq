@@ -354,7 +354,7 @@ fn midimix_bottom_knobs_follow_strip_rack_macros_and_live_topology() {
     editor.runtime_mut().register_native("seq-armed-tracks", |_, _| {
         Ok(Value::List(vec![Rc::new(RefCell::new(Value::Number(10.0)))]))
     });
-    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(10.0));
+    seed_value("current-track", Value::Number(10.0));
     // Zero-valued macro/track indices and CC values are valid. UI focus and
     // the armed keyboard target must not redirect the strip's macro.
     for (controller, track, raw) in [(18, 0, 0), (26, 3, 64), (60, 10, 127)] {

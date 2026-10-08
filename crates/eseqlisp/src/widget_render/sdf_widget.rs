@@ -1292,7 +1292,7 @@ mod tests {
     #[test]
     fn sdf_drag_preserves_named_region_with_pixel_correct_hit_testing() {
         let mut runtime = crate::Runtime::new();
-        runtime.eval_str("(defwidget sdf-drag-regression :state (offset) :bindable (offset) :shader (sdf/region :handle (sdf/translate offset 0 (sdf/circle 0.05)) :accent (sdf/translate offset 0 (sdf/circle 0.2))))").unwrap();
+        runtime.eval_str("(defwidget sdf-drag-regression :state (offset) :shader (sdf/region :handle (sdf/translate offset 0 (sdf/circle 0.05)) :accent (sdf/translate offset 0 (sdf/circle 0.2))))").unwrap();
         let mut node = LayoutNode {
             widget_id: 999, stable_widget_id: None, subtree_root_id: None,
             parent_subtree_root_id: None, stable_key: None,

@@ -81,7 +81,7 @@
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "df-algorithm-" index)
       (v-stack :gap 0.05
         (label (str index) :width 7.8 :height 0.55 :font-size 7.5 :v-align :center :color (df-ink) :bg :transparent)
-        (df-routing :mode index :selected (= (reactive-value (df-bound "algorithm" 2)) index)
+        (df-routing :mode index :selected (= (df-bound "algorithm" 2) index)
         :width 7.8 :height 1.65 :debug-name (str "df-algorithm-" index)
         :on-click (lambda (x y r)
           (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p index)))))))

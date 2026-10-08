@@ -48,9 +48,40 @@ pub(super) fn dict_string(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-/// What a test published under legacy field `field` (`SEQ.<field>`).
-fn published(rt: &Runtime, field: &str) -> Option<Value> {
-    rt.reactive_field_value("SEQ", field).cloned()
+thread_local! {
+    /// The values a host-less harness test seeds for [`seed_panel_kinds`]
+    /// to publish as kinds: the dicts' `:value-field` handles, the track
+    /// settings (`tp-*`), the p-lock rows, `current-track`. Test-local Rust
+    /// state: no Lisp namespace carries it (the SEQ namespace was removed,
+    /// eseq-0l17.78/.80). Per test: libtest and nextest run every test on
+    /// a thread of its own (even with `--test-threads=1`), and the harness
+    /// constructors start from [`seed_values`]. Not cleared by
+    /// [`seed_app_panels`], which reads the p-lock seeds a test set first.
+    static SEEDS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+}
+
+/// Replace every seed with `fields` (a harness's starting values).
+pub(super) fn seed_values(fields: Vec<(&str, Value)>) {
+    SEEDS.with(|seeds| {
+        let mut seeds = seeds.borrow_mut();
+        seeds.clear();
+        seeds.extend(fields.into_iter().map(|(field, value)| (field.to_string(), value)));
+    });
+}
+
+/// Seed one value (see [`seed_values`]).
+pub(super) fn seed_value(field: &str, value: Value) {
+    SEEDS.with(|seeds| seeds.borrow_mut().insert(field.to_string(), value));
+}
+
+/// What a test seeded under `field`, if anything.
+pub(super) fn seeded(field: &str) -> Option<Value> {
+    SEEDS.with(|seeds| seeds.borrow().get(field).cloned())
+}
+
+/// What a test seeded under handle `field` (see [`seed_values`]).
+fn published(_rt: &Runtime, field: &str) -> Option<Value> {
+    seeded(field)
 }
 
 /// What a test published under the legacy field `dict`'s `key` names.
@@ -571,9 +602,9 @@ pub(super) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String
     format!("rack-slot-delete-target-{track}-{slot}")
 }
 
-/// The legacy p-lock lists a test published (`SEQ.track-plocks`, the
-/// selected step's lock rows; `SEQ.track-plock-any`, the params locked on
-/// any step; `SEQ.track-plock-variants`, the variant chips) as the
+/// The legacy p-lock lists a test seeded (`track-plocks`, the
+/// selected step's lock rows; `track-plock-any`, the params locked on
+/// any step; `track-plock-variants`, the variant chips) as the
 /// seeded params' `locked` / `base` / `value` / `has-locks`, the track's
 /// variants and the step panel's table ([`seed_plock_table`]).
 pub(super) fn seed_panel_locks(rt: &mut Runtime, track: eseqlisp::vm::InstanceId) {
@@ -634,10 +665,7 @@ pub(super) fn seed_panel_locks(rt: &mut Runtime, track: eseqlisp::vm::InstanceId
             // The row's lock value, else what the legacy display field the
             // test published shows, else the default.
             let value = (dict_value(row, "text-value").or_else(|| dict_value(row, "value")))
-                .or_else(|| {
-                    rt.reactive_field_value("SEQ", &format!("tp-{name}"))
-                        .cloned()
-                })
+                .or_else(|| seeded(&format!("tp-{name}")))
                 .or_else(|| dict_value(row, "default"))?;
             Some(map_value([("name", Value::String(name)), ("value", value)]))
         })
@@ -752,7 +780,7 @@ pub(super) fn seed_plock_table(
 }
 
 /// The current track's settings a test published under their legacy
-/// fields (`SEQ.tp-*`, `fts-options`) as the track's (and the project's)
+/// fields (`tp-*`, `fts-options`) as the track's (and the project's)
 /// fields, the legacy fields mapped to the ones that replaced them.
 fn seed_track_settings(rt: &mut Runtime, kinds: &mut PanelKinds, track: eseqlisp::vm::InstanceId) {
     for (legacy, field) in [
@@ -819,7 +847,7 @@ fn seed_track_settings(rt: &mut Runtime, kinds: &mut PanelKinds, track: eseqlisp
     }
 }
 
-/// The published legacy scale fields (`SEQ.tp-tuning-*`) as the track's
+/// The seeded legacy scale fields (`tp-tuning-*`) as the track's
 /// tuning and its degrees.
 fn seed_track_tuning(rt: &mut Runtime, track: eseqlisp::vm::InstanceId) {
     let Some(Value::Bool(on)) = published(rt, "tp-tuning-on") else {
@@ -1114,8 +1142,8 @@ pub(super) fn seed_panel_kinds(editor: &mut Editor, seed: &PanelSeed) -> PanelKi
     if !has_host_kinds(rt) {
         return kinds;
     }
-    let current = match rt.reactive_field_value("SEQ", "current-track") {
-        Some(Value::Number(n)) => *n as usize,
+    let current = match seeded("current-track") {
+        Some(Value::Number(n)) => n as usize,
         _ => 0,
     };
     // The harness's own tracks when it publishes them (seed_kind_tracks).
@@ -1333,7 +1361,7 @@ pub(super) fn seed_app_panels(editor: &mut Editor, app: &app::App, track: usize)
     if !has_host_kinds(rt) {
         return kinds;
     }
-    rt.set_reactive("SEQ", "current-track", Value::Number(track as f64));
+    seed_value("current-track", Value::Number(track as f64));
     let mut tracks = project_list(rt, "tracks");
     if tracks.len() <= track {
         tracks = register_kind_range(rt, "eseq.kinds:track", app.tracks.len().max(track + 1));
@@ -1733,12 +1761,12 @@ thread_local! {
 /// modulation or process display field; [`seed_panel_kinds`]), as the
 /// host-kinds tick does. A value sets the param's base too.
 /// A field nothing seeded (set before the panels were seeded) is still
-/// the test's own `SEQ` value, which seeding reads from the dicts.
+/// the test's own seed ([`seed_value`]), which seeding reads from the dicts.
 pub(super) fn set_seeded_field(editor: &mut Editor, field: &str, value: Value) {
     let Some((id, kind_field)) =
         SEEDED_DISPLAY_FIELDS.with(|fields| fields.borrow().get(field).copied())
     else {
-        editor.runtime_mut().set_reactive("SEQ", field, value);
+        seed_value(field, value);
         return;
     };
     let rt = editor.runtime_mut();

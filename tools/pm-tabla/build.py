@@ -234,7 +234,7 @@ def ui_source(data):
 
 ;; Normalized two-pole contact force over 0-1.5 ms, as the DSP computes it.
 (defwidget pm-tabla-hand
-  :width 35.3 :height 3.1 :state (hardness dynamics) :bindable (hardness dynamics)
+  :width 35.3 :height 3.1 :state (hardness dynamics)
   :shader
   (let ((time (* 0.0015 0.5 (+ 1 (/ x aspect))))
         (hard (* 0.00025 (pow 2 (* 3 (- 0.5 hardness)))))
@@ -255,7 +255,7 @@ def ui_source(data):
 ;; Bayan ring with decay and muffle loss (measured $bayan_rate/s), and the
 ;; meend: pitch rising at the measured $bayan_glide cents/s for $bayan_hold s.
 (defwidget pm-tabla-bayan
-  :width 35.3 :height 3.1 :state (decay muffle meend press) :bindable (decay muffle meend press)
+  :width 35.3 :height 3.1 :state (decay muffle meend press)
   :shader
   (let ((time (* 0.6 0.5 (+ 1 (/ x aspect))))
         (rate (+ (/ $bayan_rate decay) (* 90 muffle muffle)))
@@ -274,7 +274,7 @@ def ui_source(data):
 
 ;; Skin noise band: level and centre shift around a 2 kHz reference.
 (defwidget pm-tabla-skin
-  :width 35.3 :height 3.1 :state (skin tone) :bindable (skin tone)
+  :width 35.3 :height 3.1 :state (skin tone)
   :shader
   (let ((octave (* 4 (/ x aspect)))
         (centre (* 1.5 tone))

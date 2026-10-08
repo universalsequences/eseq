@@ -34,6 +34,15 @@ pub use view_buffers::BoundView;
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 pub const SOURCE_BUFFER_ID_PROP: &str = "__source-buffer-id";
+/// The native `#'NS.field` compiles to on a live host namespace (THEME, …):
+/// `(__ns-ref "NS" "field")` returns the field's float slot as a binding.
+pub const NAMESPACE_REF_NATIVE: &str = "__ns-ref";
+/// The one-time warning `reactive-value` gives (eseq-0l17.80).
+pub const REACTIVE_VALUE_DEPRECATION: &str = "reactive-value is deprecated and will be removed: \
+     a value position reads a binding already, so (reactive-value x) is just x";
+/// The one-time warning a `defwidget` `:bindable` gives (eseq-0l17.80).
+pub const BINDABLE_DEPRECATION: &str = "defwidget :bindable is deprecated and ignored \
+     (every :state accepts a binding); remove it";
 pub const SOURCE_MODULE_PATH_PROP: &str = "__source-module-path";
 pub const SOURCE_SYMBOL_PROP: &str = "__source-symbol";
 pub const SOURCE_START_BYTE_PROP: &str = "__source-start-byte";
@@ -279,8 +288,8 @@ impl ReactiveBindingKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingKind {
-    /// A float slot of a host reactive namespace (`bind`, `bind-seq`,
-    /// `bind-nth`). Read as a value it is the slot's number.
+    /// A float slot of a host reactive namespace (`#'NS.field`, or an
+    /// element handle a host native returns). Read as a value it is the slot's number.
     Float,
     /// A `:number`, `:int` or `:bool` field of an instance (`#'x.field`,
     /// kind-bindings spec §7.1): one float slot. Read as a value it is the
@@ -2944,6 +2953,11 @@ pub struct VM {
     pub macros: HashMap<String, MacroDef>,
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
+    /// Deprecations already reported (`:bindable`, `reactive-value`): each
+    /// warns once per VM. See [`VM::warn_deprecated`].
+    deprecations_warned: HashSet<&'static str>,
+    /// The deprecation warnings this VM has issued, in order.
+    deprecation_warnings: Vec<String>,
     preserve_state_on_redefinition: bool,
     global_store_hooks: Vec<GlobalStoreHook>,
     inline_widget_metadata_resolver: Option<InlineWidgetMetadataResolver>,
@@ -3150,26 +3164,17 @@ pub fn register_core_natives(vm: &mut VM) {
     // Works on both Maps and keyword-value lists like (:label "foo" :children (...)).
     vm.register_borrowing_native("get", core_get);
 
-    vm.register_native_with_vm("reactive-get", |args, vm| {
-        let (Some(Value::String(namespace)), Some(Value::String(field))) =
-            (args.first(), args.get(1))
-        else {
-            return Value::Nil;
-        };
-        vm.track_source_read(namespace, field);
-        vm.current_reactive_value(namespace, field)
+    // (reactive-value x) → x. Deprecated (eseq-0l17.80): a value position
+    // reads a binding already (kind-bindings spec §8), so the call boundary
+    // hands this native the value. Warns once; removed later.
+    vm.register_native_with_vm("reactive-value", |args, vm| {
+        vm.warn_deprecated("reactive-value", REACTIVE_VALUE_DEPRECATION);
+        args.into_iter().next().unwrap_or(Value::Nil)
     });
 
-    vm.register_native_with_vm("reactive-set", |args, vm| {
-        let (Some(Value::String(namespace)), Some(Value::String(field)), Some(value)) =
-            (args.first(), args.get(1), args.get(2))
-        else {
-            return Value::Bool(false);
-        };
-        Value::Bool(vm.host_reactive_set(namespace, field, value.clone()))
-    });
-
-    vm.register_native_with_vm("bind", |args, vm| {
+    // `#'NS.f` on a live host namespace (THEME, …) compiles to
+    // `(__ns-ref "NS" "f")`: the field's float slot as a binding.
+    vm.register_ref_aware_native_with_vm(NAMESPACE_REF_NATIVE, |args, vm| {
         let (Some(Value::String(namespace)), Some(Value::String(field))) =
             (args.first(), args.get(1))
         else {
@@ -3178,31 +3183,9 @@ pub fn register_core_natives(vm: &mut VM) {
         reactive_float_ref(&vm.reactive_float_slots, namespace, field)
     });
 
-    vm.register_native_with_vm("bind-seq", |args, vm| {
-        let Some(Value::String(field)) = args.first() else {
-            return Value::Nil;
-        };
-        reactive_float_ref(&vm.reactive_float_slots, "SEQ", field)
-    });
-
-    // (reactive-value ref) → what the ref reads now, recording a dependency
-    // (the explicit form of what any value position does, spec §8).
-    vm.register_ref_aware_native_with_vm("reactive-value", |args, vm| {
-        let Some(value) = args.first() else {
-            return Value::Nil;
-        };
-        if !matches!(value, Value::ReactiveRef { .. }) {
-            return value.clone();
-        }
-        vm.read_binding_ref(value).unwrap_or_else(|error| {
-            vm.fail_native_call(error);
-            Value::Nil
-        })
-    });
-
     // `#'h.f` compiles to `(__field-ref h "f")` (kind-bindings spec §7.1):
-    // a binding to field f of instance h. (`#'SEQ.playing` on a reactive
-    // namespace compiles to `(bind "SEQ" "playing")` instead.)
+    // a binding to field f of instance h. (`#'THEME.accent` on a live
+    // host namespace compiles to `(__ns-ref "THEME" "accent")` instead.)
     vm.register_ref_aware_native_with_vm(FIELD_REF_NATIVE, |args, vm| {
         let result = match (args.first(), args.get(1)) {
             (Some(Value::Instance(id)), Some(Value::String(field))) => {
@@ -3220,32 +3203,6 @@ pub fn register_core_natives(vm: &mut VM) {
             vm.fail_native_call(error);
             Value::Nil
         })
-    });
-
-    vm.register_native_with_vm("bind-nth", |args, vm| {
-        let (
-            Some(Value::String(namespace)),
-            Some(Value::String(field)),
-            Some(Value::Number(index)),
-        ) = (args.first(), args.get(1), args.get(2))
-        else {
-            return Value::Nil;
-        };
-        let Some(index) = binding_index(*index) else {
-            return Value::Nil;
-        };
-        reactive_indexed_float_ref(&vm.reactive_float_slots, namespace, field, index)
-    });
-
-    vm.register_native_with_vm("bind-seq-nth", |args, vm| {
-        let (Some(Value::String(field)), Some(Value::Number(index))) = (args.first(), args.get(1))
-        else {
-            return Value::Nil;
-        };
-        let Some(index) = binding_index(*index) else {
-            return Value::Nil;
-        };
-        reactive_indexed_float_ref(&vm.reactive_float_slots, "SEQ", field, index)
     });
 
     vm.register_native_with_vm("subtree-owner", |args, vm| {
@@ -4362,10 +4319,7 @@ pub fn register_core_natives(vm: &mut VM) {
         "cons",
         "append",
         "set-nth",
-        "bind",
-        "bind-seq",
-        "bind-nth",
-        "bind-seq-nth",
+        NAMESPACE_REF_NATIVE,
         "bind-view-buffer",
     ]);
 }
@@ -4500,29 +4454,6 @@ fn reactive_float_ref(
         index: None,
         kind: BindingKind::Float,
         slot: slots.slot(namespace, field),
-    }
-}
-
-fn reactive_indexed_float_ref(
-    slots: &crate::reactive::ReactiveBindingStore,
-    namespace: &str,
-    field: &str,
-    index: usize,
-) -> Value {
-    Value::ReactiveRef {
-        namespace: namespace.to_string(),
-        field: field.to_string(),
-        index: Some(index),
-        kind: BindingKind::Float,
-        slot: slots.indexed_slot(namespace, field, index),
-    }
-}
-
-fn binding_index(value: f64) -> Option<usize> {
-    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= usize::MAX as f64 {
-        Some(value as usize)
-    } else {
-        None
     }
 }
 
@@ -5271,6 +5202,8 @@ impl VM {
             macros: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
+            deprecations_warned: HashSet::new(),
+            deprecation_warnings: Vec::new(),
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
@@ -6108,6 +6041,27 @@ impl VM {
         std::mem::take(&mut self.source_load_errors)
     }
 
+    /// Report deprecation `key` once per session (per VM): to stderr and
+    /// the load diagnostics, naming the source file of the first use
+    /// (`:bindable`, `reactive-value`; eseq-0l17.80).
+    pub fn warn_deprecated(&mut self, key: &'static str, message: &str) {
+        if !self.deprecations_warned.insert(key) {
+            return;
+        }
+        let message = match self.current_source_file() {
+            Some(file) => format!("warning: {message} (first use in {})", file.display()),
+            None => format!("warning: {message}"),
+        };
+        eprintln!("eseqlisp: {message}");
+        self.source_manager.push_diagnostic(message.clone());
+        self.deprecation_warnings.push(message);
+    }
+
+    /// The deprecation warnings issued so far (see [`VM::warn_deprecated`]).
+    pub fn deprecation_warnings(&self) -> &[String] {
+        &self.deprecation_warnings
+    }
+
     pub fn set_preserve_state_on_redefinition(&mut self, preserve: bool) {
         self.preserve_state_on_redefinition = preserve;
     }
@@ -6422,7 +6376,7 @@ impl VM {
 
     /// `global_names` index of a reactive namespace map, memoised. Reactive
     /// reads are the hottest lookup in the UI (every bound widget prop and
-    /// every `reactive-get`), and the flat `global_names` Vec grows with the
+    /// every `NS.field` read), and the flat `global_names` Vec grows with the
     /// total amount of loaded Lisp, so the linear scan this replaces cost
     /// more as more instrument/effect UIs were installed.
     fn reactive_namespace_global_index(&self, name: &str) -> Option<usize> {
@@ -7352,8 +7306,7 @@ impl VM {
     /// the value it binds plus a dependency of the running effect on its
     /// source, exactly what the matching by-value read records. An instance
     /// field ref (`#'t.x`) reads like `t.x` (typed: `true`, `(rgb r g b)`);
-    /// a legacy ref (`bind`, `bind-seq`) reads its float slot, as
-    /// `reactive-value` always has. Anything else is returned as is.
+    /// a host namespace ref (`#'THEME.accent`) reads its float slot. Anything else is returned as is.
     pub(crate) fn read_binding_ref(&mut self, value: &Value) -> Result<Value, VMError> {
         let Value::ReactiveRef {
             namespace,
@@ -7520,21 +7473,15 @@ impl VM {
         subscribed
     }
 
-    /// `(reactive-set namespace field value)`: write the float binding slot,
+    /// `(set! NS.field value)` (`StoreReactive`) and a native's reactive set:
+    /// write the float binding slot(s),
     /// the namespace global and the DAG source, and queue the registry write
     /// that dirties bound widgets. Returns false for a non-writable namespace.
     pub(crate) fn host_reactive_set(&mut self, namespace: &str, field: &str, value: Value) -> bool {
         if !self.writable_reactive_namespaces.contains(namespace) {
             return false;
         }
-        match &value {
-            Value::Number(number) => self
-                .reactive_float_slots
-                .write_float(namespace, field, *number),
-            Value::Bool(true) => self.reactive_float_slots.write_float(namespace, field, 1.0),
-            Value::Bool(false) => self.reactive_float_slots.write_float(namespace, field, 0.0),
-            _ => {}
-        }
+        self.reactive_float_slots.store_value(namespace, field, &value);
         self.update_reactive_global(namespace, field, value.clone());
         self.pending_reactive_sets
             .push((namespace.to_string(), field.to_string(), value.clone()));
@@ -8125,8 +8072,8 @@ impl VM {
     /// namespace map. `global_value(namespace)` clones the map, so its cost
     /// grows with the total number of fields in the namespace: `SEQV` holds
     /// one entry per bound widget field in the whole UI (tens of thousands in
-    /// a real project), which made every `reactive-get` an O(total UI state)
-    /// operation. Custom instrument/effect panels call `reactive-get` several
+    /// a real project), which made every namespace field read an O(total UI state)
+    /// operation. Custom instrument/effect panels read fields several
     /// times per control, so that clone dominated every panel render.
     fn current_reactive_value(&self, namespace: &str, field: &str) -> Value {
         let Some(idx) = self.resolve_global_read_index(namespace) else {
@@ -9540,11 +9487,7 @@ impl VM {
                         return Err(VMError::ReadonlyReactive(namespace));
                     }
                     let new_value = value.borrow().clone();
-                    self.reactive_float_slots
-                        .store_value(&namespace, &field, &new_value);
-                    self.update_reactive_global(&namespace, &field, new_value.clone());
-                    let source_id = self.get_or_create_source_node(&namespace, &field);
-                    self.mark_source_dependents_dirty(source_id, new_value);
+                    self.host_reactive_set(&namespace, &field, new_value);
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::MakeClosure(chunk_idx, num_upvalues) => {
@@ -9952,25 +9895,16 @@ mod tests {
     /// namespace map (`SEQV` holds one entry per bound widget field in the
     /// UI). This pins the observable behaviour of the borrowing read.
     #[test]
-    fn reactive_get_reads_one_field_without_the_namespace_map() {
+    fn a_namespace_field_read_reads_one_field_without_the_namespace_map() {
         let mut vm = module_test_vm();
         vm.reactive_namespaces.insert("PROBE".to_string());
         let mut fields = HashMap::new();
         fields.insert("a".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
         fields.insert("b".to_string(), Rc::new(RefCell::new(Value::Number(2.0))));
         vm.set_global_value("PROBE", Value::Map(fields));
+        assert_eq!(vm.eval_str("PROBE.b").expect("field b"), Some(Value::Number(2.0)));
         assert_eq!(
-            vm.eval_str("(reactive-get \"PROBE\" \"b\")").expect("field b"),
-            Some(Value::Number(2.0))
-        );
-        assert_eq!(
-            vm.eval_str("(reactive-get \"PROBE\" \"missing\")")
-                .expect("missing field"),
-            Some(Value::Nil)
-        );
-        assert_eq!(
-            vm.eval_str("(reactive-get \"ABSENT\" \"a\")")
-                .expect("missing namespace"),
+            vm.eval_str("PROBE.missing").expect("missing field"),
             Some(Value::Nil)
         );
     }

@@ -38,19 +38,10 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
         midi_effects: test_list(vec![]),
         bus_effects: test_list(vec![]),
     };
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-        ],
-        true,
-    );
+    seed_values(vec![
+    ]);
     for (field, value) in bindings {
-        editor.runtime_mut().set_reactive("SEQ", &field, value);
+        seed_value(&field, value);
     }
     editor
         .runtime_mut()

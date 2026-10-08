@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal B (.77) and D (.79: the buffer-name liveness gates collapsed onto the observed bits) built, .11, .14 (groups A–D: .14, .61, .74), .20, .64 and legacy removal A (.78: the host's `SEQ` / `SEQV` gone, the host-less test mailbox left) in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17, .18, .19, .21, .65, .66, .67, .76 and .82 ported, legacy removal A (.78: the host's `SEQ` / `SEQV` gone), B (.77), D (.79: the buffer-name liveness gates collapsed onto the observed bits) and E (.80: the legacy binding language forms removed, the host-less test mailbox moved to a Rust map) built, .11, .14 (groups A–D: .14, .61, .74), .20 and .64 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -625,6 +625,10 @@ Built (stage 2), decisions the above left open:
 - `#'NS.field` on a reactive namespace (`#'SEQ.playing`) compiles to the
   legacy ref `(bind "SEQ" "playing")`, as a migration aid; the compiler
   knows the reactive namespaces statically. `#'SEQ.a.b` is a compile error.
+  Since eseq-0l17.80, a live namespace (`#'THEME.accent`) compiles to the
+  internal `(__ns-ref "THEME" "accent")` (same float-slot ref; `bind` is
+  gone), and a removed one (`SEQ`, `SEQV`, `EXPORT`, `AGENT`, unregistered)
+  is a compile error naming eseq.kinds (§13 stage 8 .80 note).
 - Errors: `#': kind 'm:k' has no field 'x'; bindable fields: a, b` and
   `#': field 'name' of kind 'm:k' is :string, which is not bindable;
   bindable fields: …` (also for built-in fields). A non-instance head (a
@@ -828,7 +832,8 @@ Built (stage 5):
 
 ## 8. Refs used as values
 
-Refs now exist only where `#'` (or legacy `bind`/`bind-seq`) made one. When one
+Refs now exist only where `#'` (or, before eseq-0l17.80, legacy
+`bind`/`bind-seq`) made one, or a host native hands one out. When one
 reaches a value position, it **reads itself**: the slot's current value, plus a
 DAG dependency on its source. This is exactly what the matching `t.x` read
 does, so it costs nothing extra.
@@ -1021,12 +1026,15 @@ Built (eseq-0l17.23):
 
 ## 11. Migration
 
-- `SEQ.x`, `bind-seq`, `bind-seq-nth`, `bind`, `reactive-get` keep working.
-  The host publishes both the legacy names and the kind fields until content
-  is ported, then the legacy names are removed per area.
+- `SEQ.x`, `bind-seq`, `bind-seq-nth`, `bind`, `reactive-get` kept working
+  while content was ported; the host published both the legacy names and
+  the kind fields, then removed the legacy names per area. Removed since
+  eseq-0l17.78 (the `SEQ`/`SEQV` publishers) and .80 (the language forms):
+  each is now a compile error with a migration hint (§13 stage 8 .80 note).
 - Existing `def-kind`s (`neural`, `jaki`) are unaffected; their numeric
   `:state` fields additionally become bindable (§3.3).
-- `:bindable` is accepted and ignored (§7.3).
+- `:bindable` is accepted and ignored (§7.3); since eseq-0l17.80 it warns
+  once per session (per VM; deprecated), as does `reactive-value` (the identity).
 - The §8 read points change behaviour for legacy refs too: code that
   accidentally used a `bind-seq` ref as a value starts getting the right
   answer instead of `true`/`false`/`nil`. Audit content for code that
@@ -3598,6 +3606,66 @@ its instance and field.
      byte-identical; the three rack-sampler jobs fail before and after
      alike (a missing IR). Capture syncs the host kinds without the tick, so it bounds only
      the view side.
+   Built (stage 8, eseq-0l17.80, legacy removal E): the legacy binding
+   language forms are gone from eseqlisp.
+   - **Removed natives:** `bind`, `bind-seq`, `bind-nth`, `bind-seq-nth`,
+     `reactive-get`, `reactive-set` (and their help entries). A use is a
+     compile error carrying a migration hint (`compiler::REMOVED_BINDING_FORMS`),
+     e.g. "bind-seq was removed; bind an eseq.kinds instance field with #',
+     e.g. #'transport.playing or (let ((t (nth (tracks) 0))) #'t.volume)"
+     and "reactive-get was removed; read the eseq.kinds instance field as a
+     value, e.g. t.volume (or NS.field on a live host namespace)". The check
+     runs when the compile unit ends and skips a name the code defines
+     itself (a module's own one-argument `bind`, drum-surface's and
+     physical-model-surface's; a local; a def later in the same unit) or
+     that an earlier unit defined.
+   - **Removed namespaces:** `SEQ.x`, `SEQV.x`, `EXPORT.x`, `AGENT.x` reads
+     (and `(set! SEQ.x v)`) on an unregistered namespace are compile errors:
+     "SEQ.track-colors was removed; read the eseq.kinds instance fields,
+     e.g. (map (lambda (t) t.color) (tracks))" (writes: "… write a writable
+     eseq.kinds instance field, e.g. (set! t.volume 0.5)"). `#'SEQ.playing`:
+     "#'SEQ.playing was removed; bind an eseq.kinds instance field instead,
+     e.g. #'transport.playing or #'t.volume". A namespace registered under
+     one of those names (a test's) and a local of that name stay ordinary.
+   - **`#'NS.f` on a live namespace** (`#'THEME.accent`; nothing in the
+     repo binds one) keeps working: it compiles to the internal
+     `__ns-ref` native, the same float-slot ref `bind` returned.
+   - **`(set! NS.f v)`** on a writable host namespace now also queues the
+     registry write that dirties widgets bound to the field, as
+     `reactive-set` did (it is the one Lisp writer left).
+   - **Deprecated, warn once per session (per VM), naming the file of the first use:** `defwidget :bindable`
+     (ignored) and `reactive-value` (the identity; the call boundary reads a
+     ref argument). Warnings go to stderr and the load diagnostics
+     (`VM::warn_deprecated`, `Runtime::deprecation_warnings`):
+     "warning: defwidget :bindable is deprecated and ignored (every :state
+     accepts a binding); remove it", "warning: reactive-value is deprecated
+     and will be removed: a value position reads a binding already, so
+     (reactive-value x) is just x", each followed by "(first use in
+     <file>)" when the use has a source file.
+   - **Fixtures and tools.** The dev instrument fixtures
+     (`crates/sequencer/tests/fixtures/instruments/**/ui.lisp`: ten with the
+     dead `reactive-get "SEQ"` `:value-field` branch, four more with
+     `reactive-value`) read `custom-ui-param-value` directly;
+     `tools/pm-{ride,ride2,tabla,bongos,milagre-brass}`, `tools/digi-fm`
+     and `tools/fm-formant` (generators and outputs) drop `:bindable` and
+     `reactive-value`. `tools/heat` was already ported (.82).
+   - **Test-harness mailbox.** The host-less harnesses no longer register a
+     `SEQ` namespace: their seeds live in a thread-local map in
+     `state_values/panel_kinds_seed.rs` (`seed_values`, `seed_value`,
+     `seeded`), which `seed_panel_kinds` / `seed_app_panels` read. The grid
+     harness's step-selection natives answer from the seeded
+     `selected-steps`; the process-port mapping test hands its slot through
+     a test native. The ignored project-92 probes assert the expanded
+     header binds the cursor step's `velocity` field and that the fx
+     controls bind instance fields and no host namespace.
+   - **Corpus test.** `host_kinds::tests::views::the_lisp_corpus_uses_no_legacy_binding_forms`:
+     every `content/**/*.lisp`, `crates/sequencer/tests/fixtures/**/ui.lisp`
+     and capture fixture has no `legacy_forms` hit (`defstate` / `(state …)`
+     allowed; THEME is not flagged). The scanner now sees `#'SEQ.x` too.
+   - **eseqlisp tests** that used the removed forms on generic namespaces
+     moved to `#'APP.x`, `APP.x` and `(set! APP.x v)`; the `bind-nth` meter
+     tests use a test native over `ReactiveBindingStore::indexed_float_ref`;
+     the generic reactive store tests stay.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -6868,9 +6936,9 @@ builds the field name.
 | `SEQV.plk-var-g` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local; ported (.14 A: plock-color singleton); removed (.78) | .14 .78 |
 | `SEQV.plk-var-r` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton (:rgb) | view-local; ported (.14 A: plock-color singleton, three :number fields: a float prop reads one component); removed (.78) | .14 .78 |
 | `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local; ported (.13), removed | .13 |
-| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21); removed in ui/effects and ui/materials (.61) | .11 .12 .13 .14 .20 .21 .61 |
+| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21); removed in ui/effects and ui/materials (.61); deprecated (.80): ignored, warns once per session (per VM); gone from the dev instrument fixtures and tools/pm-*, digi-fm, fm-formant | .11 .12 .13 .14 .20 .21 .61 .80 |
 | `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove; kept (.18): eseq.bindings' only reader is alez.tracker (.20); removed (.77: ui/bindings.lisp, its imports in ui/main.lisp and ui/noui.lisp, and its state_values test) | .18 .77 |
-| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value); gone from the panel plumbing (.14 A: custom-ui-param-value, fx-param-numeric-value-for); gone from .20's ported files (alez.jaki: generator marks); ported in ui/effects (.61: value twins custom-ui-param-value, comparisons read refs) | .11 .13 .14 .20 .21 .61 |
+| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value); gone from the panel plumbing (.14 A: custom-ui-param-value, fx-param-numeric-value-for); gone from .20's ported files (alez.jaki: generator marks); ported in ui/effects (.61: value twins custom-ui-param-value, comparisons read refs); deprecated (.80): the identity, warns once per session (per VM); gone from the dev instrument fixtures and tools/digi-fm, fm-formant | .11 .13 .14 .20 .21 .61 .80 |
 | `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state; ported (.19), removed | .11 .13 .19 |
 | `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13, .17: the browser reads slot device.delete-target), kept: application-menus +; ported (.14 A: panel-bodies reads the effect device's delete-target); ported, legacy removed (.18: the last reader; its publishers in the tick, the invalidation apply and the registration) | .13 .14 .17 .18 |
 | `SEQ.num-patterns` | 6 | transport, macros, scene-banks | sv/topology_and_visualization.rs | model | (len (scenes)) | remove; ported (.12), kept: macros (.18); ported, legacy removed (.18: scene macros list (scenes)); removed (.78) | .12 .18 .78 |
@@ -6883,8 +6951,8 @@ builds the field name.
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |
 | `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep; kept (.15) | .15 |
 | `GRAPH` via `bind-graph` / `bind-graph-config` (103 calls) | 103 | scripts/sequencers/graph-*, packages/alez.neural | lisp_host/eseq/graph_authoring.rs | model | graph-node.‹field›, graph-param.value, graph.‹field› (`#'` bindings) | built (.33); ported (.64: the seven graph demos), kept: alez.neural; ported (.67: alez.neural), removed with `graph-key`, `graph-edge-key`, `graph-config-key`, `bind-graph-node-notes` and the GRAPH namespace | .20 .64 .67 |
-| `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node / graph-param / graph `:set` (`set-graph`) | built (.33); ported (.64), gone from content | .20 .64 |
-| `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step (`:set`) / step.‹param› | built (.35) | .11 |
+| `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node / graph-param / graph `:set` (`set-graph`) | built (.33); ported (.64), gone from content; `reactive-set` removed (.80): a compile error | .20 .64 .80 |
+| `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step (`:set`) / step.‹param› | built (.35); `reactive-set` removed (.80): a compile error | .11 .80 |
 
 ## Appendix A. Target example (abridged)
 

@@ -55,7 +55,6 @@ fn rack_views_follow_stable_tracks_and_reset_on_project_replacement() {
         racks.resize(2, None);
         racks[1] = racks[0].clone();
     }
-    editor.runtime_mut().set_reactive("SEQ", "num-tracks", Value::Number(2.0));
     show_track(&mut editor, &app, 0);
     assert_view(&mut editor, true, false, true);
     click_toggle(&mut editor, "rack-slot-list-view-toggle");

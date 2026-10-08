@@ -209,11 +209,7 @@ use panel_kinds_seed::*;
             .expect("restore first scene");
 
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![("current-pattern", Value::Number(0.0))],
-            true,
-        );
+        seed_values(vec![]);
         sequencer::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
         runtime
             .eval_str(
@@ -270,11 +266,7 @@ use panel_kinds_seed::*;
             .expect("restore the opened project");
 
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![("current-pattern", Value::Number(0.0))],
-            true,
-        );
+        seed_values(vec![]);
         sequencer::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
         runtime
             .eval_str(
@@ -534,7 +526,7 @@ use panel_kinds_seed::*;
             .eval_str(
                 r#"
                   (load "ui/materials.lisp")
-                  (tick :active 1 :plocked 0 :selected (bind "APP" "selected"))
+                  (tick :active 1 :plocked 0 :selected #'APP.selected)
                 "#,
             )
             .expect("load materials and construct tick")
@@ -2072,15 +2064,9 @@ use panel_kinds_seed::*;
         // Panel navigation is outside this browser command-routing harness.
         editor.runtime_mut().register_native(
             "eseq.seq-panels/seq-show-fx-lower-panel", |_args, _ctx| Ok(Value::Nil));
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(0.0)),
-                ("current-track", Value::Number(0.0)),
-                ("track-instrument-types", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .register_native("seq-filter-sample-tree", |_args, _ctx| {
@@ -3339,9 +3325,7 @@ use panel_kinds_seed::*;
     fn metal_seq_browser_new_instrument_editor_uses_finalize_copy() {
         let mut editor = browser_editor_on_instrument_tab();
         set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        seed_value("current-track", Value::Number(2.0));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let browser = editor
@@ -3386,9 +3370,7 @@ use panel_kinds_seed::*;
     fn metal_seq_browser_new_effect_editor_uses_finalize_controls() {
         let mut editor = browser_editor_on_instrument_tab();
         set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        seed_value("current-track", Value::Number(2.0));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let browser = editor
@@ -3635,9 +3617,7 @@ use panel_kinds_seed::*;
         );
 
         set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        seed_value("current-track", Value::Number(2.0));
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/refresh-buffer)")
@@ -6610,16 +6590,11 @@ use panel_kinds_seed::*;
                 Rc::new(RefCell::new(test_string_list(&["Basic", "Metallic"]))),
             )])))
         });
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("current-track", Value::Number(0.0)),
-                ("macros", test_list(vec![])),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -6676,16 +6651,11 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .register_reactive("TEST", vec![("fx", fx)], true);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("current-track", Value::Number(0.0)),
-                ("macros", test_list(vec![])),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -7645,19 +7615,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -7995,20 +7956,11 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-                ("fx-instrument-param-0-mode", Value::Number(1.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+            ("fx-instrument-param-0-mode", Value::Number(1.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -8484,10 +8436,6 @@ use panel_kinds_seed::*;
 
     fn test_number_list(values: &[f64]) -> Value {
         test_list(values.iter().copied().map(Value::Number).collect())
-    }
-
-    fn test_track_colors() -> Value {
-        test_list(vec![test_number_list(&[0.96, 0.28, 0.52])])
     }
 
     fn test_bool_list(values: &[bool]) -> Value {
@@ -9369,9 +9317,7 @@ use panel_kinds_seed::*;
     fn print_latch_and_plock_presence_reach_the_param_wrappers() {
         let mut editor = macro_controls_editor(0.25);
         editor.set_layout_viewport(180, 20);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        seed_value("current-track", Value::Number(0.0));
         let mut panel_seed = PanelSeed::default();
         panel_seed.effects = test_list(vec![Value::Map(test_fx_map(
                 "track-fx",
@@ -9384,16 +9330,10 @@ use panel_kinds_seed::*;
             ("track-plock-variants", test_list(vec![])),
             ("track-plock-any", test_list(vec![])),
         ] {
-            editor.runtime_mut().set_reactive("SEQ", field, value);
+            seed_value(field, value);
         }
         // The per-param projection namespace the *plock-sync* effects write
         // into; the app registers it in `natives.rs`.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "playing", Value::Bool(true));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "recording", Value::Bool(true));
         for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read param control UI source");
             let overlays = editor.snapshot_file_backed_sources();
@@ -9522,9 +9462,7 @@ use panel_kinds_seed::*;
     fn param_knob_right_click_offers_clear_plock_actions_only_for_locked_params() {
         let mut editor = macro_controls_editor(0.25);
         editor.set_layout_viewport(180, 20);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        seed_value("current-track", Value::Number(0.0));
         let mut panel_seed = PanelSeed::default();
         panel_seed.effects = test_list(vec![Value::Map(test_fx_map(
                 "track-fx",
@@ -9540,13 +9478,8 @@ use panel_kinds_seed::*;
                 "track-plock-any",
                 Value::List(vec![plock_key_row("effect", Some(0), None, Some(0))]),
             ),
-            // Two selected steps, so the selection-scoped item is offered.
-            (
-                "selected-steps",
-                test_bool_list(&[false, true, false, true]),
-            ),
         ] {
-            editor.runtime_mut().set_reactive("SEQ", field, value);
+            seed_value(field, value);
         }
         for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp", "ui/effects/panel-data.lisp"] {
             let source = read_factory_source(path).expect("read param control UI source");
@@ -9681,9 +9614,7 @@ use panel_kinds_seed::*;
     fn macro_mapping_mode_selects_device_params_and_marks_owned_controls_read_only() {
         let mut editor = macro_controls_editor(0.25);
         editor.set_layout_viewport(180, 20);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        seed_value("current-track", Value::Number(0.0));
 
         let mut effect_param = test_param_map("gain", 0, 0.5, 0.0, 1.0);
         effect_param.insert(
@@ -10053,19 +9984,10 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -10160,19 +10082,10 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -10300,19 +10213,10 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -10640,18 +10544,9 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+        ]);
         // This test toggles seq-has-selection? mid-run, AFTER converted
         // modules (eseq.effects.param-controls) have healed their global
         // slot for the name. A lisp `(def …)` stub StoreGlobals a fresh
@@ -11273,13 +11168,8 @@ use panel_kinds_seed::*;
             15,
             0.73,
         ));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
-            build_track_plocks_value(&app, &app.state, 0, &selected),
-        );
-        editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
-            Value::List(vec![plock_key_row("rack-macro", None, None, Some(0))]));
+        seed_value("track-plocks", build_track_plocks_value(&app, &app.state, 0, &selected));
+        seed_value("track-plock-any", Value::List(vec![plock_key_row("rack-macro", None, None, Some(0))]));
         // The rack's macros as the host kinds push them from these lists;
         // macro 1 shows its lock at the selected step 15.
         seed_app_panels(&mut editor, &app, 0);
@@ -12321,18 +12211,6 @@ use panel_kinds_seed::*;
         test_list((0..len).map(|_| Value::Bool(value)).collect())
     }
 
-    fn test_repeated_track_number_lists(
-        value: f64,
-        track_count: usize,
-        step_count: usize,
-    ) -> Value {
-        test_list(
-            (0..track_count)
-                .map(|_| test_repeated_number_list(value, step_count))
-                .collect(),
-        )
-    }
-
     /// The test track colors, by track position modulo their count.
     fn test_palette() -> [[f64; 3]; 10] {
         [
@@ -12349,71 +12227,6 @@ use panel_kinds_seed::*;
         ]
     }
 
-    fn test_multi_track_colors(track_count: usize) -> Value {
-        let palette = test_palette();
-        test_list(
-            (0..track_count)
-                .map(|track| {
-                    let color = palette[track % palette.len()];
-                    test_number_list(&color)
-                })
-                .collect(),
-        )
-    }
-
-    fn sequencer_perf_steps(track: usize, generation: usize, step_count: usize) -> Value {
-        test_list(
-            (0..step_count)
-                .map(|step| Value::Bool((step + track + generation) % 3 == 0))
-                .collect(),
-        )
-    }
-
-    fn sequencer_perf_plocks(track: usize, generation: usize, step_count: usize) -> Value {
-        test_list(
-            (0..step_count)
-                .map(|step| Value::Bool((step * 5 + track + generation) % 11 == 0))
-                .collect(),
-        )
-    }
-
-    fn sequencer_perf_plock_kinds(track: usize, generation: usize, step_count: usize) -> Value {
-        test_list(
-            (0..step_count)
-                .map(|step| {
-                    let plocked = (step * 5 + track + generation) % 11 == 0;
-                    Value::Number(if plocked { 2.0 } else { 0.0 })
-                })
-                .collect(),
-        )
-    }
-
-    fn sequencer_perf_variant_color_channel(
-        track: usize,
-        generation: usize,
-        step_count: usize,
-        channel: usize,
-    ) -> Value {
-        const PERF_VARIANT_COLOR: [f64; 3] = [0.270_588_25, 0.784_313_74, 0.862_745_1];
-        let value = PERF_VARIANT_COLOR.get(channel).copied().unwrap_or(0.0);
-        test_list(
-            (0..step_count)
-                .map(|step| {
-                    let plocked = (step * 5 + track + generation) % 11 == 0;
-                    Value::Number(if plocked { value } else { 0.0 })
-                })
-                .collect(),
-        )
-    }
-
-    fn sequencer_perf_duration_spans(track: usize, generation: usize, step_count: usize) -> Value {
-        test_list(
-            (0..step_count)
-                .map(|step| Value::Bool((step + track * 2 + generation) % 7 == 0))
-                .collect(),
-        )
-    }
-
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
         crate::midi_dispatch::register_device_state(editor.runtime_mut());
         // The shared sequencer keymap's BS/Delete binding asks the host for
@@ -12421,23 +12234,46 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        // The step selection a test seeds (`selected-steps`, a bool per
+        // step; seed_value), as the host's selection natives answer it.
+        // These natives are not reactive: a later seed reruns no view.
+        fn seeded_selected_steps() -> Vec<usize> {
+            let Some(Value::List(items)) = seeded("selected-steps") else {
+                return Vec::new();
+            };
+            items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| match &*item.borrow() {
+                    Value::Bool(on) => *on,
+                    Value::Number(n) => *n > 0.5,
+                    _ => false,
+                })
+                .map(|(step, _)| step)
+                .collect()
+        }
+        editor.runtime_mut().register_native("seq-step-selected?", |args, _ctx| {
+            let step = match args.first() {
+                Some(Value::Number(step)) => *step as usize,
+                _ => return Ok(Value::Nil),
+            };
+            Ok(Value::Bool(seeded_selected_steps().contains(&step)))
+        });
         editor
             .runtime_mut()
-            .eval_str(
-                r#"
-                (def seq-step-selected? (step)
-                  (nth SEQ.selected-steps step))
-
-                (def seq-selected-step-indexes-native ()
-                  (filter
-                    (lambda (step) (nth SEQ.selected-steps step))
-                    (range 0 (len SEQ.selected-steps))))
-
-                (def seq-selected-step-count-native ()
-                  (len (seq-selected-step-indexes-native)))
-                "#,
-            )
-            .expect("install selection-query test natives");
+            .register_native("seq-selected-step-indexes-native", |_args, _ctx| {
+                Ok(test_list(
+                    seeded_selected_steps()
+                        .into_iter()
+                        .map(|step| Value::Number(step as f64))
+                        .collect(),
+                ))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-selected-step-count-native", |_args, _ctx| {
+                Ok(Value::Number(seeded_selected_steps().len() as f64))
+            });
         editor
             .runtime_mut()
             .register_native("seq-filter-sample-tree", |_args, _ctx| {
@@ -13683,148 +13519,30 @@ use panel_kinds_seed::*;
         });
 
 
-        let steps = test_bool_list(&[
-            true, false, true, false, true, false, true, false, true, false, true, false, true,
-            false, true, false,
-        ]);
-        let step_numbers = test_number_list(&[
-            1.0, 0.0, 0.8, 0.0, 0.7, 0.0, 0.9, 0.0, 0.6, 0.0, 0.8, 0.0, 1.0, 0.0, 0.7, 0.0,
-        ]);
-        let empty_plocks = test_bool_list(&[false; 16]);
 
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("track-ids", test_number_list(&[0.0])),
-                ("track-names", test_string_list(&["bd02"])),
-                ("track-colors", test_track_colors()),
-                ("track-collapsed", test_bool_list(&[false])),
-                ("current-track", Value::Number(0.0)),
-                ("record-armed", test_bool_list(&[false])),
-                ("track-mutes", test_bool_list(&[false])),
-                ("track-solos", test_bool_list(&[false])),
-                ("track-muted-by-solo", test_bool_list(&[false])),
-                ("track-muted-effective", test_bool_list(&[false])),
-                ("track-volumes", test_number_list(&[1.0])),
-                ("track-0-volume", Value::Number(1.0)),
-                ("tp-bus-0-send", Value::Number(0.0)),
-                ("tp-bus-1-send", Value::Number(0.0)),
-                ("track-steps", test_list(vec![steps.clone()])),
-                ("track-num-steps", test_number_list(&[16.0])),
-                ("track-timebases", test_string_list(&["16"])),
-                (
-                    "track-duration-spans",
-                    test_list(vec![test_bool_list(&[false; 16])]),
-                ),
-                (
-                    "track-step-has-plocks",
-                    test_list(vec![empty_plocks.clone()]),
-                ),
-                (
-                    "track-step-plock-kinds",
-                    test_list(vec![test_number_list(&[0.0; 16])]),
-                ),
-                (
-                    "track-step-variant-r",
-                    test_list(vec![test_number_list(&[0.0; 16])]),
-                ),
-                (
-                    "track-step-variant-g",
-                    test_list(vec![test_number_list(&[0.0; 16])]),
-                ),
-                (
-                    "track-step-variant-b",
-                    test_list(vec![test_number_list(&[0.0; 16])]),
-                ),
-                ("track-velocities", test_list(vec![step_numbers.clone()])),
-                (
-                    "track-durations",
-                    test_list(vec![test_number_list(&[1.0; 16])]),
-                ),
-                ("track-auxas", test_list(vec![test_number_list(&[0.0; 16])])),
-                (
-                    "track-transposes",
-                    test_list(vec![test_number_list(&[0.0; 16])]),
-                ),
-                ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
-                ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-                ("steps", steps.clone()),
-                ("velocities", step_numbers.clone()),
-                ("durations", test_number_list(&[1.0; 16])),
-                ("auxas", test_number_list(&[0.0; 16])),
-                ("transposes", test_number_list(&[0.0; 16])),
-                ("pans", test_number_list(&[0.0; 16])),
-                ("syncs", test_number_list(&[0.0; 16])),
-                ("process-lanes", test_list(vec![])),
-                ("track-process-lanes", test_list(vec![test_list(vec![])])),
-                ("process-slots", test_list(vec![])),
-                ("track-process-slots", test_list(vec![test_list(vec![])])),
-                ("process-library", test_list(vec![])),
-                ("step-has-plocks", empty_plocks.clone()),
-                ("step-plock-kinds", test_number_list(&[0.0; 16])),
-                ("step-variant-r", test_number_list(&[0.0; 16])),
-                ("step-variant-g", test_number_list(&[0.0; 16])),
-                ("step-variant-b", test_number_list(&[0.0; 16])),
-                ("selected-steps", test_bool_list(&[false; 16])),
-                ("playhead", Value::Number(0.0)),
-                ("playhead-page", Value::Number(0.0)),
-                ("playing", Value::Bool(false)),
-                ("auto-follow", Value::Bool(false)),
-                ("tp-num-steps", Value::Number(16.0)),
-                ("tp-timebase", Value::String("16".to_string())),
-                ("tp-swing", Value::Number(0.0)),
-                ("tp-swing-resolution", Value::Number(0.0)),
-                ("tp-gate", Value::Number(1.0)),
-                ("tp-poly", Value::Bool(false)),
-                ("tp-max-polyphony", Value::Number(6.0)),
-                ("tp-accumulator", Value::Number(0.0)),
-                ("tp-accum-mode", Value::Number(0.0)),
-                ("tp-accum-limit", Value::Number(0.0)),
-                ("tp-fts", Value::Number(0.0)),
-                ("tp-mute-group", Value::String("Off".to_string())),
-                (
-                    "sync-labels",
-                    test_string_list(&["off", "1/16", "1/8", "1/4"]),
-                ),
-                ("fts-options", test_string_list(&["off", "up", "down"])),
-                (
-                    "mute-group-options",
-                    test_string_list(&["Off", "1", "2", "3", "4", "5", "6", "7", "8"]),
-                ),
-                ("accum-mode-options", test_string_list(&["off", "wrap"])),
-                ("accumulator-options", test_string_list(&["off", "step"])),
-                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
-                ("bus-mutes", test_bool_list(&[false, false, false])),
-                ("bus-solos", test_bool_list(&[false, false, false])),
-                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("current-pattern", Value::Number(0.0)),
-                ("recording", Value::Bool(false)),
-                ("bpm", Value::Number(120.0)),
-                ("scene-launch-quantize", Value::String("off".to_string())),
-                // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
-                // the real registration in natives.rs.
-                ("song-exists", Value::Bool(false)),
-                ("song-recording-kind", Value::String("".to_string())),
-                ("song-current-row", Value::Number(-1.0)),
-                ("song-current-row-id", Value::Number(-1.0)),
-                ("song-row-count", Value::Number(0.0)),
-                ("song-loop-enabled", Value::Bool(false)),
-                ("song-capture-failed", Value::Bool(false)),
-                ("song-capture-error", Value::Nil),
-                ("sampler-playhead", Value::Number(0.0)),
-                ("track-peak-0", Value::Number(0.0)),
-                ("bus-peak-0", Value::Number(0.0)),
-                ("bus-peak-1", Value::Number(0.0)),
-                ("bus-peak-2", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+            ("selected-steps", test_bool_list(&[false; 16])),
+            ("tp-num-steps", Value::Number(16.0)),
+            ("tp-timebase", Value::String("16".to_string())),
+            ("tp-swing", Value::Number(0.0)),
+            ("tp-swing-resolution", Value::Number(0.0)),
+            ("tp-gate", Value::Number(1.0)),
+            ("tp-poly", Value::Bool(false)),
+            ("tp-max-polyphony", Value::Number(6.0)),
+            ("tp-accumulator", Value::Number(0.0)),
+            ("tp-accum-mode", Value::Number(0.0)),
+            ("tp-accum-limit", Value::Number(0.0)),
+            ("tp-fts", Value::Number(0.0)),
+            ("tp-mute-group", Value::String("Off".to_string())),
+            ("fts-options", test_string_list(&["off", "up", "down"])),
+            // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
+            // the real registration in natives.rs.
+            ("song-exists", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+        ]);
         register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
@@ -14125,200 +13843,16 @@ use panel_kinds_seed::*;
         track_count: usize,
         step_count: usize,
     ) {
-        let names = (0..track_count)
-            .map(|track| format!("track-{track}"))
-            .collect::<Vec<_>>();
-        let ids = (0..track_count)
-            .map(|track| Value::Number(track as f64))
-            .collect::<Vec<_>>();
-        let steps = (0..track_count)
-            .map(|track| {
-                test_list(
-                    (0..step_count)
-                        .map(|step| Value::Bool((step + track) % 2 == 0))
-                        .collect(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let repeated_param_lists = |value: f64| {
-            (0..track_count)
-                .map(|_| test_repeated_number_list(value, step_count))
-                .collect::<Vec<_>>()
-        };
         seed_kind_test_tracks(editor, track_count, |track| format!("track-{track}"));
         for track in 0..track_count {
             let active: Vec<_> = (0..step_count).map(|step| (step + track) % 2 == 0).collect();
             set_kind_track_steps(editor, track, &active);
         }
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
-        rt.set_reactive("SEQ", "track-ids", test_list(ids));
-        rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
-        rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
-        rt.set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
-        rt.set_reactive(
-            "SEQ",
-            "record-armed",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-mutes",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-solos",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-muted-by-solo",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-muted-effective",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-volumes",
-            test_repeated_number_list(1.0, track_count),
-        );
-        rt.set_reactive("SEQ", "track-steps", test_list(steps));
-        rt.set_reactive(
-            "SEQ",
-            "track-num-steps",
-            test_repeated_number_list(step_count as f64, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-timebases",
-            test_list(
-                (0..track_count)
-                    .map(|_| Value::String("16".to_string()))
-                    .collect(),
-            ),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-duration-spans",
-            test_list(
-                (0..track_count)
-                    .map(|_| test_repeated_bool_list(false, step_count))
-                    .collect(),
-            ),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-has-plocks",
-            test_list(
-                (0..track_count)
-                    .map(|_| test_repeated_bool_list(false, step_count))
-                    .collect(),
-            ),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-plock-kinds",
-            test_repeated_track_number_lists(0.0, track_count, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-r",
-            test_repeated_track_number_lists(0.0, track_count, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-g",
-            test_repeated_track_number_lists(0.0, track_count, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-b",
-            test_repeated_track_number_lists(0.0, track_count, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-playheads",
-            test_repeated_number_list(0.0, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-velocities",
-            test_list(repeated_param_lists(1.0)),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-durations",
-            test_list(repeated_param_lists(1.0)),
-        );
-        rt.set_reactive("SEQ", "track-auxas", test_list(repeated_param_lists(0.0)));
-        rt.set_reactive(
-            "SEQ",
-            "track-transposes",
-            test_list(repeated_param_lists(0.0)),
-        );
-        rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
-        rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
-        rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
-        rt.set_reactive(
-            "SEQ",
-            "selected-steps",
-            test_repeated_bool_list(false, step_count),
-        );
-        rt.set_reactive("SEQ", "steps", test_repeated_bool_list(true, step_count));
-        rt.set_reactive(
-            "SEQ",
-            "velocities",
-            test_repeated_number_list(1.0, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "durations",
-            test_repeated_number_list(1.0, step_count),
-        );
-        rt.set_reactive("SEQ", "auxas", test_repeated_number_list(0.0, step_count));
-        rt.set_reactive(
-            "SEQ",
-            "transposes",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
-        rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
-        rt.set_reactive(
-            "SEQ",
-            "step-has-plocks",
-            test_repeated_bool_list(false, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-plock-kinds",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-r",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-g",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-b",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive("SEQ", "track-plocks", test_list(vec![]));
-        rt.set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
+        seed_value("current-track", Value::Number(0.0));
+        seed_value("tp-num-steps", Value::Number(step_count as f64));
+        seed_value("selected-steps", test_repeated_bool_list(false, step_count));
+        seed_value("track-plocks", test_list(vec![]));
+        seed_value("track-plock-variants", test_list(vec![]));
     }
 
     fn assert_finite_nonzero_rect(node: &eseqlisp::layout::LayoutNode, label: &str) {
@@ -14366,51 +13900,6 @@ use panel_kinds_seed::*;
         step_count: usize,
         generation: usize,
     ) {
-        let names = (0..track_count)
-            .map(|track| format!("perf-track-{track:02}"))
-            .collect::<Vec<_>>();
-        let ids = (0..track_count)
-            .map(|track| Value::Number((1000 + track) as f64))
-            .collect::<Vec<_>>();
-        let track_steps = (0..track_count)
-            .map(|track| sequencer_perf_steps(track, generation, step_count))
-            .collect::<Vec<_>>();
-        let track_duration_spans = (0..track_count)
-            .map(|track| sequencer_perf_duration_spans(track, generation, step_count))
-            .collect::<Vec<_>>();
-        let track_step_has_plocks = (0..track_count)
-            .map(|track| sequencer_perf_plocks(track, generation, step_count))
-            .collect::<Vec<_>>();
-        let track_step_plock_kinds = (0..track_count)
-            .map(|track| sequencer_perf_plock_kinds(track, generation, step_count))
-            .collect::<Vec<_>>();
-        let track_step_variant_r = (0..track_count)
-            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 0))
-            .collect::<Vec<_>>();
-        let track_step_variant_g = (0..track_count)
-            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 1))
-            .collect::<Vec<_>>();
-        let track_step_variant_b = (0..track_count)
-            .map(|track| sequencer_perf_variant_color_channel(track, generation, step_count, 2))
-            .collect::<Vec<_>>();
-        let track_velocities = (0..track_count)
-            .map(|_| test_repeated_number_list(1.0, step_count))
-            .collect::<Vec<_>>();
-        let track_durations = (0..track_count)
-            .map(|_| test_repeated_number_list(1.0, step_count))
-            .collect::<Vec<_>>();
-        let track_auxas = (0..track_count)
-            .map(|_| test_repeated_number_list(0.0, step_count))
-            .collect::<Vec<_>>();
-        let track_transposes = (0..track_count)
-            .map(|_| test_repeated_number_list(0.0, step_count))
-            .collect::<Vec<_>>();
-        let track_pans = (0..track_count)
-            .map(|_| test_repeated_number_list(0.0, step_count))
-            .collect::<Vec<_>>();
-        let track_syncs = (0..track_count)
-            .map(|_| test_repeated_number_list(0.0, step_count))
-            .collect::<Vec<_>>();
 
         seed_kind_test_tracks(editor, track_count, |track| format!("perf-track-{track:02}"));
         for track in 0..track_count {
@@ -14420,160 +13909,9 @@ use panel_kinds_seed::*;
             set_kind_track_steps(editor, track, &active);
         }
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
-        rt.set_reactive("SEQ", "track-ids", test_list(ids));
-        rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
-        rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
-        rt.set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_list(
-                (0..track_count)
-                    .map(|_| Value::String("sampler".to_string()))
-                    .collect(),
-            ),
-        );
-        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
-        rt.set_reactive(
-            "SEQ",
-            "record-armed",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-mutes",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-solos",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-muted-by-solo",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-muted-effective",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-volumes",
-            test_repeated_number_list(1.0, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-num-steps",
-            test_repeated_number_list(step_count as f64, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-timebases",
-            test_list(
-                (0..track_count)
-                    .map(|_| Value::String("16".to_string()))
-                    .collect(),
-            ),
-        );
-        rt.set_reactive("SEQ", "track-steps", test_list(track_steps));
-        rt.set_reactive(
-            "SEQ",
-            "track-duration-spans",
-            test_list(track_duration_spans),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-has-plocks",
-            test_list(track_step_has_plocks),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-plock-kinds",
-            test_list(track_step_plock_kinds),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-r",
-            test_list(track_step_variant_r),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-g",
-            test_list(track_step_variant_g),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-step-variant-b",
-            test_list(track_step_variant_b),
-        );
-        rt.set_reactive("SEQ", "track-velocities", test_list(track_velocities));
-        rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
-        rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
-        rt.set_reactive("SEQ", "track-transposes", test_list(track_transposes));
-        rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
-        rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
-        rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
-        rt.set_reactive(
-            "SEQ",
-            "steps",
-            sequencer_perf_steps(0, generation, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-has-plocks",
-            sequencer_perf_plocks(0, generation, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-plock-kinds",
-            sequencer_perf_plock_kinds(0, generation, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-r",
-            sequencer_perf_variant_color_channel(0, generation, step_count, 0),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-g",
-            sequencer_perf_variant_color_channel(0, generation, step_count, 1),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "step-variant-b",
-            sequencer_perf_variant_color_channel(0, generation, step_count, 2),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "selected-steps",
-            test_repeated_bool_list(false, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "durations",
-            test_repeated_number_list(1.0, step_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "velocities",
-            test_repeated_number_list(1.0, step_count),
-        );
-        rt.set_reactive("SEQ", "auxas", test_repeated_number_list(0.0, step_count));
-        rt.set_reactive(
-            "SEQ",
-            "transposes",
-            test_repeated_number_list(0.0, step_count),
-        );
-        rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
-        rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
+        seed_value("current-track", Value::Number(0.0));
+        seed_value("tp-num-steps", Value::Number(step_count as f64));
+        seed_value("selected-steps", test_repeated_bool_list(false, step_count));
 
         // The grid reads the step instances' gates.
         if has_host_kinds(rt) {
@@ -14691,11 +14029,6 @@ use panel_kinds_seed::*;
         cell_count: usize,
         generation: usize,
     ) {
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "current-pattern",
-            Value::Number((generation % cell_count) as f64),
-        );
         apply_mixer_v2_perf_pattern(editor, track_count, cell_count, generation);
     }
 
@@ -14718,59 +14051,13 @@ use panel_kinds_seed::*;
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.set_layout_viewport(160, 34);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("track-names", test_owned_string_list(&names)),
-                ("track-colors", test_multi_track_colors(track_count)),
-                (
-                    "track-collapsed",
-                    test_repeated_bool_list(false, track_count),
-                ),
-                ("num-tracks", Value::Number(track_count as f64)),
-                ("current-track", Value::Number(0.0)),
-                ("record-armed", test_repeated_bool_list(false, track_count)),
-                ("track-mutes", test_repeated_bool_list(false, track_count)),
-                ("track-solos", test_repeated_bool_list(false, track_count)),
-                (
-                    "track-muted-by-solo",
-                    test_repeated_bool_list(false, track_count),
-                ),
-                (
-                    "track-muted-effective",
-                    test_repeated_bool_list(false, track_count),
-                ),
-                (
-                    "track-instrument-types",
-                    test_list(
-                        (0..track_count)
-                            .map(|_| Value::String("instrument".to_string()))
-                            .collect(),
-                    ),
-                ),
-                ("track-volumes", test_repeated_number_list(1.0, track_count)),
-                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
-                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("bus-mutes", test_bool_list(&[false, false, false])),
-                ("bus-solos", test_bool_list(&[false, false, false])),
-                ("bus-peak-0", Value::Number(0.0)),
-                ("bus-peak-1", Value::Number(0.0)),
-                ("bus-peak-2", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+        ]);
 
         for track in 0..track_count {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &format!("track-peak-{track}"),
-                Value::Number(0.0),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &format!("track-{track}-volume"),
-                Value::Number(1.0),
-            );
+            seed_value(&format!("track-peak-{track}"), Value::Number(0.0));
+            seed_value(&format!("track-{track}-volume"), Value::Number(1.0));
         }
 
         editor
@@ -18197,11 +17484,9 @@ use panel_kinds_seed::*;
         tuning.offsets[4] = 20.0;
         params.set_tuning(tuning);
         for (key, value) in crate::tuning_reactive_fields(&params) {
-            editor.runtime_mut().set_reactive("SEQ", key, value);
+            seed_value(key, value);
         }
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "tp-fts", Value::String(crate::fts_scale_label(&params)));
+        seed_value("tp-fts", Value::String(crate::fts_scale_label(&params)));
         let panel_seed = PanelSeed::default();
         seed_panel_kinds(&mut editor, &panel_seed);
         editor.refresh_runtime_side_effects();
@@ -18283,9 +17568,9 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(true));
-        editor.runtime_mut().set_reactive("SEQ", "tp-voice-priority", Value::String("High".into()));
-        editor.runtime_mut().set_reactive("SEQ", "tp-mono-trigger", Value::String("legato".into()));
+        seed_value("tp-supports-mono-trigger", Value::Bool(true));
+        seed_value("tp-voice-priority", Value::String("High".into()));
+        seed_value("tp-mono-trigger", Value::String("legato".into()));
         editor.refresh_runtime_side_effects();
 
         let track_id = editor
@@ -18296,13 +17581,8 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(track_id);
         editor.set_layout_viewport(80, 60);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "tp-timebase", Value::String("8T".to_string()));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-plocks",
-            test_list(vec![
+        seed_value("tp-timebase", Value::String("8T".to_string()));
+        seed_value("track-plocks", test_list(vec![
                 map_value([
                     ("target", Value::String("timebase".to_string())),
                     ("default", Value::Number(4.0)),
@@ -18315,8 +17595,7 @@ use panel_kinds_seed::*;
                     ("target", Value::String("swing-resolution".to_string())),
                     ("default", Value::Number(0.0)),
                 ]),
-            ]),
-        );
+            ]));
         let panel_seed = PanelSeed::default();
         // The track's settings and their locks, as the host kinds push them.
         seed_panel_kinds(&mut editor, &panel_seed);
@@ -18475,24 +17754,6 @@ use panel_kinds_seed::*;
         retrigs[2] = 3.0;
         let mut retrig_rates = [4.0; 16];
         retrig_rates[2] = 12.0;
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "retrigs", test_number_list(&retrigs));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "retrig-rates", test_number_list(&retrig_rates));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "transposes", test_number_list(&transposes));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "velocities", test_number_list(&velocities));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "durations", test_number_list(&durations));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "pans", test_number_list(&pans));
         editor
             .runtime_mut()
             .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 2)")
@@ -18729,9 +17990,6 @@ use panel_kinds_seed::*;
         let mut editor = full_grid_editor_for_scroll_tests();
         let mut durations = [1.0; 16];
         durations[0] = 12.0;
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "durations", test_number_list(&durations));
         // The edited step (eseq.kinds selection.edit-step) holds 12.
         seed_kind_edit_step(&mut editor, 0, &[("duration", &durations)]);
 
@@ -18754,12 +18012,6 @@ use panel_kinds_seed::*;
         assert_eq!(layout_prop_number(duration, "max"), Some(128.0));
         assert_eq!(layout_prop_number(duration, "value"), Some(12.0));
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "playing", Value::Bool(true));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "recording", Value::Bool(true));
         set_kind_transport(&mut editor, true, true);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -18784,9 +18036,6 @@ use panel_kinds_seed::*;
         assert_eq!(layout_prop_number(transpose, "min"), Some(-48.0));
         assert_eq!(layout_prop_number(transpose, "max"), Some(48.0));
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "playing", Value::Bool(false));
         set_kind_transport(&mut editor, false, true);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -18843,14 +18092,10 @@ use panel_kinds_seed::*;
                 });
         }
         editor.refresh_runtime_side_effects();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "selected-steps",
-            test_bool_list(&[
+        seed_value("selected-steps", test_bool_list(&[
                 false, true, true, false, false, false, false, false, false, false, false, false,
                 false, false, false, false,
-            ]),
-        );
+            ]));
         assert_eq!(
             editor
                 .runtime_mut()
@@ -18939,12 +18184,6 @@ use panel_kinds_seed::*;
                     Ok(Value::Bool(true))
                 });
         }
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "playing", Value::Bool(true));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "recording", Value::Bool(true));
         // The panel reads the transport kinds.
         let rt = editor.runtime_mut();
         let transport = kind_singleton_rt(rt, "transport");
@@ -19071,11 +18310,6 @@ use panel_kinds_seed::*;
 
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 3, 16);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom", "sampler", "rack"]),
-        );
         set_kind_instrument_types(&mut editor, &["custom", "sampler", "rack"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -19154,11 +18388,6 @@ use panel_kinds_seed::*;
     fn metal_seq_sequencer_drop_handlers_route_to_existing_host_commands() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 3, 16);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom", "custom", "rack"]),
-        );
         set_kind_instrument_types(&mut editor, &["custom", "custom", "rack"]);
         let _ = editor.drain_host_commands();
         editor
@@ -19367,9 +18596,6 @@ use panel_kinds_seed::*;
             .expect("place cursor at step 12");
         assert_eq!(grid_cursor(&mut editor), Some(Value::Number(12.0)));
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0, 16.0]));
         set_kind_track_steps(&mut editor, 0, &[false; 8]);
         editor
             .runtime_mut()
@@ -20705,9 +19931,6 @@ use panel_kinds_seed::*;
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(0.0));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -20769,7 +19992,6 @@ use panel_kinds_seed::*;
         let mut editor = full_grid_editor_for_scroll_tests();
         // No tracks (eseq.kinds project.tracks, what the panel reads).
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(0.0));
         let project = kind_singleton_rt(rt, "project");
         set_field(rt, project, "tracks", instance_list([]));
         editor.runtime_mut().run_reactive_cycle();
@@ -20843,13 +20065,8 @@ use panel_kinds_seed::*;
         // Age the panel the way a session does: reactive changes that rerun
         // the *step* subtrees on their own (track switch, transport toggle)
         // before the source edit lands.
-        for (track, playing) in [(1.0, true), (0.0, false), (1.0, false), (0.0, true), (0.0, false)] {
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "current-track", Value::Number(track));
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "playing", Value::Bool(playing));
+        for track in [1.0, 0.0, 1.0, 0.0, 0.0] {
+            seed_value("current-track", Value::Number(track));
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let _ = step_tile_layout(&mut editor);
@@ -23822,12 +23039,6 @@ use panel_kinds_seed::*;
         // track 5 has a clip.
         let track_count = 8usize;
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
-        rt.set_reactive(
-            "SEQ",
-            "track-ids",
-            test_number_list(&(0..track_count).map(|i| i as f64).collect::<Vec<_>>()),
-        );
         rt.run_reactive_cycle();
         seed_kind_test_tracks(&mut editor, track_count, |track| format!("track-{track}"));
         seed_kind_song(&mut editor, 16.0, 1, &[(0.0, 16.0, 0)]);
@@ -24837,21 +24048,6 @@ use panel_kinds_seed::*;
     fn arrangement_region_editor(tracks: usize, collapsed: &[usize]) -> eseqlisp::Editor {
         let mut editor = full_grid_editor_for_scroll_tests();
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(tracks as f64));
-        rt.set_reactive(
-            "SEQ",
-            "track-ids",
-            test_number_list(&(0..tracks).map(|i| i as f64).collect::<Vec<_>>()),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_bool_list(
-                &(0..tracks)
-                    .map(|i| collapsed.contains(&i))
-                    .collect::<Vec<_>>(),
-            ),
-        );
         rt.run_reactive_cycle();
         seed_kind_test_tracks(&mut editor, tracks, |track| format!("track-{track}"));
         let rt = editor.runtime_mut();
@@ -26762,8 +25958,6 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_empty_track_double_click_chooses_device_without_changing_track() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive("SEQ", "track-instrument-types",
-            build_string_list(&["empty".to_string(), "sampler".to_string()]));
         let track = kind_track(editor.runtime(), 0);
         set_field(editor.runtime_mut(), track, "instrument-type", Value::String("empty".into()));
         editor.runtime_mut().eval_str(
@@ -27088,7 +26282,7 @@ use panel_kinds_seed::*;
 
         // A header double-click must leave piano-roll mode even if another
         // track is selected (or the single-click selection has not synchronized).
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        seed_value("current-track", Value::Number(1.0));
         let selected_track = Rc::new(RefCell::new(None));
         let selected_capture = Rc::clone(&selected_track);
         editor.runtime_mut().register_native("seq-set-track", move |args, _ctx| {
@@ -27684,52 +26878,9 @@ use panel_kinds_seed::*;
             .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(4.0)),
-                ("track-ids", test_number_list(&[0.0, 1.0, 2.0, 3.0])),
-                (
-                    "track-names",
-                    test_string_list(&["kick", "snare", "hat", "modulator"]),
-                ),
-                ("track-colors", test_multi_track_colors(4)),
-                (
-                    "track-collapsed",
-                    test_bool_list(&[false, false, false, true]),
-                ),
-                ("current-track", Value::Number(0.0)),
-                ("record-armed", test_repeated_bool_list(false, 4)),
-                ("track-mutes", test_repeated_bool_list(false, 4)),
-                ("track-solos", test_repeated_bool_list(false, 4)),
-                ("track-muted-by-solo", test_repeated_bool_list(false, 4)),
-                ("track-muted-effective", test_repeated_bool_list(false, 4)),
-                (
-                    "track-instrument-types",
-                    test_string_list(&["sampler", "custom", "rack", "modulator"]),
-                ),
-                (
-                    "track-volumes",
-                    test_number_list(&[1.0, 1.0, 1.0, 1.0]),
-                ),
-                (
-                    "track-num-steps",
-                    test_number_list(&[16.0, 16.0, 16.0, 16.0]),
-                ),
-                (
-                    "track-timebases",
-                    test_string_list(&["16", "16", "16", "16"]),
-                ),
-                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
-                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("bus-mutes", test_repeated_bool_list(false, 3)),
-                ("bus-solos", test_repeated_bool_list(false, 3)),
-                ("bus-peak-0", Value::Number(0.0)),
-                ("bus-peak-1", Value::Number(0.0)),
-                ("bus-peak-2", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("current-track", Value::Number(0.0)),
+        ]);
         // The mixer's view of the same tracks: kinds.
         editor
             .runtime_mut()
@@ -27865,11 +27016,6 @@ use panel_kinds_seed::*;
             .expect("cancel inline track rename");
         editor.refresh_runtime_side_effects();
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_bool_list(&[false, false, false, false]),
-        );
         let modulator = kind_track(editor.runtime(), 3);
         set_field(editor.runtime_mut(), modulator, "collapsed", Value::Bool(false));
         editor.runtime_mut().run_reactive_cycle();
@@ -28150,49 +27296,6 @@ use panel_kinds_seed::*;
         );
     }
 
-    fn mappable_process_lane_value() -> Value {
-        map_value([
-            ("mode", Value::Number(7.0)),
-            ("lane-index", Value::Number(0.0)),
-            ("slot-index", Value::Number(0.0)),
-            ("instance-id", Value::Number(42.0)),
-            ("class", Value::String("mod-writer".to_string())),
-            ("process", Value::String("mod-writer".to_string())),
-            ("inlet", Value::String("amount".to_string())),
-            ("name", Value::String("amount".to_string())),
-            ("label", Value::String("mod-writer / amount".to_string())),
-            ("short-label", Value::String("mw/amount".to_string())),
-            ("kind", Value::String("float".to_string())),
-            ("min", Value::Number(0.0)),
-            ("max", Value::Number(1.0)),
-            ("default", Value::Number(0.0)),
-            ("decimals", Value::Number(2.0)),
-            ("target", Value::String("shape:unbound".to_string())),
-            (
-                "map-ports",
-                test_list(vec![map_value([
-                    ("name", Value::String("shape".to_string())),
-                    ("label", Value::String("shape".to_string())),
-                    ("hint", Value::String(String::new())),
-                    ("target", Value::String("unbound".to_string())),
-                    ("status", Value::String("unbound".to_string())),
-                    ("manual", Value::Bool(false)),
-                    ("clearable", Value::Bool(false)),
-                    ("mappable", Value::Bool(true)),
-                    ("bindable", Value::Bool(true)),
-                    ("target-kind", Value::String("instrument-param".to_string())),
-                ])]),
-            ),
-            (
-                "values",
-                test_number_list(&[
-                    0.0, 0.25, 0.5, 0.75, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                    0.0,
-                ]),
-            ),
-        ])
-    }
-
     fn mappable_process_slot_value() -> Value {
         map_value([
             ("slot-index", Value::Number(0.0)),
@@ -28229,50 +27332,9 @@ use panel_kinds_seed::*;
         ])
     }
 
-    fn compact_process_slot_value(instance_id: u64, name: &str) -> Value {
-        map_value([
-            ("slot-index", Value::Number(0.0)),
-            ("instance-id", Value::Number(instance_id as f64)),
-            ("class", Value::String(name.to_string())),
-            ("process", Value::String(name.to_string())),
-            ("label", Value::String(name.to_string())),
-            ("doc", Value::String(String::new())),
-            ("source-path", Value::String(String::new())),
-            ("enabled", Value::Bool(true)),
-            ("target", Value::String(String::new())),
-            ("ports", test_list(vec![])),
-            ("inlets", test_list(vec![])),
-        ])
-    }
-
-    fn install_mappable_process_lane_fixture(editor: &mut eseqlisp::Editor) {
-        let lane = mappable_process_lane_value();
-        let slot = mappable_process_slot_value();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-process-lanes",
-            test_list(vec![test_list(vec![lane])]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "process-slots", test_list(vec![slot.clone()]));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-process-slots",
-            test_list(vec![test_list(vec![slot])]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-    }
-
     #[test]
     fn metal_seq_fx_omits_process_panel_without_an_attached_process() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "process-slots", test_list(vec![]));
         editor.refresh_runtime_side_effects();
 
         let fx_id = editor
@@ -28302,11 +27364,6 @@ use panel_kinds_seed::*;
         );
         let mut panel_seed = PanelSeed::default();
         panel_seed.instrument_panel = test_list(vec![Value::Map(instrument)]);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
         set_kind_instrument_types(&mut editor, &["custom"]);
         seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
@@ -28471,11 +27528,6 @@ use panel_kinds_seed::*;
         let mut editor = full_grid_editor_for_scroll_tests();
         let mut panel_seed = PanelSeed::default();
         panel_seed.instrument_panel = test_list(vec![Value::Map(test_sampler_instrument_map(0))]);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["sampler"]),
-        );
         set_kind_instrument_types(&mut editor, &["sampler"]);
         seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
@@ -28600,11 +27652,6 @@ use panel_kinds_seed::*;
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
         set_kind_instrument_types(&mut editor, &["custom"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -28666,9 +27713,6 @@ use panel_kinds_seed::*;
             "mixer instrument drop should queue one targeted swap: {commands:?}"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-collapsed", test_bool_list(&[true]));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*mixer*");
@@ -28677,11 +27721,6 @@ use panel_kinds_seed::*;
             find_track_drop_target(&layout, 0.0).expect("collapsed mixer track drop target");
         assert_accepts_instrument(collapsed_strip, "collapsed mixer instrument drop target");
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["sampler"]),
-        );
         set_kind_instrument_types(&mut editor, &["sampler"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -28691,11 +27730,6 @@ use panel_kinds_seed::*;
             find_track_drop_target(&layout, 0.0).expect("sampler mixer track drop target");
         assert_accepts_instrument(sampler_strip, "sampler mixer instrument drop target");
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["rack"]),
-        );
         set_kind_instrument_types(&mut editor, &["rack"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -28709,15 +27743,6 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_fx_omits_process_panel_with_attached_processes() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "process-slots",
-            test_list(vec![
-                compact_process_slot_value(41, "first"),
-                compact_process_slot_value(42, "second"),
-                compact_process_slot_value(43, "third"),
-            ]),
-        );
 
         let fx_id = editor
             .buffers
@@ -28740,7 +27765,7 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_process_port_mapping_arms_port_and_binds_instrument_param() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        install_mappable_process_lane_fixture(&mut editor);
+        editor.runtime_mut().run_reactive_cycle();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         {
             let calls = Arc::clone(&calls);
@@ -28821,8 +27846,13 @@ use panel_kinds_seed::*;
         );
         assert!(find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none());
         // Mapping remains a supported API, independent of the removed FX box.
+        // The fixture's slot, as a host native hands it (the SEQ namespace
+        // that carried it is gone, eseq-0l17.78/.80).
+        editor
+            .runtime_mut()
+            .register_native("test-process-slot", |_args, _ctx| Ok(mappable_process_slot_value()));
         editor.runtime_mut().eval_str(
-            "(let ((slot (nth SEQ.process-slots 0))) (eseq.effects.param-controls/process-map-arm-port 0 slot (nth (get slot :ports) 0)))"
+            "(let ((slot (test-process-slot))) (eseq.effects.param-controls/process-map-arm-port 0 slot (nth (get slot :ports) 0)))"
         ).expect("arm process port mapping");
         assert_eq!(
             editor
@@ -29145,9 +28175,7 @@ use panel_kinds_seed::*;
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        seed_value("current-track", Value::Number(2.0));
         select_kind_current_track(&mut editor, 10, 2);
         editor.refresh_runtime_side_effects();
         let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
@@ -30108,9 +29136,7 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(sequencer_id);
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        seed_value("current-track", Value::Number(1.0));
         let track = Value::Instance(kind_track(editor.runtime(), 1));
         set_kind_field(&mut editor, "selection", "track", track);
         editor
@@ -30315,14 +29341,10 @@ use panel_kinds_seed::*;
             .id;
         editor.set_active_buffer(sequencer_id);
         editor.set_layout_viewport(180, 30);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "selected-steps",
-            test_bool_list(&[
+        seed_value("selected-steps", test_bool_list(&[
                 true, false, false, false, false, false, false, false, false, false, false, false,
                 false, false, false, false,
-            ]),
-        );
+            ]));
 
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         editor
@@ -31740,35 +30762,9 @@ use panel_kinds_seed::*;
                         test_list(vec![]),
                     ]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("limiter".to_string())]),
-                ),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![
-                        Value::String("Mix".to_string()),
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
-                ("tp-mute-group", Value::String("Off".to_string())),
-                (
-                    "mute-group-options",
-                    test_string_list(&["Off", "1", "2", "3", "4", "5", "6", "7", "8"]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-mute-group", Value::String("Off".to_string())),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -31787,9 +30783,7 @@ use panel_kinds_seed::*;
         register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         seed_panel_kinds(&mut editor, &panel_seed);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        seed_value("current-track", Value::Number(0.0));
         editor
             .runtime_mut()
             .eval_str(
@@ -32194,23 +31188,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -32298,25 +31277,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-                (cutoff_field, Value::Number(1000.0)),
-                (resonance_field, Value::Number(1.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            (cutoff_field, Value::Number(1000.0)),
+            (resonance_field, Value::Number(1.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -32400,23 +31364,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("EQ8".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -32514,25 +31463,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-                ("sampler-playhead", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -32694,20 +31628,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("track-instrument-types", test_string_list(&["sampler"])),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("sampler-playhead", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -33170,25 +32094,12 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(3.0)),
-                // The panel is track 2's (the seed places it on the current track).
-                ("current-track", Value::Number(2.0)),
-                (
-                    "track-instrument-types",
-                    test_string_list(&["sampler", "sampler", "sampler"]),
-                ),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("sampler-playhead", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            // The panel is track 2's (the seed places it on the current track).
+            ("current-track", Value::Number(2.0)),
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -33341,24 +32252,15 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("sampler-playhead", Value::Number(0.0)),
-                ("track-plocks", test_list(vec![Value::Map(sr_plock)])),
-                (
-                    "track-plock-variants",
-                    test_list(vec![Value::Map(current_variant)]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+            ("track-plocks", test_list(vec![Value::Map(sr_plock)])),
+            (
+                "track-plock-variants",
+                test_list(vec![Value::Map(current_variant)]),
+            ),
+        ]);
         // The p-lock presence projection (param-controls.lisp) publishes into
         // the Lisp-writable SEQV namespace, which init_runtime always
         // registers in production.
@@ -33496,21 +32398,12 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("sampler-playhead", Value::Number(0.0)),
-                ("track-plocks", test_list(vec![])),
-                ("track-plock-variants", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -33655,23 +32548,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Dimension".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -33749,25 +32627,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("test-es-mode", Value::Number(0.0)),
-                ("test-es-tone", Value::Number(0.0)),
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("ES Compressor".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("test-es-mode", Value::Number(0.0)),
+            ("test-es-tone", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -33869,38 +32732,22 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("bpm", Value::Number(120.0)),
-                ("test-phaser-flanger-param-1", Value::Number(0.0)),
-                ("test-phaser-flanger-param-2", Value::Number(4.0)),
-                ("test-phaser-flanger-param-3", Value::Number(400.0)),
-                ("test-phaser-flanger-param-4", Value::Number(0.35)),
-                ("test-phaser-flanger-param-5", Value::Number(0.0)),
-                ("test-phaser-flanger-param-6", Value::Number(2.5)),
-                ("test-phaser-flanger-param-7", Value::Number(80.0)),
-                ("test-phaser-flanger-param-8", Value::Number(0.0)),
-                ("test-phaser-flanger-param-9", Value::Number(0.15)),
-                ("test-phaser-flanger-param-10", Value::Number(6.0)),
-                ("test-phaser-flanger-param-11", Value::Number(0.0)),
-                ("test-phaser-flanger-param-12", Value::Number(0.25)),
-                ("test-phaser-flanger-param-15", Value::Number(20.0)),
-                ("test-phaser-flanger-param-19", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Phaser-Flanger".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("test-phaser-flanger-param-1", Value::Number(0.0)),
+            ("test-phaser-flanger-param-2", Value::Number(4.0)),
+            ("test-phaser-flanger-param-3", Value::Number(400.0)),
+            ("test-phaser-flanger-param-4", Value::Number(0.35)),
+            ("test-phaser-flanger-param-5", Value::Number(0.0)),
+            ("test-phaser-flanger-param-6", Value::Number(2.5)),
+            ("test-phaser-flanger-param-7", Value::Number(80.0)),
+            ("test-phaser-flanger-param-8", Value::Number(0.0)),
+            ("test-phaser-flanger-param-9", Value::Number(0.15)),
+            ("test-phaser-flanger-param-10", Value::Number(6.0)),
+            ("test-phaser-flanger-param-11", Value::Number(0.0)),
+            ("test-phaser-flanger-param-12", Value::Number(0.25)),
+            ("test-phaser-flanger-param-15", Value::Number(20.0)),
+            ("test-phaser-flanger-param-19", Value::Number(1.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -34120,7 +32967,7 @@ use panel_kinds_seed::*;
         for (slot, (_, value)) in reactive_keys.iter().zip(reactive_values.iter()) {
             fields.push((slot.as_str(), Value::Number(*value)));
         }
-        editor.runtime_mut().register_reactive("SEQ", fields, true);
+        seed_values(fields);
         editor
             .runtime_mut()
             .eval_str(
@@ -34268,7 +33115,7 @@ use panel_kinds_seed::*;
         for (name, value) in &reactive_values {
             fields.push((name.as_str(), value.clone()));
         }
-        editor.runtime_mut().register_reactive("SEQ", fields, true);
+        seed_values(fields);
         editor
             .runtime_mut()
             .eval_str(
@@ -34428,24 +33275,9 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Compressor".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-                ("test-comp-param-0", Value::Number(-18.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("test-comp-param-0", Value::Number(-18.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -34584,23 +33416,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Space Echo".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -34882,26 +33699,12 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("filter-table-live-0", Value::Number(0.0)),
-                ("filter-table-live-1", Value::Number(1000.0)),
-                ("filter-table-live-2", Value::Number(0.0)),
-                ("fx-mod-value-77-2", Value::Number(0.0)),
-                ("fx-mod-offset-77-2", Value::Number(0.0)),
-                ("filter-table-live-3", Value::Number(0.7)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter Table".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("filter-table-live-0", Value::Number(0.0)),
+            ("filter-table-live-1", Value::Number(1000.0)),
+            ("filter-table-live-2", Value::Number(0.0)),
+            ("filter-table-live-3", Value::Number(0.7)),
+        ]);
         editor.runtime_mut().eval_str(
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -35282,21 +34085,9 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
-                ("test-cutoff-mod-value", Value::Number(1000.0)),
-                ("test-cutoff-mod-offset", Value::Number(0.0)),
-                ("test-cutoff-mod-scale", Value::Number(1.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
+        ]);
         editor.runtime_mut().eval_str(
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -35459,20 +34250,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filter Table".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor.runtime_mut().eval_str(
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -35657,23 +34436,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Filterbank".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -35741,24 +34505,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("bpm", Value::Number(120.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Multiverb".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -35955,23 +34703,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Str8 Delay".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -36084,24 +34817,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("bpm", Value::Number(120.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Reverb".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -36295,23 +35012,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                (
-                    "available-builtin-effects",
-                    test_list(vec![Value::String("Delay".to_string())]),
-                ),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -37440,23 +36142,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("MODUM_DELAY".to_string())]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -37538,23 +36225,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(2.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("sidechain".to_string())]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -37671,23 +36343,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("dimension-d-chorus".to_string())]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -37793,26 +36450,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![
-                        Value::String("dimension-d-chorus".to_string()),
-                        Value::String("lexilush".to_string()),
-                    ]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -37939,26 +36578,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![
-                        Value::String("dimension-d-chorus".to_string()),
-                        Value::String("lexilush".to_string()),
-                    ]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -38108,26 +36729,17 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                (
-                    tensor_field,
-                    test_list(vec![
-                        Value::Number(0.1),
-                        Value::Number(0.2),
-                        Value::Number(0.3),
-                        Value::Number(0.4),
-                    ]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+            (
+                tensor_field,
+                test_list(vec![
+                    Value::Number(0.1),
+                    Value::Number(0.2),
+                    Value::Number(0.3),
+                    Value::Number(0.4),
+                ]),
+            ),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -38255,23 +36867,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("shimmerpitch".to_string())]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -38414,23 +37011,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![test_list(vec![])]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                (
-                    "available-effects",
-                    test_list(vec![Value::String("dimension-d-chorus".to_string())]),
-                ),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                (
-                    "bus-names",
-                    test_list(vec![Value::String("Mix".to_string())]),
-                ),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -38558,17 +37140,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -38968,21 +37541,11 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("test-lfo-sync", Value::Number(1.0)),
-                ("test-mod-source-12", Value::Number(0.0)),
-                ("test-mod-depth-13", Value::Number(0.0)),
-                ("fx-instrument-mod-offset-0", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("test-lfo-sync", Value::Number(1.0)),
+            ("test-mod-source-12", Value::Number(0.0)),
+            ("test-mod-depth-13", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -39584,20 +38147,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("tp-gate", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("sampler-playhead", Value::Number(0.0)),
-                ("fx-instrument-mod-offset-11", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("tp-gate", Value::Bool(false)),
+            ("sampler-playhead", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -39844,17 +38397,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -39972,19 +38516,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         for (field, value) in bindings {
-            editor.runtime_mut().set_reactive("SEQ", &field, value);
+            seed_value(&field, value);
         }
         editor
             .runtime_mut()
@@ -40234,11 +38769,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-        ], true);
+        seed_values(vec![
+        ]);
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
@@ -40362,13 +38894,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-        ], true);
+        seed_values(vec![
+        ]);
         for (field, value) in &values {
-            editor.runtime_mut().set_reactive("SEQ", field, value.clone());
+            seed_value(field, value.clone());
         }
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -40776,17 +39305,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -40958,13 +39478,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive("SEQ", vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
-        ], true);
+        seed_values(vec![
+        ]);
         for (_, name, value, _, _) in &params {
-            editor.runtime_mut().set_reactive("SEQ", &format!("clap-test-{name}"), Value::Number(*value));
+            seed_value(&format!("clap-test-{name}"), Value::Number(*value));
         }
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
@@ -41183,17 +39700,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -41438,17 +39946,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -41601,17 +40100,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -41936,19 +40426,10 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("dj-enabled-depth", Value::Number(1.0)),
-                ("dj-loop-depth", Value::Number(0.0)),
-            ],
-            true,
-        );
+        seed_values(vec![
+            ("dj-enabled-depth", Value::Number(1.0)),
+            ("dj-loop-depth", Value::Number(0.0)),
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -42305,17 +40786,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -43101,17 +41573,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -43239,17 +41702,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -43359,17 +41813,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -43505,17 +41950,8 @@ use panel_kinds_seed::*;
             midi_effects: test_list(vec![]),
             bus_effects: test_list(vec![]),
         };
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-            ],
-            true,
-        );
+        seed_values(vec![
+        ]);
         editor
             .runtime_mut()
             .eval_str(
@@ -46674,7 +45110,7 @@ use panel_kinds_seed::*;
         let mut rack = rack_group_fixture(false);
         rack.members = vec![1, 2, 3];
         apply_groups_bindings(&mut editor, &[rack]);
-        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
+        seed_value("current-track", Value::Number(0.0));
         let run = |editor: &mut eseqlisp::Editor, calls: &Rc<RefCell<Vec<String>>>, setup: &str| {
             calls.borrow_mut().clear();
             editor.runtime_mut().eval_str(setup).expect("setup");
@@ -46722,12 +45158,8 @@ use panel_kinds_seed::*;
         seed_kind_buses(editor, &[(0, "Mix"), (1, "Bus A"), (2, "Group")]);
         seed_kind_groups(editor, groups);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Group"]));
-        rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
-        rt.set_reactive("SEQ", "bus-mutes", test_bool_list(&[false, false, false]));
-        rt.set_reactive("SEQ", "bus-solos", test_bool_list(&[false, false, false]));
         for bus in 0..3 {
-            rt.set_reactive("SEQ", &format!("bus-peak-{bus}"), Value::Number(0.0));
+            seed_value(&format!("bus-peak-{bus}"), Value::Number(0.0));
         }
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -47130,11 +45562,6 @@ use panel_kinds_seed::*;
 
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 3, 16);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom", "sampler", "rack"]),
-        );
         set_kind_instrument_types(&mut editor, &["custom", "sampler", "rack"]);
         let cases = [
             (

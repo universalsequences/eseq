@@ -180,7 +180,7 @@
         :value (if (= (mod i span) 0) 1 0))) (range 1 5)))))
 (def ff-route-selected (config)
   (= 0 (len (filter (lambda (p)
-    (> (abs (- (reactive-value (ff-bound (get p :name) 0)) (get p :value))) 0.0001)) config))))
+    (> (abs (- (ff-bound (get p :name) 0) (get p :value))) 0.0001)) config))))
 (def ff-route-apply (mode)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)) (config (ff-route-config mode)))
     (lambda (x y r)
@@ -202,7 +202,7 @@
         (if (= (mod (+ ,i 1) span) 0) 0.82 (+ yy (/ 1.25 (- span 1))))) 0.025 ink)
       (sdf/fill (sdf/translate xx yy (sdf/rect 0.13 (if (= span 8) 0.055 0.09))) ink))))
 (defwidget ff-algorithm
-  :width 15 :height 2 :state (mode selected) :bindable (selected)
+  :width 15 :height 2 :state (mode selected)
   :shader
   (let ((span (if (= mode 0) 1 (if (= mode 1) 2 4)))
         (ink (if (> selected 0.5) :control-on-bg :dim)))
@@ -245,7 +245,6 @@
 (defwidget ff-incoming
   :width 30.2 :height 1.3
   :state (d1 d2 d3 d4 f1 f2 f3 f4)
-  :bindable (d1 d2 d3 d4 f1 f2 f3 f4)
   :shader
   (sdf/layer
     (sdf/fill (sdf/rect width height) :instrument-control-bg)

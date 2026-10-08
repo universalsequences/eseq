@@ -168,8 +168,8 @@ impl ReactiveBindingStore {
         }
     }
 
-    /// Handle to element `index` of a numeric-list field (what `bind-nth`
-    /// returns), for host natives that hand Lisp a batch of element bindings.
+    /// Handle to element `index` of a numeric-list field,
+    /// for host natives that hand Lisp a batch of element bindings.
     pub fn indexed_float_ref(&self, namespace: &str, field: impl Into<String>, index: usize) -> Value {
         let field = field.into();
         Value::ReactiveRef {
@@ -794,7 +794,7 @@ impl ReactiveRegistry {
             });
         }
         // Root lists with numeric elements carry per-index float slots for
-        // bind-seq subscribers; an in-place patch would leave those slots
+        // bound widgets; an in-place patch would leave those slots
         // stale, so such fields always take the full set pipeline.
         if let Value::List(items) = stored
             && items

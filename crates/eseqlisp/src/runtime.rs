@@ -1102,7 +1102,7 @@ impl NativeContext {
             .push((namespace.into(), Box::new(generation)));
     }
 
-    /// The host-side equivalent of `(reactive-set namespace field value)`,
+    /// The host-side equivalent of `(set! NS.field value)`,
     /// applied after the native returns. Only writable namespaces accept it.
     pub fn reactive_set(
         &mut self,
@@ -1768,8 +1768,11 @@ impl Runtime {
                                 }
                             }
                             // Every state accepts refs (kind-bindings spec
-                            // §7.3); `:bindable` is parsed and ignored.
-                            "bindable" => {}
+                            // §7.3); `:bindable` is deprecated and ignored.
+                            "bindable" => vm.warn_deprecated(
+                                "defwidget :bindable",
+                                crate::vm::BINDABLE_DEPRECATION,
+                            ),
                             _ => {}
                         }
                         i += 2;
@@ -2093,14 +2096,9 @@ impl Runtime {
                 "Return a value from a map or keyword/value list, or nil when missing.",
             ),
             (
-                "reactive-get",
-                "(reactive-get namespace field)",
-                "Read a reactive namespace field and track it as a dependency.",
-            ),
-            (
-                "reactive-set",
-                "(reactive-set namespace field value)",
-                "Write a field in a writable reactive namespace and rerun dependent effects.",
+                "reactive-value",
+                "(reactive-value x)",
+                "Deprecated: returns x (a value position reads a binding already). Warns once; will be removed.",
             ),
             (
                 "subtree-owner",
@@ -2192,9 +2190,9 @@ impl Runtime {
 
         self.document_symbol_with_keywords(
             "defwidget",
-            "(defwidget name :width w :height h :state (name ...) :bindable (prop ...) :paint-margin margin :animates bool :shader expr)",
-            "Register an SDF-backed widget constructor. The shader, state names, and bindable props are automatically quoted.",
-            ["width", "height", "state", "bindable", "paint-margin", "animates", "shader"],
+            "(defwidget name :width w :height h :state (name ...) :paint-margin margin :animates bool :shader expr)",
+            "Register an SDF-backed widget constructor. The shader and state names are automatically quoted; every state accepts a binding (#'t.volume). (:bindable is deprecated and ignored.)",
+            ["width", "height", "state", "paint-margin", "animates", "shader"],
         );
         self.document_symbol_with_keywords(
             "material",
@@ -3167,6 +3165,12 @@ impl Runtime {
             return base;
         }
         handler
+    }
+
+    /// The deprecation warnings this runtime's VM has issued, once each
+    /// (`:bindable`, `reactive-value`; eseq-0l17.80).
+    pub fn deprecation_warnings(&self) -> &[String] {
+        self.vm.deprecation_warnings()
     }
 
     /// Borrows one field of a reactive namespace without cloning the whole
@@ -5334,8 +5338,7 @@ mod observer_tests {
 
     #[test]
     fn resubscribed_reader_observes_return_to_value_before_unobserved_write() {
-        for (read, indexed) in [("INPUT.value", false),
-            ("(reactive-get \"INPUT\" \"value\")", false), ("(nth INPUT.value 0)", true)]
+        for (read, indexed) in [("INPUT.value", false), ("(nth INPUT.value 0)", true)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let writes = seen.clone();

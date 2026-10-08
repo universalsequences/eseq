@@ -16,13 +16,13 @@
 //! state changes. Every committed edit is one `:on-change` call with the new
 //! stored value.
 //!
-//! `:lit` — a number, usually a `(bind-seq …)` so it repaints without
+//! `:lit` — a number, usually a `#'` field binding so it repaints without
 //! re-running Lisp — is a bitmask of top-level items to ring in `:lit-color`
 //! (bit i = item i): the jaki kind lights the row items applied to the hit
 //! that is sounding.
 //!
 //! `:lit-values` — a list, one number per top-level item (usually
-//! `(bind-seq …)`s) — fills the member of item i that number addresses in
+//! `#'` bindings) — fills the member of item i that number addresses in
 //! `:lit-color`: base-64 digits, least significant first, each an element
 //! index + 1 below the item (0 = none). The jaki kind shows which value of a
 //! `(seq …)` / cycle list the sounding hit played.
@@ -914,7 +914,7 @@ impl WidgetDefinition for SexpSlotWidget {
         ]
     }
 
-    /// `:lit` is usually a `(bind-seq …)`: a hit repaints the slot without
+    /// `:lit` is usually a `#'` field binding: a hit repaints the slot without
     /// re-running Lisp.
     fn bindable_props(&self) -> &'static [&'static str] {
         &["lit"]

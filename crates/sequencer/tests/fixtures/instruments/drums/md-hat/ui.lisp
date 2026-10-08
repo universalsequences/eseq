@@ -3,7 +3,7 @@
 ;; full-height knobs. CORE + machine panel column, FILTER/COLOR/OUT column.
 
 (def md-hat-engine-options () '("TRX-HH" "EFM-HH" "PI-HH"))
-(def md-hat-engine-index () (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "engine"))) (let ((e (if p (round (if (get p :value-field) (reactive-get "SEQ" (get p :value-field)) (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)))) 1))) (if (= e 2) 2 (if (= e 3) 3 1)))))
+(def md-hat-engine-index () (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "engine"))) (let ((e (if p (round (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 1))) (if (= e 2) 2 (if (= e 3) 3 1)))))
 
 (def md-hat-core-block ()
   (eseq.effects.custom-ui-lego/ui-control-panel-dense-s 0

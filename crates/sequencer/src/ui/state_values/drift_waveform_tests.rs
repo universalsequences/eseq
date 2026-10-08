@@ -69,28 +69,11 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         midi_effects: test_list(vec![]),
         bus_effects: test_list(vec![]),
     };
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("available-effects", test_list(vec![])),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            ("bus-names", test_list(vec![])),
-        ],
-        true,
-    );
+    seed_values(vec![
+    ]);
     for (name, default, _, _) in params {
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &format!("preview-{name}"),
-            Value::Number(default),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &format!("preview-{name}-mod"),
-            Value::Number(0.0),
-        );
+        seed_value(&format!("preview-{name}"), Value::Number(default));
+        seed_value(&format!("preview-{name}-mod"), Value::Number(0.0));
     }
     editor
         .runtime_mut()
@@ -172,9 +155,6 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
     let warm = evaluation_count();
     let start = std::time::Instant::now();
     for i in 0..120 {
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "ui_epoch", Value::Number(i as f64));
         set_seeded_field(
             &mut editor,
             "preview-lp_freq",

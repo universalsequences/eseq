@@ -7080,25 +7080,21 @@
                     )
                     .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                     .expect("expanded velocity header number-picker");
-                    let header_field =
-                        format!("seqv-cursor-param-value-{}", track_ids[TRACK]);
-                    assert!(
-                        matches!(
-                            header.props.get("value"),
-                            Some(Value::ReactiveRef { namespace, field, index: None, .. })
-                                if namespace == "SEQ" && field == &header_field
+                    // The header binds the cursor step's field (`#'s.velocity`,
+                    // eseq.sequencer/expanded-cursor-picker).
+                    let header_value = match header.props.get("value") {
+                        Some(Value::ReactiveRef {
+                            kind: eseqlisp::vm::BindingKind::InstanceFloat(_),
+                            field,
+                            slot,
+                            ..
+                        }) if field == "velocity" => {
+                            eseqlisp::reactive::read_float_slot(slot) as f32
+                        }
+                        other => panic!(
+                            "expanded header must bind the cursor step's velocity: {other:?}"
                         ),
-                        "expanded header must bind directly to the cursor projection: {:?}",
-                        header.props.get("value")
-                    );
-                    let header_value = editor
-                        .runtime()
-                        .reactive_field_value("SEQ", &header_field)
-                        .and_then(|value| match value {
-                            Value::Number(value) => Some(*value as f32),
-                            _ => None,
-                        })
-                        .expect("expanded header projection value");
+                    };
                     assert!(
                         (header_value - expected).abs() <= VELOCITY_EPSILON,
                         "header must show cursor step value {expected}, got {header_value}"
@@ -9741,44 +9737,34 @@
                 )
             };
 
-            // Custom-instrument controls must bind only the current-fx-relative
-            // field family. Track-addressed bindings would make every control
-            // subtree's captured parameter map differ after a track switch.
+            // Custom-instrument controls bind their params' instance fields
+            // (`#'p.value`, eseq.kinds): no host-namespace binding (the
+            // track-addressed SEQ fields these once bound are gone,
+            // eseq-0l17.78/.80) that would make a cached control subtree's
+            // captured bindings differ after a track switch.
             let fx_instrument_bindings =
-                |editor: &mut Editor| -> (std::collections::BTreeSet<usize>, usize) {
+                |editor: &mut Editor| -> (std::collections::BTreeSet<String>, usize) {
                     fn collect_bindings(
                         node: &eseqlisp::layout::LayoutNode,
-                        tracks: &mut std::collections::BTreeSet<usize>,
-                        relative: &mut usize,
+                        namespaces: &mut std::collections::BTreeSet<String>,
+                        instance_bound: &mut usize,
                     ) {
                         for value in node.props.values() {
                             let Value::ReactiveRef {
-                                namespace, field, ..
+                                namespace, kind, ..
                             } = value
                             else {
                                 continue;
                             };
-                            if namespace != "SEQ" {
-                                continue;
-                            }
-                            if field.starts_with("fx-instrument-param-") {
-                                *relative += 1;
-                                continue;
-                            }
-                            let Some(rest) = field.strip_prefix("track-") else {
-                                continue;
-                            };
-                            let Some((track, tail)) = rest.split_once('-') else {
-                                continue;
-                            };
-                            if tail.starts_with("instrument-param-") {
-                                if let Ok(track) = track.parse::<usize>() {
-                                    tracks.insert(track);
+                            match kind {
+                                eseqlisp::vm::BindingKind::Float => {
+                                    namespaces.insert(namespace.clone());
                                 }
+                                _ => *instance_bound += 1,
                             }
                         }
                         for child in &node.children {
-                            collect_bindings(child, tracks, relative);
+                            collect_bindings(child, namespaces, instance_bound);
                         }
                     }
                     let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
@@ -9792,10 +9778,10 @@
                         .find(|tile| tile.frame.buffer_name == "*fx*")
                         .expect("visible fx tile");
                     let layout = tile.frame.widget_layout.as_ref().expect("fx tile layout");
-                    let mut tracks = std::collections::BTreeSet::new();
-                    let mut relative = 0;
-                    collect_bindings(layout, &mut tracks, &mut relative);
-                    (tracks, relative)
+                    let mut namespaces = std::collections::BTreeSet::new();
+                    let mut instance_bound = 0;
+                    collect_bindings(layout, &mut namespaces, &mut instance_bound);
+                    (namespaces, instance_bound)
                 };
 
             // The instrument name the *fx* tile displays, read off the
@@ -10234,14 +10220,14 @@
                             // tree is safe only because its bindings are
                             // current-track-relative rather than owner-specific.
                             let _track = expect_track.expect("drift transitions select a track");
-                            let (track_bound, relative_count) = fx_instrument_bindings(editor);
+                            let (namespace_bound, instance_bound) = fx_instrument_bindings(editor);
                             assert!(
-                                track_bound.is_empty(),
-                                "{label} click {iteration}: fx controls retained track-addressed bindings {track_bound:?}"
+                                namespace_bound.is_empty(),
+                                "{label} click {iteration}: fx controls bind host namespaces {namespace_bound:?}"
                             );
                             assert!(
-                                relative_count > 0,
-                                "{label} click {iteration}: fx controls must bind current-track-relative instrument fields"
+                                instance_bound > 0,
+                                "{label} click {iteration}: fx controls must bind their params' instance fields"
                             );
                         }
                         if iteration == 0 {

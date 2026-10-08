@@ -900,7 +900,7 @@ mod tests {
             (defmacro contour (v) `(* ,v 0.8))
             (defmacro shape (v) `(sdf/circle (contour ,v)))
             (defwidget plot :width 8 :height 3
-              :state (level) :bindable (level)
+              :state (level)
               :shader (sdf/layer (sdf/stroke (shape level) 0.04 :dim)))
         "#;
         let exprs = ASTParser::new(Parser::new(authored.to_string()).parse().unwrap()).parse().unwrap();
@@ -912,7 +912,7 @@ mod tests {
         runtime.register_reactive("HEAT", vec![("level", Value::Number(0.25))], true);
         let result = runtime.eval_str(&source).unwrap();
         assert!(!matches!(result, Some(Value::String(ref error)) if error.contains("error")), "{result:?}");
-        runtime.eval_str(r#"(effect (test_heat_plot :level (bind "HEAT" "level")))"#).unwrap();
+        runtime.eval_str(r#"(effect (test_heat_plot :level #'HEAT.level))"#).unwrap();
         let layout = runtime.current_layout.as_ref().expect("SDF plot");
         assert_eq!(layout.widget_type, "test_heat_plot");
         let Some(Value::ReactiveRef { slot, .. }) = layout.props.get("level") else {

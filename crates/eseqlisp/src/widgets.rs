@@ -536,7 +536,7 @@ fn prop_accepts_binding(
         .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop))
 }
 
-/// The error for a `defwidget` call that binds a ref (`#'x`, `bind`) to a
+/// The error for a `defwidget` call that binds a ref (`#'x.field`) to a
 /// prop the widget does not declare in `:state` (eseq-0l17.68). Such a prop
 /// never reaches the shader, and the widget used to be replaced by a
 /// diagnostic label that a port or cell layout could hide, so the widget

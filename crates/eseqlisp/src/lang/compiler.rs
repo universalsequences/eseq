@@ -4,6 +4,64 @@ use crate::vm::KindKey;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// The legacy binding natives removed in eseq-0l17.80 (kind-bindings spec
+/// §11, §14.4), each with its migration hint. A use is a compile error
+/// unless the unit (or an earlier one) defines the name itself, so a
+/// module's own `(def bind (name) …)` keeps working.
+pub const REMOVED_BINDING_FORMS: &[(&str, &str)] = &[
+    (
+        "bind-seq",
+        "bind-seq was removed; bind an eseq.kinds instance field with #', \
+         e.g. #'transport.playing or (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "bind-seq-nth",
+        "bind-seq-nth was removed; bind a field of the indexed eseq.kinds \
+         instance, e.g. (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "bind",
+        "bind was removed; bind an eseq.kinds instance field with #', \
+         e.g. #'t.volume (or #'NS.field on a live host namespace such as THEME)",
+    ),
+    (
+        "bind-nth",
+        "bind-nth was removed; bind a field of the indexed eseq.kinds \
+         instance, e.g. (let ((t (nth (tracks) 0))) #'t.volume)",
+    ),
+    (
+        "reactive-get",
+        "reactive-get was removed; read the eseq.kinds instance field as a \
+         value, e.g. t.volume (or NS.field on a live host namespace)",
+    ),
+    (
+        "reactive-set",
+        "reactive-set was removed; write a writable eseq.kinds instance \
+         field, e.g. (set! t.volume 0.5) (or (set! NS.field v) on a writable \
+         host namespace)",
+    ),
+];
+
+/// Host namespaces deleted with their publishers (eseq-0l17.78, .80):
+/// `NS.field` and `#'NS.field` on one that is not registered is a compile
+/// error naming eseq.kinds. A live namespace (THEME, MIDI, …) is untouched.
+pub const REMOVED_HOST_NAMESPACES: &[&str] = &["SEQ", "SEQV", "EXPORT", "AGENT"];
+
+/// What a removed host namespace path says (see [`REMOVED_HOST_NAMESPACES`]).
+fn removed_namespace_message(path: &str, write: bool) -> String {
+    if write {
+        format!(
+            "{path} was removed; write a writable eseq.kinds instance field, \
+             e.g. (set! t.volume 0.5)"
+        )
+    } else {
+        format!(
+            "{path} was removed; read the eseq.kinds instance fields, \
+             e.g. (map (lambda (t) t.color) (tracks))"
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReactiveChunkKind { Derived, View, Observer }
 
@@ -260,6 +318,14 @@ pub struct Compiler<'a> {
     /// Fatal resolution errors (unknown alias/namespace, malformed module
     /// forms) recorded mid-compile and reported when `compile` finishes.
     errors: Vec<String>,
+    /// Globals that existed before this unit (natives, earlier units'
+    /// definitions): see [`Self::note_removed_form`].
+    initial_global_count: usize,
+    /// Globals this unit stores into (`def`, `set!`), by index.
+    defined_globals: HashSet<usize>,
+    /// Removed legacy names this unit loads as globals, checked when the
+    /// unit finishes (a later `def` in the same unit may still define one).
+    removed_form_uses: Vec<(&'static str, usize)>,
     pub macros: HashMap<String, MacroDef>,
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
     next_macro_expansion_ordinal: usize,
@@ -884,6 +950,9 @@ impl<'a> Compiler<'a> {
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            initial_global_count: 0,
+            defined_globals: HashSet::new(),
+            removed_form_uses: Vec::new(),
             macros: HashMap::new(),
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
@@ -908,6 +977,7 @@ impl<'a> Compiler<'a> {
         source_file: Option<PathBuf>,
         source_label: Option<String>,
     ) -> Self {
+        let existing_global_names_len = existing_global_names.len();
         Compiler {
             expressions,
             chunks: existing_chunks,
@@ -930,6 +1000,9 @@ impl<'a> Compiler<'a> {
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            initial_global_count: existing_global_names_len,
+            defined_globals: HashSet::new(),
+            removed_form_uses: Vec::new(),
             macros,
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
@@ -1844,8 +1917,9 @@ impl<'a> Compiler<'a> {
     /// `#'h.f1…fn`, read as `(function h.f1…fn)` (kind-bindings spec §7.1):
     /// evaluate `h.f1…f(n-1)` by value like any dotted path (each step
     /// records its dependency), then `(__field-ref instance "fn")` builds the
-    /// binding. A reactive namespace head (`#'SEQ.playing`) compiles to the
-    /// legacy ref `(bind "SEQ" "playing")`.
+    /// binding. A live host namespace head (`#'THEME.accent`) compiles to
+    /// `(__ns-ref "THEME" "accent")`, its float slot's ref; a removed one
+    /// (`#'SEQ.playing`) is a compile error.
     fn compile_field_binding(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         const USAGE: &str = "#' takes a field path like t.volume";
         let path = match list {
@@ -1861,7 +1935,13 @@ impl<'a> Compiler<'a> {
         let native = if self.reactive_namespaces.contains(prefix) {
             let idx = self.use_string_constant(prefix);
             self.emit(OpCode::PushStr(idx));
-            "bind"
+            crate::vm::NAMESPACE_REF_NATIVE
+        } else if let Some(head) = self.removed_namespace_head(prefix) {
+            let field = path[head.len() + 1..].split('.').next().unwrap_or_default();
+            return Err(CompilerError::Message(format!(
+                "#'{head}.{field} was removed; bind an eseq.kinds instance field \
+                 instead, e.g. #'transport.playing or #'t.volume"
+            )));
         } else if let Some((head, _)) = prefix.split_once('.')
             && self.reactive_namespaces.contains(head)
         {
@@ -1915,6 +1995,9 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
                 if parts.len() == 2 {
+                    if self.removed_namespace_head(parts[0]).is_some() {
+                        self.errors.push(removed_namespace_message(name, true));
+                    }
                     let fields = parts[1].split('.').collect::<Vec<_>>();
                     self.emit_symbol_load(parts[0]);
                     for field in fields.iter().take(fields.len().saturating_sub(1)) {
@@ -2959,6 +3042,7 @@ impl<'a> Compiler<'a> {
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
             SymbolResolution::Global(idx) => {
+                self.note_removed_form(name, idx);
                 if let Some(key) = self.scene_binding_for(name) {
                     let name_idx = self.use_string_constant(&key);
                     self.emit(OpCode::PushStr(name_idx));
@@ -2978,10 +3062,13 @@ impl<'a> Compiler<'a> {
 
     fn emit_symbol_store(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
-                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
-                None => self.emit(OpCode::StoreGlobal(idx)),
-            },
+            SymbolResolution::Global(idx) => {
+                self.defined_globals.insert(idx);
+                match self.state_binding_for(name) {
+                    Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                    None => self.emit(OpCode::StoreGlobal(idx)),
+                }
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
         }
@@ -3014,6 +3101,50 @@ impl<'a> Compiler<'a> {
     /// module-qualified entry (see `emit_symbol_store_for_definition`);
     /// otherwise the ordinary reference ladder.
     fn use_global_for_definition(&mut self, name: &str) -> usize {
+        let idx = self.use_global_for_definition_slot(name);
+        self.defined_globals.insert(idx);
+        idx
+    }
+
+    /// A removed legacy binding name (see [`REMOVED_BINDING_FORMS`]) loaded
+    /// as a global that no earlier unit defined: checked when the unit
+    /// finishes, in case the unit defines it after this use.
+    fn note_removed_form(&mut self, name: &str, idx: usize) {
+        if idx < self.initial_global_count {
+            return;
+        }
+        if let Some((form, _)) = REMOVED_BINDING_FORMS.iter().find(|(form, _)| *form == name) {
+            self.removed_form_uses.push((form, idx));
+        }
+    }
+
+    /// The removed host namespace (see [`REMOVED_HOST_NAMESPACES`]) a
+    /// dotted path's head names, unless it is registered, a local, or a
+    /// global the code defines (`(def AGENT …)`, here or in an earlier unit).
+    fn removed_namespace_head<'p>(&self, head: &'p str) -> Option<&'p str> {
+        let head = head.split('.').next().unwrap_or(head);
+        (REMOVED_HOST_NAMESPACES.contains(&head)
+            && !self.reactive_namespaces.contains(head)
+            && !self.symbol_is_locally_bound(head)
+            && !self.global_is_defined(head))
+        .then_some(head)
+    }
+
+    /// Whether bare `name` resolves to a global that existed before this
+    /// unit or that this unit stores into (no interning, unlike
+    /// `resolve_global_name`).
+    fn global_is_defined(&self, name: &str) -> bool {
+        let qualified = super::modules::qualify(&self.current_module, name);
+        let candidates = [Some(name), Some(qualified.as_str()), self.refers.get(name).map(String::as_str)];
+        candidates.into_iter().flatten().any(|candidate| {
+            self.global_symbols
+                .iter()
+                .position(|symbol| symbol == candidate)
+                .is_some_and(|idx| idx < self.initial_global_count || self.defined_globals.contains(&idx))
+        })
+    }
+
+    fn use_global_for_definition_slot(&mut self, name: &str) -> usize {
         if self.declared_module().is_none()
             || super::modules::is_qualified(name)
             || self.reactive_namespaces.contains(name)
@@ -4272,6 +4403,12 @@ impl<'a> Compiler<'a> {
                         let field_idx = self.use_string_constant(fields[0]);
                         self.emit(OpCode::LoadReactive(ns_idx, field_idx));
                     } else {
+                        if self.removed_namespace_head(parts[0]).is_some() {
+                            let message = removed_namespace_message(s, false);
+                            if !self.errors.contains(&message) {
+                                self.errors.push(message);
+                            }
+                        }
                         self.emit_symbol_load(parts[0]);
                         let idx = self.use_string_constant(fields[0]);
                         self.emit(OpCode::GetField(idx));
@@ -4344,6 +4481,18 @@ impl<'a> Compiler<'a> {
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
             self.compile_expression(expression)?;
+        }
+        for (form, idx) in std::mem::take(&mut self.removed_form_uses) {
+            if self.defined_globals.contains(&idx) {
+                continue;
+            }
+            let (_, message) = REMOVED_BINDING_FORMS
+                .iter()
+                .find(|(name, _)| *name == form)
+                .expect("a removed form");
+            if !self.errors.iter().any(|error| error == message) {
+                self.errors.push(message.to_string());
+            }
         }
         if !self.errors.is_empty() {
             return Err(CompilerError::Message(self.errors.join("; ")));

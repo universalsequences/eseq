@@ -421,7 +421,7 @@ fn a_kind_named_state_read_bare_stays_scalar() {
 }
 
 #[test]
-fn bindable_is_ignored_and_every_state_accepts_refs() {
+fn every_state_accepts_refs() {
     let mut runtime = Runtime::new();
     runtime.register_reactive(
         "APP",
@@ -433,10 +433,9 @@ fn bindable_is_ignored_and_every_state_accepts_refs() {
             r#"
             (defwidget partial-bindable
               :state (a b)
-              :bindable (a)
               :shader (sdf/circle (+ a b)))
-            (partial-bindable :a (bind "APP" "a") :b (bind "APP" "b"))
-            (box :background "partial-bindable" :a 1 :b (bind "APP" "b"))
+            (partial-bindable :a #'APP.a :b #'APP.b)
+            (box :background "partial-bindable" :a 1 :b #'APP.b)
             "#,
         )
         .expect("evaluate")
@@ -450,7 +449,7 @@ fn bindable_is_ignored_and_every_state_accepts_refs() {
         Some(Value::ReactiveRef { .. })
     ));
     let value = runtime
-        .eval_str(r#"(partial-bindable :a (bind "APP" "a") :b (bind "APP" "b"))"#)
+        .eval_str(r#"(partial-bindable :a #'APP.a :b #'APP.b)"#)
         .expect("evaluate")
         .expect("widget");
     let Value::Map(map) = value else {

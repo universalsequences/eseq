@@ -33,28 +33,10 @@ fn custom_controls_keep_owners_across_step_selection() {
         midi_effects: test_list(vec![]),
         bus_effects: test_list(vec![test_list(vec![])]),
     };
-    editor.runtime_mut().register_reactive(
-        "SEQ",
-        vec![
-            ("num-tracks", Value::Number(1.0)),
-            ("track-plocks", test_list(vec![])),
-            ("track-plock-variants", test_list(vec![])),
-            (
-                "available-effects",
-                test_list(vec![
-                    Value::String("dimension-d-chorus".to_string()),
-                    Value::String("lexilush".to_string()),
-                ]),
-            ),
-            ("available-builtin-effects", test_list(vec![])),
-            ("available-midi-effects", test_list(vec![])),
-            (
-                "bus-names",
-                test_list(vec![Value::String("Mix".to_string())]),
-            ),
-        ],
-        true,
-    );
+    seed_values(vec![
+        ("track-plocks", test_list(vec![])),
+        ("track-plock-variants", test_list(vec![])),
+    ]);
     editor
             .runtime_mut()
             .eval_str(
@@ -206,9 +188,7 @@ fn custom_controls_keep_owners_across_step_selection() {
         } else {
             vec![]
         };
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-plocks", test_list(rows));
+        seed_value("track-plocks", test_list(rows));
         seed_panel_kinds(&mut editor, &panel_seed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();

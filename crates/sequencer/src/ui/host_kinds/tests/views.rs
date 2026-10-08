@@ -325,7 +325,8 @@ pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
             "FACTORY_PROMOTE.",
         ]
         .into_iter()
-        .filter(|namespace| has_symbol_starting_with(&code, namespace)),
+        // `#'SEQ.x` too: the quote is no symbol character here.
+        .filter(|namespace| has_symbol_starting_with(&code.replace("#'", " "), namespace)),
     );
     found
 }
@@ -344,14 +345,7 @@ pub(super) fn assert_ported(files: &[(&str, &str)]) {
 
 /// Every `ui.lisp` under `dir` (recursively: package versions included).
 fn ui_lisp_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            ui_lisp_files(&path, out);
-        } else if path.file_name().is_some_and(|name| name == "ui.lisp") {
-            out.push(path);
-        }
-    }
+    files_under(dir, &|path| path.file_name().is_some_and(|name| name == "ui.lisp"), out);
 }
 
 #[test]
@@ -378,6 +372,70 @@ fn factory_device_uis_use_no_legacy_binding_forms() {
             .collect();
         assert_eq!(found, Vec::<&str>::new(), "{}", file.display());
     }
+}
+
+/// Every file under `dir` (recursively) whose name `keep` accepts.
+fn files_under(
+    dir: &std::path::Path,
+    keep: &dyn Fn(&std::path::Path) -> bool,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files_under(&path, keep, out);
+        } else if keep(&path) {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn the_lisp_corpus_uses_no_legacy_binding_forms() {
+    // eseq-0l17.80: the legacy binding forms are gone from the language
+    // (`bind*`, `reactive-get`/`-set` and the SEQ/SEQV/EXPORT/AGENT
+    // namespaces are compile errors; `:bindable` and `reactive-value` warn),
+    // so no shipped, example, tool or test Lisp may use one: all of
+    // content/, the eseqlisp and docs examples, tools/, the dev instrument
+    // fixtures' UIs and the capture fixtures. A `defstate` / `(state …)`
+    // cell is Lisp view state, not a reactive binding; THEME, MIDI
+    // (midi_dispatch.rs) and SAMPLE_BROWSER are still-registered host
+    // namespaces (`legacy_forms` flags only MIDI of those).
+    const ALLOWED: [&str; 3] = ["defstate", "(state ", "MIDI."];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let is_lisp = |path: &std::path::Path| path.extension().is_some_and(|ext| ext == "lisp");
+    let mut counts = Vec::new();
+    let mut files = Vec::new();
+    for dir in [
+        "../../content",
+        "../eseqlisp/examples",
+        "../../docs/examples",
+        "../../tools",
+        "ui/capture-fixtures",
+    ] {
+        let before = files.len();
+        files_under(&root.join(dir), &is_lisp, &mut files);
+        counts.push((dir, files.len() - before));
+    }
+    let before = files.len();
+    ui_lisp_files(&root.join("tests/fixtures"), &mut files);
+    counts.push(("tests/fixtures (ui.lisp)", files.len() - before));
+    assert!(
+        counts.iter().all(|(_, count)| *count > 0) && files.len() > 800,
+        "too few corpus files: {counts:?}"
+    );
+    let offenders: Vec<String> = files
+        .iter()
+        .filter_map(|file| {
+            let source = std::fs::read_to_string(file).unwrap();
+            let found: Vec<_> = legacy_forms(&source)
+                .into_iter()
+                .filter(|form| !ALLOWED.contains(form))
+                .collect();
+            (!found.is_empty()).then(|| format!("{}: {found:?}", file.display()))
+        })
+        .collect();
+    assert!(offenders.is_empty(), "legacy binding forms:\n{}", offenders.join("\n"));
 }
 
 #[test]
