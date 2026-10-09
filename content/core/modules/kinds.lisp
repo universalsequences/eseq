@@ -37,7 +37,9 @@
 (export track scene bank bus group transport selection project master engine
         song region
         tracks scenes banks buses groups routes macros
-        launch! clone-scene! delete-scene! step-preset!
+        launch! clone-scene! delete-scene! step-preset! copy-scene-to-new-bank!
+        add-instrument-track! add-builtin-track! delete-device! bypass-device!
+        timebase-options
         device-param lock-param! unlock-param! lock-strip! unlock-strip!
         lock-rack-macro! unlock-rack-macro!
         set-tensor-cell! stamp-variant! stamp-key-variant!
@@ -82,6 +84,8 @@
 (def voice-priority-options '("Last" "High" "Low"))
 (def mono-trigger-options '("retrig" "legato"))
 (def swing-resolution-options '("1/16" "1/8" "1/4" "1/2"))
+;; track.timebase's and step.timebase's choices.
+(def timebase-options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 (def roll-rate-options '("4" "4T" "8" "8T" "16" "16T" "32" "32T"))
 ;; transport.launch-quantize's and transport.record-quantize's choices.
 (def launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
@@ -103,6 +107,15 @@
 (def set-track-muted (t v) (seq-set-track-mute t.index v))
 (def set-track-armed (t v) (seq-set-record-arm t.index v))
 (def set-step-active (s v) (seq-set-track-step s.track.index s.index v))
+;; P-lock step s to timebase label v (one of timebase-options); "" clears
+;; the lock, so the step follows its track's timebase again.
+(def set-step-timebase (s v)
+  (host-command "slice2-history-action"
+    (if (= v "")
+      (dict :op :timebase-plock-clear :track s.track.index :steps (list s.index))
+      (dict :op :timebase-plock :track s.track.index :steps (list s.index)
+            :value (reduce |found i| (if (= (nth timebase-options i) v) i found)
+                     4 (range 0 (len timebase-options)))))))
 (def set-transport-playing (tr v) (seq-set-playing v))
 (def set-transport-recording (tr v) (seq-set-recording v))
 (def select-track (sel t) (if t (seq-set-track t.index) nil))
@@ -420,20 +433,24 @@
          (selected :bool   :doc "Selected for editing (the current track's steps only)")
          (held     :bool   :doc "Inside an active step's duration (that step included)")
          ;; Step parameters, in the host's units (seq-set-track-step-param).
-         (velocity    :number :set (step-param-setter :velocity))
-         (duration    :number :set (step-param-setter :duration) :doc "Length in steps")
-         (transpose   :number :set (step-param-setter :transpose))
-         (delay       :number :set (step-param-setter :delay))
-         (retrig      :number :set (step-param-setter :retrig))
-         (retrig-rate :number :set (step-param-setter :retrig-rate))
-         (pan         :number :set (step-param-setter :pan))
-         (sync        :number :set (step-param-setter :sync))
+         ;; :range and :default are the engine's (StepParam::min/max,
+         ;; default_value), for widgets that configure themselves (field-info).
+         (velocity    :number :range (0 1) :default 1 :set (step-param-setter :velocity))
+         (duration    :number :range (0 32) :default 1 :set (step-param-setter :duration) :doc "Length in steps")
+         (transpose   :number :range (-48 48) :default 0 :set (step-param-setter :transpose))
+         (delay       :number :default 0 :set (step-param-setter :delay))
+         (retrig      :number :range (0 127) :default 0 :set (step-param-setter :retrig))
+         (retrig-rate :number :range (1 1024) :default 4 :set (step-param-setter :retrig-rate))
+         (pan         :number :range (-1 1) :default 0 :set (step-param-setter :pan))
+         (sync        :number :default 0 :set (step-param-setter :sync) :doc "An index into project.sync-options")
          (aux-a       :number :set (step-param-setter :aux-a))
          ;; P-lock display (any family: device params, sends, step params, …).
          (plocked       :bool :doc "Some p-lock lands on this step")
          (lock-kind     :int  :doc "lock-none, lock-seq (sequencer-only locks) or lock-variant (a p-lock variant)")
          (variant-color :rgb  :doc "The step's p-lock variant color (gray for sequencer-only locks)")
-         (variant variant :doc "The step variant the step plays (one of its track's variants); nil when it plays none")))
+         (variant variant :doc "The step variant the step plays (one of its track's variants); nil when it plays none")
+         (timebase :string :set set-step-timebase :options timebase-options :default ""
+                   :doc "The timebase the step plays at: its timebase p-lock's label (one of timebase-options), else the track's own. Setting a label p-locks the step to it; the empty string clears the lock")))
 
 ;; One track's send to one bus (not the main mix): (nth t.sends 0).
 (def-kind send
@@ -1073,7 +1090,8 @@
          (length-step :int  :doc "The step a length lane (length!) last set the pattern length to, while playing; -1 when none")
          (playhead-row :int :doc "The row the playhead lights on a grid as tall as the longest pattern, where a shorter track repeats (a tracker's): the transport's step modulo the grid's height when that repeat plays, else playhead; -1 while stopped")
          (step-params-in-use (list-of :string) :doc "The step params (focus-step-params' :name, in their order) some active step holds off its default")
-         (timebase  :string :doc "Step timebase: 1/16, 1/8T, …")
+         (timebase  :string :set (track-setting "timebase") :options timebase-options :default "16"
+                    :doc "Step timebase, one of timebase-options")
          (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
          (instrument-id :string :doc "The instrument it plays, as the browser's Instruments tab names it (builtin:sampler, …); empty for an empty track or a drum rack")
          (rack      :bool   :doc "A drum rack track")
@@ -1085,13 +1103,15 @@
          (max-polyphony :int :range (1 16) :set (track-setting "max-polyphony") :doc "Voices")
          (gate      :bool   :set (track-setting "gate") :doc "Notes last their step duration")
          (supports-mono-trigger :bool :doc "The instrument honours voice-priority and mono-trigger")
-         (voice-priority :string :set (track-setting "voice-priority") :doc "One of voice-priority-options")
-         (mono-trigger :string :set (track-setting "mono-trigger") :doc "One of mono-trigger-options")
-         (mute-group :int   :range (0 8) :set (track-setting "mute-group")
+         (voice-priority :string :set (track-setting "voice-priority") :options voice-priority-options
+                    :default "Last" :doc "One of voice-priority-options")
+         (mono-trigger :string :set (track-setting "mono-trigger") :options mono-trigger-options
+                    :default "retrig" :doc "One of mono-trigger-options")
+         (mute-group :int   :range (0 8) :set (track-setting "mute-group") :options mute-group-options :default 0
                     :doc "0 for none, else the group; (nth mute-group-options g) is its label")
-         (swing     :number :range (50 75) :set (track-setting "swing")
+         (swing     :number :range (50 75) :default 50 :set (track-setting "swing")
                     :doc "The track's own swing percent (a step's swing p-lock never shows here)")
-         (swing-resolution :string :set (track-setting "swing-resolution")
+         (swing-resolution :string :set (track-setting "swing-resolution") :options swing-resolution-options :default "1/16"
                     :doc "The track's own swing resolution, one of swing-resolution-options")
          (fts       :string :set (track-setting "fts")
                     :doc "Scale name: one of project.fts-options, an imported scale's name, * once degrees are edited")
@@ -1432,7 +1452,7 @@
          (queued          scene :doc "The scene a quantized launch waits for, or nil")
          (launch-quantize :string :set set-transport-launch-quantize
                           :doc "Scene launch quantization: off, 1/16, …, 1 bar")
-         (bpm             :int    :range (20 300) :set set-transport-bpm)
+         (bpm             :int    :range (20 300) :default 120 :set set-transport-bpm)
          (position        :int    :doc "Transport step counter")
          (metronome       :bool   :set set-transport-metronome)
          (roll-mode       :bool   :set set-transport-roll-mode)
@@ -1917,6 +1937,22 @@
 ;; unless it is s.
 (def delete-scene! (s) (host-command "delete-pattern" (dict :idx s.index)))
 
+;; Copy scene s into a new scene bank (appended), as its first scene.
+(def copy-scene-to-new-bank! (s) (host-command "copy-scene-to-new-bank" (dict :idx s.index)))
+
+;; Add a track playing saved instrument `name` (as the browser lists it).
+(def add-instrument-track! (name) (host-command "add-track-instrument" (dict :name name)))
+
+;; Add a track playing builtin `name`: sampler, modulator, rack (a drum rack)
+;; or layer-rack.
+(def add-builtin-track! (name)
+  (match name
+    "sampler" (host-command "add-track-sampler" (dict))
+    "modulator" (host-command "add-track-modulator" (dict))
+    "rack" (host-command "add-track-rack" (dict))
+    "layer-rack" (host-command "add-track-layer-rack" (dict))
+    _ (status (str "No builtin instrument " name))))
+
 ;; track.governed values.
 (def take-none 0)
 (def take-governed 1)
@@ -1942,6 +1978,20 @@
 (def lock-none 0)
 (def lock-seq 1)
 (def lock-variant 2)
+
+;; Delete device d (an effect: an instrument is never deleted), as
+;; Backspace on the selected effect does.
+(def delete-device! (d)
+  (do (set! d.delete-target true)
+      (seq-delete-active-target)))
+
+;; Bypass device d (or un-bypass it with on false) through its enabled param;
+;; with steps given (step instances of d's track), p-lock that instead.
+(def bypass-device! (d bypassed &key steps)
+  (let ((p (device-param d "enabled"))
+        (v (if bypassed 0 1)))
+    (when p
+      (if (and steps (> (len steps) 0)) (lock-param! p steps v) (set! p.base v)))))
 
 ;; Device d's param named name, or nil.
 (def device-param (d name)

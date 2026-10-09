@@ -69,6 +69,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "reorder-scene",
     "propagate-current-track-to-all-patterns",
     "clone-pattern",
+    "copy-scene-to-new-bank",
     "delete-pattern",
 ];
 
@@ -110,6 +111,30 @@ pub(super) fn handle(
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
+    // `copy-scene-to-new-bank {:idx s}`: a new (empty, appended) scene bank,
+    // then `clone-pattern` of scene s into it.
+    if name == "copy-scene-to-new-bank" {
+        let created = app.apply_recorded_scene_structure_mutation("Create scene bank", |app| {
+            app.state.create_scene_bank()
+        });
+        match created {
+            Ok(bank) => {
+                let mut map = match &payload {
+                    Value::Map(map) => map.clone(),
+                    _ => HashMap::new(),
+                };
+                map.insert(
+                    "bank-id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(bank.0 as f64))),
+                );
+                handle("clone-pattern", Value::Map(map), app, editor, ctx);
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                "Could not create scene bank: {error}"
+            ))),
+        }
+        return;
+    }
     let payload = match name {
         "set-scene-cell" => match scene_cell_by_ids(app, payload) {
             Ok(payload) => payload,

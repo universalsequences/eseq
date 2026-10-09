@@ -363,6 +363,11 @@ pub(super) fn apply_slice2_history_host_command(
                     as u32,
             ),
         },
+        "timebase-plock-clear" => app::AppCommand::ClearTimebasePlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "timebase p-lock clear steps were invalid".to_string())?,
+        },
         "swing-plock" => app::AppCommand::SetTrackSwingPlockMulti {
             track,
             steps: map_usize_list(map, "steps")

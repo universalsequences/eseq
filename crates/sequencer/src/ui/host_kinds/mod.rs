@@ -908,6 +908,7 @@ pub(crate) mod f {
     pub(crate) const STEP_LOCK_KIND: FieldKey = (STEP, "lock-kind");
     pub(crate) const STEP_VARIANT_COLOR: FieldKey = (STEP, "variant-color");
     pub(crate) const STEP_VARIANT: FieldKey = (STEP, "variant");
+    pub(crate) const STEP_TIMEBASE: FieldKey = (STEP, "timebase");
 
     pub(crate) const SEND_TRACK: FieldKey = (SEND, "track");
     pub(crate) const SEND_BUS: FieldKey = (SEND, "bus");
@@ -1481,6 +1482,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STEP_VARIANT_COLOR, ":rgb", Live),
     // From the p-lock render (`vid`), the instance of the track's variants.
     (f::STEP_VARIANT, "variant", Live),
+    // The step's timebase p-lock, else the track's timebase.
+    (f::STEP_TIMEBASE, ":string", Live),
     (f::SEND_TRACK, "track", Model),
     (f::SEND_BUS, "bus", Model),
     (f::SEND_AMOUNT, ":number", Live),

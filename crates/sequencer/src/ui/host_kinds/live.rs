@@ -500,6 +500,15 @@ pub(super) fn display_step(
     step
 }
 
+/// `step.timebase`: the timebase step `step` of `track` plays at, its
+/// timebase p-lock's when it has one, else the track's own.
+pub(super) fn step_timebase_label(state: &SequencerState, track: usize, step: usize) -> &'static str {
+    (state.pattern.timebase_plocks.get(track))
+        .and_then(|locks| locks.get(step))
+        .unwrap_or_else(|| state.pattern.track_params[track].get_timebase())
+        .label()
+}
+
 /// `track.setting-locks`: the settings (timebase, swing, swing resolution)
 /// a p-lock of `track` supplies at the displayed `step`, as `{:name
 /// :value}` rows (what the legacy `tp-timebase`, `tp-swing` and
@@ -717,6 +726,9 @@ pub(super) fn live_value<S: KindStore>(
                     track_plock_render(sources, shared, track)
                         .get(step)?
                         .field(key)?
+                }
+                f::STEP_TIMEBASE => {
+                    Value::String(step_timebase_label(&sources.state, track, step).to_string())
                 }
                 f::STEP_VARIANT => {
                     let vid = track_plock_render(sources, shared, track)
