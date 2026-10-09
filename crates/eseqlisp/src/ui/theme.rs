@@ -402,20 +402,33 @@ macro_rules! theme_slots {
         pub fn sync_from_value(value: &Value) {
             let mut theme = current();
             let prev = theme;
+            let mut widgets_changed = false;
             if let Value::Map(map) = value {
+                THEME_WIDGET_SLOTS.with(|widgets| {
+                let mut widgets = widgets.borrow_mut();
                 $(
                     if let Some(value) = map.get(stringify!($field)).or_else(|| {
                         map.iter()
                             .find(|(key, _)| normalize_name(key) == stringify!($field))
                             .map(|(_, value)| value)
                     }) {
-                        if let Some(color) = parse_color_value(&value.borrow()) {
+                        let value = value.borrow();
+                        if let Some(color) = parse_color_value(&value) {
                             theme.$field = color;
+                            widgets_changed |= widgets.remove(stringify!($field)).is_some();
+                        } else if let Some(widget) = parse_widget_value(&value) {
+                            // The color field keeps its last value: code that
+                            // reads the slot as a color still gets one.
+                            if widgets.get(stringify!($field)) != Some(&widget) {
+                                widgets.insert(stringify!($field).to_string(), widget);
+                                widgets_changed = true;
+                            }
                         }
                     }
                 )+
+                });
             }
-            if theme != prev {
+            if theme != prev || widgets_changed {
                 set_current(theme);
             }
         }
@@ -1441,6 +1454,52 @@ pub fn set_current(theme: Theme) {
     THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
+thread_local! {
+    /// Theme slots that hold a widget instead of a color: slot field name
+    /// (underscored) -> defwidget name. Set by a slot value `(:widget "name")`;
+    /// cleared when the slot is set back to a color. Changes bump the theme
+    /// generation, like color changes. Thread-local like the defwidget
+    /// registry it names into (`sdf_widget::SDF_WIDGETS`): the runtime that
+    /// applies themes and the renderer that paints them share a thread.
+    static THEME_WIDGET_SLOTS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// A widget slot value, `(:widget "name")`: the defwidget that paints the slot.
+pub fn parse_widget_value(value: &Value) -> Option<String> {
+    let Value::List(items) = value else {
+        return None;
+    };
+    let [head, name] = items.as_slice() else {
+        return None;
+    };
+    let is_widget = match &*head.borrow() {
+        Value::Keyword(text) | Value::Symbol(text) => {
+            normalize_name(text.trim_start_matches(':')) == "widget"
+        }
+        _ => false,
+    };
+    if !is_widget {
+        return None;
+    }
+    match &*name.borrow() {
+        Value::String(text) | Value::Keyword(text) | Value::Symbol(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
+/// is painted with, if it holds one.
+pub fn named_widget(name: &str) -> Option<String> {
+    THEME_WIDGET_SLOTS.with(|slots| {
+        let slots = slots.borrow();
+        if slots.is_empty() {
+            return None;
+        }
+        slots.get(&normalize_name(name)).cloned()
+    })
+}
+
 pub fn parse_color_value(value: &Value) -> Option<Color> {
     match value {
         Value::String(text) | Value::Keyword(text) => parse_color_string(text),
@@ -1658,6 +1717,47 @@ mod tests {
             Some(Color::rgba(0.25, 0.5, 0.75, 1.0))
         );
         assert_eq!(named_color("dimmer"), Some(DIMMER()));
+        set_current(restore);
+    }
+
+    #[test]
+    fn a_theme_slot_can_hold_a_widget() {
+        let cell = |value: Value| std::rc::Rc::new(std::cell::RefCell::new(value));
+        let slot = |value: Value| {
+            Value::Map(std::collections::HashMap::from([(
+                "instrument-group-bg".to_string(),
+                cell(value),
+            )]))
+        };
+        let widget_value = Value::List(vec![
+            cell(Value::Keyword("widget".to_string())),
+            cell(Value::String("daw-pill".to_string())),
+        ]);
+        assert_eq!(parse_widget_value(&widget_value), Some("daw-pill".to_string()));
+        // Not a color, so the color path leaves the slot alone.
+        assert_eq!(parse_color_value(&widget_value), None);
+
+        let restore = current();
+        let color_before = named_color("instrument-group-bg");
+        let generation_before = generation();
+        sync_from_value(&slot(widget_value));
+        assert_eq!(named_widget("instrument-group-bg"), Some("daw-pill".to_string()));
+        assert_eq!(named_widget("instrument_group_bg"), Some("daw-pill".to_string()));
+        // The color field keeps its last value for code reading it as a color.
+        assert_eq!(named_color("instrument-group-bg"), color_before);
+        assert!(generation() > generation_before, "a widget slot change redraws");
+
+        // Setting the slot back to a color clears the widget.
+        sync_from_value(&slot(Value::List(vec![
+            cell(Value::Number(0.1)),
+            cell(Value::Number(0.2)),
+            cell(Value::Number(0.3)),
+        ])));
+        assert_eq!(named_widget("instrument-group-bg"), None);
+        assert_eq!(
+            named_color("instrument-group-bg"),
+            Some(Color::rgba(0.1, 0.2, 0.3, 1.0))
+        );
         set_current(restore);
     }
 
