@@ -638,9 +638,11 @@ fn mini_daw_opens_the_selected_tracks_instrument_panel_in_the_top_tile() {
         tree_has_string_prop(&fx, "background", "daw-panel-frame"),
         "the framed panel shows"
     );
+    // A sampler track's panel body is the sampler's own (its waveform row),
+    // as the factory instrument panel picks it, not the generic synth UI.
     assert!(
-        tree_has_string_prop(&fx, "debug-name", "synth-wrapper"),
-        "the factory synth body shows: {fx:?}"
+        tree_has_string_prop(&fx, "debug-name", "sampler-waveform-row"),
+        "the factory sampler body shows: {fx:?}"
     );
     let mut pills = Vec::new();
     widgets_with_prop(&fx, "queued", &mut pills);
