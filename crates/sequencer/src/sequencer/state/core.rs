@@ -735,6 +735,17 @@ pub struct SequencerState {
     /// with one atomic load.
     pub(super) track_output_events_revision: AtomicU64,
     pub(super) track_output_current_beat_bits: AtomicU64,
+    /// Scheduler → control-thread live p-lock stream
+    /// (`transport.plock-events`): a bounded lock-free queue the scheduler
+    /// `force_push`es into (never blocks, never allocates; when full the
+    /// oldest undrained event is dropped).
+    pub(super) plock_output_queue: crossbeam_queue::ArrayQueue<PlockOutputEvent>,
+    /// The drained p-lock history, oldest first, capped at
+    /// [`PLOCK_OUTPUT_EVENT_HISTORY_CAP`]. Control-thread only: the
+    /// scheduler never takes this lock (it only pushes to the queue).
+    pub(super) plock_output_history: Mutex<std::collections::VecDeque<PlockOutputEvent>>,
+    /// Moved by every drain or clear that changed the history.
+    pub(super) plock_output_events_revision: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) active_note_velocity_bits: Vec<[AtomicU32; 128]>,
     pub(super) live_note_velocity_bits: Vec<[AtomicU32; 128]>,
@@ -913,6 +924,30 @@ pub struct ActiveNoteActivity {
 }
 
 pub(super) const TRACK_OUTPUT_EVENT_HISTORY_CAP: usize = 1024;
+
+/// One explicit p-lock (or live macro / scene-push value) the scheduler
+/// applied at a trigger, for the live p-lock stream
+/// (`transport.plock-events`). Small and `Copy`: pushed lock-free from the
+/// scheduler thread without allocating.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlockOutputEvent {
+    pub track: u32,
+    /// -1 for the instrument slot, else the effect slot index.
+    pub device_slot: i32,
+    pub param_idx: u32,
+    /// The trigger's absolute beat.
+    pub beat: f64,
+    /// The applied value in stored (descriptor) units.
+    pub value: f32,
+    /// Whether the value came from the live macro layer (a scene push /
+    /// scene morph or a macro) rather than a stored p-lock.
+    pub from_macro: bool,
+}
+
+/// Bounded lock-free queue between the scheduler and the drain.
+pub(super) const PLOCK_OUTPUT_QUEUE_CAP: usize = 4096;
+/// Drained p-lock history kept for `transport.plock-events`.
+pub(super) const PLOCK_OUTPUT_EVENT_HISTORY_CAP: usize = 2048;
 
 #[derive(Clone, Debug, Default)]
 pub struct PatternSwitchProfile {

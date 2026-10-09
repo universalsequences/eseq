@@ -1216,6 +1216,7 @@ pub(crate) mod f {
     pub(crate) const TRANSPORT_SEQUENCE_ROLLING: FieldKey = (TRANSPORT, "sequence-rolling");
     pub(crate) const TRANSPORT_TRACK_EVENTS: FieldKey = (TRANSPORT, "track-events");
     pub(crate) const TRANSPORT_TRACK_EVENTS_BEAT: FieldKey = (TRANSPORT, "track-events-beat");
+    pub(crate) const TRANSPORT_PLOCK_EVENTS: FieldKey = (TRANSPORT, "plock-events");
 
     pub(crate) const MASTER_PEAK_L: FieldKey = (MASTER, "peak-l");
     pub(crate) const MASTER_PEAK_R: FieldKey = (MASTER, "peak-r");
@@ -1808,6 +1809,13 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
         Live,
     ),
     (f::TRANSPORT_TRACK_EVENTS_BEAT, ":number", Live),
+    // Drained from the scheduler's p-lock queue; read only when the
+    // history's revision moved (`events.rs`).
+    (
+        f::TRANSPORT_PLOCK_EVENTS,
+        "(list-of (list-of :number))",
+        Live,
+    ),
     (f::MASTER_PEAK_L, ":number", Live),
     (f::MASTER_PEAK_R, ":number", Live),
     (f::MASTER_RECORDING, ":bool", Live),
@@ -2733,6 +2741,8 @@ pub(crate) struct HostKinds {
     pub(crate) networks: NeuralState,
     /// The tracks' output event stream (`transport.track-events`).
     track_events: TrackEventsState,
+    /// The scheduler's applied p-lock stream (`transport.plock-events`).
+    plock_events: TrackEventsState,
     /// Generators (tick-mode sequencers) and their marks.
     pub(crate) generators: GeneratorState,
     /// The step panel's p-lock table.
@@ -2826,6 +2836,7 @@ impl HostKinds {
             self.table_editor.invalidate();
             self.networks.invalidate();
             self.track_events.invalidate();
+            self.plock_events.invalidate();
             self.generators.invalidate();
             self.plock_rows.invalidate();
         }

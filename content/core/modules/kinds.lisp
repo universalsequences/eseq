@@ -1462,7 +1462,9 @@
          (sequence-rolling :bool  :doc "A sequence roll is held")
          (track-events    (list-of (list-of :number))
                           :doc "The tracks' output notes, oldest first (at most 1024): (node track beat transpose velocity) rows, node -1 (the event-view's :events)")
-         (track-events-beat :number :doc "The scheduler's rendered beat (track-events' current beat)")))
+         (track-events-beat :number :doc "The scheduler's rendered beat (track-events' current beat)")
+         (plock-events    (list-of (list-of :number))
+                          :doc "The p-locks the scheduler applies, oldest first (at most 2048): (node track beat transpose velocity) rows, node = (device-slot + 1) * 1000 + param index (instrument params 0..999, effect slot n at (n + 1) * 1000), transpose = the value normalized 0..1 by the param's min/max, velocity 1; includes scene push / morph and macro values on each trigger (the event-view's :events)")))
 
 ;; The master output.
 (def-kind master

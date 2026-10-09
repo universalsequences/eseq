@@ -9,7 +9,7 @@ use sequencer::graph::{
     GraphDeltaEntry, GraphDeltaKey, GraphSoundingNote, GraphVisualizationEdge,
     GraphVisualizationEvent, GraphVisualizationSnapshot,
 };
-use sequencer::sequencer::TrackOutputEvent;
+use sequencer::sequencer::{PlockOutputEvent, TrackOutputEvent};
 
 const REFER_GRAPH: &str = "(import eseq.kinds :refer (track tracks project graphs graph-of \
                            graph-param-named graph-edge-to set-group-gain! set-group-coupling! \
@@ -1737,6 +1737,89 @@ fn transport_track_events_read_the_track_output_and_skip_an_unchanged_revision()
     state.clear_track_output_events();
     h.sync();
     assert_eq!(h.eval_all("transport.track-events"), h.eval_all("(list)"));
+}
+
+#[test]
+fn transport_plock_events_drain_the_scheduler_queue_into_normalized_rows() {
+    let mut h = Harness::new();
+    let state = h.shared.state.clone();
+    // Track 0's instrument param 0 has a descriptor range; track 40 has no
+    // track, so its value is only clamped.
+    let snapshot = state.latest_scheduler_snapshot();
+    let range = snapshot
+        .tracks
+        .first()
+        .and_then(|track| track.instrument_descriptor.params.first())
+        .map(|pdesc| (pdesc.min as f64, pdesc.max as f64))
+        .filter(|(min, max)| max != min);
+    let event = |track: u32, device_slot: i32, param_idx: u32, beat: f64, value: f32| {
+        PlockOutputEvent {
+            track,
+            device_slot,
+            param_idx,
+            beat,
+            value,
+            from_macro: false,
+        }
+    };
+    let (mid_value, mid_norm) = match range {
+        Some((min, max)) => ((min + (max - min) * 0.25) as f32, 0.25),
+        None => (0.25, 0.25),
+    };
+    state.push_plock_output_event(event(0, -1, 0, 1.5, mid_value));
+    state.push_plock_output_event(event(40, 2, 7, 2.0, 3.0));
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(h.computed(f::TRANSPORT_PLOCK_EVENTS), 0, "unobserved");
+    let rows = |h: &mut Harness| match h.eval_all("transport.plock-events") {
+        Value::List(rows) => rows
+            .iter()
+            .map(|row| match &*row.borrow() {
+                Value::List(cells) => cells
+                    .iter()
+                    .map(|cell| match &*cell.borrow() {
+                        Value::Number(n) => *n,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect::<Vec<f64>>(),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    // Cold read: node = (slot + 1) * 1000 + param, value normalized.
+    let first = rows(&mut h);
+    assert_eq!(first.len(), 2);
+    assert_eq!(&first[0][..3], &[0.0, 0.0, 1.5]);
+    assert!((first[0][3] - mid_norm).abs() < 1e-4, "{first:?}");
+    assert_eq!(first[0][4], 1.0);
+    assert_eq!(first[1], vec![3007.0, 40.0, 2.0, 1.0, 1.0]);
+
+    h.eval_all(
+        r#"(effect-buffer "*plock-events*" (label (str (len transport.plock-events))))"#,
+    );
+    h.editor.runtime_mut().run_reactive_cycle();
+    h.sync();
+    let transport = h.singleton(TRANSPORT);
+    let pushed = first_row(&h, transport, "plock-events");
+    // Idle: an empty queue drains nothing and the revision holds.
+    let revision = state.drain_plock_output_events();
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(state.drain_plock_output_events(), revision);
+    assert!(Rc::ptr_eq(&pushed, &first_row(&h, transport, "plock-events")));
+    // Playing: the next scheduled p-lock lands on the next sync.
+    state.push_plock_output_event(event(1, 0, 3, 4.0, -5.0));
+    h.sync();
+    let next = rows(&mut h);
+    assert_eq!(next.len(), 3);
+    assert_eq!(next[2][..3], [1003.0, 1.0, 4.0]);
+    assert!((0.0..=1.0).contains(&next[2][3]));
+    state.clear_plock_output_events();
+    h.sync();
+    assert_eq!(h.eval_all("transport.plock-events"), h.eval_all("(list)"));
 }
 
 #[test]

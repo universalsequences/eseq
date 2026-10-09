@@ -11151,6 +11151,85 @@
         state.device_print_override.clear();
     }
 
+    /// The live p-lock stream (`transport.plock-events`): every trigger
+    /// reports the explicit stored p-locks at its step (ON and off steps,
+    /// instrument and effect slots) at its absolute beat, and an ON trigger
+    /// also reports the live macro layer (scene push / morph) values it
+    /// stamps.
+    #[test]
+    fn scheduler_lookahead_reports_applied_plocks_to_the_live_stream() {
+        run_with_scheduler_stack(scheduler_lookahead_reports_applied_plocks_body);
+    }
+
+    fn scheduler_lookahead_reports_applied_plocks_body() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let track = 0;
+        state.pattern.instrument_slots[track]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        let desc = EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 0);
+        // Step 0 (ON): an instrument p-lock. Step 1 (off): an effect p-lock.
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.instrument_slots[track].set_plock(0, 12, 2.0);
+        state.pattern.effect_chains[track][0].set_plock(1, 0, 0.7);
+        // A scene push morphs effect param 1 through the live macro layer.
+        let slot = &state.pattern.effect_chains[track][0];
+        let raw_idx = slot.param_node_indices[1].load(Ordering::Relaxed);
+        let param_id = crate::neural::ParamNodeId::from_slot_param(42, 0, raw_idx);
+        let key = crate::macro_engine::MacroParamKey::for_effect(track, 0, 1, param_id);
+        state.publish_macro_overrides(std::collections::HashMap::from([(key, 0.4)]));
+        state.transport.playing.store(true, Ordering::Relaxed);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        assert_eq!(snapshot.tracks[track].macro_override_params, vec![(0, 1)]);
+        let queue = ScheduledEventQueue::<256>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+        // 12000 samples at 24000 per quarter: steps 0 and 1 (beats 0, 0.25).
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            12_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let events = state.with_plock_output_events(|_, events| {
+            events.iter().copied().collect::<Vec<_>>()
+        });
+        let plock = |device_slot: i32, param_idx: u32, beat: f64, value: f32, from_macro: bool| {
+            crate::sequencer::PlockOutputEvent {
+                track: track as u32,
+                device_slot,
+                param_idx,
+                beat,
+                value,
+                from_macro,
+            }
+        };
+        assert!(events.contains(&plock(-1, 12, 0.0, 2.0, false)), "{events:?}");
+        assert!(events.contains(&plock(0, 1, 0.0, 0.4, true)), "{events:?}");
+        assert!(events.contains(&plock(0, 0, 0.25, 0.7, false)), "{events:?}");
+        // Off steps report stored p-locks only, not the macro layer.
+        assert!(
+            !events.iter().any(|event| event.beat == 0.25 && event.from_macro),
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 3, "{events:?}");
+    }
+
     #[test]
     fn cross_track_neural_fires_take_the_p_locks_of_their_landing_step() {
         let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());

@@ -921,6 +921,7 @@ pub(super) fn live_value<S: KindStore>(
                     .load(Ordering::Relaxed),
             ),
             f::TRANSPORT_TRACK_EVENTS => track_events_value(sources),
+            f::TRANSPORT_PLOCK_EVENTS => plock_events_value(sources),
             f::TRANSPORT_TRACK_EVENTS_BEAT => number(sources.state.track_output_current_beat()),
             f::SONG_POSITION => {
                 let position = song_position(&sources.state, shared.borrow().capture_head);

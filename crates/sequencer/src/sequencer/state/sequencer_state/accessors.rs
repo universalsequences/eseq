@@ -305,6 +305,9 @@ impl SequencerState {
             track_output_events: Mutex::new(Vec::new()),
             track_output_events_revision: AtomicU64::new(0),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
+            plock_output_queue: crossbeam_queue::ArrayQueue::new(PLOCK_OUTPUT_QUEUE_CAP),
+            plock_output_history: Mutex::new(std::collections::VecDeque::new()),
+            plock_output_events_revision: AtomicU64::new(0),
             active_note_until_samples: (0..MAX_TRACKS)
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
