@@ -505,6 +505,45 @@ impl Harness {
     }
 }
 
+/// A smoke check for a view file under development: loads the file named by
+/// `ESEQ_VIEW` into a project with a few tracks, renders every buffer it
+/// defines (`ESEQ_VIEW_BUFFERS`, comma-separated) and fails on any UI error in
+/// them. Run by hand:
+/// `ESEQ_VIEW=path ESEQ_VIEW_BUFFERS='*fx*,*mixer*' cargo test … -- --ignored smoke_view_file`.
+#[test]
+#[ignore]
+fn smoke_view_file() {
+    let path = std::env::var("ESEQ_VIEW").expect("ESEQ_VIEW names the view file");
+    let source = std::fs::read_to_string(&path).expect("the view file reads");
+    let mut h = Harness::new();
+    h.app.graph_controller().add_blank_sampler_track();
+    h.shared.current_track.store(0, Ordering::Relaxed);
+    h.sync();
+    h.editor
+        .runtime_mut()
+        .eval_str(&source)
+        .unwrap_or_else(|error| {
+            let detail = h.editor.runtime_mut().take_source_load_errors();
+            panic!("{path}: {error:?} {detail:?}")
+        });
+    for _ in 0..2 {
+        h.sync();
+        h.show_all();
+    }
+    let buffers = std::env::var("ESEQ_VIEW_BUFFERS").unwrap_or_default();
+    let mut failures = Vec::new();
+    for name in buffers.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let (tree, _) = h.buffer_tree(name);
+        let text = format!("{tree:?}");
+        for (at, _) in text.match_indices("UI error") {
+            let end = text[at..].find('"').map_or(text.len(), |i| at + i);
+            failures.push(format!("{name}: {}", &text[at..end.min(at + 300)]));
+        }
+        println!("{name}: rendered ({} bytes of tree)", text.len());
+    }
+    assert!(failures.is_empty(), "UI errors:\n{}", failures.join("\n"));
+}
+
 #[test]
 fn mini_daw_example_renders_through_kinds_and_only_repaints_on_playback() {
     let mut h = Harness::new();
