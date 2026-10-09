@@ -399,6 +399,48 @@ fn a_parent_that_is_not_keyed_is_an_error_at_registration() {
 }
 
 #[test]
+fn field_info_reports_a_host_fields_declared_metadata() {
+    let (mut vm, _) = vm();
+    eval(
+        &mut vm,
+        r#"
+        (def knob-modes '("lo" "mid" "hi"))
+        (def knob-wrote nil)
+        (def set-knob-level (k v) (set! knob-wrote v))
+        (def-kind dial :key (index)
+          :host ((level :number :range (0 2) :default 1 :set set-knob-level :doc "Gain")
+                 (mode :string :options knob-modes)
+                 (name :string)))
+        "#,
+    );
+    vm.register_keyed_instance("dial", &[0]).expect("register");
+    // #' binds the number field; the (instance :field) form reaches any.
+    let info = |vm: &mut VM, field: &str, key: &str| {
+        let form = if field == "level" { "#'k.level".to_string() } else { format!("k :{field}") };
+        eval(vm, &format!("(let ((k (dial 0))) (get (field-info {form}) :{key}))"))
+    };
+    assert_eq!(info(&mut vm, "level", "range"), eval(&mut vm, "(list 0 2)"));
+    assert_eq!(info(&mut vm, "level", "default"), Value::Number(1.0));
+    assert_eq!(info(&mut vm, "level", "settable"), Value::Bool(true));
+    assert_eq!(info(&mut vm, "level", "doc"), Value::String("Gain".into()));
+    assert_eq!(info(&mut vm, "level", "type"), Value::String(":number".into()));
+    // :options names a global (or is a list): field-info hands back the list.
+    assert_eq!(info(&mut vm, "mode", "options"), eval(&mut vm, "knob-modes"));
+    // A field with nothing declared: no range or options, not settable.
+    assert_eq!(info(&mut vm, "name", "range"), Value::Nil);
+    assert_eq!(info(&mut vm, "name", "settable"), Value::Bool(false));
+    // Anything but an instance field binding has no info.
+    assert_eq!(eval(&mut vm, "(field-info 3)"), Value::Nil);
+    // (field h :f) reads as h.f; (set-field! h :f v) writes as (set! h.f v),
+    // a :host field through its :set.
+    let id = vm.register_keyed_instance("dial", &[1]).expect("register");
+    push(&mut vm, id, "level", Value::Number(0.5));
+    assert_eq!(eval(&mut vm, "(field (dial 1) :level)"), Value::Number(0.5));
+    eval(&mut vm, "(set-field! (dial 1) :level 1.5)");
+    assert_eq!(eval(&mut vm, "knob-wrote"), Value::Number(1.5));
+}
+
+#[test]
 fn host_fields_read_their_pushed_values_and_dirty_only_their_readers() {
     let (mut vm, _) = vm();
     let id = vm.register_keyed_instance("track", &[0]).expect("register");
@@ -1202,7 +1244,7 @@ fn a_module_whose_def_kind_reuses_a_built_in_field_reports_the_field() {
 fn a_kind_that_binds_a_widget_name_is_a_compile_error() {
     let (mut vm, _) = vm();
     for (code, name) in [
-        ("(def-kind knob :key (index) :host ((value :number)))", "knob"),
+        ("(def-kind dial :key (index) :host ((value :number)))", "knob"),
         ("(def-kind label :key () :state ((open false)))", "label"),
     ] {
         let errors = compile_errors(&mut vm, code);

@@ -3183,6 +3183,106 @@ pub fn register_core_natives(vm: &mut VM) {
         reactive_float_ref(&vm.reactive_float_slots, namespace, field)
     });
 
+    // (field h :f) reads field f of instance h as `h.f` does (a tracked
+    // read); (set-field! h :f v) writes it as `(set! h.f v)` does (a :host
+    // field through its :set). For code handed a field by name: a control
+    // given an instance and a field rather than a place.
+    vm.register_native_with_vm("field", |args, vm| {
+        let (Some(Value::Instance(id)), Some(Value::Keyword(f) | Value::String(f))) =
+            (args.first(), args.get(1))
+        else {
+            return Value::Nil;
+        };
+        vm.read_instance_field_tracked(*id, f).unwrap_or_else(|error| {
+            vm.fail_native_call(error);
+            Value::Nil
+        })
+    });
+    vm.register_native_with_vm("set-field!", |args, vm| {
+        let (Some(Value::Instance(id)), Some(Value::Keyword(f) | Value::String(f)), Some(value)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            vm.fail_native_call(VMError::Instance(
+                "set-field! takes an instance, a field name and a value".to_string(),
+            ));
+            return Value::Nil;
+        };
+        if let Err(error) = vm.write_instance_field(*id, f, value.clone()) {
+            vm.fail_native_call(error);
+        }
+        Value::Nil
+    });
+
+    // (field-info #'h.f) or (field-info h :f): what the schema declares
+    // about field f of h's kind, for widgets that configure themselves from
+    // the field: a map of :kind :field :type, and when declared :range
+    // (lo hi), :default, :options, :doc; :settable when a :host field has a
+    // :set (a :state field always is). The (h :f) form reaches fields #'
+    // cannot bind (strings: an enum's label). Nil for anything else.
+    vm.register_ref_aware_native_with_vm("field-info", |args, vm| {
+        let (id, field) = match (args.first(), args.get(1)) {
+            (Some(Value::ReactiveRef { namespace, field, .. }), _) => {
+                let Some(id) = namespace
+                    .strip_prefix(INSTANCE_NAMESPACE_PREFIX)
+                    .and_then(|id| id.parse::<InstanceId>().ok())
+                else {
+                    return Value::Nil;
+                };
+                (id, field.clone())
+            }
+            (Some(Value::Instance(id)), Some(Value::Keyword(f) | Value::String(f))) => {
+                (*id, f.clone())
+            }
+            _ => return Value::Nil,
+        };
+        let field = &field;
+        let Some(kind) = vm.instance_kind(id).map(str::to_string) else {
+            return Value::Nil;
+        };
+        let Some(schema) = vm.instance_kind_schema(&kind) else {
+            return Value::Nil;
+        };
+        let cell = |value: Value| Rc::new(RefCell::new(value));
+        let mut info = HashMap::new();
+        info.insert("kind".to_string(), cell(Value::String(kind_name_of(&kind).to_string())));
+        info.insert("field".to_string(), cell(Value::String(field.clone())));
+        if let Some(host) = schema.host.iter().find(|h| &h.field.name == field) {
+            info.insert("type".to_string(), cell(Value::String(host.field.ty.to_string())));
+            info.insert("settable".to_string(), cell(Value::Bool(host.set.is_some())));
+            if let Some((lo, hi)) = host.range {
+                info.insert(
+                    "range".to_string(),
+                    cell(Value::List(vec![cell(Value::Number(lo)), cell(Value::Number(hi))])),
+                );
+            }
+            if let Some(reset) = &host.reset {
+                info.insert("default".to_string(), cell(reset.clone()));
+            }
+            if let Some(options) = &host.options {
+                let options = match options {
+                    Value::Symbol(name) => vm.global_value(name).unwrap_or(Value::Nil),
+                    other => other.clone(),
+                };
+                info.insert("options".to_string(), cell(options));
+            }
+            if let Some(doc) = &host.doc {
+                info.insert("doc".to_string(), cell(Value::String(doc.clone())));
+            }
+        } else if let Some(state) = schema
+            .fields
+            .iter()
+            .chain(schema.document.iter())
+            .find(|f| &f.name == field)
+        {
+            info.insert("type".to_string(), cell(Value::String(state.ty.to_string())));
+            info.insert("settable".to_string(), cell(Value::Bool(true)));
+            info.insert("default".to_string(), cell(state.default.clone()));
+        } else {
+            return Value::Nil;
+        }
+        Value::Map(info)
+    });
+
     // `#'h.f` compiles to `(__field-ref h "f")` (kind-bindings spec §7.1):
     // a binding to field f of instance h. (`#'THEME.accent` on a live
     // host namespace compiles to `(__ns-ref "THEME" "accent")` instead.)

@@ -2706,6 +2706,10 @@ impl<'a> Compiler<'a> {
                         self.compile_quoted_expression(&pair[1])?
                     }
                     ("doc", Expression::String(_)) => self.compile_expression(&pair[1])?,
+                    // Metadata for widgets that configure themselves from the
+                    // field (field-info): evaluated, so :options can name a
+                    // global list.
+                    ("default" | "options", expr) => self.compile_expression(expr)?,
                     _ => return Err(option_message()),
                 }
             }
