@@ -359,33 +359,31 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col :fg)
-      (muted-col :gray)
-      (bg-col (if (= active 1)
-          :transparent
-          :transparent
-          ))
-      (panel-col (if (= active 1) fg-col muted-col)))
+  ;; The macOS "sidebar.left" glyph: a rounded window outline split by a
+  ;; divider, with three short rows in the left pane.
+  (let ((panel-col (if (= active 1) :fg :gray)))
     (sdf/layer
-      (sdf/fill 
+      (sdf/fill
         (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent)
-        )
+        (if active :buffer-bg :transparent))
       (sdf/fill
-        (sdf/translate -0.38 0.0
-          (sdf/rounded-rect 0.10 0.55 0.12))
+        (- (abs (sdf/rounded-rect 0.56 0.42 0.14)) 0.045)
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.18 0.34
-          (sdf/rounded-rect 0.34 0.08 0.08))
+        (sdf/translate -0.17 0.0
+          (sdf/rect 0.045 0.42))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.18 0.0
-          (sdf/rounded-rect 0.34 0.08 0.08))
+        (sdf/translate -0.37 -0.2
+          (sdf/rounded-rect 0.1 0.04 0.04))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.18 -0.34
-          (sdf/rounded-rect 0.34 0.08 0.08))
+        (sdf/translate -0.37 -0.06
+          (sdf/rounded-rect 0.1 0.04 0.04))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate -0.37 0.08
+          (sdf/rounded-rect 0.1 0.04 0.04))
         (material :color panel-col)))))
 
 (defwidget mix-panel-icon
@@ -393,33 +391,29 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col :fg)
-      (muted-col :gray)
-      (bg-col (if (= active 1)
-          :mixer-strip-selected-bg
-          :transparent
-          ))
-      (panel-col (if (= active 1) fg-col muted-col)))
+  ;; Three vertical faders: thin tracks, caps at different heights.
+  (let ((panel-col (if (= active 1) :fg :gray)))
     (sdf/layer
-      (sdf/fill 
+      (sdf/fill
         (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent)
-        )
+        (if active :buffer-bg :transparent))
       (sdf/fill
-        (sdf/translate 0.0 -0.34
-          (sdf/rounded-rect 0.56 0.10 0.10))
+        (sdf/translate -0.36 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate -0.34 0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate 0.0 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.0 0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate 0.36 0.0 (sdf/rounded-rect 0.03 0.44 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.34 0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate -0.36 0.16 (sdf/rounded-rect 0.12 0.07 0.04))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate 0.0 -0.2 (sdf/rounded-rect 0.12 0.07 0.04))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate 0.36 0.04 (sdf/rounded-rect 0.12 0.07 0.04))
         (material :color panel-col)))))
 
 (defwidget fx-panel-icon
@@ -427,33 +421,27 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col :fg)
-      (muted-col :gray)
-      (bg-col (if (= active 1)
-          :mixer-strip-selected-bg
-          :transparent
-          ))
-      (panel-col (if (= active 1) fg-col muted-col)))
+  ;; Two knobs: outlined dials with pointers at different settings.
+  (let ((panel-col (if (= active 1) :fg :gray)))
     (sdf/layer
-      (sdf/fill 
+      (sdf/fill
         (sdf/rounded-rect width height 0.5)
-        (if active :buffer-bg :transparent)
-        )
+        (if active :buffer-bg :transparent))
       (sdf/fill
-        (sdf/translate 0.0 0.34
-          (sdf/rounded-rect 0.56 0.10 0.10))
+        (sdf/translate -0.3 0.02
+          (- (abs (sdf/circle 0.25)) 0.045))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate -0.34 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate -0.3 0.02
+          (- (sdf/line 0.0 0.0 -0.13 -0.14) 0.045))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.0 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate 0.3 0.02
+          (- (abs (sdf/circle 0.25)) 0.045))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.34 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.08))
+        (sdf/translate 0.3 0.02
+          (- (sdf/line 0.0 0.0 0.16 -0.1) 0.045))
         (material :color panel-col)))))
 
 (defwidget session-view-icon
