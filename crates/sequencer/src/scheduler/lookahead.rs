@@ -395,6 +395,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let parked_generators = &mut scheduler.parked_generators;
     let generator_owner_racks = &scheduler.generator_owner_racks;
     let graph_replay = &mut scheduler.graph_replay;
+    // Read once per call: nothing scans p-locks while nothing observes them.
+    let record_plocks = state.plock_output_observed();
     let mut track_output_events = Vec::new();
     // How many of `track_output_events` the process reads have seen; see
     // `feed_track_output_reads`.
@@ -947,6 +949,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 // device-print latch substitutes here too, so a held printing
                 // knob is heard on sparse patterns, not just on triggers.
                 let sample_time = scheduled_until_sample + trigger.offset as u64;
+                if record_plocks {
+                    record_trigger_plocks(
+                        state,
+                        &snapshot.tracks[trigger.track],
+                        trigger.track,
+                        trigger.step,
+                        trigger.absolute_beats,
+                        false,
+                    );
+                }
                 let print_overrides =
                     state.device_print_override.values_for_track(trigger.track);
                 let mut off_step_effect_params =
@@ -1040,6 +1052,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 // §Early hits), so it is not handled again.
                 continue;
             };
+            if record_plocks {
+                record_trigger_plocks(
+                    state,
+                    track,
+                    trigger.track,
+                    trigger.step,
+                    trigger.absolute_beats,
+                    true,
+                );
+            }
             clock.record_queued_step_hit(
                 trigger.track,
                 trigger.step,

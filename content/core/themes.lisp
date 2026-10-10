@@ -137,6 +137,7 @@
     :track-tint '(0.0 0.0 0.0 0.0)
     :control-on-bg '(0.95 0.48 0.18) :control-on-fg '(0.9411764705882353 0.9411764705882353 0.9529411764705882)
     :bg "#fafafa" :fg "#1a1a2e" :fg_muted "#8b8fa0"
+    :text-buffer-bg :transparent
     :dim "#6c6c70" :dimmer "#85868f"
     :black "#f0f0f3" :red "#d1345b" :green "#2e8555"
     :yellow "#9a6700" :blue "#0969da" :magenta "#8250df"
@@ -306,6 +307,7 @@
     :track-tint '(0.0 0.0 0.0 0.0)
     :control-on-bg '(0.95 0.48 0.18) :control-on-fg '(0.12156862745098039 0.13725490196078433 0.20784313725490197)
     :bg "#24283b" :fg "#c0caf5" :fg_muted "#565f89"
+    :text-buffer-bg :transparent
     :dim "#6c6c70" :dimmer "#606473"
     :black "#1f2335" :red "#f7768e" :green "#9ece6a"
     :yellow "#e0af68" :blue "#7aa2f7" :magenta "#bb9af7"
@@ -481,6 +483,7 @@
     :track-tint '(0.0 0.0 0.0 0.0)
     :control-on-bg '(0.95 0.48 0.18) :control-on-fg '(0.023529411764705882 0.06274509803921569 0.12549019607843137)
     :bg "#0a0612" :fg "#c8d8f0" :fg_muted "#5a6e8a"
+    :text-buffer-bg :transparent
     :dim "#6c6c70" :dimmer "#535d6d"
     :black "#061020" :red "#ff6b8a" :green "#5ec4b0"
     :yellow "#f0c060" :blue "#4a9ef5" :magenta "#a88bfa"
@@ -651,6 +654,7 @@
       :control-on-bg  '(0.95 0.48 0.18)
       :control-on-fg  '(0.07 0.07 0.07)
       :bg             '(0.11 0.11 0.12)
+      :text-buffer-bg :transparent
       :fg             '(0.88 0.88 0.89)
       :fg-muted       '(0.56 0.56 0.58)
       :dim            '(0.66 0.66 0.68)

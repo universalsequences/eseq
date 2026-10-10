@@ -627,6 +627,14 @@ pub struct HostField {
     pub range: Option<(f64, f64)>,
     /// `:doc "…"`.
     pub doc: Option<String>,
+    /// `:options xs`: the values the field takes (an enum's labels);
+    /// metadata for choice widgets. Evaluated when `def-kind` runs, so a
+    /// global named here is read then: redefining it later changes nothing
+    /// until the kind is defined again.
+    pub options: Option<Value>,
+    /// `:default v` given explicitly: the value a reset puts back (metadata;
+    /// the host still pushes the field's actual value).
+    pub reset: Option<Value>,
 }
 
 impl HostField {
@@ -637,6 +645,8 @@ impl HostField {
             set: None,
             range: None,
             doc: None,
+            options: None,
+            reset: None,
         }
     }
 
@@ -685,6 +695,8 @@ impl HostField {
                         field = field.with_range(lo, hi);
                     }
                     ("doc", Value::String(doc)) => field = field.with_doc(doc.clone()),
+                    ("options", options) => field.options = Some(options.clone()),
+                    ("default", value) => field.reset = Some(value.clone()),
                     (option, _) => return Err(host_option_message(kind, name, option)),
                 },
                 _ => return Err(shape()),
@@ -698,7 +710,7 @@ impl HostField {
 pub(crate) fn host_entry_shape_message(kind: &str) -> String {
     format!(
         "def-kind {kind}: each :host entry is (field type option…) with options \
-         :set f, :range (lo hi), :doc \"…\""
+         :set f, :range (lo hi), :default v, :options xs, :doc \"…\""
     )
 }
 
@@ -711,7 +723,7 @@ pub(crate) fn host_option_message(kind: &str, field: &str, option: &str) -> Stri
         }
         "doc" => format!("def-kind {kind}: :host field '{field}': :doc takes a string"),
         other => format!(
-            "def-kind {kind}: :host field '{field}': unknown option :{other}; options are :set, :range, :doc"
+            "def-kind {kind}: :host field '{field}': unknown option :{other}; options are :set, :range, :default, :options, :doc"
         ),
     }
 }

@@ -18,7 +18,7 @@ errors naming the fields, and field groups that differ only in storage
 
 ## 1. Problem
 
-The mini-DAW experiments (`eseq -noui view.lisp`) are meant to let someone
+The mini-DAW experiments (`eseq run -noui view.lisp`) are meant to let someone
 whip up a custom sequencer view in a few hundred lines of Lisp. Today the
 reactive layer fights that:
 

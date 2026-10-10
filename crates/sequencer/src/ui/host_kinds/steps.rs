@@ -17,6 +17,8 @@ struct StepBits {
     lock_kind: ObservedMask,
     variant_color: ObservedMask,
     variant: ObservedMask,
+    /// `timebase`.
+    timebase: ObservedMask,
 }
 
 static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
@@ -28,6 +30,7 @@ static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
     lock_kind: STEP_LIVE.bit(f::STEP_LOCK_KIND),
     variant_color: STEP_LIVE.bit(f::STEP_VARIANT_COLOR),
     variant: STEP_LIVE.bit(f::STEP_VARIANT),
+    timebase: STEP_LIVE.bit(f::STEP_TIMEBASE),
 });
 
 /// The step selection as of the last sync, so `step.selected` is
@@ -114,6 +117,10 @@ pub(super) struct StepDiff {
     /// the key moves.
     plocks: Vec<StepPlockRender>,
     plock_key: Option<PlockKey>,
+    /// The timebase label last pushed per step; empty while nothing
+    /// observes `timebase`. Compared each tick (a timebase lock and the
+    /// track's own timebase both move it, and neither moves the PlockKey).
+    timebases: Vec<&'static str>,
     /// The union of the step instances' observed fields (bit `i` is
     /// `STEP_LIVE.keys[i]`), as of `Runtime::instance_observer_epoch`.
     observers: Option<(u64, ObservedMask)>,
@@ -272,6 +279,19 @@ pub(super) fn sync_steps(
                 track,
                 VariantScope::Steps,
             );
+        }
+    }
+    if union & bits.timebase == 0 {
+        diff.timebases.clear();
+    } else {
+        let fresh = !primed || diff.timebases.len() != num_steps;
+        diff.timebases.resize(num_steps, "");
+        for (step, previous) in diff.timebases.iter_mut().enumerate() {
+            let now = step_timebase_label(state, track, step);
+            if fresh || *previous != now {
+                *previous = now;
+                changes[step] |= bits.timebase;
+            }
         }
     }
     diff.primed = true;

@@ -13,7 +13,7 @@
 ;; cycle, per the panel-widgets <-> process-panel precedent.
 (import eseq.effects.instrument-panel :as ip)
 
-(export sampler-view
+(export sampler-panel-content sampler-view
         sampler-reset-view
         sampler-param-knob
         sampler-panel)

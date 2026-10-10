@@ -159,6 +159,7 @@
       ;; Core canvas and semantic colors
       :accent         '(0.25 0.55 0.95)
       :bg             '(0.0275 0.0350 0.0450)
+      :text-buffer-bg :transparent
       :fg             '(0.86 0.89 0.92)
       :fg-muted       '(0.50 0.55 0.60)
       :dim            '(0.62 0.67 0.72)

@@ -822,9 +822,9 @@
      (sdf/layer
        ,@under
        ;; border
-       (sdf/fill (sdf/circle (* radius 0.8))
+       (sdf/fill (sdf/circle (* radius 0.85))
          (material
-           :lighting (lighting :edge-min -0.12 :edge-max 0.9
+           :lighting (lighting :edge-min -0.28 :edge-max 1.9
              :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2))
                      (eseq.materials/color border border))))
@@ -856,15 +856,15 @@
                      :blur (if (= muted 1) 0.0 (if (= plock-kind 2) 0.12 0.0))
                      :offset (vec2 0 0))))
        ;; toggled fill
-       (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.7)))
+       (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.6)))
          (material
            :lighting (lighting :edge-min -0.25 :edge-max 1.25
-             :light (vec3 0.01 -0.2 1.8) :shininess 32.0)
+             :light (vec3 0.01 -0.2 0.8) :shininess 32.0)
            :color (if (= active 1)
                     (if (= muted 1)
                       (* 0.7 (eseq.materials/color offcol border))
                       (eseq.materials/color
-                        (rgba (* tc (vec3 0.72 0.72 0.82)) 1.0)
+                        (rgba (* tc (vec3 0.82 0.82 0.92)) 1.0)
                         (rgba tc 1.0)))
                     (rgba 0 0 0 0)))))))
 
@@ -888,7 +888,7 @@
       (material
         :lighting (lighting :edge-min -0.32 :edge-max 1.293
           :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-        :color (* 0.7 (if (= step.held 1)
+        :color (* 0.4 (if (= step.held 1)
                         (if (= muted 1)
                           (rgba 0 0 0 0)
                           (eseq.materials/color

@@ -96,6 +96,11 @@ pub struct SequencerTrackSnapshot {
     /// runs, so processes see (and can grab) the transposed note.
     pub bar_transposes: [f32; BARS_PER_PATTERN],
     pub steps: Vec<SequencerStepSnapshot>,
+    /// The `(device_slot, param_idx)` params whose defaults the live macro
+    /// layer (macros, scene push / scene morph) replaced at capture, -1 for
+    /// the instrument slot. The scheduler reports their values on each ON
+    /// trigger to the live p-lock stream (`transport.plock-events`).
+    pub macro_override_params: Vec<(i32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -528,6 +533,7 @@ fn capture_live_track(
         track_send_live_baselines,
         bar_transposes,
         steps,
+        macro_override_params: Vec::new(),
     }
 }
 
@@ -558,15 +564,24 @@ fn apply_track_macro_overrides(
             }
         }
     }
-    apply_slot_macro_overrides(
+    let applied = &mut track.macro_override_params;
+    applied.clear();
+    if overrides.is_empty() {
+        return;
+    }
+    apply_slot_macro_overrides_with(
         &mut track.instrument_slot,
         overrides,
         |param_idx, param_id| MacroParamKey::for_instrument(track_idx, param_idx, param_id),
+        |param_idx| applied.push((-1, param_idx as u32)),
     );
     for (slot_idx, slot) in track.effect_slots.iter_mut().enumerate() {
-        apply_slot_macro_overrides(slot, overrides, |param_idx, param_id| {
-            MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id)
-        });
+        apply_slot_macro_overrides_with(
+            slot,
+            overrides,
+            |param_idx, param_id| MacroParamKey::for_effect(track_idx, slot_idx, param_idx, param_id),
+            |param_idx| applied.push((slot_idx as i32, param_idx as u32)),
+        );
     }
 }
 
@@ -574,6 +589,16 @@ pub(in crate::sequencer) fn apply_slot_macro_overrides(
     slot: &mut EffectSlotSnapshot,
     overrides: &HashMap<MacroParamKey, f32>,
     key_for_param: impl Fn(usize, Option<crate::neural::ParamNodeId>) -> MacroParamKey,
+) {
+    apply_slot_macro_overrides_with(slot, overrides, key_for_param, |_| {});
+}
+
+/// [`apply_slot_macro_overrides`], reporting each overridden param index.
+fn apply_slot_macro_overrides_with(
+    slot: &mut EffectSlotSnapshot,
+    overrides: &HashMap<MacroParamKey, f32>,
+    key_for_param: impl Fn(usize, Option<crate::neural::ParamNodeId>) -> MacroParamKey,
+    mut applied: impl FnMut(usize),
 ) {
     let param_count = (slot.num_params as usize).min(slot.defaults.len());
     for param_idx in 0..param_count {
@@ -595,6 +620,7 @@ pub(in crate::sequencer) fn apply_slot_macro_overrides(
         });
         if let Some(value) = overrides.get(&key_for_param(param_idx, param_id)) {
             slot.defaults[param_idx] = *value;
+            applied(param_idx);
         }
     }
 }
@@ -682,6 +708,7 @@ fn track_snapshot_from_pattern_data(
         track_send_live_baselines: Vec::new(),
         bar_transposes: data.bar_transpose_snapshot,
         steps,
+        macro_override_params: Vec::new(),
     }
 }
 

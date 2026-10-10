@@ -143,6 +143,7 @@
       :variant-tint    '(0.0 0.0 0.0 0.0)
       ;; Main editor
       :bg             '(0.10 0.10 0.12)     ; #1c1c1e — System dark bg
+      :text-buffer-bg :transparent
       :fg             '(0.88 0.88 0.89)     ; #e0e0e3
       :fg-muted       '(0.56 0.56 0.58)     ; #8e8e93 — System gray
       :dim            '(0.66 0.66 0.68)     ; Secondary sequencer text
@@ -273,7 +274,7 @@
       :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
       :widget-knob-mod-dot  '(1.00 0.80 0.35)
-      :sequencer-step-border          '(0.13 0.14 0.15)
+      :sequencer-step-border          '(0.03 0.03 0.04)
       :sequencer-step-selected-border '(0.90 0.92 0.96)
       :sequencer-step-off-fill        '(0.015 0.028 0.025)
       :sequencer-step-off-fill-alt    '(0.15 0.155 0.16)

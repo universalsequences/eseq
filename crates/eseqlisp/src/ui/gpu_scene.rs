@@ -556,8 +556,10 @@ pub(crate) fn build_proportional_text_quads(
             }
             let [u0, v0] = glyph.uv_min;
             let [u1, v1] = glyph.uv_max;
-            let gx0 = base_x_px + (glyph.pen_x + glyph.offset_x) * scale;
-            let gy0 = base_y_px + y_offset;
+            let gx0 = glyph_atlas::snap_glyph_origin_px(
+                base_x_px + (glyph.pen_x + glyph.offset_x) * scale,
+            );
+            let gy0 = glyph_atlas::snap_glyph_origin_px(base_y_px + y_offset);
             let gx1 = gx0 + glyph.raster_w as f32 * scale;
             let gy1 = gy0 + glyph.raster_h as f32 * scale;
 
@@ -2163,5 +2165,52 @@ pub(crate) fn offset_primitive(
             widget_render::GpuPrimitive::PushClipRect(r)
         }
         widget_render::GpuPrimitive::PopClipRect => widget_render::GpuPrimitive::PopClipRect,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Glyph quads must start on whole device pixels: the atlas is already
+    /// rasterized at device size, so a fractional origin only makes the
+    /// bilinear sampler blur every edge (eseq-cxup).
+    #[test]
+    fn proportional_glyph_quads_start_on_whole_device_pixels() {
+        let mut atlas = ProportionalGlyphAtlas::new(2.0).expect("proportional atlas");
+        let mut cache = PropTextLayoutCache::new();
+        let (cell_w, cell_h, vp_w, vp_h) = (15.3_f32, 31.0_f32, 800.0_f32, 600.0_f32);
+        let run = widget_render::GpuProportionalTextPrimitive {
+            row: 2.37,
+            col: 3.41,
+            align_width: 9.0,
+            h_align: 0.5,
+            text: "1.5 Hz delay".to_string(),
+            font_size: 11.0,
+            scale: 1.0,
+            fg: Color::rgb(0.1, 0.1, 0.1),
+            bg: Color::rgb(0.9, 0.9, 0.9),
+            mono: false,
+        };
+        let verts = build_proportional_text_quads(
+            &[widget_render::GpuPrimitive::ProportionalText(run)],
+            &mut atlas,
+            &mut cache,
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        assert!(!verts.is_empty(), "the run must emit glyph quads");
+        for vertex in &verts {
+            let px = (vertex.position[0] + 1.0) * 0.5 * vp_w;
+            let py = (1.0 - vertex.position[1]) * 0.5 * vp_h;
+            for coord in [px, py] {
+                assert!(
+                    (coord - coord.round()).abs() < 1e-3,
+                    "glyph corner at {px},{py} is off the pixel grid"
+                );
+            }
+        }
     }
 }

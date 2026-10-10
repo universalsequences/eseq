@@ -11418,6 +11418,46 @@ fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
 }
 
 #[test]
+fn buffer_list_selection_overrides_column_colors_and_follows_cursor() {
+    let restore = crate::theme::current();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
+    let mut editor = Editor::new(
+        Runtime::with_init_source(&init),
+        EditorConfig { init_source: Some(init), ..EditorConfig::default() },
+    );
+    editor.runtime_mut().eval_str(include_str!(
+        "../../../../content/ui/themes/mac-osx-rune.lisp"
+    )).unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.open_scratch_buffer("*grid*", "(+ 1 2)");
+    editor.open_scratch_buffer("*gain*", "0.75");
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let first_row = editor.active_buffer().cursor.0;
+    let assert_selected = |frame: &crate::backend::RenderFrame, row: usize| {
+        assert!(frame.lines[row].len() >= 100, "selection fills the row");
+        assert!(frame.lines[row].iter().all(|cell|
+            cell.style.bg == Some(crate::theme::COMP_SELECTED_BG())
+                && cell.style.fg == crate::theme::COMP_SELECTED_FG()),
+            "selected name, flags, count, mode and path must use the selected palette");
+    };
+    let frame = crate::frame::build_render_frame(&mut editor, 100, 20);
+    assert_selected(&frame, first_row);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let next_row = editor.active_buffer().cursor.0;
+    assert_eq!(next_row, first_row + 1);
+    let frame = crate::frame::build_render_frame(&mut editor, 100, 20);
+    assert_selected(&frame, next_row);
+    assert_eq!(frame.lines[first_row][2].style.fg, crate::theme::FG());
+    assert_eq!(frame.lines[first_row][33].style.fg, crate::theme::SYN_NUMBER());
+    assert_eq!(frame.lines[first_row][41].style.fg, crate::theme::BLUE());
+    assert!(frame.lines[first_row].iter().all(|cell| cell.style.bg.is_none()));
+    crate::theme::set_current(restore);
+}
+
+#[test]
 fn buffer_list_mode_accepts_filter_input_while_read_only() {
     let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);

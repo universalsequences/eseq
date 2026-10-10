@@ -318,6 +318,11 @@ fn track_setting_request(
             let changed = index != tp.get_swing_resolution() as usize;
             edit(changed, "swing-resolution", index as f64, false)
         }
+        "timebase" => {
+            let index = value.choice(&sequencer::sequencer::Timebase::LABELS)?;
+            let changed = index != tp.get_timebase() as usize;
+            edit(changed, "timebase", index as f64, false)
+        }
         "fts" => {
             // The current label (an edited `*` scale, an imported name)
             // always works.

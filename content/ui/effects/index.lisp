@@ -24,6 +24,8 @@
 
 ;; Rack slot clicks select the slot as the factory rack panel does.
 (import eseq.effects.instrument-panel)
+(import eseq.effects.sampler-panel :as sp)
+(import eseq.effects.modulator-panel :as mp)
 (import eseq.effects.panel-data :as pd)
 
 (export device-panel device-panel-body panel-height panel-buffer rack-slot-select)
@@ -50,10 +52,19 @@
       (pd/fx-panel-of d))
     nil))
 
-;; The factory body of d's panel (no header), `panel-height` tall: the synth
-;; UI of an instrument or of a rack's selected slot, an effect's controls
-;; (MIDI or audio, as the factory effect panel picks). Nil when
-;; `device-panel` is.
+;; An instrument's body, picked by its type as the factory instrument panel
+;; picks its panel (eseq.effects.instrument-panel/instrument-panel): the
+;; sampler's and modulator's own bodies, else the synth UI.
+(def instrument-body (inst)
+  (match (get inst :type)
+    "sampler" (sp/sampler-panel-content inst)
+    "modulator" (mp/modulator-panel-body inst)
+    _ (eseq.effects.panel-bodies/instrument-synth-panel-body inst)))
+
+;; The factory body of d's panel (no header), `panel-height` tall: the
+;; instrument body of an instrument or of a rack's selected slot, an
+;; effect's controls (MIDI or audio, as the factory effect panel picks). Nil
+;; when `device-panel` is.
 (def device-panel-body (d)
   (let ((panel (device-panel d)))
     (if (= panel nil)
@@ -65,10 +76,10 @@
             (eseq.effects.panel-bodies/audio-fx-panel-body panel (get panel :params)))
           (if (= (get panel :type) "rack")
             (if (get panel :selected-instrument)
-              (eseq.effects.panel-bodies/instrument-synth-panel-body (get panel :selected-instrument))
+              (instrument-body (get panel :selected-instrument))
               (box :width 30 :h-align :center :v-align :center
                 (label "Empty slot" :color :dim :bg :transparent)))
-            (eseq.effects.panel-bodies/instrument-synth-panel-body panel)))))))
+            (instrument-body panel)))))))
 
 ;; Select a rack slot (an entry of a rack panel's `:slots`).
 (def rack-slot-select (slot) (eseq.effects.instrument-panel/rack-slot-select slot))

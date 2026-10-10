@@ -196,6 +196,76 @@ impl SequencerState {
         read(self.track_output_events_revision(), &history)
     }
 
+    /// Whether anything observes the live p-lock stream (the scheduler
+    /// records p-locks only while it does).
+    pub fn plock_output_observed(&self) -> bool {
+        self.plock_output_observed.load(Ordering::Relaxed)
+    }
+
+    /// Control-thread side: start or stop recording the live p-lock stream.
+    pub fn set_plock_output_observed(&self, observed: bool) {
+        self.plock_output_observed.store(observed, Ordering::Relaxed);
+    }
+
+    /// Scheduler side of the live p-lock stream: lock-free, never blocks,
+    /// never allocates. When the queue is full (nothing drained it for a
+    /// while) the oldest undrained event is dropped to make room.
+    pub fn push_plock_output_event(&self, event: PlockOutputEvent) {
+        let _ = self.plock_output_queue.force_push(event);
+    }
+
+    /// Control-thread side: move every queued p-lock event into the capped
+    /// history (dropping the oldest past [`PLOCK_OUTPUT_EVENT_HISTORY_CAP`])
+    /// and return the history's revision, moved iff anything was drained.
+    /// An empty queue costs one atomic check and takes no lock.
+    pub fn drain_plock_output_events(&self) -> u64 {
+        if self.plock_output_queue.is_empty() {
+            return self.plock_output_events_revision.load(Ordering::Relaxed);
+        }
+        let mut history = self.plock_output_history.lock().unwrap();
+        let mut moved = false;
+        while let Some(event) = self.plock_output_queue.pop() {
+            history.push_back(event);
+            moved = true;
+        }
+        let overflow = history.len().saturating_sub(PLOCK_OUTPUT_EVENT_HISTORY_CAP);
+        if overflow > 0 {
+            history.drain(..overflow);
+        }
+        if moved {
+            self.plock_output_events_revision
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1)
+        } else {
+            self.plock_output_events_revision.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Drop the queued and drained p-lock events (control thread).
+    pub fn clear_plock_output_events(&self) {
+        let mut history = self.plock_output_history.lock().unwrap();
+        let mut moved = !history.is_empty();
+        history.clear();
+        while self.plock_output_queue.pop().is_some() {
+            moved = true;
+        }
+        if moved {
+            self.plock_output_events_revision
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Drain, then read the p-lock history in place, oldest first, with its
+    /// revision (the host kinds' `transport.plock-events`).
+    pub fn with_plock_output_events<R>(
+        &self,
+        read: impl FnOnce(u64, &std::collections::VecDeque<PlockOutputEvent>) -> R,
+    ) -> R {
+        let revision = self.drain_plock_output_events();
+        let history = self.plock_output_history.lock().unwrap();
+        read(revision, &history)
+    }
+
     pub fn set_track_output_current_beat(&self, beat: f64) {
         self.track_output_current_beat_bits
             .store(beat.max(0.0).to_bits(), Ordering::Relaxed);

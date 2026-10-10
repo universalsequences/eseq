@@ -67,6 +67,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-device-param-locks",
     "clear-device-param-locks",
     "set-device",
+    "delete-device",
     "set-device-strip-locks",
     "clear-device-strip-locks",
 ];
@@ -118,6 +119,7 @@ pub(super) fn handle(
     };
     let result = match name {
         "set-device" => device_edit(map, app, ctx),
+        "delete-device" => device_delete(map, app, editor, ctx),
         "set-device-strip-locks" | "clear-device-strip-locks" => {
             strip_lock_edit(name, map, app, editor, ctx)
         }
@@ -435,6 +437,60 @@ fn device_edit(
             None => Err(format!("a device has no settable field {other}")),
         },
     }
+}
+
+/// `delete-device` (`delete-device!`): resolves the device now and runs
+/// the delete its delete target names, as Backspace on that target does.
+/// It never goes through the held delete target (a queued `set-device`
+/// lands after a synchronous read of it), so the target held before is
+/// left alone unless it names this device. The devices that are no delete
+/// target (an instrument, an effect of another track) are an error.
+fn device_delete(
+    map: &Payload,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<(), String> {
+    let Addressed { owner, device, .. } = addressed(app, map)?;
+    let current = ctx.shared.current_track.load(Ordering::Relaxed);
+    let target = device.delete_target(owner, current).ok_or_else(|| match device {
+        DeviceSlot::Instrument => "an instrument is never deleted".to_string(),
+        _ => "an effect of a track is deleted only on the current track".to_string(),
+    })?;
+    let number = |n: usize| Rc::new(RefCell::new(Value::Number(n as f64)));
+    let (name, fields) = match &target {
+        ActiveDeleteTarget::FxEffect { chain: FxDeleteChain::Audio, slot, .. } => {
+            ("delete-effect", vec![("slot", *slot)])
+        }
+        ActiveDeleteTarget::FxEffect { chain: FxDeleteChain::Midi, slot, .. } => {
+            ("delete-midi-fx", vec![("slot", *slot)])
+        }
+        ActiveDeleteTarget::FxEffect { chain: FxDeleteChain::Bus, bus, slot } => (
+            "delete-bus-effect",
+            vec![("bus", bus.ok_or("the bus effect has no bus")?), ("slot", *slot)],
+        ),
+        ActiveDeleteTarget::RackSlot { track, slot } => {
+            ("delete-rack-slot", vec![("track", *track), ("slot", *slot)])
+        }
+        ActiveDeleteTarget::RackEffect { track, rack_slot, effect_slot } => (
+            "delete-rack-slot-effect",
+            vec![("track", *track), ("rack-slot", *rack_slot), ("effect-slot", *effect_slot)],
+        ),
+        _ => return Err("the device is no delete target".to_string()),
+    };
+    let payload: Payload = fields
+        .into_iter()
+        .map(|(key, n)| (key.to_string(), number(n)))
+        .collect();
+    {
+        let mut held = ctx.shared.active_delete_target.lock().unwrap();
+        if held.as_ref() == Some(&target) {
+            *held = None;
+            bump_delete_target_version(&ctx.shared.active_delete_target_version);
+        }
+    }
+    super::dispatch::dispatch_custom_host_command(name, Value::Map(payload), app, editor, ctx);
+    Ok(())
 }
 
 /// A strip control's base edit (`set-device` `gain`, `pan`, `muted`,

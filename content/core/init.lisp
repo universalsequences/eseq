@@ -259,9 +259,11 @@
   (append
     (list
       (style-bold-fg 0 0 10 :status-accent)
-      (style-bold-fg 0 11 200 :syn-number)
-      (style-bg-current-line :comp-selected-bg))
-    (buflist-entry-styles (buflist-visible-buffers) 1)))
+      (style-bold-fg 0 11 200 :syn-number))
+    (buflist-entry-styles (buflist-visible-buffers) 1)
+    ;; Selection must override column foregrounds as well as their background.
+    (list (dict :current-line true :full-line true
+                :fg :comp-selected-fg :bg :comp-selected-bg))))
 
 ;; A buffer already presented in a tile is excluded: switching to it from
 ;; here would just present the same buffer twice. The source buffer is

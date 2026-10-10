@@ -10,7 +10,8 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: eseq -noui [FILE]
+const USAGE: &str = "usage: eseq run
+       eseq run -noui [FILE]
        eseq paths
        eseq authoring seed [DIR]
        eseq authoring skill
@@ -32,8 +33,16 @@ fn run(args: Vec<String>) -> Result<(), String> {
     sequencer::app_paths::init()
         .map_err(|error| format!("failed to resolve application paths: {error}"))?;
     match args.as_slice() {
-        [flag, file @ ..] if (flag == "-noui" || flag == "--noui") && file.len() <= 1 => {
-            run_noui(file.first())
+        [command] if command == "run" => run_app(false, None),
+        [command, flag, file @ ..]
+            if command == "run" && is_noui_flag(flag) && file.len() <= 1 =>
+        {
+            run_app(true, file.first())
+        }
+        // The pre-`run` spelling, kept for scripts and muscle memory.
+        [flag, file @ ..] if is_noui_flag(flag) && file.len() <= 1 => {
+            eprintln!("eseq: `eseq {flag}` is deprecated; use `eseq run -noui`");
+            run_app(true, file.first())
         }
         [paths] if paths == "paths" => print_paths(),
         [authoring, seed, dir @ ..] if authoring == "authoring" && seed == "seed" && dir.len() <= 1 => {
@@ -186,11 +195,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-/// Replace this process with the sibling `metal_seq noui` (eseq-750i): the
-/// app under a bare Lisp root with FILE open and the shell's directory as the
-/// working directory. Exec rather than spawn so the terminal keeps the app's
-/// output and Ctrl-C.
-fn run_noui(file: Option<&String>) -> Result<(), String> {
+fn is_noui_flag(flag: &str) -> bool {
+    flag == "-noui" || flag == "--noui"
+}
+
+/// Replace this process with the sibling `metal_seq`, optionally using the
+/// bare Lisp root with FILE open. Exec preserves terminal output and Ctrl-C.
+fn run_app(noui: bool, file: Option<&String>) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
 
     // Resolve symlinks first: macOS reports the invoked path, so an `eseq`
@@ -201,14 +212,13 @@ fn run_noui(file: Option<&String>) -> Result<(), String> {
         .and_then(|exe| exe.parent().map(|dir| dir.join("metal_seq")))
         .filter(|path| path.exists())
         .ok_or("metal_seq not found next to eseq")?;
-    let cwd = std::env::current_dir()
-        .map_err(|error| format!("failed to read the current directory: {error}"))?;
-    let error = std::process::Command::new(&metal_seq)
-        .arg("noui")
-        .args(file)
-        .arg("--cwd")
-        .arg(&cwd)
-        .exec();
+    let mut command = std::process::Command::new(&metal_seq);
+    if noui {
+        let cwd = std::env::current_dir()
+            .map_err(|error| format!("failed to read the current directory: {error}"))?;
+        command.arg("noui").args(file).arg("--cwd").arg(&cwd);
+    }
+    let error = command.exec();
     Err(format!("cannot run {}: {error}", metal_seq.display()))
 }
 

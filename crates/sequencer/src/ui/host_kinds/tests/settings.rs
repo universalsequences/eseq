@@ -1066,3 +1066,28 @@ fn setting_locks_show_the_displayed_steps_track_level_locks() {
     h.sync();
     assert_eq!(h.eval_7i("t0.setting-locks"), list_value([]));
 }
+
+#[test]
+fn step_timebase_locks_take_labels_in_any_case_and_reject_unknown_ones() {
+    let mut h = Harness::new();
+    h.sync();
+    h.eval_7i("(def s3 (let ((t0 (track 0))) (nth t0.steps 3)))");
+    h.eval_7i("(set! s3.timebase \"16t\")");
+    h.drain_and_sync_7i();
+    assert_eq!(
+        h.shared.state.pattern.timebase_plocks[0].get(3),
+        Some(Timebase::SixteenthTriplet)
+    );
+    h.editor.minibuffer = None;
+    h.eval_7i("(set! s3.timebase \"prh?\")");
+    h.drain_and_sync_7i();
+    assert!(h.error().contains("unknown timebase"), "{}", h.error());
+    assert_eq!(
+        h.shared.state.pattern.timebase_plocks[0].get(3),
+        Some(Timebase::SixteenthTriplet),
+        "an unknown label locks nothing"
+    );
+    h.eval_7i("(set! s3.timebase \"\")");
+    h.drain_and_sync_7i();
+    assert_eq!(h.shared.state.pattern.timebase_plocks[0].get(3), None);
+}
