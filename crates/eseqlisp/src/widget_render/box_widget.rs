@@ -110,6 +110,21 @@ fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str)
     }
 }
 
+/// The defwidget a background color prop paints with instead of a flat
+/// color: set when the prop names a theme slot holding `(:widget "name")`
+/// (see `theme::named_widget`) and that widget is defined.
+fn theme_background_widget(
+    props: &std::collections::HashMap<String, Value>,
+    prop: &str,
+) -> Option<String> {
+    let name = match props.get(prop)? {
+        Value::Keyword(text) | Value::String(text) => text,
+        _ => return None,
+    };
+    let widget = crate::theme::named_widget(name)?;
+    super::sdf_widget::sdf_widget_def(&widget).map(|_| widget)
+}
+
 fn state_color_prop<'a>(
     props: &'a std::collections::HashMap<String, Value>,
     base_prop: &'a str,
@@ -614,13 +629,9 @@ impl WidgetDefinition for BoxWidget {
         let border_width_px = super::ui_design_px(border_width_design_px);
         let has_rounded_corners = corner_radius_px > 0.0;
         let hover_drop = super::drop_target_hovered(node.widget_id);
-        let background_color =
+        let background_prop =
             if hover_drop && node.props.contains_key("drop-hover-background-color") {
-                Some(resolve_named_color(
-                    &node.props,
-                    "drop-hover-background-color",
-                    Color::rgba(0.0, 0.0, 0.0, 0.0),
-                ))
+                Some("drop-hover-background-color")
             } else {
                 state_color_prop(
                     &node.props,
@@ -628,8 +639,29 @@ impl WidgetDefinition for BoxWidget {
                     "selected-background-color",
                     "muted-background-color",
                 )
-                .map(|prop| resolve_named_color(&node.props, prop, Color::rgba(0.0, 0.0, 0.0, 0.0)))
             };
+        // A theme slot holding a widget paints that widget where the flat
+        // background would go (it takes its state from the box's props, as a
+        // `:background` widget does).
+        let background_widget =
+            background_prop.and_then(|prop| theme_background_widget(&node.props, prop));
+        let background_color = if background_widget.is_some() {
+            None
+        } else {
+            background_prop
+                .map(|prop| resolve_named_color(&node.props, prop, Color::rgba(0.0, 0.0, 0.0, 0.0)))
+        };
+        let push_background_widget = |prims: &mut Vec<GpuPrimitive>, rect: Rect| {
+            if let Some(widget) = &background_widget {
+                prims.extend(super::sdf_widget::sdf_widget_background_primitives(
+                    widget,
+                    node.widget_id,
+                    rect,
+                    viewport,
+                    &node.props,
+                ));
+            }
+        };
         let border_color = if hover_drop && node.props.contains_key("drop-hover-border-color") {
             Some(resolve_named_color(
                 &node.props,
@@ -652,18 +684,18 @@ impl WidgetDefinition for BoxWidget {
                     push_rounded_rect(&mut prims, node.rect, color, viewport, corner_radius_px);
                 }
             }
+            let inset_x = if viewport.cell_w > 0.0 {
+                border_width_px / viewport.cell_w
+            } else {
+                0.0
+            };
+            let inset_y = if viewport.cell_h > 0.0 {
+                border_width_px / viewport.cell_h
+            } else {
+                0.0
+            };
             if let Some(color) = background_color {
                 if color.a > 0.0 {
-                    let inset_x = if viewport.cell_w > 0.0 {
-                        border_width_px / viewport.cell_w
-                    } else {
-                        0.0
-                    };
-                    let inset_y = if viewport.cell_h > 0.0 {
-                        border_width_px / viewport.cell_h
-                    } else {
-                        0.0
-                    };
                     push_rounded_rect(
                         &mut prims,
                         inset_rect(node.rect, inset_x, inset_y),
@@ -673,10 +705,14 @@ impl WidgetDefinition for BoxWidget {
                     );
                 }
             }
+            // Widget backgrounds paint square (the widget draws its own shape).
+            push_background_widget(&mut prims, inset_rect(node.rect, inset_x, inset_y));
         } else if let Some(color) = background_color {
             if color.a > 0.0 {
                 push_rounded_rect(&mut prims, node.rect, color, viewport, 0.0);
             }
+        } else {
+            push_background_widget(&mut prims, node.rect);
         }
 
         // A borderless box still draws its background and state indicators below.

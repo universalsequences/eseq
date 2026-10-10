@@ -7,8 +7,8 @@
 
 (module eseq.view-kit)
 
-(export open-menu! menu-of nothing listed? index-of named prop-if rgb-part color-rgba
-        dimmed dimmed-part track-color-part)
+(export open-menu! menu-of menu-tree nothing listed? index-of find without named prop-if
+        rgb-part color-rgba dimmed dimmed-part track-color-part)
 
 ;; m's context menu opens at the pointer event's grid point.
 (def open-menu! (m event)
@@ -22,11 +22,38 @@
     :on-close (lambda () (set! m.open false))
     items))
 
+;; Menu items for a tree of rows (dicts, as the browser's trees are): a row
+;; with :children opens a submenu of them, a :kind "header" row is a disabled
+;; label, any other row calls (pick row) when chosen. Labels key the items,
+;; so siblings with one label share a key.
+(def menu-tree (rows pick &key (path ""))
+  (map (lambda (row)
+         (let ((label (get row :label))
+               (key (str "menu-tree" path "/" label))
+               (kids (get row :children)))
+           (if (= (get row :kind) "header")
+             (menu-item label :key key :disabled true)
+             (if kids
+               (apply menu-item label :key key (menu-tree kids pick :path (str path "/" label)))
+               (menu-item label :key key :on-select (lambda (e) (pick row)))))))
+       rows))
+
 ;; An empty slot where a widget shows only sometimes.
 (def nothing () (box :width 0 :height 0))
 
 ;; Whether x is one of xs (instances compare by identity).
 (def listed? (x xs) (reduce |found y| (or found (= y x)) false xs))
+
+;; The first of xs that (pred x) holds for, or nil.
+(def find (pred xs) (first (filter pred xs)))
+
+;; A props list (:k v …) without the pairs keyed by any of `keys`: for a
+;; function that takes some keys itself and hands the rest on.
+(def without (props keys)
+  (reduce |acc pair|
+    (if (listed? (first pair) keys) acc (append acc pair))
+    (list)
+    (chunks props 2)))
 
 ;; The position of the first `value` in xs, or -1.
 (def index-of (xs value)

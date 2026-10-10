@@ -111,3 +111,21 @@ fn banks_follow_bank_edits_with_their_ids_and_names() {
     h.sync();
     assert_eq!(h.eval("(len (banks))"), Value::Number(1.0));
 }
+
+#[test]
+fn copy_scene_to_new_bank_is_one_undo_entry_and_leaves_no_bank_on_failure() {
+    let mut h = Harness::new();
+    h.sync();
+    assert_eq!(h.app.state.scene_banks().len(), 1);
+    h.command("copy-scene-to-new-bank", crate::values::map_value([("idx", Value::Number(0.0))]));
+    assert_eq!(h.app.state.scene_banks().len(), 2);
+    assert_eq!(h.app.state.scene_banks()[1].len, 1, "the copy is in the new bank");
+    assert_eq!(h.app.state.scene_count(), 2);
+    h.undo();
+    assert_eq!(h.app.state.scene_banks().len(), 1, "one undo removes the bank too");
+    assert_eq!(h.app.state.scene_count(), 1);
+    // A scene that is not there creates nothing.
+    h.command("copy-scene-to-new-bank", crate::values::map_value([("idx", Value::Number(9.0))]));
+    assert_eq!(h.app.state.scene_banks().len(), 1);
+    assert_eq!(h.app.state.scene_count(), 1);
+}

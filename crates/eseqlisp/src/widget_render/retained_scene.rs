@@ -922,6 +922,50 @@ mod tests {
     }
 
     #[test]
+    fn a_widget_theme_slot_paints_box_backgrounds_with_the_widget() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "retained-themed-cell".into(), shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
+            paint_margin: 0.0, animates: false,
+        });
+        let value = |v| Rc::new(std::cell::RefCell::new(v));
+        let set_slot = |slot_value: Value| {
+            crate::theme::sync_from_value(&Value::Map(HashMap::from([(
+                "instrument-group-selected-bg".to_string(),
+                value(slot_value),
+            )])));
+        };
+        let restore = crate::theme::current();
+        let mut root = node(81101, "box", rect(0.0, 0.0, 20.0, 4.0), vec![]);
+        root.props.insert(
+            "background-color".into(),
+            Value::Keyword("instrument-group-selected-bg".into()),
+        );
+        let painted_widget = |root: &LayoutNode| {
+            RetainedScene::default()
+                .prepare(root, 1, 1, &[], viewport(), rect(0.0, 0.0, 40.0, 20.0))
+                .flatten(viewport())
+                .iter()
+                .any(|primitive| matches!(primitive,
+                    GpuPrimitive::WidgetInstance { widget_type, .. }
+                        if widget_type == "retained-themed-cell"))
+        };
+
+        set_slot(Value::List(vec![
+            value(Value::Keyword("widget".into())),
+            value(Value::String("retained-themed-cell".into())),
+        ]));
+        assert!(painted_widget(&root), "the slot's widget paints the box background");
+
+        set_slot(Value::List(vec![
+            value(Value::Number(0.2)), value(Value::Number(0.2)), value(Value::Number(0.2)),
+        ]));
+        assert!(!painted_widget(&root), "a color slot paints flat again");
+        crate::theme::set_current(restore);
+    }
+
+    #[test]
     fn dirty_control_refreshes_only_its_ancestor_bounds() {
         let mut root = node(82000, "hstack", rect(0.0, 0.0, 3000.0, 10.0),
             (0..100).map(|i| panel(82010 + i * 10, i as f32 * 30.0)).collect());

@@ -18,7 +18,8 @@
         instrument-mods-toggle-button
         instrument-sound-binding-badge
         instrument-keys-button
-        effect-mods-toggle-button)
+        effect-mods-toggle-button
+        effect-toggle-mods-view)
 
 ;; Migration aliases (module spec §10). Callers are still-unconverted lisp
 ;; files — effects/panel-frame.lisp,

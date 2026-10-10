@@ -1,4 +1,4 @@
-; Bare root for `metal_seq noui` / `eseq -noui FILE` (eseq-750i).
+; Bare root for `metal_seq noui` / `eseq run -noui FILE` (eseq-750i).
 ;
 ; The full distro root (ui/main.lisp) assembles the DAW: step grid, mixer,
 ; fx panels, arrangement, browser. This root keeps only what a plain Lisp

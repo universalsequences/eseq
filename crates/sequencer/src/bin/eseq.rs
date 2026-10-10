@@ -35,8 +35,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
     match args.as_slice() {
         [command] if command == "run" => run_app(false, None),
         [command, flag, file @ ..]
-            if command == "run" && flag == "-noui" && file.len() <= 1 =>
+            if command == "run" && is_noui_flag(flag) && file.len() <= 1 =>
         {
+            run_app(true, file.first())
+        }
+        // The pre-`run` spelling, kept for scripts and muscle memory.
+        [flag, file @ ..] if is_noui_flag(flag) && file.len() <= 1 => {
+            eprintln!("eseq: `eseq {flag}` is deprecated; use `eseq run -noui`");
             run_app(true, file.first())
         }
         [paths] if paths == "paths" => print_paths(),
@@ -188,6 +193,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+fn is_noui_flag(flag: &str) -> bool {
+    flag == "-noui" || flag == "--noui"
 }
 
 /// Replace this process with the sibling `metal_seq`, optionally using the

@@ -1360,3 +1360,66 @@ mod rack_slot_named_param_tests {
         assert!(event.rack_slot_params.is_empty(), "unknown engine: dropped");
     }
 }
+
+/// Reports what a trigger at `step_idx` applies to the live p-lock stream
+/// (`transport.plock-events`): every explicit stored p-lock (current device
+/// identity, the same check the resolvers use) on the instrument slot and on
+/// each live effect slot. On an ON trigger (`include_macro_layer`) the full
+/// param stamp also carries the live macro layer's defaults — scene push /
+/// scene morph values and macros, which never become stored p-locks — so
+/// those params report their effective value too unless a p-lock beats them.
+/// Lock-free and allocation-free (`push_plock_output_event`); the caller
+/// skips it while nothing observes the stream.
+pub(super) fn record_trigger_plocks(
+    state: &crate::sequencer::SequencerState,
+    track: &crate::sequencer::SequencerTrackSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+    beat: f64,
+    include_macro_layer: bool,
+) {
+    let push = |device_slot: i32, param_idx: usize, value: f32, from_macro: bool| {
+        if value.is_finite() {
+            state.push_plock_output_event(crate::sequencer::PlockOutputEvent {
+                track: track_idx as u32,
+                device_slot,
+                param_idx: param_idx as u32,
+                beat,
+                value,
+                from_macro,
+            });
+        }
+    };
+    let slots = std::iter::once((-1_i32, &track.instrument_slot)).chain(
+        (track.effect_slots.iter().enumerate())
+            .filter(|(_, slot)| slot.node_id != 0)
+            .map(|(slot_idx, slot)| (slot_idx as i32, slot)),
+    );
+    for (device_slot, slot) in slots {
+        for param_idx in 0..slot.num_params as usize {
+            if let Some(value) = slot.explicit_plock_value(step_idx, param_idx) {
+                push(device_slot, param_idx, value, false);
+            }
+        }
+    }
+    if !include_macro_layer {
+        return;
+    }
+    for &(device_slot, param_idx) in &track.macro_override_params {
+        let param_idx = param_idx as usize;
+        let slot = if device_slot < 0 {
+            Some(&track.instrument_slot)
+        } else {
+            track.effect_slots.get(device_slot as usize)
+        };
+        let Some(slot) = slot.filter(|slot| device_slot < 0 || slot.node_id != 0) else {
+            continue;
+        };
+        if slot.explicit_plock_value(step_idx, param_idx).is_some() {
+            continue;
+        }
+        if let Some(&value) = slot.defaults.get(param_idx) {
+            push(device_slot, param_idx, value, true);
+        }
+    }
+}

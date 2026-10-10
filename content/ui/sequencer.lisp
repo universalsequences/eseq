@@ -859,12 +859,12 @@
        (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.6)))
          (material
            :lighting (lighting :edge-min -0.25 :edge-max 1.25
-             :light (vec3 0.01 -0.2 1.8) :shininess 32.0)
+             :light (vec3 0.01 -0.2 0.8) :shininess 32.0)
            :color (if (= active 1)
                     (if (= muted 1)
                       (* 0.7 (eseq.materials/color offcol border))
                       (eseq.materials/color
-                        (rgba (* tc (vec3 0.72 0.72 0.82)) 1.0)
+                        (rgba (* tc (vec3 0.82 0.82 0.92)) 1.0)
                         (rgba tc 1.0)))
                     (rgba 0 0 0 0)))))))
 
