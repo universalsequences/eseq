@@ -382,6 +382,10 @@ pub struct Theme {
     /// Highlight painted on every target a process port can bind to while its
     /// map button is armed (step-param tabs, other lanes, device params).
     pub process_map_arm_bg: Color,
+    /// Theme slots that hold a widget instead of a color (see
+    /// [`WidgetSlots`]): part of the theme value, so a `current()` snapshot
+    /// and `set_current` carry them on every thread.
+    pub widgets: WidgetSlots,
 }
 
 macro_rules! theme_slots {
@@ -389,6 +393,7 @@ macro_rules! theme_slots {
         pub fn default_theme() -> Theme {
             Theme {
                 $($field: $default,)+
+                widgets: WidgetSlots::NONE,
             }
         }
 
@@ -402,10 +407,8 @@ macro_rules! theme_slots {
         pub fn sync_from_value(value: &Value) {
             let mut theme = current();
             let prev = theme;
-            let mut widgets_changed = false;
             if let Value::Map(map) = value {
-                THEME_WIDGET_SLOTS.with(|widgets| {
-                let mut widgets = widgets.borrow_mut();
+                let mut widgets = theme.widgets.slots();
                 $(
                     if let Some(value) = map.get(stringify!($field)).or_else(|| {
                         map.iter()
@@ -415,20 +418,17 @@ macro_rules! theme_slots {
                         let value = value.borrow();
                         if let Some(color) = parse_color_value(&value) {
                             theme.$field = color;
-                            widgets_changed |= widgets.remove(stringify!($field)).is_some();
+                            widgets.remove(stringify!($field));
                         } else if let Some(widget) = parse_widget_value(&value) {
                             // The color field keeps its last value: code that
                             // reads the slot as a color still gets one.
-                            if widgets.get(stringify!($field)) != Some(&widget) {
-                                widgets.insert(stringify!($field).to_string(), widget);
-                                widgets_changed = true;
-                            }
+                            widgets.insert(stringify!($field).to_string(), widget);
                         }
                     }
                 )+
-                });
+                theme.widgets = WidgetSlots::intern(widgets);
             }
-            if theme != prev || widgets_changed {
+            if theme != prev {
                 set_current(theme);
             }
         }
@@ -1454,15 +1454,55 @@ pub fn set_current(theme: Theme) {
     THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-thread_local! {
-    /// Theme slots that hold a widget instead of a color: slot field name
-    /// (underscored) -> defwidget name. Set by a slot value `(:widget "name")`;
-    /// cleared when the slot is set back to a color. Changes bump the theme
-    /// generation, like color changes. Thread-local like the defwidget
-    /// registry it names into (`sdf_widget::SDF_WIDGETS`): the runtime that
-    /// applies themes and the renderer that paints them share a thread.
-    static THEME_WIDGET_SLOTS: std::cell::RefCell<std::collections::HashMap<String, String>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+/// Theme slots that hold a widget instead of a color: slot field name
+/// (underscored) -> defwidget name. Set by a slot value `(:widget "name")`;
+/// cleared when the slot is set back to a color. A change is a theme change
+/// (it bumps the generation). The maps are interned process-wide by content
+/// so `Theme` stays `Copy` and equal maps compare equal; a session applies
+/// only a handful of distinct ones, so the registry stays small.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WidgetSlots(usize);
+
+type WidgetSlotMap = std::collections::BTreeMap<String, String>;
+
+static WIDGET_SLOT_MAPS: OnceLock<RwLock<Vec<std::sync::Arc<WidgetSlotMap>>>> = OnceLock::new();
+
+fn widget_slot_maps() -> &'static RwLock<Vec<std::sync::Arc<WidgetSlotMap>>> {
+    WIDGET_SLOT_MAPS.get_or_init(|| RwLock::new(vec![std::sync::Arc::new(WidgetSlotMap::new())]))
+}
+
+impl WidgetSlots {
+    /// No slot holds a widget.
+    pub const NONE: WidgetSlots = WidgetSlots(0);
+
+    fn map(self) -> std::sync::Arc<WidgetSlotMap> {
+        let maps = widget_slot_maps().read().expect("widget slot lock should not be poisoned");
+        maps[self.0].clone()
+    }
+
+    fn slots(self) -> WidgetSlotMap {
+        (*self.map()).clone()
+    }
+
+    fn intern(slots: WidgetSlotMap) -> WidgetSlots {
+        if slots.is_empty() {
+            return WidgetSlots::NONE;
+        }
+        let mut maps = widget_slot_maps().write().expect("widget slot lock should not be poisoned");
+        if let Some(index) = maps.iter().position(|map| **map == slots) {
+            return WidgetSlots(index);
+        }
+        maps.push(std::sync::Arc::new(slots));
+        WidgetSlots(maps.len() - 1)
+    }
+
+    /// The defwidget slot `field` (underscored) holds, if any.
+    fn get(self, field: &str) -> Option<String> {
+        if self == WidgetSlots::NONE {
+            return None;
+        }
+        self.map().get(field).cloned()
+    }
 }
 
 /// A widget slot value, `(:widget "name")`: the defwidget that paints the slot.
@@ -1491,13 +1531,11 @@ pub fn parse_widget_value(value: &Value) -> Option<String> {
 /// The widget theme slot `name` (a keyword such as `instrument-group-bg`)
 /// is painted with, if it holds one.
 pub fn named_widget(name: &str) -> Option<String> {
-    THEME_WIDGET_SLOTS.with(|slots| {
-        let slots = slots.borrow();
-        if slots.is_empty() {
-            return None;
-        }
-        slots.get(&normalize_name(name)).cloned()
-    })
+    let widgets = current().widgets;
+    if widgets == WidgetSlots::NONE {
+        return None;
+    }
+    widgets.get(&normalize_name(name))
 }
 
 pub fn parse_color_value(value: &Value) -> Option<Color> {
@@ -1743,6 +1781,16 @@ mod tests {
         sync_from_value(&slot(widget_value));
         assert_eq!(named_widget("instrument-group-bg"), Some("daw-pill".to_string()));
         assert_eq!(named_widget("instrument_group_bg"), Some("daw-pill".to_string()));
+        // Other threads see the widget slot too: it is part of the theme.
+        assert_eq!(
+            std::thread::spawn(|| named_widget("instrument-group-bg")).join().unwrap(),
+            Some("daw-pill".to_string())
+        );
+        // A snapshot taken before restores the slot to a color.
+        let with_widget = current();
+        set_current(restore);
+        assert_eq!(named_widget("instrument-group-bg"), None);
+        set_current(with_widget);
         // The color field keeps its last value for code reading it as a color.
         assert_eq!(named_color("instrument-group-bg"), color_before);
         assert!(generation() > generation_before, "a widget slot change redraws");

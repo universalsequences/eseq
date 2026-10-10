@@ -1368,7 +1368,8 @@ mod rack_slot_named_param_tests {
 /// param stamp also carries the live macro layer's defaults — scene push /
 /// scene morph values and macros, which never become stored p-locks — so
 /// those params report their effective value too unless a p-lock beats them.
-/// Lock-free and allocation-free (`push_plock_output_event`).
+/// Lock-free and allocation-free (`push_plock_output_event`); the caller
+/// skips it while nothing observes the stream.
 pub(super) fn record_trigger_plocks(
     state: &crate::sequencer::SequencerState,
     track: &crate::sequencer::SequencerTrackSnapshot,

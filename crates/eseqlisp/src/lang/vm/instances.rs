@@ -627,8 +627,10 @@ pub struct HostField {
     pub range: Option<(f64, f64)>,
     /// `:doc "…"`.
     pub doc: Option<String>,
-    /// `:options xs`: the values the field takes (an enum's labels), a list
-    /// or the name of a global holding one; metadata for choice widgets.
+    /// `:options xs`: the values the field takes (an enum's labels);
+    /// metadata for choice widgets. Evaluated when `def-kind` runs, so a
+    /// global named here is read then: redefining it later changes nothing
+    /// until the kind is defined again.
     pub options: Option<Value>,
     /// `:default v` given explicitly: the value a reset puts back (metadata;
     /// the host still pushes the field's actual value).

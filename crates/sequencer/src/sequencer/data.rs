@@ -339,6 +339,14 @@ impl Timebase {
             .unwrap_or(Timebase::Sixteenth)
     }
 
+    /// The timebase labelled `label` ([`Self::LABELS`], any case).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::LABELS
+            .iter()
+            .position(|known| known.eq_ignore_ascii_case(label))
+            .map(|i| Self::ALL[i])
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Timebase::Whole => "1",

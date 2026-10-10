@@ -11181,6 +11181,7 @@
         state.transport.playing.store(true, Ordering::Relaxed);
 
         let snapshot = state.publish_scheduler_snapshot();
+        state.set_plock_output_observed(true);
         assert_eq!(snapshot.tracks[track].macro_override_params, vec![(0, 1)]);
         let queue = ScheduledEventQueue::<256>::new();
         let mut scheduler = SchedulerLookaheadState::new(48_000);
@@ -11228,6 +11229,76 @@
             "{events:?}"
         );
         assert_eq!(events.len(), 3, "{events:?}");
+    }
+
+    /// The live p-lock stream reports each trigger once: a chunk that breaks
+    /// off on a full queue has already advanced the step clock past its
+    /// triggers, so the next pass never handles (or reports) them again.
+    /// Nothing is recorded while nothing observes the stream.
+    #[test]
+    fn scheduler_lookahead_reports_plocks_once_across_a_queue_full_retry() {
+        run_with_scheduler_stack(scheduler_lookahead_reports_plocks_once_body);
+    }
+
+    fn scheduler_lookahead_reports_plocks_once_body() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.instrument_slots[0]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.instrument_slots[0].set_plock(0, 12, 2.0);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let snapshot = state.publish_scheduler_snapshot();
+        fn run<const N: usize>(
+            scheduler: &mut SchedulerLookaheadState,
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            queue: &ScheduledEventQueue<N>,
+        ) -> u64 {
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                scheduler,
+                state,
+                snapshot,
+                queue,
+                &mut None,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                6_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            )
+            .scheduled_until_sample
+        }
+        let reported = || state.with_plock_output_events(|_, events| events.len());
+
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        run(&mut scheduler, &state, &snapshot, &ScheduledEventQueue::<256>::new());
+        assert_eq!(reported(), 0, "nothing observes the stream");
+
+        state.set_plock_output_observed(true);
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let full = ScheduledEventQueue::<2>::new();
+        while full
+            .push(crate::scheduled_event::ScheduledEvent {
+                audition_generation: 0,
+                pattern_epoch: snapshot.transport.pattern_epoch,
+                sample_time: 0,
+                kind: ScheduledEventKind::RackParams { track: 0, step: 0 },
+            })
+            .is_ok()
+        {}
+        let broke = run(&mut scheduler, &state, &snapshot, &full);
+        assert_eq!(broke, 0, "the full queue breaks the chunk off");
+        assert_eq!(reported(), 1, "the trigger reports as it runs");
+        let done = run(&mut scheduler, &state, &snapshot, &ScheduledEventQueue::<256>::new());
+        assert_eq!(done, 6_000);
+        assert_eq!(reported(), 1, "the next pass does not report it again");
     }
 
     #[test]

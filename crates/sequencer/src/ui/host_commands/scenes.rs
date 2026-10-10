@@ -111,30 +111,13 @@ pub(super) fn handle(
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
-    // `copy-scene-to-new-bank {:idx s}`: a new (empty, appended) scene bank,
-    // then `clone-pattern` of scene s into it.
-    if name == "copy-scene-to-new-bank" {
-        let created = app.apply_recorded_scene_structure_mutation("Create scene bank", |app| {
-            app.state.create_scene_bank()
-        });
-        match created {
-            Ok(bank) => {
-                let mut map = match &payload {
-                    Value::Map(map) => map.clone(),
-                    _ => HashMap::new(),
-                };
-                map.insert(
-                    "bank-id".to_string(),
-                    Rc::new(RefCell::new(Value::Number(bank.0 as f64))),
-                );
-                handle("clone-pattern", Value::Map(map), app, editor, ctx);
-            }
-            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-                "Could not create scene bank: {error}"
-            ))),
-        }
-        return;
-    }
+    // `copy-scene-to-new-bank {:idx s}`: `clone-pattern` of scene s into a
+    // new (appended) scene bank, created inside the same recorded mutation:
+    // one undo entry, and a clone that fails leaves no empty bank behind.
+    let (name, into_new_bank) = match name {
+        "copy-scene-to-new-bank" => ("clone-pattern", true),
+        _ => (name, false),
+    };
     let payload = match name {
         "set-scene-cell" => match scene_cell_by_ids(app, payload) {
             Ok(payload) => payload,
@@ -1033,8 +1016,10 @@ pub(super) fn handle(
                         .ok_or_else(|| "The current scene does not belong to a scene bank".to_string()),
                 },
             };
+            // `None`: a new bank, created inside the mutation.
             let target_bank = match target_bank {
-                Ok(bank) => bank,
+                _ if into_new_bank => None,
+                Ok(bank) => Some(bank),
                 Err(error) => {
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Could not create scene: {error}"
@@ -1045,8 +1030,12 @@ pub(super) fn handle(
 
             let num_tracks = app.tracks.len();
             let created = app.apply_recorded_scene_structure_mutation(
-                "Create scene",
+                if into_new_bank { "Copy scene to new bank" } else { "Create scene" },
                 |app| {
+                    let target_bank = match target_bank {
+                        Some(bank) => bank,
+                        None => app.state.create_scene_bank()?,
+                    };
                     let old_scene_count = app.state.scene_count();
                     let new_idx = app.state.clone_pattern_in_scene_bank(
                         target_bank,

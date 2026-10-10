@@ -185,7 +185,7 @@
       :buffer-tab-selected-shadow '(0.00 0.00 0.00 0.16)
       
       :status-fg         '(0.76 0.79 0.82)
-      :status-bg         '(0.050 0.060 0.975)
+      :status-bg         '(0.250 0.260 0.375)
       :status-edge       '(0.145 0.155 0.170)
       :status-chip-bg    '(0.250 0.260 0.375)
       :status-mode-bg    '(0.295 0.310 0.330)

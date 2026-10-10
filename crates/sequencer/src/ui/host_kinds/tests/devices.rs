@@ -2067,3 +2067,50 @@ fn a_rack_slot_eq8_drag_reads_one_coherent_band_through_the_kinds() {
         );
     }
 }
+
+#[test]
+fn delete_device_deletes_the_device_it_names_not_the_held_target() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.add_effect(0, "Filter");
+    let (bus, _) = h.bus_with_filter();
+    h.sync();
+    let refer = "(import eseq.kinds :refer (track buses delete-device!))";
+    h.eval_with(
+        refer,
+        &format!(
+            r#"(def t0 (track 0)) (def flt (first t0.devices)) (def t2 (track 2))
+               (def rk (first t2.devices)) (def rs (first rk.devices))
+               (def b (nth (buses) {bus})) (def bd (first b.devices))"#
+        ),
+    );
+    let count = |h: &mut Harness| {
+        h.eval_all("(list (len t0.devices) (len rk.devices) (len b.devices))")
+    };
+    let before = count(&mut h);
+    // The rack slot is the held target; deleting the filter leaves it be.
+    h.eval_all("(set! rs.delete-target true)");
+    h.drain_and_sync();
+    h.eval_with(refer, "(delete-device! flt)");
+    h.drain_and_sync();
+    let after = h.eval_all("(list (+ (len t0.devices) 1) (len rk.devices) (len b.devices))");
+    assert_eq!(after, before, "only the filter is gone");
+    assert_eq!(
+        *h.shared.active_delete_target.lock().unwrap(),
+        Some(ActiveDeleteTarget::RackSlot { track: 2, slot: 0 }),
+        "the held target is untouched"
+    );
+    // A bus effect; the held target goes with the device it names.
+    h.eval_with(refer, "(delete-device! bd)");
+    h.drain_and_sync();
+    assert_eq!(h.eval_all("(len b.devices)"), Value::Number(0.0));
+    h.eval_with(refer, "(delete-device! rs)");
+    h.drain_and_sync();
+    assert_eq!(h.eval_all("(len rk.devices)"), Value::Number(0.0));
+    assert_eq!(*h.shared.active_delete_target.lock().unwrap(), None);
+    // An instrument never.
+    h.editor.minibuffer = None;
+    h.eval_with(refer, "(delete-device! rk)");
+    h.drain();
+    assert!(h.error().contains("never deleted"), "{}", h.error());
+}

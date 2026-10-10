@@ -107,15 +107,14 @@
 (def set-track-muted (t v) (seq-set-track-mute t.index v))
 (def set-track-armed (t v) (seq-set-record-arm t.index v))
 (def set-step-active (s v) (seq-set-track-step s.track.index s.index v))
-;; P-lock step s to timebase label v (one of timebase-options); "" clears
-;; the lock, so the step follows its track's timebase again.
+;; P-lock step s to timebase label v (one of timebase-options, any case;
+;; the host rejects anything else); "" clears the lock, so the step follows
+;; its track's timebase again.
 (def set-step-timebase (s v)
   (host-command "slice2-history-action"
     (if (= v "")
       (dict :op :timebase-plock-clear :track s.track.index :steps (list s.index))
-      (dict :op :timebase-plock :track s.track.index :steps (list s.index)
-            :value (reduce |found i| (if (= (nth timebase-options i) v) i found)
-                     4 (range 0 (len timebase-options)))))))
+      (dict :op :timebase-plock :track s.track.index :steps (list s.index) :value v))))
 (def set-transport-playing (tr v) (seq-set-playing v))
 (def set-transport-recording (tr v) (seq-set-recording v))
 (def select-track (sel t) (if t (seq-set-track t.index) nil))
@@ -1982,10 +1981,11 @@
 (def lock-variant 2)
 
 ;; Delete device d (an effect: an instrument is never deleted), as
-;; Backspace on the selected effect does.
+;; Backspace on the selected effect does; it never touches the held delete
+;; target. A track's effect or MIDI effect is deleted only on the current
+;; track (anything else is an error).
 (def delete-device! (d)
-  (do (set! d.delete-target true)
-      (seq-delete-active-target)))
+  (host-command "delete-device" (device-target d)))
 
 ;; Bypass device d (or un-bypass it with on false) through its enabled param;
 ;; with steps given (step instances of d's track), p-lock that instead.

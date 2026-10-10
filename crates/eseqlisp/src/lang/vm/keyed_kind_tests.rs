@@ -424,7 +424,8 @@ fn field_info_reports_a_host_fields_declared_metadata() {
     assert_eq!(info(&mut vm, "level", "settable"), Value::Bool(true));
     assert_eq!(info(&mut vm, "level", "doc"), Value::String("Gain".into()));
     assert_eq!(info(&mut vm, "level", "type"), Value::String(":number".into()));
-    // :options names a global (or is a list): field-info hands back the list.
+    // :options names a global (or is a list): field-info hands back the list
+    // as it was when def-kind ran.
     assert_eq!(info(&mut vm, "mode", "options"), eval(&mut vm, "knob-modes"));
     // A field with nothing declared: no range or options, not settable.
     assert_eq!(info(&mut vm, "name", "range"), Value::Nil);
@@ -1244,7 +1245,7 @@ fn a_module_whose_def_kind_reuses_a_built_in_field_reports_the_field() {
 fn a_kind_that_binds_a_widget_name_is_a_compile_error() {
     let (mut vm, _) = vm();
     for (code, name) in [
-        ("(def-kind dial :key (index) :host ((value :number)))", "knob"),
+        ("(def-kind knob :key (index) :host ((value :number)))", "knob"),
         ("(def-kind label :key () :state ((open false)))", "label"),
     ] {
         let errors = compile_errors(&mut vm, code);

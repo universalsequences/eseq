@@ -357,11 +357,15 @@ pub(super) fn apply_slice2_history_host_command(
             track,
             steps: map_usize_list(map, "steps")
                 .ok_or_else(|| "timebase p-lock steps were invalid".to_string())?,
-            timebase: Timebase::from_index(
-                map_usize(map, "value")
-                    .ok_or_else(|| "timebase p-lock value was invalid".to_string())?
-                    as u32,
-            ),
+            // A label (`step.timebase`, any case) or an index into
+            // `Timebase::ALL`; anything else is an error, never a default.
+            timebase: match map_string(map, "value") {
+                Some(label) => Timebase::from_label(&label)
+                    .ok_or_else(|| format!("unknown timebase '{label}'"))?,
+                None => map_usize(map, "value")
+                    .and_then(|i| Timebase::ALL.get(i).copied())
+                    .ok_or_else(|| "timebase p-lock value was invalid".to_string())?,
+            },
         },
         "timebase-plock-clear" => app::AppCommand::ClearTimebasePlockMulti {
             track,

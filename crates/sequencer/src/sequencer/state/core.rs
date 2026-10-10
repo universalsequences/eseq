@@ -746,6 +746,9 @@ pub struct SequencerState {
     pub(super) plock_output_history: Mutex<std::collections::VecDeque<PlockOutputEvent>>,
     /// Moved by every drain or clear that changed the history.
     pub(super) plock_output_events_revision: AtomicU64,
+    /// Whether anything reads `transport.plock-events`: while false the
+    /// scheduler skips the per-trigger p-lock scan entirely.
+    pub(super) plock_output_observed: AtomicBool,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) active_note_velocity_bits: Vec<[AtomicU32; 128]>,
     pub(super) live_note_velocity_bits: Vec<[AtomicU32; 128]>,

@@ -3259,11 +3259,7 @@ pub fn register_core_natives(vm: &mut VM) {
                 info.insert("default".to_string(), cell(reset.clone()));
             }
             if let Some(options) = &host.options {
-                let options = match options {
-                    Value::Symbol(name) => vm.global_value(name).unwrap_or(Value::Nil),
-                    other => other.clone(),
-                };
-                info.insert("options".to_string(), cell(options));
+                info.insert("options".to_string(), cell(options.clone()));
             }
             if let Some(doc) = &host.doc {
                 info.insert("doc".to_string(), cell(Value::String(doc.clone())));

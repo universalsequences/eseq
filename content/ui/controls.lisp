@@ -19,7 +19,7 @@
 
 (module eseq.controls)
 
-(import eseq.view-kit :refer (clamp index-of without))
+(import eseq.view-kit :refer (index-of without))
 
 (export field-slider field-choice field-toggle text-button along)
 

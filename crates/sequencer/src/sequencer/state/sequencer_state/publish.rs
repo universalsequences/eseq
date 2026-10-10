@@ -196,6 +196,17 @@ impl SequencerState {
         read(self.track_output_events_revision(), &history)
     }
 
+    /// Whether anything observes the live p-lock stream (the scheduler
+    /// records p-locks only while it does).
+    pub fn plock_output_observed(&self) -> bool {
+        self.plock_output_observed.load(Ordering::Relaxed)
+    }
+
+    /// Control-thread side: start or stop recording the live p-lock stream.
+    pub fn set_plock_output_observed(&self, observed: bool) {
+        self.plock_output_observed.store(observed, Ordering::Relaxed);
+    }
+
     /// Scheduler side of the live p-lock stream: lock-free, never blocks,
     /// never allocates. When the queue is full (nothing drained it for a
     /// while) the oldest undrained event is dropped to make room.

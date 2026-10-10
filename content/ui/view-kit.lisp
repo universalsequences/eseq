@@ -7,7 +7,7 @@
 
 (module eseq.view-kit)
 
-(export open-menu! menu-of menu-tree nothing listed? index-of find clamp without named prop-if
+(export open-menu! menu-of menu-tree nothing listed? index-of find without named prop-if
         rgb-part color-rgba dimmed dimmed-part track-color-part)
 
 ;; m's context menu opens at the pointer event's grid point.
@@ -43,9 +43,6 @@
 
 ;; Whether x is one of xs (instances compare by identity).
 (def listed? (x xs) (reduce |found y| (or found (= y x)) false xs))
-
-;; x held to lo..hi.
-(def clamp (x lo hi) (min hi (max lo x)))
 
 ;; The first of xs that (pred x) holds for, or nil.
 (def find (pred xs) (first (filter pred xs)))

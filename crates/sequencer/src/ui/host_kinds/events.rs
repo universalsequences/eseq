@@ -162,8 +162,10 @@ fn read_plock_events(sources: &KindsHandles, rows: &mut Vec<EventRow>) -> u64 {
     })
 }
 
-/// The p-lock history as rows (the reader hook's cold read).
+/// The p-lock history as rows (the reader hook's cold read); a read starts
+/// the scheduler recording.
 pub(super) fn plock_events_value(sources: &KindsHandles) -> Value {
+    sources.state.set_plock_output_observed(true);
     let mut history = RowHistory::default();
     history.update(|rows| read_plock_events(sources, rows));
     history.value()
@@ -210,6 +212,8 @@ impl HostKinds {
             stream.pushed = Some((id, revision));
         }
         let stream = &mut self.plock_events;
+        // The scheduler scans each trigger's p-locks only while observed.
+        sources.state.set_plock_output_observed(mask & plock_bit != 0);
         if mask & plock_bit == 0 {
             stream.pushed = None;
         } else {
