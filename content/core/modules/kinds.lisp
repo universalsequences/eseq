@@ -1825,6 +1825,7 @@
          (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")
          (macros (list-of macro) :doc "The project's macros, in macro order")
          (name :string :doc "The project's name; empty while unsaved")
+         (dirty :bool :doc "The project has edits since it was last saved (a fresh, untouched project has none)")
          (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")
          (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")
          (networks (list-of network) :doc "The current scene's native neural networks, in order")

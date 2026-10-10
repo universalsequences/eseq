@@ -81,6 +81,7 @@ pub(crate) struct PresentedState {
     retro_items: HashMap<u64, InstanceId>,
     midi_devices: KeyedRows,
     project_name: Option<Option<String>>,
+    project_dirty: Option<bool>,
     library_epoch: Option<u64>,
     /// The package instances' fingerprint as last pushed (`None` forces a
     /// push; reset while nothing observes `project.instances`).
@@ -115,6 +116,7 @@ impl PresentedState {
         self.slot_devices.clear();
         self.palette_tint = None;
         self.project_name = None;
+        self.project_dirty = None;
         self.library_epoch = None;
         self.instances = None;
     }
@@ -207,6 +209,11 @@ impl HostKinds {
             if state.project_name.as_ref().map(Option::as_deref) != Some(name) {
                 pusher.push(project, f::PROJECT_NAME, text(name.unwrap_or_default()));
                 state.project_name = Some(name.map(str::to_string));
+            }
+            let dirty = app.has_unsaved_changes();
+            if state.project_dirty != Some(dirty) {
+                pusher.push(project, f::PROJECT_DIRTY, Value::Bool(dirty));
+                state.project_dirty = Some(dirty);
             }
             // Only while the Packages tree (or anything) observes it: the
             // fingerprint hashes every instance, and resetting it while

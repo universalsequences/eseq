@@ -41,6 +41,7 @@ pub(crate) mod pointer_input;
 pub mod theme;
 pub mod tui;
 pub mod wgsl_shaders;
+pub mod window_chrome;
 #[cfg(feature = "wgpu")]
 pub mod gpu_adapter;
 #[cfg(feature = "wgpu")]

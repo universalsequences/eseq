@@ -171,6 +171,25 @@
 (def track-menu-actions
   (list (dict :id :rename :label "Rename" :icon :pencil)))
 
+;; The names of the track palette's colors, in `seq-track-palette` order.
+(def palette-color-names
+  (list "Pink" "Orange" "Yellow" "Green" "Teal" "Sky"
+        "Blue" "Violet" "Magenta" "Red" "Aqua" "Lime"))
+
+;; A "Color" submenu: one row per palette color, its swatch drawn in the
+;; color and the target's `current` color checked.
+(def color-menu-action (current)
+  (let ((palette (seq-track-palette)))
+    (dict :id :color-menu :label "Color" :icon :swatch :icon-color current
+          :children
+          (map (lambda (i)
+                 (let ((c (nth palette i)))
+                   (dict :id :set-color :key (str "-" i) :color i
+                         :label (nth palette-color-names i)
+                         :icon :swatch :icon-color c
+                         :checked (= c current))))
+               (range 0 (len palette))))))
+
 (def group-menu-actions
   (list
     (dict :id :rename :label "Rename" :icon :pencil)
@@ -1084,11 +1103,14 @@
         (t strip-menu.track))
     (if g
       (if (listed? g (groups))
-        (if g.rack (rack-group-menu-actions g) group-menu-actions)
+        (append
+          (if g.rack (rack-group-menu-actions g) group-menu-actions)
+          (list (color-menu-action g.color)))
         (list))
       (if (and t (listed? t (tracks)))
         (append
           track-menu-actions
+          (list (color-menu-action t.color))
           (if t.group
             (list (dict :id :ungroup-track :label "Ungroup track" :icon :ungroup))
             (list))
@@ -1105,6 +1127,10 @@
     (set! strip-menu.open false)
     (match (get action :id)
       :rename (begin-rename t g)
+      :set-color
+      (if g
+        (host-command "set-group-color" (dict :group-id g.gid :color (get action :color)))
+        (host-command "set-track-color" (dict :track t.index :color (get action :color))))
       :convert-drum-rack (host-command "convert-group-to-drum-rack" (dict :group-id g.gid))
       :group (group-selected)
       :ungroup-track (host-command "remove-track-from-group" (dict :track t.index))
@@ -1131,10 +1157,23 @@
   ;; must not pay for (or depend on) on every mixer render.
   (apply menu-of strip-menu
     (each (if strip-menu.open (track-context-menu-actions) (list)) |action|
-      (menu-item (get action :label)
-        :key (str "track-menu-" (get action :id) (or (get action :key) ""))
-        :icon (get action :icon)
-        :on-select (lambda (event) (select-track-menu-action action))))))
+      (track-menu-item action))))
+
+;; An action's menu row; one with `:children` opens them as a submenu.
+(def track-menu-item (action)
+  (let ((key (str "track-menu-" (get action :id) (or (get action :key) "")))
+        (children (get action :children)))
+    (if children
+      (apply menu-item (get action :label)
+        :key key :icon (get action :icon) :icon-color (get action :icon-color)
+        (each children |child| (track-menu-item child)))
+      (apply menu-item (get action :label)
+        (append
+          (list :key key
+                :icon (get action :icon)
+                :on-select (lambda (event) (select-track-menu-action action)))
+          (prop-if :icon-color (get action :icon-color))
+          (if (= (get action :id) :set-color) (list :checked (get action :checked)) (list)))))))
 
 (def rename-input (key width font-size on-done)
   (text-input
@@ -1437,67 +1476,68 @@
 ;; them selects that bus. With the clip column above, the meter gives up the
 ;; spacer that kept it level.
 (def group-header-slot (g)
-  (let ((b g.bus)
-        (bus-idx (if b b.index -1))
-        ;; Compact mode has no clip area for the column to stand in.
-        (show-clips (and (not (compact?)) (has-clips? g))))
-    (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.2 :height (group-bus-strip-height)
-      :corner-radius (eseq.seq-core-state/radius 12)
-      :padding 0.1
-      :background-color :mixer-strip-bg
-      :drop-hover-border-color :mixer-strip-selected-border
-      :drop-types (if b
-        (list "sample" "instrument" "instrument-preset" "audio-effect")
-        (list))
-      :drop-meta (dict :kind "bus" :bus bus-idx)
-      :on-drop (lambda (event) (drop-on-group-header event g))
-      (v-stack :gap 0.3 :align :center
-        (bus-output-dropdown b)
-        ;; Where a plain track strip shows its pattern grid, a clip-bearing
-        ;; rack shows its clip run vertically (§6.2). Everything else keeps the
-        ;; spacer that levels the meters.
-        (if show-clips (rack-clip-column g) (clip-growth-spacer))
-        (if b
-          (v-stack :gap 0.4 :align :center
-            (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
-              (if show-clips
-                (bus-meter-control-with-spacer b true 0.0)
-                (bus-meter-control b true))))
-          (nothing))
-        (if b
-          (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
-            (bus-buttons b g))
-          (nothing))
-        (if b (bus-mod-port-row b) nil)
-        (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
-          :key (str "group-badge-" g.gid)
-          :selected #'g.delete-target
-          :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (select-group-delete-target g))
-          :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
-          :on-right-click (lambda (event) (open-strip-menu event nil g))
-          (h-stack :gap 0.2 :align :center
-            (box :width 0.05)
-            (box :background "disclosure-button"
-              :width 1.7 :height 0.8
-              :collapsed g.collapsed
-              :surface-alpha 0.35
-              :col 0.1
-              :on-click (lambda (event)
-                (select-group g)
-                (toggle! g.collapsed)))
-            (box :width 0.05)
-            (if (= strip-rename.group g)
-              (group-rename-input g)
-              (apply label (substring g.name 0 (name-chars 10))
-                :key (str "group-name-label-" g.gid)
-                :font-size 11
-                :height 0.9
-                :v-align :center
-                :h-align :center
-                :color :black
-                bare-text))))))))
+                            (let ((b g.bus)
+                                (bus-idx (if b b.index -1))
+                                ;; Compact mode has no clip area for the column to stand in.
+                                (show-clips (and (not (compact?)) (has-clips? g))))
+                              (box :key (str "group-bus-strip-" bus-idx)
+                                :width 10.2 :height (group-bus-strip-height)
+                                :corner-radius (eseq.seq-core-state/radius 12)
+                                :padding 0.1
+                                :background-color :mixer-strip-bg
+                                :drop-hover-border-color :mixer-strip-selected-border
+                                :drop-types (if b
+                                  (list "sample" "instrument" "instrument-preset" "audio-effect")
+                                  (list))
+                                :drop-meta (dict :kind "bus" :bus bus-idx)
+                                :on-drop (lambda (event) (drop-on-group-header event g))
+                                (v-stack :gap 0.3 :align :center
+                                  (bus-output-dropdown b)
+                                  ;; Where a plain track strip shows its pattern grid, a clip-bearing
+                                  ;; rack shows its clip run vertically (§6.2). Everything else keeps the
+                                  ;; spacer that levels the meters.
+                                  (if show-clips (rack-clip-column g) (clip-growth-spacer))
+                                  (if b
+                                    (v-stack :gap 0.4 :align :center
+                                      (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
+                                        (if show-clips
+                                          (bus-meter-control-with-spacer b true 0.0)
+                                          (bus-meter-control b true))))
+                                    (nothing))
+                                  (if b
+                                    (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
+                                      (bus-buttons b g))
+                                    (nothing))
+                                  (if b (bus-mod-port-row b) nil)
+                                  (box :corner-radius (eseq.seq-core-state/radius 34) :background-color g.color :width 9.5 :padding 0.1
+                                    :key (str "group-badge-" g.gid)
+                                    :selected #'g.delete-target
+                                    :selected-background-color :fx-panel-header-selected-bg
+                                    :on-click (lambda (event) (select-group-delete-target g))
+                                    :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group g))
+                                    :on-right-click (lambda (event) (open-strip-menu event nil g))
+                                    (h-stack :gap 0.2 :align :center
+                                      (box :width 0.05)
+                                      (box :background "disclosure-button"
+                                        :width 1.7 :height 0.8
+                                        :collapsed g.collapsed
+                                        :stroke-width 0.1
+                                        :surface-alpha 0.35
+                                        :col 0.1
+                                        :on-click (lambda (event)
+                                          (select-group g)
+                                          (toggle! g.collapsed)))
+                                      (box :width 0.05)
+                                      (if (= strip-rename.group g)
+                                        (group-rename-input g)
+                                        (apply label (substring g.name 0 (name-chars 10))
+                                          :key (str "group-name-label-" g.gid)
+                                          :font-size 11
+                                          :height 0.9
+                                          :v-align :center
+                                          :h-align :center
+                                          :color :black
+                                          bare-text))))))))
 
 (def drop-new-track-into-group (event g)
   (let ((payload event.payload)

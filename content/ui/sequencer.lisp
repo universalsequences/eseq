@@ -824,8 +824,8 @@
        ;; border
        (sdf/fill (sdf/circle (* radius 0.85))
          (material
-           :lighting (lighting :edge-min -0.12 :edge-max 0.9
-             :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
+           :lighting (lighting :edge-min -0.22 :edge-max 0.9
+             :light (vec3 -0.3 0.3 1.8) :shininess 92.0)
            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2))
                      (eseq.materials/color border border))))
        (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
@@ -888,7 +888,7 @@
       (material
         :lighting (lighting :edge-min -0.32 :edge-max 1.293
           :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-        :color (* 0.4 (if (= step.held 1)
+        :color (* 0.65 (if (= step.held 1)
                         (if (= muted 1)
                           (rgba 0 0 0 0)
                           (eseq.materials/color
@@ -2401,8 +2401,8 @@
       :output true
       :selected false
       :style lane-patch-port-style
-      :on-mouse-down (lambda (event) (lane-patch-arm id))
-      :on-click (lambda (event) (lane-patch-arm id))
+      :on-mouse-down |x y r| (lane-patch-arm id)
+      :on-click |x y r| (lane-patch-arm id)
       :on-patch-cancel (lambda (source) (lane-patch-clear-pending))
       :on-patch-miss (lambda () (clear-cable!)))))
 
@@ -2428,8 +2428,8 @@
         :style lane-patch-port-style
         :on-patch-drop (lambda (source dest input) (lane-patch-connect ns source dest input))
         :on-cable-click (lambda (source dest input) (lane-patch-select-cable ns source dest input))
-        :on-click (lambda (event) (lane-patch-in-click ns slot ordinal))
-        :on-mouse-up (lambda (event) (lane-patch-in-click ns slot ordinal)))
+        :on-click |x y r| (lane-patch-in-click ns slot ordinal)
+        :on-mouse-up |x y r| (lane-patch-in-click ns slot ordinal))
       (label (str (get port :name) (if backward " ↑" ""))
         :height 1.1 :font-size 8.5 :v-align :center
         :color (if backward :process-lane-accent :dim) :bg :transparent))))
@@ -3257,9 +3257,9 @@
 (def group-container-bg (c)
   (let ((bg THEME.buffer_bg))
     (rgba
-      (+ (* (rgb-part c 0) 0.22) (* (nth bg 0) 0.78))
-      (+ (* (rgb-part c 1) 0.22) (* (nth bg 1) 0.78))
-      (+ (* (rgb-part c 2) 0.22) (* (nth bg 2) 0.78))
+      (+ (* (rgb-part c 0) 0.32) (* (nth bg 0) 0.68))
+      (+ (* (rgb-part c 1) 0.32) (* (nth bg 1) 0.68))
+      (+ (* (rgb-part c 2) 0.32) (* (nth bg 2) 0.68))
       1.0)))
 
 ;; Volume/meter for a group's backing bus b; a spacer while it has none.
@@ -3295,83 +3295,85 @@
   (when g.rack :sampler))
 
 (def group-header-body (g)
-  (let ((c g.color)
-        (b g.bus)
-        (on-select (lambda (event) (select-group g))))
-    (box :background "seqv-track-container"
-      :padding 0.1
-      :on-click on-select
-      ;; A fill row: the clip grid at the end flexes into whatever width the
-      ;; panel has left and wraps there, so a wide window shows more cells
-      ;; per row and a long bank grows the header instead of running off it.
-      (h-stack :width :fill :gap 0.4 :align :center
-        (box
-          :key (group-element-key g "color-badge")
-          :width 0.68 :height 2.0
-          :background "seqv-track-color-badge"
-          :track-r (rgb-part c 0)
-          :track-g (rgb-part c 1)
-          :track-b (rgb-part c 2)
-          :on-click on-select)
-        (disclosure-button
-          :key (group-element-key g "collapse")
-          :width 1.55 :height 1.4
-          :collapsed g.collapsed
-          :col 1
-          :surface-alpha 1.0
-          :focusable true
-          :on-click (lambda (event) (toggle! g.collapsed)))
-        ;; Arm = drum-rack pad-play mode. A regular group is not an input
-        ;; target and therefore contributes no Arm control or placeholder.
-        (if g.rack
-          (box :width 2 :height 1.5
-            :background "seqv-rec-arm-dot"
-            :key (group-element-key g "arm")
-            :active #'g.armed
-            :on-click (lambda (event)
-              (select-group g)
-              (toggle! g.armed)))
-          (box :width 2.0 :height 0.0 :bg :transparent))
-        (header-toggle "M" (group-element-key g "mute") (if b #'b.muted false)
-          :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
-          :color :black :active-color :gray
-          :on-click (lambda (event)
-            (when b
-              (select-group g)
-              (toggle! b.muted))))
-        (header-toggle "S" (group-element-key g "solo") (if b #'b.soloed false)
-          :active-color :white
-          :on-click (lambda (event)
-            (when b
-              (select-group g)
-              (toggle! b.soloed))))
-        (box :width 8.6 :height 1
-          :key (group-element-key g "select")
-          :background-color :transparent
-          :on-click on-select
-          :on-double-click (lambda (event) (show-fx-for-group g))
-          (badge (track-name-display g.name)
-            :key (group-element-key g "name-label")
-            :icon (group-type-icon g)
-            :font-size 11 :width 8.6 :height 1 :padding 0
-            :h-align :left
-            :background-color :transparent
-            :border-color :transparent
-            :highlight-color :transparent
-            :shadow-color :transparent
-            :muted (if b #'b.muted false)
-            :color :dim
-            :muted-color (rgba 0.4 0.4 0.4 0.6)
-            :bg :transparent))
-        (box :width 0.3)
-        ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
-        ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
-        ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
-        ;; name/meter shape an ordinary track header has.
-        (group-volume-control g b)
-        ;; A clip-bearing rack's clip grid sits in the header's empty right half
-        ;; (§6.1), starting where the member rows' step grids start.
-        (rack-clip-grid g)))))
+                                        (let ((c g.color)
+                                            (b g.bus)
+                                            (on-select (lambda (event) (select-group g))))
+                                          (box :background "seqv-track-container"
+                                            :padding 0.1
+                                            :on-click on-select
+                                            ;; A fill row: the clip grid at the end flexes into whatever width the
+                                            ;; panel has left and wraps there, so a wide window shows more cells
+                                            ;; per row and a long bank grows the header instead of running off it.
+                                            (h-stack :width :fill :gap 0.4 :align :center
+                                              (box
+                                                :key (group-element-key g "color-badge")
+                                                :width 0.68 :height 2.0
+                                                :background "seqv-track-color-badge"
+                                                :track-r (rgb-part c 0)
+                                                :track-g (rgb-part c 1)
+                                                :track-b (rgb-part c 2)
+                                                :on-click on-select)
+                                              (disclosure-button
+                                                :key (group-element-key g "collapse")
+                                                :width 1.55 :height 1.4
+                                                :collapsed g.collapsed
+                                                :col 0.8
+                                                :surface-alpha 1.0
+                                                :stroke-width 0.22
+                                                :focusable true
+                                                ;; An SDF widget calls :on-click with (sx sy region).
+                                                :on-click (lambda (x y region) (toggle! g.collapsed)))
+                                              ;; Arm = drum-rack pad-play mode. A regular group is not an input
+                                              ;; target and therefore contributes no Arm control or placeholder.
+                                              (if g.rack
+                                                (box :width 2 :height 1.5
+                                                  :background "seqv-rec-arm-dot"
+                                                  :key (group-element-key g "arm")
+                                                  :active #'g.armed
+                                                  :on-click (lambda (event)
+                                                    (select-group g)
+                                                    (toggle! g.armed)))
+                                                (box :width 2.0 :height 0.0 :bg :transparent))
+                                              (header-toggle "M" (group-element-key g "mute") (if b #'b.muted false)
+                                                  :bg :control-on-bg :active-bg :sequencer-toggle-off-bg
+                                                  :color :black :active-color :gray
+                                                  :on-click (lambda (event)
+                                                    (when b
+                                                      (select-group g)
+                                                      (toggle! b.muted))))
+                                                (header-toggle "S" (group-element-key g "solo") (if b #'b.soloed false)
+                                                    :active-color :white
+                                                    :on-click (lambda (event)
+                                                      (when b
+                                                        (select-group g)
+                                                        (toggle! b.soloed))))
+                                                  (box :width 8.6 :height 1
+                                                    :key (group-element-key g "select")
+                                                    :background-color :transparent
+                                                    :on-click on-select
+                                                    :on-double-click (lambda (event) (show-fx-for-group g))
+                                                    (badge (track-name-display g.name)
+                                                      :key (group-element-key g "name-label")
+                                                      :icon (group-type-icon g)
+                                                      :font-size 11 :width 8.6 :height 1 :padding 0
+                                                      :h-align :left
+                                                      :background-color :transparent
+                                                      :border-color :transparent
+                                                      :highlight-color :transparent
+                                                      :shadow-color :transparent
+                                                      :muted (if b #'b.muted false)
+                                                        :color :dim
+                                                        :muted-color (rgba 0.4 0.4 0.4 0.6)
+                                                        :bg :transparent))
+                                                    (box :width 0.3)
+                                                    ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
+                                                    ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
+                                                    ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
+                                                    ;; name/meter shape an ordinary track header has.
+                                                    (group-volume-control g b)
+                                                    ;; A clip-bearing rack's clip grid sits in the header's empty right half
+                                                    ;; (§6.1), starting where the member rows' step grids start.
+                                                    (rack-clip-grid g)))))
 
 ;; ── Rack clip grid (docs/rack-clips-and-break-kits-spec.md §6.1) ─────────
 ;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
@@ -3387,8 +3389,8 @@
 ;; lit when active. They sit in a `wrap` that fills the header's right half,
 ;; so the column count follows the panel width and a long bank wraps onto
 ;; more rows rather than stretching the row past the window.
-(def rack-clip-cell-width 3.6)
-(def rack-clip-cell-height 1.8)
+(def rack-clip-cell-width 3.0)
+(def rack-clip-cell-height 1.5)
 (def rack-clip-rename-width 4.6)
 
 ;; Whether the held clip rc is still in its rack's bank (a delete, an undo or

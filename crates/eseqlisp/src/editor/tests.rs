@@ -1700,7 +1700,7 @@ fn dragging_vertical_tile_border_updates_split_ratio() {
         1,
     );
 
-    let super::TileNode::Split(split) = &editor.tile_root else {
+    let super::TileNode::Split(split) = &editor.tile_root.content else {
         panic!("expected root split");
     };
     assert!(
@@ -1760,7 +1760,7 @@ fn dragging_horizontal_tile_border_updates_split_ratio() {
         1,
     );
 
-    let super::TileNode::Split(split) = &editor.tile_root else {
+    let super::TileNode::Split(split) = &editor.tile_root.content else {
         panic!("expected root split");
     };
     assert!(
@@ -9618,7 +9618,7 @@ fn remembered_layout_split_restores_its_user_resized_ratio() {
         .unwrap();
     editor.refresh_runtime_side_effects();
 
-    let (split_id, split_dir) = match &editor.tile_root {
+    let (split_id, split_dir) = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => {
             assert_eq!(split.remember_key.as_deref(), Some("lower:piano-roll"));
             (split.id, split.dir)
@@ -9648,7 +9648,7 @@ fn remembered_layout_split_restores_its_user_resized_ratio() {
         )
         .unwrap();
     editor.refresh_runtime_side_effects();
-    let fx_ratio = match &editor.tile_root {
+    let fx_ratio = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => split.ratio,
         crate::tile::TileNode::Leaf(_) => panic!("FX layout should build a split"),
     };
@@ -9664,7 +9664,7 @@ fn remembered_layout_split_restores_its_user_resized_ratio() {
         )
         .unwrap();
     editor.refresh_runtime_side_effects();
-    let restored_ratio = match &editor.tile_root {
+    let restored_ratio = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => split.ratio,
         crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
     };
@@ -9701,7 +9701,7 @@ fn resize_window_remembers_the_constraint_clamped_ratio() {
         .eval_str("(resize-window 0.3)")
         .unwrap();
     editor.refresh_runtime_side_effects();
-    let resized_ratio = match &editor.tile_root {
+    let resized_ratio = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => split.ratio,
         crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
     };
@@ -9724,7 +9724,7 @@ fn resize_window_remembers_the_constraint_clamped_ratio() {
     editor.runtime_mut().eval_str(piano_roll_layout).unwrap();
     editor.refresh_runtime_side_effects();
 
-    let restored_ratio = match &editor.tile_root {
+    let restored_ratio = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => split.ratio,
         crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
     };
@@ -9758,7 +9758,7 @@ fn fixed_pane_collapses_only_after_dragging_through_its_threshold() {
         .unwrap();
     editor.refresh_runtime_side_effects();
 
-    let (split_id, split_dir) = match &editor.tile_root {
+    let (split_id, split_dir) = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => (split.id, split.dir),
         crate::tile::TileNode::Leaf(_) => panic!("collapsible layout should build a split"),
     };
@@ -9835,7 +9835,7 @@ fn fixed_pane_collapses_only_after_dragging_through_its_threshold() {
         )
         .unwrap();
     editor.refresh_runtime_side_effects();
-    let (split_id, split_dir) = match &editor.tile_root {
+    let (split_id, split_dir) = match &editor.tile_root.content {
         crate::tile::TileNode::Split(split) => (split.id, split.dir),
         crate::tile::TileNode::Leaf(_) => panic!("collapsible sidebar should build a split"),
     };

@@ -36,6 +36,26 @@ pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
             Ok(Value::String(path.to_string_lossy().into_owned()))
         },
     );
+    runtime.register_native_with_docs(
+        "seq-track-palette",
+        "(seq-track-palette)",
+        "The track color palette, in order, each as an :rgb drawn the way the current \
+         theme shows track colors. `set-track-color` / `set-group-color` take an index into it.",
+        |_args, _ctx| {
+            Ok(Value::List(
+                sequencer::track_color::TRACK_COLOR_PALETTE
+                    .iter()
+                    .map(|color| {
+                        let [r, g, b] = crate::state_values::themed_track_rgb([color.r, color.g, color.b]);
+                        Rc::new(RefCell::new(eseqlisp::vm::tagged_list(
+                            "rgb",
+                            vec![Value::Number(r as f64), Value::Number(g as f64), Value::Number(b as f64)],
+                        )))
+                    })
+                    .collect(),
+            ))
+        },
+    );
     runtime.register_native("seq-factory-path", |args, _ctx| {
         let Some(Value::String(relative)) = args.first() else {
             return Err("seq-factory-path expects one relative path string".to_string());

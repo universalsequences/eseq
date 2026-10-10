@@ -3017,6 +3017,20 @@ mod tests {
     }
 
     #[test]
+    fn insert_newline_after_hash_quote_counts_following_parens() {
+        // An unclosed form after `#'` on the same line must deepen the indent;
+        // treating `#` as a comment start used to drop it.
+        let mut buffer = Buffer::from_text(0, "*test*", "(row (label #'master.recording (inner x)))");
+        buffer.cursor = (0, 37);
+        buffer.insert_newline_with_indent();
+        assert_eq!(
+            buffer.text(),
+            "(row (label #'master.recording (inner\n      x)))"
+        );
+        assert_eq!(buffer.cursor, (1, 6));
+    }
+
+    #[test]
     fn slice_range_spans_multiple_lines() {
         let buffer = Buffer::from_text(0, "*test*", "abc\ndef\nghi");
         assert_eq!(buffer.slice_range((0, 1), (2, 2)), "bc\ndef\ngh");
@@ -3417,7 +3431,8 @@ fn lisp_indent_for_position(lines: &[String], row: usize, col: usize) -> usize {
             }
 
             match ch {
-                ';' | '#' => break,
+                ';' => break,
+                '#' if bytes.get(idx + 1) != Some(&b'\'') => break,
                 '"' => in_string = true,
                 '(' => depth += 1,
                 ')' => {

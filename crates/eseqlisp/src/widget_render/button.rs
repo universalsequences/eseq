@@ -169,6 +169,7 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "ungroup" => Some(19.0),
         "clips" => Some(20.0),
         "save" | "download" => Some(21.0),
+        "swatch" | "color" => Some(22.0),
         _ => None,
     }
 }
@@ -473,6 +474,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (in.value_t > 21.5) {
+        // swatch: a solid disc, the same in either style (a color chip whose
+        // color is the glyph's own).
+        d = length(p) - 0.46;
     } else if (in.value_t > 20.5) {
         // save: a tray with an arrow dropping into it (export's mirror).
         float tray_l = button_icon_segment(p, float2(-0.46, 0.08), float2(-0.46, 0.44)) - stroke;

@@ -1061,6 +1061,10 @@ pub struct App {
     /// the real pattern epoch must NOT bump mid-playback (it would
     /// invalidate the scheduler's in-flight lookahead window).
     pub song_row_mirror_epoch: u64,
+    /// Bumped whenever a scene's bus/group values are recalled into
+    /// `buses` ([`App::restore_bus_pattern_snapshot`]). The UI diffs it to
+    /// refresh its shared bus copy, which the bus effect params read.
+    pub bus_pattern_restore_epoch: u64,
     /// The non-destructive staging take while `ArrangementCapture` is active
     /// (docs/song-mode-spec.md 7.4/10.3). Owned by the control thread;
     /// `apply_pattern_launch` appends one lightweight event per audible
@@ -2543,6 +2547,7 @@ impl App {
     }
 
     pub fn restore_bus_pattern_snapshot(&mut self, snapshot: &[BusPatternSnapshot]) {
+        self.bus_pattern_restore_epoch += 1;
         for bus in &mut self.buses {
             bus.output = snapshot.iter().find(|saved| saved.id == bus.id)
                 .map(|saved| saved.output).unwrap_or_default();
@@ -2938,6 +2943,7 @@ impl App {
             active_song_start_beat: None,
             song_mirrored_row: None,
             song_row_mirror_epoch: 0,
+            bus_pattern_restore_epoch: 0,
             song_capture_take: None,
             song_capture_failed: false,
             song_capture_error: None,

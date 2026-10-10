@@ -25500,6 +25500,17 @@ use panel_kinds_seed::*;
             layout.rect
         );
 
+        let save_button =
+            find_layout_node_by_stable_key(&layout, "transport-File-menu-button").expect("file menu button");
+        assert_finite_nonzero_rect(save_button, "save button");
+
+        // The panel toggles live in the window titlebar.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-titlebar nil) (set-window-buffer "*titlebar*")"#)
+            .expect("switch to titlebar buffer");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("titlebar layout");
         let samples_button =
             find_layout_node_by_stable_key(&layout, "transport-samples-sidebar-button")
                 .expect("samples sidebar button");
@@ -25507,12 +25518,9 @@ use panel_kinds_seed::*;
             .expect("mixer panel button");
         let fx_button = find_layout_node_by_stable_key(&layout, "transport-fx-panel-button")
             .expect("FX panel button");
-        let save_button =
-            find_layout_node_by_stable_key(&layout, "transport-File-menu-button").expect("file menu button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
         assert_finite_nonzero_rect(mixer_button, "mixer panel button");
         assert_finite_nonzero_rect(fx_button, "FX panel button");
-        assert_finite_nonzero_rect(save_button, "save button");
         assert!(
             samples_button.rect.col + samples_button.rect.width <= mixer_button.rect.col,
             "samples sidebar button should be to the left of mixer; samples={:?} mixer={:?}",
@@ -25524,12 +25532,6 @@ use panel_kinds_seed::*;
             "mixer panel button should be to the left of FX; mixer={:?} fx={:?}",
             mixer_button.rect,
             fx_button.rect
-        );
-        assert!(
-            fx_button.rect.col + fx_button.rect.width <= save_button.rect.col,
-            "FX panel button should be to the left of save; fx={:?} save={:?}",
-            fx_button.rect,
-            save_button.rect
         );
 
         let mixer_icon = find_layout_node_by_widget_type(mixer_button, "mix-panel-icon")
@@ -26533,6 +26535,51 @@ use panel_kinds_seed::*;
     }
 
     #[test]
+    fn metal_seq_mixer_track_context_menu_color_submenu_sets_a_palette_color() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().eval_str(
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.group nil)
+               (set! m.track (eseq.kinds/track 1)))",
+        ).expect("target track 1");
+        let summary = editor.runtime_mut().eval_str(
+            "(let ((menu (nth (filter (lambda (a) (= (get a :id) :color-menu))
+                                      (eseq.mixer/track-context-menu-actions)) 0))
+                   (rows (get menu :children)))
+               (list (len rows)
+                     (get (nth rows 0) :label)
+                     (len (filter (lambda (r) (get r :checked)) rows))
+                     (let ((t (eseq.kinds/track 1))) (= (get menu :icon-color) t.color))))",
+        ).expect("color submenu");
+        assert_eq!(
+            format!("{summary:?}"),
+            format!("{:?}", editor.runtime_mut().eval_str(
+                "(let ((t (eseq.kinds/track 1)))
+                   (list 12 \"Pink\" (len (filter (lambda (c) (= c t.color)) (seq-track-palette))) true))",
+            ).unwrap()),
+            "twelve swatches, the track's own color checked, the Color row tinted with it",
+        );
+
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.open true)
+               (eseq.mixer/select-track-menu-action (dict :id :set-color :color 4)))",
+        ).expect("pick Teal");
+        match &editor.drain_host_commands()[..] {
+            [eseqlisp::host::HostCommand::Custom { name, payload }] => {
+                assert_eq!(name, "set-track-color");
+                let Value::Map(payload) = payload else { panic!("{payload:?}") };
+                let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+                assert_eq!(field("track"), Some(Value::Number(1.0)));
+                assert_eq!(field("color"), Some(Value::Number(4.0)));
+            }
+            other => panic!("expected one set-track-color command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_mixer_track_context_menu_only_groups_the_clicked_multi_selection() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 3, 16);
@@ -26565,16 +26612,16 @@ use panel_kinds_seed::*;
 
         assert_eq!(
             track_menu_action_ids(&mut editor, 0, &[0, 1]),
-            vec!["rename", "group"],
+            vec!["rename", "color-menu", "group"],
         );
         assert_eq!(
             track_menu_action_ids(&mut editor, 2, &[0, 1]),
-            vec!["rename"],
+            vec!["rename", "color-menu"],
             "right-clicking outside the multi-selection keeps the single-track menu",
         );
         assert_eq!(
             track_menu_action_ids(&mut editor, 0, &[0]),
-            vec!["rename"],
+            vec!["rename", "color-menu"],
         );
 
         track_menu_action_ids(&mut editor, 0, &[0, 1]);
@@ -26743,6 +26790,7 @@ use panel_kinds_seed::*;
                 // Break kits (spec §7.2) enter through the rack menu too.
                 "export-kit",
                 "ungroup",
+                "color-menu",
             ],
         );
     }
@@ -26789,13 +26837,13 @@ use panel_kinds_seed::*;
 
         assert_eq!(
             menu_action_ids(&mut editor, 7.0),
-            vec!["rename", "convert-drum-rack", "ungroup"],
+            vec!["rename", "convert-drum-rack", "ungroup", "color-menu"],
         );
         assert_eq!(
             // A rack with no clip bank is a LEGACY rack, so it is offered the
             // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "export-kit", "ungroup"],
+            vec!["rename", "convert-to-clips", "export-kit", "ungroup", "color-menu"],
         );
 
         // The kind picker (instance-kinds spec §8.3): one "New <kind> in
@@ -26810,7 +26858,7 @@ use panel_kinds_seed::*;
         });
         assert_eq!(
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "ungroup"],
+            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "ungroup", "color-menu"],
         );
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
@@ -42228,6 +42276,8 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .register_native("seq-instance-kinds", |_args, _ctx| Ok(Value::List(Vec::new())));
+        // The Color submenu's swatches (`seq-track-palette`).
+        crate::natives::register_factory_path_native(editor.runtime_mut());
 
         let selected_tracks = Arc::new(Mutex::new(std::collections::HashSet::from([0usize])));
         for name in [
@@ -45523,6 +45573,57 @@ use panel_kinds_seed::*;
                 "collapsed regular group should hide member track {member}"
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_sequencer_group_disclosure_click_toggles_collapse() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_group_bindings(&mut editor, regular_group_fixture(false));
+        // The header's disclosure is an SDF defwidget, whose :on-click gets
+        // (sx sy region), not a box's single event map. The stub harness has
+        // no host natives, so record the collapse request the click sends.
+        editor
+            .runtime_mut()
+            .eval_str("(do (def collapse-requests (list)) (def seq-set-group-collapsed (gid v) (set! collapse-requests (list (list gid v)))))")
+            .expect("stub the group-collapse native");
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 150, 44);
+        let tile = frame
+            .tiles
+            .iter()
+            .find(|t| t.frame.buffer_name == "*sequencer*")
+            .expect("sequencer tile");
+        let layout = tile.frame.widget_layout.as_deref().expect("sequencer layout");
+        let node = find_layout_node_by_stable_key_suffix(layout, "/group-collapse-8")
+            .expect("group disclosure button");
+        let col = tile.rect.col + node.rect.col + node.rect.width * 0.5
+            - tile.frame.widget_layout_scroll_left;
+        let row = tile.rect.row + node.rect.row + node.rect.height * 0.5
+            - tile.frame.widget_scroll_top;
+        editor.active_leaf_mut().last_widget_click = None;
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_tiled_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: col as u16,
+                    row: row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                col,
+                row,
+                0,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("collapse-requests").expect("read requests"),
+            editor.runtime_mut().eval_str("(list (list 8 true))").expect("expected"),
+            "clicking the *sequencer* group disclosure should request a collapse"
+        );
     }
 
     #[test]

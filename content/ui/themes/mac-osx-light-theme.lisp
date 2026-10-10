@@ -116,6 +116,8 @@
       :record-active-base             '(0.12 0.001 0.001 1.0)
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)
       :clock-fg                       '(0.85 0.85 0.85 1.0)
+      :transport-led-bg               '(0.784 0.784 0.791 1.0)  ; LED panel: well below the playback container
+      :transport-controls-bg          '(0.884 0.884 0.891 1.0)  ; playback buttons: a shade darker than :bg
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
       :device-enabled                 '(1.0 0.8 0.12 1.0)

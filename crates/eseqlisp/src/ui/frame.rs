@@ -1628,7 +1628,7 @@ fn build_tiled_render_frame_impl(
             .as_ref()
             .and_then(|toast| crate::backend::toast_placement(toast, total_width, total_height)),
     );
-    TiledRenderFrame { tiles, completion, toast }
+    TiledRenderFrame { tiles, completion, toast, titlebar_tile: editor.tile_root.titlebar_id() }
 }
 
 /// Build a simple RenderFrame for an inactive (non-focused) tile.

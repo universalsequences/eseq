@@ -44,9 +44,13 @@ fn ported_transport_views_use_no_legacy_binding_forms() {
 #[test]
 fn the_transport_binds_its_host_state_through_kinds_and_only_repaints_on_playback() {
     let mut h = distro();
+    // The controls and scene pills render in the *transport* row; the
+    // window titlebar keeps the panel and view toggles.
     let (tree, revision) = h.buffer_tree("*transport*");
+    let (titlebar_tree, titlebar_revision) = h.buffer_tree("*titlebar*");
     let (mut bound, mut legacy) = (Vec::new(), Vec::new());
     instance_bindings(&tree, &mut bound, &mut legacy);
+    instance_bindings(&titlebar_tree, &mut bound, &mut legacy);
     assert_eq!(legacy, Vec::<String>::new(), "legacy bindings");
     let (transport, master, engine, song) = (
         h.singleton(TRANSPORT),
@@ -106,6 +110,11 @@ fn the_transport_binds_its_host_state_through_kinds_and_only_repaints_on_playbac
         revision,
         "playback only repaints"
     );
+    assert_eq!(
+        h.buffer_tree("*titlebar*").1,
+        titlebar_revision,
+        "playback only repaints the titlebar"
+    );
 }
 
 #[test]
@@ -154,6 +163,46 @@ fn a_loaded_project_shows_the_bank_of_its_playing_scene() {
             .iter()
             .any(|pill| pill.get("scene") == Some(&Value::Number(11.0))));
     }
+}
+
+#[test]
+fn cmd_arrows_step_scenes_across_banks_without_wrapping() {
+    let mut h = distro();
+    let mut project = h.app.capture_export_project().unwrap();
+    // Banks A = scenes 0..2, B = scenes 2..4.
+    project.patterns = vec![project.patterns[0].clone(); 4];
+    project.scene_banks = vec![
+        sequencer::project::ProjectSceneBank { id: 1, name: None, len: 2 },
+        sequencer::project::ProjectSceneBank { id: 2, name: None, len: 2 },
+    ];
+    project.current_pattern = 0;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scene-step.json");
+    std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
+    h.app.queue_project_load_from_path("scene-step", &path).unwrap();
+    while h.app.has_pending_project_load() {
+        h.app.advance_pending_project_load().unwrap();
+    }
+    h.sync();
+    h.show_all();
+    let viewed = |h: &mut Harness| h.eval("(eseq.scene-banks/scene-viewed-bank-index)");
+    let mut step = |h: &mut Harness, verb: &str| {
+        h.eval(&format!("(eseq.sequencer-keys/{verb})"));
+        h.drain();
+        h.sync();
+        (h.app.state.current_scene_index(), viewed(h))
+    };
+    assert_eq!(viewed(&mut h), Value::Number(0.0));
+    // No wrap at the start of the list.
+    assert_eq!(step(&mut h, "scene-previous"), (0, Value::Number(0.0)));
+    assert_eq!(step(&mut h, "scene-next"), (1, Value::Number(0.0)));
+    // The end of bank A steps to bank B's first scene, and the strip follows.
+    assert_eq!(step(&mut h, "scene-next"), (2, Value::Number(1.0)));
+    assert_eq!(step(&mut h, "scene-next"), (3, Value::Number(1.0)));
+    // The end of the last bank stays put.
+    assert_eq!(step(&mut h, "scene-next"), (3, Value::Number(1.0)));
+    assert_eq!(step(&mut h, "scene-previous"), (2, Value::Number(1.0)));
+    assert_eq!(step(&mut h, "scene-previous"), (1, Value::Number(0.0)));
 }
 
 #[test]

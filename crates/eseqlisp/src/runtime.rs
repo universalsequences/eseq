@@ -882,6 +882,18 @@ pub enum TileOp {
         current: String,
     },
     SetLayout(LayoutSpec),
+    /// Mount a UI buffer in the window titlebar band, or clear it (`None`).
+    SetTitlebar(Option<TitlebarSpec>),
+}
+
+/// `set-titlebar`: the buffer shown in the titlebar band and how it sits there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitlebarSpec {
+    pub buffer: String,
+    /// Band height in cells; the native titlebar band is the floor.
+    pub height: f32,
+    /// Theme color name painted behind the buffer.
+    pub background_color_name: Option<String>,
 }
 
 /// Declarative layout specification for `set-layout`.
@@ -915,11 +927,15 @@ pub enum LayoutSpec {
     },
     Rows {
         gap: f32,
+        /// The margin to the window edge when this split is the root
+        /// (`:outer-gap`); `None` uses `gap`.
+        outer_gap: Option<f32>,
         remember: Option<String>,
         panes: Vec<(f32, LayoutSpec)>,
     },
     Cols {
         gap: f32,
+        outer_gap: Option<f32>,
         remember: Option<String>,
         panes: Vec<(f32, LayoutSpec)>,
     },
@@ -1423,6 +1439,13 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::SetLayout(spec));
+    }
+
+    pub fn set_titlebar(&mut self, spec: Option<TitlebarSpec>) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SetTitlebar(spec));
     }
 
     pub fn set_window_buffer(&mut self, name: String) {
@@ -2093,8 +2116,8 @@ impl Runtime {
             ),
             (
                 "menu-item",
-                "(menu-item \"label\" :icon name :shortcut text :disabled bool :checked bool :on-select callback child ...)",
-                "One context-menu row with optional checkmark, leading icon (a button :icon name), and shortcut. Child menu rows form a submenu opened by hover or Right; leaf selection closes the whole menu.",
+                "(menu-item \"label\" :icon name :icon-color color :shortcut text :disabled bool :checked bool :on-select callback child ...)",
+                "One context-menu row with optional checkmark, leading icon (a button :icon name, tinted by :icon-color), and shortcut. Child menu rows form a submenu opened by hover or Right; leaf selection closes the whole menu.",
             ),
             (
                 "menu-separator",

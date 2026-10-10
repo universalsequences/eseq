@@ -15,7 +15,8 @@
 ;; mode-bind-key from user lisp; `M-x describe-key` shows the winner.
 (module eseq.sequencer-keys)
 
-(import eseq.kinds :refer (tracks selection))
+(import eseq.kinds :refer (tracks selection scenes transport launch!))
+(import eseq.scene-banks :refer (view-scene-bank!))
 
 (export mode-name
         cursor-left
@@ -26,7 +27,9 @@
         delete-selected-steps
         track-up
         track-down
-        track-relative)
+        track-relative
+        scene-previous
+        scene-next)
 
 (def mode-name "eseq.sequencer-keys/sequencer-keys")
 
@@ -66,6 +69,26 @@
 (def track-up () (do (select-track-delta -1) true))
 (def track-down () (do (select-track-delta 1) true))
 
+;; Cmd+LEFT / Cmd+RIGHT: launch the previous / next scene. Banks are
+;; consecutive spans of the scene list, so stepping the flat list crosses
+;; into the neighboring bank (the last scene of a bank steps to the next
+;; bank's first). No wrap: at either end of the list the scene stays. The
+;; step is from the queued scene when one waits, so repeated presses keep
+;; walking during a quantized launch; the strip follows into a new bank.
+(def scene-step (delta)
+  (let ((current (or transport.queued transport.scene)))
+    (when current
+      (let ((all (scenes))
+            (i (+ current.index delta)))
+        (when (and (>= i 0) (< i (len all)))
+          (let ((s (nth all i)))
+            (unless (= s.bank current.bank) (view-scene-bank! s.bank))
+            (launch! s)))))
+    true))
+
+(def scene-previous () (scene-step -1))
+(def scene-next () (scene-step 1))
+
 (define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true)
 (mode-bind-key mode-name "LEFT" "cursor-left")
 (mode-bind-key mode-name "RIGHT" "cursor-right")
@@ -76,3 +99,7 @@
 (mode-bind-key mode-name "DOWN" "track-down")
 (mode-bind-key mode-name "BS" "delete-selected-steps")
 (mode-bind-key mode-name "Delete" "delete-selected-steps")
+(mode-bind-key mode-name "s-LEFT" "scene-previous")
+(mode-bind-key mode-name "s-RIGHT" "scene-next")
+(mode-bind-key mode-name "C-LEFT" "scene-previous")
+(mode-bind-key mode-name "C-RIGHT" "scene-next")

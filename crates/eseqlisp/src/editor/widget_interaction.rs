@@ -17,7 +17,10 @@ use super::widget_focus::find_node_by_id;
 
 const PATCH_PORT_CANCEL_RADIUS_CELLS: f32 = 1.5;
 const PATCH_PORT_DROP_RADIUS_CELLS: f32 = 1.75;
-const WIDGET_DRAG_START_THRESHOLD_CELLS: f32 = 1.0;
+/// How far (in row heights) the pointer travels before a press on a
+/// draggable widget becomes a drag. Generous on purpose: a click that wobbles
+/// must stay a click, not flash the drag cursor.
+const WIDGET_DRAG_START_THRESHOLD_ROWS: f32 = 0.75;
 
 fn is_slider_widget(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
@@ -129,14 +132,19 @@ pub(super) fn widget_gesture_is_drag(gesture: &WidgetGesture) -> bool {
     active_widget_drag(gesture).is_some()
 }
 
+/// Columns are narrower than rows, so the column delta is scaled into row
+/// heights before measuring: the threshold is the same on-screen distance in
+/// every direction.
 fn widget_drag_threshold_reached(
     gesture: &WidgetGesture,
     precise_col: f32,
     precise_row: f32,
+    (cell_w, cell_h): (f32, f32),
 ) -> bool {
-    let dx = precise_col - gesture.start_precise_col;
+    let col_to_rows = if cell_w > 0.0 && cell_h > 0.0 { cell_w / cell_h } else { 0.5 };
+    let dx = (precise_col - gesture.start_precise_col) * col_to_rows;
     let dy = precise_row - gesture.start_precise_row;
-    dx.hypot(dy) >= WIDGET_DRAG_START_THRESHOLD_CELLS
+    dx.hypot(dy) >= WIDGET_DRAG_START_THRESHOLD_ROWS
 }
 
 fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<LayoutNode> {
@@ -2205,7 +2213,12 @@ impl Editor {
     ) -> Option<WidgetGesture> {
         let gesture = self.active_widget_drag_gesture()?;
         if !gesture.drag_active
-            && !widget_drag_threshold_reached(&gesture, precise_col, precise_row)
+            && !widget_drag_threshold_reached(
+                &gesture,
+                precise_col,
+                precise_row,
+                self.runtime.layout_cell_dims(),
+            )
         {
             return None;
         }

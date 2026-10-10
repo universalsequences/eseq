@@ -89,7 +89,7 @@
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
-      :scene-active-base              '(0.00 0.01 0.42 1.0)
+      :scene-active-base              '(0.00 0.01 0.02 0.5)
       :scene-hover-base               '(0.10 0.10 0.12 0.72)
       :scene-push-base                '(0.04 0.24 0.88 1.0)
       :scene-queued-base              '(0.01 0.03 0.38 1.0)
@@ -109,6 +109,8 @@
       :record-active-base             '(0.12 0.001 0.001 1.0)
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)
       :clock-fg                       '(0.85 0.85 0.85 1.0)
+      :transport-led-bg               '(0.074 0.074 0.081 1.0)  ; LED panel: well below the playback container
+      :transport-controls-bg          '(0.095 0.095 0.105 1.0)  ; playback buttons: a shade darker than :bg
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
       :device-enabled                 '(1.0 0.8 0.12 1.0)
@@ -274,7 +276,7 @@
       :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
       :widget-knob-mod-dot  '(1.00 0.80 0.35)
-      :sequencer-step-border          '(0.13 0.14 0.15)
+      :sequencer-step-border          '(0.08 0.08 0.09)
       :sequencer-step-selected-border '(0.90 0.92 0.96)
       :sequencer-step-off-fill        '(0.015 0.028 0.025)
       :sequencer-step-off-fill-alt    '(0.15 0.155 0.16)

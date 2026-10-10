@@ -53,15 +53,43 @@
 ;; Transport bar height (cells). The knob is the customize-tier surface; the
 ;; function stays so a package can `override` it (e.g. a two-row transport
 ;; while its own view is showing).
-(defcustom transport-bar-height 2.4
+(defcustom transport-bar-height 3.4
   :type :number :min 1.5 :max 6 :step 0.1
   :doc "Height (cells) of the transport bar.")
 
 (def transport-height () transport-bar-height)
 
+;; The space between buffer tiles, and (`:outer-gap` on the root split) their
+;; margin to the window edges; the transport keeps its own gap. 0 butts them.
+(defcustom tile-gap 1
+  :type :number :min 0 :max 4 :step 0.25
+  :doc "Gap between buffer tiles, and their margin to the window edge (0 = none).")
+
 (def transport-tile-spec ()
   (list :buf "*transport*" :hide-status true :borderless true
     :min-height (transport-height) :max-height (transport-height)))
+
+;; The window titlebar band, beside the traffic lights, holds the panel
+;; toggles (*titlebar*, eseq-9ocu); the transport keeps its fixed row above
+;; the layout.
+(defcustom titlebar-height 1.75
+  :type :number :min 1 :max 4 :step 0.05
+  :doc "Height (cells) of the window titlebar band. The native titlebar is the floor.")
+
+;; `main` with the transport row on top.
+(def with-transport (main)
+  ;; The transport always keeps its gap; the edge margin follows tile-gap.
+  (list :rows :gap 1 :outer-gap tile-gap
+    0.05 (transport-tile-spec)
+    0.95 main))
+
+;; Every layout entry point goes through here so the titlebar is mounted
+;; whichever layout comes up first.
+(def set-layout-with-transport (spec)
+  (do
+    (set-layout spec)
+    (set-titlebar "*titlebar*" :height titlebar-height)))
+
 ;; The width itself lives in the seq-step-tabs hub (which cannot import us);
 ;; edit it there and every tile follows, including *sequencer*.
 (def border-width eseq.seq-step-tabs/seq-tile-border-width)
@@ -69,11 +97,11 @@
 ;; The right column: *step* over *track* — or, while a node editor is open
 ;; in the main tile, the *processes* dock (processes-dock-layout-spec).
 (def step-and-track-panel-layout-spec ()
-  (list :cols :gap 1
+  (list :cols :gap tile-gap
     0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
     0.22 (if (procs/showing?)
       (processes-dock-layout-spec)
-      (list :rows :gap 1
+      (list :rows :gap tile-gap
         0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
         0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height (track-tile-height) :min-height (track-tile-height) :min-width 28 :max-width 28)))))
 
@@ -155,7 +183,7 @@
 (def processes-dock-layout-spec ()
   (let ((code (procs/code-layout-buffer)))
     (if code
-      (list :rows :gap 1 :remember "processes-dock-code-split"
+      (list :rows :gap tile-gap :remember "processes-dock-code-split"
         (- 1.0 processes-code-ratio) (dock-tile-spec "*processes*" 6)
         processes-code-ratio (dock-tile-spec code 3))
       (dock-tile-spec "*processes*" 6))))
@@ -168,7 +196,7 @@
       (lambda () (eseq.macro-state/clear-mapping-arm))
       46 64 nil nil)
     (if (groove/showing?)
-      (list :rows :gap 1 :remember "sidebar-groove-split"
+      (list :rows :gap tile-gap :remember "sidebar-groove-split"
         (- 1.0 groove-buffer-ratio) (samples-panel-layout-spec 34 42 nil nil)
         groove-buffer-ratio (groove-panel-layout-spec))
       (samples-panel-layout-spec 34 42 nil nil))))
@@ -186,7 +214,7 @@
 
 (def main-and-mixer-layout-spec ()
   (if eseq.seq-core-state/mixer-panel-visible
-    (list :rows :gap 1
+    (list :rows :gap tile-gap
       0.55 (main-panel-layout-spec)
       0.45 (let ((h (eseq.seq-core-state/mixer-panel-height)))
              (mixer-panel-layout-spec nil nil h h)))
@@ -195,21 +223,18 @@
 (def lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (let ((main-layout
           (if eseq.seq-core-state/samples-sidebar-visible
-            (list :cols :gap 1
+            (list :cols :gap tile-gap
               (sidebar-ratio) (samples-sidebar-layout-spec)
               (- 1.0 (sidebar-ratio)) (main-and-mixer-layout-spec))
             (main-and-mixer-layout-spec))))
-    (if eseq.seq-core-state/lower-panel-visible
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.95 (list :rows :gap 1 :remember (str "sequencer-lower-panel:" lower-buffer)
+    (with-transport
+      (if eseq.seq-core-state/lower-panel-visible
+        (list :rows :gap tile-gap :remember (str "sequencer-lower-panel:" lower-buffer)
           0.95 main-layout
           lower-ratio (if (= lower-buffer "*fx*")
             (fx-panel-layout-spec nil nil lower-min-height lower-max-height)
-            (list :buf lower-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.95 main-layout))))
+            (list :buf lower-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
+        main-layout))))
 
 ;; Every patcher bottom-bar panel shares the regular fx-panel height so the
 ;; instrument preview isn't padded out by a taller neighbor.
@@ -218,23 +243,23 @@
 (def patcher-bottom-bar-layout-spec ()
   (let ((h patcher-bottom-bar-panel-height))
     (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/lower-panel-visible)
-      (list :cols :gap 1
+      (list :cols :gap tile-gap
         0.30 (samples-panel-layout-spec 28 28 h h)
         0.15 (patch-mixer-panel-layout-spec 10 10 h h)
         0.55 (fx-panel-layout-spec nil nil h h))
       (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible)
-        (list :cols :gap 1
+        (list :cols :gap tile-gap
           0.6 (samples-panel-layout-spec 28 28 h h)
           0.4 (patch-mixer-panel-layout-spec 10 10 h h))
       (if eseq.seq-core-state/samples-sidebar-visible
         (if eseq.seq-core-state/lower-panel-visible
-          (list :cols :gap 1
+          (list :cols :gap tile-gap
             0.5 (samples-panel-layout-spec 28 28 h h)
             0.5 (fx-panel-layout-spec nil nil h h))
           (samples-panel-layout-spec 28 28 h h))
         (if eseq.seq-core-state/mixer-panel-visible
           (if eseq.seq-core-state/lower-panel-visible
-            (list :cols :gap 1
+            (list :cols :gap tile-gap
               0.4 (patch-mixer-panel-layout-spec 10 10 h h)
               0.6 (fx-panel-layout-spec nil nil h h))
             (patch-mixer-panel-layout-spec 15 15 h h))
@@ -258,67 +283,61 @@
 
 (def patcher-main-layout-spec (patcher-buffer)
   (if eseq.seq-core-state/patch-macros-panel-visible
-    (list :cols :gap 1
+    (list :cols :gap tile-gap
       0.15 (patch-macros-panel-layout-spec)
       0.85 (patcher-canvas-layout-spec patcher-buffer))
     (patcher-canvas-layout-spec patcher-buffer)))
 
 (def instrument-patcher-layout-spec (patcher-buffer)
   (if (patcher-bottom-bar-visible?)
-    (list :rows :gap 1
-      0.05 (transport-tile-spec)
-      0.80 (patcher-main-layout-spec patcher-buffer)
-      0.15 (patcher-bottom-bar-layout-spec))
-    (list :rows :gap 1
-      0.05 (transport-tile-spec)
-      0.95 (patcher-main-layout-spec patcher-buffer))))
+    (with-transport
+      (list :rows :gap tile-gap
+        0.84 (patcher-main-layout-spec patcher-buffer)
+        0.16 (patcher-bottom-bar-layout-spec)))
+    (with-transport (patcher-main-layout-spec patcher-buffer))))
 
 (def instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
   (let ((main-layout
           (if eseq.seq-core-state/patch-macros-panel-visible
-            (list :cols :gap 1
+            (list :cols :gap tile-gap
               0.14 (patch-macros-panel-layout-spec)
               0.53 (patcher-canvas-layout-spec patcher-buffer)
               0.33 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20))
-            (list :cols :gap 1
+            (list :cols :gap tile-gap
               0.62 (patcher-canvas-layout-spec patcher-buffer)
               0.38 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20)))))
     (if (patcher-bottom-bar-visible?)
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.80 main-layout
-        0.15 (patcher-bottom-bar-layout-spec))
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.95 main-layout))))
+      (with-transport
+        (list :rows :gap tile-gap
+          0.84 main-layout
+          0.16 (patcher-bottom-bar-layout-spec)))
+      (with-transport main-layout))))
 
 ;; Patch Learn is a real sibling buffer in the editor's tile tree. Keeping it
 ;; outside the patcher render root prevents either pane from clipping, sizing,
 ;; or routing pointer input through the other one.
 (def instrument-patcher-learn-layout-spec (patcher-buffer learn-buffer)
   (let ((patcher-and-learn
-          (list :cols :gap 1 :remember (str "instrument-patcher-learn:" patcher-buffer)
+          (list :cols :gap tile-gap :remember (str "instrument-patcher-learn:" patcher-buffer)
             0.68 (patcher-canvas-layout-spec patcher-buffer)
             0.32 (patch-learn-buffer-layout-spec learn-buffer)))
         (main-layout
           (if eseq.seq-core-state/patch-macros-panel-visible
-            (list :cols :gap 1
+            (list :cols :gap tile-gap
               0.15 (patch-macros-panel-layout-spec)
               0.85 patcher-and-learn)
             patcher-and-learn)))
     (if (patcher-bottom-bar-visible?)
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.80 main-layout
-        0.15 (patcher-bottom-bar-layout-spec))
-      (list :rows :gap 1
-        0.05 (transport-tile-spec)
-        0.95 main-layout))))
+      (with-transport
+        (list :rows :gap tile-gap
+          0.84 main-layout
+          0.16 (patcher-bottom-bar-layout-spec)))
+      (with-transport main-layout))))
 
 (def apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
     (set! eseq.seq-step-tabs/seq-layout-mode :lower-panel)
-    (set-layout (lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
+    (set-layout-with-transport (lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
     (host-command "refresh-mixer-ui" (dict))))
 
 (defcustom lower-panel-ratio 0.33
@@ -342,7 +361,7 @@
     (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-source-buffer "")
     (set! eseq.seq-step-tabs/seq-patcher-learn-buffer "")
-    (set-layout (instrument-patcher-layout-spec patcher-buffer))
+    (set-layout-with-transport (instrument-patcher-layout-spec patcher-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def apply-instrument-patcher-source-layout (patcher-buffer source-buffer)
@@ -352,7 +371,7 @@
     (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-source-buffer source-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-learn-buffer "")
-    (set-layout (instrument-patcher-source-layout-spec patcher-buffer source-buffer))
+    (set-layout-with-transport (instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def apply-instrument-patcher-learn-layout (patcher-buffer learn-buffer)
@@ -362,7 +381,7 @@
     (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-source-buffer "")
     (set! eseq.seq-step-tabs/seq-patcher-learn-buffer learn-buffer)
-    (set-layout (instrument-patcher-learn-layout-spec patcher-buffer learn-buffer))
+    (set-layout-with-transport (instrument-patcher-learn-layout-spec patcher-buffer learn-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def refresh-current-layout ()

@@ -202,6 +202,52 @@
     }
 
     #[test]
+    fn track_and_group_color_edits_take_a_palette_color_and_are_undoable() {
+        use sequencer::track_color::TRACK_COLOR_PALETTE;
+        let (_state, mut app) = history_test_app();
+        let bus = app.buses[0].id;
+        app.groups.push(sequencer::project::ProjectTrackGroup {
+            id: 41,
+            name: "Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: bus.0,
+            rack: None,
+            rack_members: Vec::new(),
+        });
+        app.normalize_track_colors();
+        let original = app.track_colors[0];
+        let pick = TRACK_COLOR_PALETTE[3];
+
+        assert!(matches!(
+            app.apply_recorded_track_color(0, pick),
+            Ok(sequencer::app::edit::EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.track_colors[0], pick);
+        assert!(matches!(
+            app.apply_recorded_track_color(0, pick),
+            Ok(sequencer::app::edit::EditOutcome::NoOp)
+        ), "picking the color it has records nothing");
+
+        app.set_group_color_recorded(41, pick).expect("set group color");
+        assert_eq!(app.groups[0].color, [pick.r, pick.g, pick.b]);
+        assert!(app.set_group_color_recorded(41, pick).is_err(), "unchanged");
+        assert!(app.set_group_color_recorded(99, pick).is_err(), "missing group");
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[0].color, [0.5; 3]);
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.track_colors[0], original);
+    }
+
+    #[test]
     fn shared_bus_pull_copies_only_mixer_scalars_when_topology_is_unchanged() {
         let (_state, mut app) = history_test_app();
         app.buses = sequencer::app::BusChannelState::default_buses();

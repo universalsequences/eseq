@@ -37,7 +37,10 @@ mod inner {
         },
         event_loop::{ControlFlow, EventLoop},
         keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
-        platform::{pump_events::EventLoopExtPumpEvents, run_on_demand::EventLoopExtRunOnDemand},
+        platform::{
+            macos::WindowBuilderExtMacOS, pump_events::EventLoopExtPumpEvents,
+            run_on_demand::EventLoopExtRunOnDemand,
+        },
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
         window::{CursorIcon, Window},
     };
@@ -2301,6 +2304,48 @@ fragment float4 live_spectrogram_frag(
         }
     }
 
+    /// The titlebar band of the last presented frame, kept so a press can be
+    /// classified synchronously inside the event pump: AppKit's window drag
+    /// needs the mouse-down that is current at that moment.
+    struct TitlebarDragTarget {
+        /// Band height from the window top, in cells.
+        band_rows: f32,
+        /// The titlebar tile's body rect and widget layout, if one is mounted.
+        titlebar: Option<(Rect, std::sync::Arc<LayoutNode>)>,
+    }
+
+    impl TitlebarDragTarget {
+        fn from_frame(tiled: &TiledRenderFrame) -> Option<Self> {
+            let native_rows = crate::ui::window_chrome::current().titlebar_rows;
+            let tile = tiled
+                .titlebar_tile
+                .and_then(|id| tiled.tiles.iter().find(|tile| tile.tile_id == id));
+            let band_rows = tile.map_or(native_rows, |tile| tile.rect.height.max(native_rows));
+            (band_rows > 0.0).then(|| Self {
+                band_rows,
+                titlebar: tile.and_then(|tile| {
+                    Some((tile.body_rect, tile.frame.widget_layout.clone()?))
+                }),
+            })
+        }
+
+        /// A press at (col, row) cells drags the window: it is in the band and
+        /// lands on nothing that takes pointer input.
+        fn drags_window(&self, col: f32, row: f32) -> bool {
+            if row >= self.band_rows || widget_render::topmost_overlay().is_some() {
+                return false;
+            }
+            let Some((rect, layout)) = &self.titlebar else {
+                return true;
+            };
+            if col < rect.col || col >= rect.col + rect.width {
+                return true;
+            }
+            crate::layout::hit_test_layout(layout, row - rect.row, col - rect.col)
+                .is_none_or(|node| !widget_render::node_handles_pointer_events(node))
+        }
+    }
+
     pub struct MetalBackend {
         // Metal state
         device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -2387,6 +2432,13 @@ fragment float4 live_spectrogram_frag(
         press_physical: Option<PhysicalPosition<f64>>,
         hidden_drag: Option<HiddenDrag>,
         last_precise_mouse: Option<(f32, f32)>,
+        /// Where a press drags the window instead of reaching the editor: the
+        /// titlebar band, as of the last presented frame.
+        titlebar_drag: Option<TitlebarDragTarget>,
+        /// The release of a press handed to the window server as a drag.
+        swallow_release: Option<MouseButton>,
+        /// Time and cell of the last titlebar press, for double-click zoom.
+        last_titlebar_press: Option<(Instant, (f32, f32))>,
         last_window_bg: Option<Color>,
         start_time: Instant,
         initial_window_size: LogicalSize<f64>,
@@ -2544,6 +2596,9 @@ fragment float4 live_spectrogram_frag(
                 press_physical: None,
                 hidden_drag: None,
                 last_precise_mouse: None,
+                titlebar_drag: None,
+                swallow_release: None,
+                last_titlebar_press: None,
                 last_window_bg: None,
                 start_time: Instant::now(),
                 initial_window_size: LogicalSize::new(width as f64, height as f64),
@@ -4437,6 +4492,21 @@ fragment float4 live_spectrogram_frag(
             crate::ui::platform::sync_window_theme(window, bg);
         }
 
+        /// Publish the native titlebar band (in cells) for the editor's tile
+        /// layout. Cheap AppKit reads; runs whenever the host asks the size.
+        fn sync_window_chrome(&self) {
+            let (Some(window), Some(atlas)) = (self.window.as_ref(), self.atlas.as_ref()) else {
+                return;
+            };
+            let (band_pt, leading_pt) = crate::ui::platform::native_titlebar_metrics(window);
+            let scale = window.scale_factor();
+            crate::ui::window_chrome::set(crate::ui::window_chrome::WindowChrome {
+                titlebar_rows: (band_pt * scale / atlas.cell_h.max(1) as f64) as f32,
+                leading_cols: (leading_pt * scale / atlas.cell_w.max(1) as f64) as f32,
+                content_rows: window.inner_size().height as f32 / atlas.cell_h.max(1) as f32,
+            });
+        }
+
         fn ensure_waveform_buffer(
             &mut self,
             sample_key: &str,
@@ -5226,6 +5296,9 @@ fragment float4 live_spectrogram_frag(
             self.prop_text_layout_cache.begin_frame();
             self.begin_compiled_widget_run_frame();
 
+            if target.is_none() {
+                self.titlebar_drag = TitlebarDragTarget::from_frame(tiled);
+            }
             self.retained_widget_scenes.retain(|id, _|
                 tiled.tiles.iter().any(|tile| tile.tile_id == *id));
             self.retained_tile_primitives.retain(|id, _|
@@ -6866,6 +6939,39 @@ fragment float4 live_spectrogram_frag(
                         return;
                     };
                     match state {
+                        ElementState::Pressed
+                            if button == MouseButton::Left
+                                && self.hidden_drag.is_none()
+                                && self.titlebar_drag.as_ref().is_some_and(|target| {
+                                    target.drags_window(self.cursor_pos.0, self.cursor_pos.1)
+                                }) =>
+                        {
+                            // An empty spot of the titlebar band: the window
+                            // server moves the window; the editor never sees it.
+                            let now = Instant::now();
+                            let (col, row) = self.cursor_pos;
+                            let double = self.last_titlebar_press.take().is_some_and(
+                                |(at, (last_col, last_row))| {
+                                    now.duration_since(at)
+                                        <= crate::ui::platform::double_click_interval()
+                                        && (col - last_col).abs() < 1.0
+                                        && (row - last_row).abs() < 1.0
+                                },
+                            );
+                            if !double {
+                                self.last_titlebar_press = Some((now, (col, row)));
+                            }
+                            if let Some(window) = self.window.as_ref() {
+                                crate::ui::platform::titlebar_mouse_down(
+                                    window,
+                                    if double { 2 } else { 1 },
+                                );
+                            }
+                            self.swallow_release = Some(button);
+                        }
+                        ElementState::Released if self.swallow_release == Some(button) => {
+                            self.swallow_release = None;
+                        }
                         ElementState::Pressed => {
                             self.pressed_mouse_button = Some(button);
                             self.press_physical = Some(self.cursor_physical);
@@ -6981,6 +7087,11 @@ fragment float4 live_spectrogram_frag(
                 .with_title("eseq")
                 .with_inner_size(self.initial_window_size)
                 .with_visible(self.initial_window_visible)
+                // Draw under a transparent titlebar (Codex-style): the band
+                // belongs to the content view, and `set-titlebar` puts UI in it.
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
                 .build(&event_loop)
                 .map_err(|_| BackendError::MetalError)?;
 
@@ -7001,6 +7112,7 @@ fragment float4 live_spectrogram_frag(
                 width: phys.width as f64,
                 height: phys.height as f64,
             });
+            crate::ui::platform::disable_native_window_drag(&window);
             self.event_loop = Some(event_loop);
             self.window = Some(window);
             self.sync_window_theme();
@@ -7024,6 +7136,7 @@ fragment float4 live_spectrogram_frag(
             let Some(window) = &self.window else {
                 return (80, 24);
             };
+            self.sync_window_chrome();
             let size = window.inner_size();
             let (cell_w, cell_h) = self
                 .atlas
@@ -10922,7 +11035,7 @@ fragment float4 live_spectrogram_frag(
             root.children = vec![label, knob, envelope, styled];
             let area = Rect { col: 3.0, row: 2.0,
                 width: width as f32 / cell_w - 6.0, height: height as f32 / cell_h - 4.0 };
-            let mut tiled = TiledRenderFrame { completion: None, toast: None, tiles: vec![TileFrame {
+            let mut tiled = TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,
@@ -11008,7 +11121,7 @@ fragment float4 live_spectrogram_frag(
                 label.rect = Rect { col, row: row + 3.0, width: 6.0, height: 1.0 };
                 root.children.extend([knob, label]);
             }
-            TiledRenderFrame { completion: None, toast: None, tiles: vec![TileFrame {
+            TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,

@@ -1252,6 +1252,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
     pub(crate) const PROJECT_MACROS: FieldKey = (PROJECT, "macros");
     pub(crate) const PROJECT_NAME: FieldKey = (PROJECT, "name");
+    pub(crate) const PROJECT_DIRTY: FieldKey = (PROJECT, "dirty");
     pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
     pub(crate) const PROJECT_GRAPHS: FieldKey = (PROJECT, "graphs");
     pub(crate) const PROJECT_NETWORKS: FieldKey = (PROJECT, "networks");
@@ -1946,6 +1947,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // The project's name, compared every tick; the audio worker choices
     // with the settings (`presented`).
     (f::PROJECT_NAME, ":string", Model),
+    (f::PROJECT_DIRTY, ":bool", Model),
     (f::PROJECT_AUDIO_WORKERS_OPTIONS, "(list-of :string)", Model),
     // The package instances (the Packages tab's rows), compared every tick
     // by fingerprint like the legacy `SEQ.instances`.
@@ -2607,6 +2609,8 @@ pub(crate) struct HostKinds {
     warned: Vec<String>,
     /// The model revision of the last model sync; `None` forces one.
     model: Option<ModelRevision>,
+    /// `App::bus_pattern_restore_epoch` at the last shared bus refresh.
+    bus_pattern_restore_epoch: u64,
     /// The track registry's order at the last model sync.
     model_track_ids: Vec<sequencer::sequencer::TrackId>,
     /// `TrackId` → instance, for the registry generation in
@@ -2806,6 +2810,13 @@ impl HostKinds {
     ) -> bool {
         if rt.instance_kind_schema(TRACK).is_none() {
             return false; // eseq.kinds is not loaded
+        }
+        // A scene recall (manual switch, quantized launch, song row, scene
+        // clone/delete) rewrites `app.buses` without touching the shared
+        // copy the bus effect params read: refresh it before they read it.
+        if app.bus_pattern_restore_epoch != self.bus_pattern_restore_epoch {
+            *sources.bus_state.lock().unwrap() = app.buses.clone();
+            self.bus_pattern_restore_epoch = app.bus_pattern_restore_epoch;
         }
         if self.refresh_schema(rt) {
             self.model = None;

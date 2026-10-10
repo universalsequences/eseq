@@ -40,12 +40,12 @@
 ;; target, so consumers can use it directly without a text button wrapper.
 (defwidget disclosure-button
   :width 1.5 :height 1.5
-  :state (collapsed surface-alpha col)
+  :state (collapsed surface-alpha col stroke-width)
   :paint-margin 0.2
   :shader
   (sdf/layer
     (sdf/stroke (sdf/rounded-rect (* width 0.9) (* height 0.9) 1)
-      0.1 (rgba col col col 0.95))
+       stroke-width (rgba col col col 0.95))
 
     (sdf/fill
       (if (= collapsed 1)

@@ -716,6 +716,8 @@ pub struct TiledRenderFrame {
     pub tiles: Vec<TileFrame>,
     pub completion: Option<CompletionFrame>, // completion popup (global)
     pub toast: Option<ToastFrame>,           // bottom-right toast (global)
+    /// The tile shown in the window titlebar band (`set-titlebar`), if any.
+    pub titlebar_tile: Option<TileId>,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

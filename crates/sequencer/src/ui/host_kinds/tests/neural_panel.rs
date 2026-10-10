@@ -1284,6 +1284,48 @@ fn the_node_bay_wires_through_the_kinds_and_removes_the_selected_cable() {
     );
 }
 
+/// A real drag from one card's out port onto a later card's in port wires
+/// them: the press arms the port (the cable follows the pointer while it is
+/// pending) and the release over the in port dispatches its drop.
+#[test]
+fn a_real_drag_between_node_bay_ports_wires_them() {
+    let mut p = Panel::open();
+    let (rand, cmp) = (p.add("lane-rand"), p.add("lane-cmp"));
+    let bay = p.bay.clone();
+    let press = |p: &mut Panel, key: &str, kind: MouseEventKind| {
+        let layout = p.layout_of(&bay);
+        let node = measured(&layout, key).clone();
+        let (col, row) = (
+            node.rect.col + node.rect.width * 0.5,
+            node.rect.row + node.rect.height * 0.5,
+        );
+        p.h.editor.handle_mouse_precise(
+            MouseEvent { kind, column: col.floor() as u16, row: row.floor() as u16, modifiers: KeyModifiers::NONE },
+            0, 0, 240, 100, col, row,
+        );
+        p.render();
+    };
+    let out = format!("lane-patch-out-{rand}-wire");
+    press(&mut p, &out, MouseEventKind::Down(MouseButton::Left));
+    let ns = num(p.eval("(eseq.sequencer/lane-patch-node-namespace nn 1)")) as u64;
+    assert_eq!(
+        p.eval("(eseq.sequencer/lane-patch-pending-port)"),
+        number((ns * 4096 * 16) as f64),
+        "the press arms the port"
+    );
+    let layout = p.layout_of(&bay);
+    let node = measured(&layout, &out);
+    assert!(
+        eseqlisp::widget_render::patch_port_pending(&node.props, (ns * 4096 * 16) as usize),
+        "the out port reads pending: {:?}",
+        node.props.get("pending-port")
+    );
+    let inp = format!("lane-patch-in-port-{cmp}-a");
+    press(&mut p, &inp, MouseEventKind::Drag(MouseButton::Left));
+    press(&mut p, &inp, MouseEventKind::Up(MouseButton::Left));
+    assert_eq!(p.wired_to(rand, "wire"), list_value([number(cmp as f64), s("a")]));
+}
+
 /// The bay's card edits go through the setters: bypass, move and the card
 /// menu's delete; the + box adds a class by its node label (classes that do
 /// nothing on a node fire left out).

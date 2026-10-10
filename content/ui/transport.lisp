@@ -71,7 +71,12 @@
         scene-push-end
         pattern-control-style
         transport-body
+        titlebar-body
         transport-leading
+        transport-playback
+        transport-led
+        transport-clock-panel
+        transport-meter-panel
         transport-scene-strip
         transport-trailing)
 
@@ -215,8 +220,8 @@
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.54)
         (material
-          :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
-            :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+          :lighting (lighting :edge-min -0.115 :edge-max 1.2413
+            :light (vec3 -0.51 -1.851 2.5) :shininess 91.0)
           :color
           (if (> active 0)
             (let ((base :scene-active-base)
@@ -294,7 +299,7 @@
     (sdf/fill (sdf/rounded-rect width height height)
       (material
         :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
-          :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+          :light (vec3 -0.31 -0.851 0.5) :shininess 51.0)
         :color
         (if (> active 0)
           (let ((base :scene-action-base)
@@ -350,7 +355,7 @@
         (material :color fg-col)))))
 
 (defwidget samples-sidebar-icon
-  :width 2.8 :height 1.4
+  :width 3.5 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -362,25 +367,29 @@
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
+      (sdf/fill 
+        (sdf/rounded-rect width height 0.5)
+        (if active :buffer-bg :transparent)
+        )
       (sdf/fill
         (sdf/translate -0.38 0.0
-          (sdf/rounded-rect 0.10 0.55 0.08))
+          (sdf/rounded-rect 0.10 0.55 0.12))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.18 0.34
-          (sdf/rounded-rect 0.34 0.08 0.03))
+          (sdf/rounded-rect 0.34 0.08 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.18 0.0
-          (sdf/rounded-rect 0.34 0.08 0.03))
+          (sdf/rounded-rect 0.34 0.08 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.18 -0.34
-          (sdf/rounded-rect 0.34 0.08 0.03))
+          (sdf/rounded-rect 0.34 0.08 0.08))
         (material :color panel-col)))))
 
 (defwidget mix-panel-icon
-  :width 2.8 :height 1.4
+  :width 3.5 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -392,25 +401,29 @@
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
+      (sdf/fill 
+        (sdf/rounded-rect width height 0.5)
+        (if active :buffer-bg :transparent)
+        )
       (sdf/fill
         (sdf/translate 0.0 -0.34
-          (sdf/rounded-rect 0.56 0.10 0.08))
+          (sdf/rounded-rect 0.56 0.10 0.10))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate -0.34 0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.0 0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.34 0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col)))))
 
 (defwidget fx-panel-icon
-  :width 2.8 :height 1.4
+  :width 3.5 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -422,25 +435,29 @@
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
+      (sdf/fill 
+        (sdf/rounded-rect width height 0.5)
+        (if active :buffer-bg :transparent)
+        )
       (sdf/fill
         (sdf/translate 0.0 0.34
-          (sdf/rounded-rect 0.56 0.10 0.08))
+          (sdf/rounded-rect 0.56 0.10 0.10))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate -0.34 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.0 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col))
       (sdf/fill
         (sdf/translate 0.34 -0.14
-          (sdf/rounded-rect 0.08 0.34 0.03))
+          (sdf/rounded-rect 0.08 0.34 0.08))
         (material :color panel-col)))))
 
 (defwidget session-view-icon
-  :width 2.8 :height 1.4
+  :width 2.8 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -449,24 +466,28 @@
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
+      (sdf/fill 
+        (sdf/rounded-rect width height 0.5)
+        (if active :buffer-bg :transparent)
+        )
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
       (sdf/fill
         (sdf/translate -0.34 0.22
-          (sdf/rounded-rect 0.09 0.42 0.03))
+          (sdf/rounded-rect 0.09 0.32 0.09))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.0 0.08
-          (sdf/rounded-rect 0.09 0.56 0.03))
+          (sdf/rounded-rect 0.09 0.46 0.09))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.34 -0.08
-          (sdf/rounded-rect 0.09 0.72 0.03))
+          (sdf/rounded-rect 0.09 0.62 0.09))
         (material :color line-col)))))
 
 (defwidget arrangement-view-icon
-  :width 2.8 :height 1.4
+  :width 2.8 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -475,20 +496,24 @@
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
+      (sdf/fill 
+        (sdf/rounded-rect width height 0.5)
+        (if active :buffer-bg :transparent)
+        )
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
       (sdf/fill
         (sdf/translate -0.20 -0.32
-          (sdf/rounded-rect 0.54 0.08 0.03))
+          (sdf/rounded-rect 0.44 0.08 0.08))
         (material :color line-col))
       (sdf/fill
         (sdf/translate -0.08 0.0
-          (sdf/rounded-rect 0.66 0.08 0.03))
+          (sdf/rounded-rect 0.56 0.08 0.08))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.04 0.32
-          (sdf/rounded-rect 0.78 0.08 0.03))
+          (sdf/rounded-rect 0.68 0.08 0.08))
         (material :color line-col)))))
 
 (defwidget transport-tool-chip-bg
@@ -735,8 +760,8 @@
         :value b.label
         :options (append (scene-bank-labels) (list "New bank"))
         :on-change select-scene-bank
-        :bg-color :mixer-strip-bg
-        :border-color :mixer-strip-border
+        :bg-color :transport-led-bg
+        :border-color :bg
         :badge-color :transparent
         :width 4.2 :height 0.5 :font-size 10))))
 
@@ -952,39 +977,22 @@
 ;; A label on a pill: white while on (a value or a #' binding), else gray.
 (def pill-label (text on &key (font 9))
   (label text :font-size font :color :dimmer :active on :active-color :white
+    :height :fill
+    :h-align :center
+    :v-align :center
     :hover-color :white :bg :transparent))
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
-;; The transport bar is assembled from four overridable functions so a
-;; package can re-flow it (e.g. a two-row transport with the scene strip
-;; underneath) without retyping the controls: `transport-leading` (view
-;; buttons, menus, playback, clock, meters, cpu), `transport-scene-strip`
-;; (the scene pills), `transport-trailing` (context menus and the session/
-;; arrangement pair), and `transport-body` which lays them out. The first
-;; and third return child lists; stacks splice lists into their children.
+;; The transport is assembled from overridable functions so a package can
+;; re-flow it without retyping the controls. `transport-body` lays out
+;; `transport-leading` (the in-window menus) at the left, the playback group
+;; and the LED (`transport-led`: clock group over the wrapped scene launcher)
+;; in the centre, and `transport-meter-panel` at the right. The window
+;; titlebar (`titlebar-body`, below) keeps only the panel toggles and the
+;; session/arrangement pair. The list-returning ones splice into their stack.
 (def transport-leading ()
   (list
-    
-    (subtree :key "transport-samples-sidebar-button"
-      (samples-sidebar-icon
-        :on-click |x y r| (eseq.seq-panels/seq-toggle-samples-sidebar)
-        :style transport-icon-style
-        :active (if eseq.seq-core-state/samples-sidebar-visible 1 0)))
-    
-    (subtree :key "transport-mixer-panel-button"
-      (mix-panel-icon
-        :on-click |x y r| (eseq.seq-panels/seq-toggle-mixer-panel)
-        :style transport-icon-style
-        :active (if eseq.seq-core-state/mixer-panel-visible 1 0)))
-    
-    (subtree :key "transport-fx-panel-button"
-      (fx-panel-icon
-        :on-click |x y r| (eseq.seq-panels/seq-toggle-fx-panel)
-        :style transport-icon-style
-        :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
-    
-    (box :width 2)
     ;; A plain box, not an SDF icon: SDF widgets call `:on-click` with bare
     ;; |x y r| args, while a box passes the event map the menu anchors on.
     (subtree :key "transport-application-menus"
@@ -994,176 +1002,206 @@
           (map (lambda (name)
               (subtree :key (str "transport-" name "-menu-button")
                 (application-menu-button name)))
-            (application-menu-names)))))
-    
-    ;; Transport buttons in a shared rounded-rect container
-    (box :key "transport-playback-controls" :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
-      (h-stack :gap 0.2 :align :center
-        (subtree :key "transport-stop-button"
-          (box :width 2.5
-            :on-click |x y r| (transport-stop)
-            (stop-icon)))
-        (box :width 2.5
-          :on-click |x y r| (toggle! transport.playing)
-          (play-icon :active #'transport.playing))
-        (box :width 2.5
-          :on-click |x y r| (toggle! transport.recording)
-          (rec-icon :active #'transport.recording))
-        (subtree :key "transport-master-record-button"
-          (box :debug-name "transport-master-record-button"
-            :width 4.2 :height 1.1
-            :background "pattern-pill-bg"
-            :active #'master.recording
-            :style transport-icon-style
-            :on-click |x y r| (toggle! master.recording)
-            (v-stack :align :center
-              (pill-label "WAV" #'master.recording :font 10))))
-        ;; Back to Arrangement (unified-transport spec; Ableton semantics):
-        ;; lights the moment a manual launch overrides the arrangement,
-        ;; SURVIVES transport stop, and clicking hands the latched lanes
-        ;; back to the arrangement. The box is ALWAYS laid out (the icon
-        ;; binds the latch, so a flip only repaints); the icon is
-        ;; transparent while nothing is latched, and the click guards at
-        ;; event time.
-        (subtree :key "transport-back-to-arrangement"
-          (box :debug-name "transport-back-to-arrangement"
-            :width 2.5 :height 1.4
-            :style transport-icon-style
-            :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
-            (back-to-arrangement-icon :active #'song.manual-latch)))))
-    
-    ;; Single continuous LED panel
-    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 77
-      (h-stack :align :center
-        (subtree :key "transport-clock"
-          (h-stack :gap 0 :align :center :padding-left 0.5 :padding-right 0.5
-            (transport-clock
-              ;; One transport (docs/unified-transport-spec.md 4/8): the
-              ;; parked arrangement cursor while stopped, the live absolute
-              ;; arrangement clock during playback/capture.
-              :playhead #'transport.position
-              :song-position-beats
-              (if (= song.mode "stopped") #'song.cursor #'song.position)
-              :use-song-position true
-              :font-size 15 :width 10 :height 1.2
-              :color :clock-fg
-              :bg :transparent)
-            (label "" :width 1 :bg :transparent)
-            (number-picker :value transport.bpm :min 20 :max 300 :decimals 1
-              :key "transport-bpm"
-              :noui true
-              :font-size 15
-              :text-color :clock-fg
-              :on-change (lambda (v) (set! transport.bpm (floor v)))
-              :width 7 :height 1.2)
-            (subtree :key "transport-scene-transpose"
-              (number-picker :value scene-transpose
-                :key "transport-scene-transpose-picker"
-                :debug-name "transport-scene-transpose"
-                :on-right-click open-transpose-menu
-                :min -48 :max 48 :step 1 :decimals 0 :unit "st"
-                :noui true :font-size 15 :text-color :clock-fg
-                :on-change (lambda (v) (set! scene-transpose (round v)))
-                :width 5.5 :height 1.2))
-            (subtree :key "transport-scene-launch-quantize"
-              (dropdown
-                :bg-color :mixer-strip-bg
-                :border-color :mixer-strip-selected-bg
-                :badge-color :transparent
-                :key "transport-scene-launch-quantize-dropdown"
-                :debug-name "transport-scene-launch-quantize"
-                :value (launch-quantize)
-                :options launch-quantize-options
-                :on-change seq-set-scene-launch-quantize
-                :width 5.2 :height 1.15 :font-size 9))
-            (box :width 1.0)
-            (subtree :key "transport-record-quantize"
-              (dropdown
-                :bg-color :mixer-strip-bg
-                :border-color :mixer-strip-selected-bg
-                :badge-color :transparent
-                :key "transport-record-quantize-dropdown"
-                :debug-name "transport-record-quantize"
-                :value (label-or transport.record-quantize "1/16")
-                :options record-quantize-options
-                :on-change seq-set-record-quantize
-                :width 5.2 :height 1.15 :font-size 9))
-            (box :width 1.5)
-            (subtree :key "transport-metronome-toggle"
-              (box :debug-name "transport-metronome-toggle"
-                :width 3.4 :height 1.1
-                :background "pattern-pill-bg"
-                :on-click |x y r| (toggle! transport.metronome)
-                (v-stack :align :center
-                  (pill-label "MET" #'transport.metronome))))
-            ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
-            ;; display. Rate keys 1-8 switch the rate while roll mode is on.
-            (subtree :key "transport-roll-toggle"
-              (box :debug-name "transport-roll-toggle"
-                :width 5.5 :height 1.1
-                :background-color (if transport.sequence-rolling
-                  '(rgba 0.72 0.10 0.12 1)
-                  "pattern-pill-bg")
-                :on-click |x y r| (toggle! transport.roll-mode)
-                (h-stack :align :baseline :gap 0.3
-                  (box :width 0.2)
-                  (pill-label "ROLL" #'transport.roll-mode)
-                  (label (if transport.roll-mode transport.roll-rate "")
-                    :font-size 9
-                    :color '(rgba 0.63 0.88 0.41 1)
-                    :bg :transparent))))))
-        (v-stack :gap 0.08 :padding 0.05
-          (label "L"
-            :font-size 5 :width 0.9
+            (application-menu-names)))))))
+
+;; Transport buttons in a shared rounded-rect container, about three quarters
+;; the LED's height.
+(def transport-playback ()
+  (box :key "transport-playback-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.0015 :height 1.6
+    (h-stack :gap 0.2 :align :center
+      (box :width 0.3)
+      (subtree :key "transport-stop-button"
+        (box :width 3.0
+          :on-click |x y r| (transport-stop)
+          (stop-icon :width 3.0 :height 2.0)))
+      (box :width 3.0
+        :on-click |x y r| (toggle! transport.playing)
+        (play-icon :width 3.0 :height 2.0 :active #'transport.playing))
+          (box :width 3.0
             :v-align :center
-            :color '(rgba 0.63 0.88 0.41 1)
-            :bg :transparent)
+            :on-click |x y r| (toggle! transport.recording)
+            (rec-icon :width 3.0 :height 2.0 :active #'transport.recording
+              ))
+          (subtree :key "transport-master-record-button"
+            (box :debug-name "transport-master-record-button"
+              :width 4.6 :height 2
+              :background "pattern-pill-bg"
+              :active #'master.recording
+              :style transport-icon-style
+              :v-align :center
+              :on-click |x y r| (toggle! master.recording)
+              (pill-label "WAV" #'master.recording :font 11
+                )
+              )
+            )
+          ;; Back to Arrangement (unified-transport spec; Ableton semantics):
+          ;; lights the moment a manual launch overrides the arrangement,
+          ;; SURVIVES transport stop, and clicking hands the latched lanes
+          ;; back to the arrangement. The box is ALWAYS laid out (the icon
+          ;; binds the latch, so a flip only repaints); the icon is
+          ;; transparent while nothing is latched, and the click guards at
+          ;; event time.
+          (subtree :key "transport-back-to-arrangement"
+            (box :debug-name "transport-back-to-arrangement"
+              :width 3.0 :height 2.0
+              :style transport-icon-style
+              :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
+              (back-to-arrangement-icon :width 3.0 :height 2.0 :active #'song.manual-latch)))
+                (box :width 0.3))))
+
+;; The clock group on the LED's left half, two rows like a hardware LCD:
+;; clock, BPM and scene transpose on top; launch/record quantize, MET and
+;; ROLL beneath.
+(def transport-clock-panel ()
+            (v-stack :key "transport-clock-panel" :gap 0.15 :align :start
+              (subtree :key "transport-clock"
+                (h-stack :width :fill :gap 0 :align :center
+                  (transport-clock
+                    ;; One transport (docs/unified-transport-spec.md 4/8): the
+                    ;; parked arrangement cursor while stopped, the live absolute
+                    ;; arrangement clock during playback/capture.
+                    :playhead #'transport.position
+                    :song-position-beats
+                    (if (= song.mode "stopped") #'song.cursor #'song.position)
+                      :use-song-position true
+                      :font-size 17 :width 11 :height 1.2
+                      :color :clock-fg
+                      :bg :transparent)
+                    (box :width 0.6)
+                    (number-picker :value transport.bpm :min 20 :max 300 :decimals 1
+                      :key "transport-bpm"
+                      :noui true
+                      :font-size 17
+                      :text-color :clock-fg
+                      :on-change (lambda (v) (set! transport.bpm (floor v)))
+                      :width 7.5 :height 1.2)
+                    (subtree :key "transport-scene-transpose"
+                      (number-picker :value scene-transpose
+                        :key "transport-scene-transpose-picker"
+                        :debug-name "transport-scene-transpose"
+                        :on-right-click open-transpose-menu
+                        :min -48 :max 48 :step 1 :decimals 0 :unit "st"
+                        :noui true :font-size 17 :text-color :clock-fg
+                        :on-change (lambda (v) (set! scene-transpose (round v)))
+                        :width 6 :height 1.2))))
+                (h-stack :width :fill :gap 0.4 :align :center
+                  (subtree :key "transport-scene-launch-quantize"
+                    (dropdown
+                      :bg-color :transport-led-bg
+                      :border-color :bg
+                      :badge-color :transparent
+                      :key "transport-scene-launch-quantize-dropdown"
+                      :debug-name "transport-scene-launch-quantize"
+                      :value (launch-quantize)
+                      :options launch-quantize-options
+                      :on-change seq-set-scene-launch-quantize
+                      :width 5.2 :height 1.0 :font-size 9))
+                  (subtree :key "transport-record-quantize"
+                    (dropdown
+                      :bg-color :transport-led-bg
+                      :border-color :bg
+                      :badge-color :transparent
+                      :key "transport-record-quantize-dropdown"
+                      :debug-name "transport-record-quantize"
+                      :value (label-or transport.record-quantize "1/16")
+                      :options record-quantize-options
+                      :on-change seq-set-record-quantize
+                      :width 5.2 :height 1.0 :font-size 9))
+                  (box :width 0.4)
+                  (subtree :key "transport-metronome-toggle"
+                    (box :debug-name "transport-metronome-toggle"
+                      :width 3.4 :height 1.0
+                      :v-align :center
+                      :background "pattern-pill-bg"
+                      :on-click |x y r| (toggle! transport.metronome)
+                      (v-stack :align :center
+                        (pill-label "MET" #'transport.metronome))))
+                          ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
+                          ;; display. Rate keys 1-8 switch the rate while roll mode is on.
+                          (subtree :key "transport-roll-toggle"
+                            (box :debug-name "transport-roll-toggle"
+                              :width 5.5 :height 1.0
+                              :background-color (if transport.sequence-rolling
+                                '(rgba 0.72 0.10 0.12 1)
+                                "pattern-pill-bg")
+                              :on-click |x y r| (toggle! transport.roll-mode)
+                              (h-stack :align :baseline :gap 0.3
+                                (box :width 0.2)
+                                (pill-label "ROLL" #'transport.roll-mode)
+                                  (label (if transport.roll-mode transport.roll-rate "")
+                                    :font-size 9
+                                    :color '(rgba 0.63 0.88 0.41 1)
+                                    :bg :transparent)))))))
+
+;; The LED: one dark panel, two rows tall, holding the clock group on its
+;; left half and the scene launcher, wrapped onto two rows, on its right.
+(def transport-led ()
+  (box :key "transport-led" :background-color :transport-led-bg :corner-radius 64 :height 2.8
+    (h-stack :align :center :gap 0.8
+      (box :width 0.4)
+      (transport-clock-panel)
+      (box :width 0.08 :height 2.2 :background-color :mixer-strip-selected-bg)
+      (transport-scene-strip)
+      (box :width 0.4))))
+
+;; The master meters, CPU and output latency on their own LED panel, hugging
+;; the right end of the *transport* row.
+(def transport-meter-panel ()
+  (box :key "transport-meter-panel" :background-color :transport-controls-bg :corner-radius 64 :height 1.4
+    :width 27
+    (h-stack :align :center :gap 0.3
+      (box :width 0.6)
+      (v-stack :gap 0.08 :padding 0.05
+        (label "L"
+          :font-size 5 :width 0.9
+          :v-align :center
+          :color '(rgba 0.63 0.88 0.41 1)
+          :bg :transparent)
+        
+        (label "R"
+          :font-size 5 :width 0.9
+          :v-align :center
+          :color '(rgba 0.63 0.88 0.41 1)
+          :bg :transparent)          )
+      
+      
+      (v-stack :gap 0.08 :padding 0.05
+        (h-stack :gap 0.25
           
-          (label "R"
-            :font-size 5 :width 0.9
-            :v-align :center
-            :color '(rgba 0.63 0.88 0.41 1)
-            :bg :transparent)          )
-        
-        
-        (v-stack :gap 0.08 :padding 0.05
-          (h-stack :gap 0.25
-            
-            (v-stack
-              (box :height 0.0)
-              (subtree :key "master-meter-l"
-                (transport-master-meter :level #'master.peak-l))))
-          (h-stack :gap 0.25 :align :center
-            
-            (v-stack (box :height 0.1)
-              (subtree :key "master-meter-r"
-                (transport-master-meter :level #'master.peak-r)))))
-        (subtree :key "transport-cpu"
-          (h-stack :gap 0 :align :center :padding 0.4
-            (box :height 2.7
-              (label "cpu"
-                :v-align :center
-                :font-size 12 :width 3.0
-                :color :gray :active #'engine.overloaded :active-color :red
-                :bg :transparent))
-            (number-label :key "transport-cpu-value"
-              :value #'engine.cpu-load
-              :decimals 0 :min-integer-digits 2 :suffix "%"
-              :font-size 12 :width 2.0 :height 1
-              :color :dim :active #'engine.overloaded :active-color :red
-              :bg :transparent)))
-        ;; The latency planner aligns every route to this delay. A latent FX
-        ;; therefore delays the whole project, not only the track holding it.
-        (subtree :key "transport-output-latency"
-          (h-stack :gap 0 :align :baseline :padding 0.5
-            (number-label :key "transport-output-latency-value"
-              :value #'engine.latency-ms
-              :decimals 1 :min-integer-digits 2 :suffix "ms"
-              :font-size 12 :width 3.5 :height 1
-              :color :gray
-              :bg :transparent)))))
-    
-  ))
+          (v-stack
+            (box :height 0.0)
+            (subtree :key "master-meter-l"
+              (transport-master-meter :level #'master.peak-l))))
+        (h-stack :gap 0.25 :align :center
+          
+          (v-stack (box :height 0.1)
+            (subtree :key "master-meter-r"
+              (transport-master-meter :level #'master.peak-r)))))
+      (subtree :key "transport-cpu"
+        (h-stack :gap 0 :align :center :padding 0.4
+          (box :height 2.7
+            (label "cpu"
+              :v-align :center
+              :font-size 12 :width 3.0
+              :color :gray :active #'engine.overloaded :active-color :red
+              :bg :transparent))
+          (number-label :key "transport-cpu-value"
+            :value #'engine.cpu-load
+            :decimals 0 :min-integer-digits 2 :suffix "%"
+            :font-size 12 :width 2.0 :height 1
+            :color :dim :active #'engine.overloaded :active-color :red
+            :bg :transparent)))
+      (box :width 0.8)
+      ;; The latency planner aligns every route to this delay. A latent FX
+      ;; therefore delays the whole project, not only the track holding it.
+      (subtree :key "transport-output-latency"
+        (h-stack :gap 0 :align :baseline :padding 0.5
+          (number-label :key "transport-output-latency-value"
+            :value #'engine.latency-ms
+            :decimals 1 :min-integer-digits 2 :suffix "ms"
+            :font-size 12 :width 3.5 :height 1
+            :color :gray
+            :bg :transparent))))))
 
 ;; One scene's pill: lit while it plays (bindings: launches only repaint),
 ;; pulsing while queued. Its index addresses the host's commands.
@@ -1216,35 +1254,35 @@
 (def scene-strip (b)
   (let ((offset (bank-offset b))
         (size (bank-size b))
+        ;; Scenes fill the first row, then wrap onto the second (24 max).
+        (cols 12)
         (deletable (and (> (len project.scenes) 1) b.playing)))
-    (box :background "transport-scene-strip-bg"
-      :corner-radius 64
-      :key "transport-scene-strip"
+    ;; No background of its own: the LED is the scenes' container, and each
+    ;; pill draws its own push interpolation.
+    (box :key "transport-scene-strip"
       :debug-name "transport-scene-strip"
-      :push #'scene-push.value
-      :push-target (if (and (>= scene-push.target offset)
-                            (< scene-push.target (+ offset size)))
-                     (- scene-push.target offset)
-                     -1)
-      :scene-count size
-      :padding 0.2 :height 1.4
-      (h-stack :gap 0.1 :align :center
-        (each b.scenes |s| (scene-pill s))
-        (label "" :width 0.2 :bg :transparent)
-        (scene-strip-button "scene-bank-add" "+" (not (bank-full? b))
-          (lambda ()
-            (if (bank-full? b)
-              (status "This scene bank is full (24 scenes maximum)")
-              (seq-clone-pattern))))
-        (scene-strip-button "scene-bank-delete" "-" deletable
-          (lambda () (when deletable (delete-scene! transport.scene))))
-        (h-stack :gap 0.12 :align :center
-          (box :width 0.5)
-          (scene-bank-selector b)
-          (if (scene-playing-in-other-bank? b)
-            (scene-bank-playing-indicator
-              :debug-name "scene-bank-playing-other-indicator")
-            (box :width 0.45 :height 0.45 :bg :transparent)))
+      (h-stack :gap 0.5 :align :center
+        ;; Room for a full bank: 12 columns of 2.5-wide pills at 0.1 gaps.
+        (v-stack :gap 0.15 :width 31.5
+          (h-stack :gap 0.1 :align :center
+            (each (filter (lambda (s) (< (- s.index offset) cols)) b.scenes) |s| (scene-pill s)))
+          (h-stack :gap 0.1 :align :center
+            (each (filter (lambda (s) (>= (- s.index offset) cols)) b.scenes) |s| (scene-pill s))))
+        (v-stack :gap 0.15
+          (h-stack :gap 0.1 :align :center
+            (scene-strip-button "scene-bank-add" "+" (not (bank-full? b))
+              (lambda ()
+                (if (bank-full? b)
+                  (status "This scene bank is full (24 scenes maximum)")
+                  (seq-clone-pattern))))
+            (scene-strip-button "scene-bank-delete" "-" deletable
+              (lambda () (when deletable (delete-scene! transport.scene)))))
+          (h-stack :gap 0.12 :align :center :height 1.1
+            (scene-bank-selector b)
+            (if (scene-playing-in-other-bank? b)
+              (scene-bank-playing-indicator
+                :debug-name "scene-bank-playing-other-indicator")
+              (box :width 0.45 :height 0.45 :bg :transparent))))
         (scene-bank-context-menu)
         (scene-bank-ops-context-menu)))))
 
@@ -1258,31 +1296,101 @@
 
 (def transport-trailing ()
   (list
-    (subtree :key "transport-transpose-context-menu"
-      (transpose-context-menu))
     (subtree :key "transport-context-menus"
-      (h-stack :gap 0 (map application-context-menu (application-menu-names))))
-    
-    ;; Session and arrangement are app views, not tabs in the main buffer.
-    ;; This spacer keeps the view pair against the transport's right edge.
-    (box :width 0 :flex 1)
-    (subtree :key "transport-session-view-button"
-      (session-view-icon
-        :on-click |x y r| (eseq.seq-panels/seq-show-sequencer-main)
-        :style transport-icon-style
-        :active (if (tabs/seq-arrangement-view?) 0 1)))
-    (subtree :key "transport-arrangement-view-button"
-      (arrangement-view-icon
-        :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
-        :style transport-icon-style
-        :active (if (tabs/seq-arrangement-view?) 1 0)))
-  ))
+      (h-stack :gap 0 (map application-context-menu (application-menu-names))))))
 
 (def transport-body ()
-  (h-stack :key "transport-bar" :width :fill :gap 0.5 :padding 0.5 :align :center
-    (transport-leading)
-    (transport-scene-strip)
-    (transport-trailing)))
+  ;; Fills its row and centres the controls vertically. The left and right
+  ;; columns share the free width equally, so the playback group and the LED
+  ;; stay centred whatever the menus and the meters measure.
+  (h-stack :key "transport-bar" :width :fill :height :fill :gap 0.5
+    :padding-left 0.5 :padding-right 0.5 :align :center
+    (box :key "transport-leading-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.4
+      (h-stack :key "transport-left" :width 0 :flex 1 :height :fill :gap 0.2 :align :center
+        (titlebar-leading)
+        (transport-leading))
+      )
+    (box :width 3)
+    (box :flex 1 :height 0 :width 0)
+    (transport-playback)
+    (transport-led)
+    (subtree :key "transport-transpose-context-menu"
+      (transpose-context-menu))
+    (transport-trailing)
+    
+    (h-stack :key "transport-right" :width 0 :flex 1 :height :fill :gap 0.5 :align :center
+      (box :width 0 :flex 1 :height 0)
+      (transport-meter-panel)
+      (titlebar-trailing))))
+
+;; ── Window titlebar ──
+;; The window titlebar beside the traffic lights (`set-titlebar`, eseq-9ocu;
+;; seq-layout mounts this buffer there) shows the project title: the panel toggles
+;; (`titlebar-leading`) and the session/arrangement pair (`titlebar-trailing`)
+;; sit at the ends of the *transport* row.
+(set-buffer-mode-for "*titlebar*" "eseq.sequencer-keys/sequencer-keys")
+
+(def titlebar-leading ()
+  (list
+    (subtree :key "transport-samples-sidebar-button"
+      (samples-sidebar-icon
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-samples-sidebar)
+        :style transport-icon-style
+        :active (if eseq.seq-core-state/samples-sidebar-visible 1 0)))
+    
+    (subtree :key "transport-mixer-panel-button"
+      (mix-panel-icon
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-mixer-panel)
+        :style transport-icon-style
+        :active (if eseq.seq-core-state/mixer-panel-visible 1 0)))
+    
+    (subtree :key "transport-fx-panel-button"
+      (fx-panel-icon
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-fx-panel)
+        :style transport-icon-style
+        :active (if eseq.seq-core-state/lower-panel-visible 1 0)))))
+
+;; Session and arrangement are app views, not tabs in the main buffer: the
+;; pair sits at the titlebar's right end.
+(def titlebar-trailing ()
+  (box :key "transport-trailing-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.4
+    (h-stack :gap 0.1
+      (list
+        (subtree :key "transport-session-view-button"
+          (session-view-icon
+            :on-click |x y r| (eseq.seq-panels/seq-show-sequencer-main)
+            :style transport-icon-style
+            :active (if (tabs/seq-arrangement-view?) 0 1)))
+        (subtree :key "transport-arrangement-view-button"
+          (arrangement-view-icon
+            :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
+            :style transport-icon-style
+            :active (if (tabs/seq-arrangement-view?) 1 0)))))
+    ))
+
+;; The project's name centred like a document title, followed by a green
+;; "saved" only while there is nothing unsaved.
+(def titlebar-project-title ()
+  (subtree :key "titlebar-project-title"
+    (h-stack :gap 0.6 :align :baseline
+      (label (if (= project.name "") "Untitled" project.name)
+        :font-size 12 :color :white :bg :transparent)
+      (if project.dirty
+        (nothing)
+        (label "saved" :font-size 10
+          :color '(rgba 0.34 0.86 0.40 1) :bg :transparent)))))
+
+(def titlebar-body ()
+  ;; The bar starts after the window buttons; the right spacer's extra base
+  ;; width of that inset centres the title on the window, not on the bar.
+  (h-stack :key "titlebar-bar" :width :fill :height :fill :gap 0.5
+    :padding-left 0.5 :padding-right 0.5 :align :center
+    (box :width 0 :flex 1)
+    (titlebar-project-title)
+    (box :width (window-titlebar-inset) :flex 1)))
+
+(effect-buffer "*titlebar*"
+  (titlebar-body))
 
 (effect-buffer "*transport*"
   (transport-body))

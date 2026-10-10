@@ -349,6 +349,14 @@ const TRANSPORT_BPM_PICKER_KEY: &str = "eseq.transport/transport-bpm";
 const BARE_TRANSPORT_BPM_PICKER_KEY: &str = "transport-bpm";
 
 fn focus_transport_bpm(editor: &mut Editor) -> bool {
+    // The transport normally lives in the window titlebar, which takes the
+    // keyboard without becoming the active tile.
+    if editor.titlebar_buffer_name() == Some("*transport*") {
+        editor.refresh_visible_layouts_for_buffer_named("*transport*");
+        return [TRANSPORT_BPM_PICKER_KEY, BARE_TRANSPORT_BPM_PICKER_KEY].iter().any(|key| {
+            editor.focus_titlebar_widget_by_stable_key("*transport*", key, Some("number-picker"))
+        });
+    }
     if !editor.switch_active_tile_to_buffer_named("*transport*") {
         let _ = editor
             .runtime_mut()
@@ -1629,6 +1637,18 @@ impl RecordingKeyOutcome {
 /// Coarser grids are expressed in beats and then converted through the
 /// track's timebase, which keeps recording quantization independent from the
 /// global transport resolution.
+/// Held length of a recorded live note, in steps of the target track's
+/// timebase.
+fn recorded_duration_steps(
+    hold_beats: f64,
+    timebase: sequencer::sequencer::Timebase,
+    num_steps: usize,
+) -> f32 {
+    (hold_beats / timebase.step_beats(num_steps))
+        .max(0.15)
+        .min(64.0) as f32
+}
+
 fn quantized_record_position(
     step: usize,
     phase: f32,
@@ -2169,9 +2189,7 @@ fn live_note_off(
 
         if recording.load(Ordering::Relaxed) && state.is_playing() {
             let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
-            let secs_per_step = 60.0 / bpm / 4.0;
-            let hold_secs = note.press_time.elapsed().as_secs_f64();
-            let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
+            let hold_beats = note.press_time.elapsed().as_secs_f64() * bpm / 60.0;
             let mut recorded_steps: Vec<(usize, usize)> = Vec::new();
 
             let mut recorded_take = false;
@@ -2196,6 +2214,12 @@ fn live_note_off(
                 stamped,
             } in &note.targets
             {
+                // Durations are in steps of the target track's OWN
+                // timebase: the same hold on a 1/4 track is a quarter
+                // as many steps as on a 1/16 track.
+                let num_steps = state.pattern.track_params[track].get_num_steps();
+                let timebase = state.pattern.track_params[track].get_timebase();
+                let duration_steps = recorded_duration_steps(hold_beats, timebase, num_steps);
                 // Song-mode take recording (takes spec 8.4): while
                 // arrangement capture is active, an armed track's
                 // notes retarget into its pending take at
@@ -2235,12 +2259,11 @@ fn live_note_off(
                 // timebase and length, which is what lets one rack
                 // performance land a 1/64 hat pad and a 1/16 kick pad
                 // on their own grids.
-                let num_steps = state.pattern.track_params[track].get_num_steps();
                 let (local_step, delay) = quantized_record_position(
                     position.step,
                     position.phase,
                     num_steps,
-                    state.pattern.track_params[track].get_timebase(),
+                    timebase,
                     quantize,
                 );
                 if record_stamp_debug() {
@@ -2351,7 +2374,8 @@ mod live_keyboard_tests {
         LiveNoteSource,
         is_active_roll_rate_key, is_duplicate_shortcut_for, is_new_instrument_shortcut_for,
         normalize_command_shortcuts, normalize_command_shortcuts_for, note_from_key,
-        number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
+        number_picker_edit_state, quantized_record_position, recorded_duration_steps,
+        sample_browser_search_shortcut_for,
         sequencer_history_shortcut, sequencer_tab_shortcut_index_for,
         should_route_to_live_keyboard, should_toggle_play_on_space,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
@@ -3310,6 +3334,16 @@ mod live_keyboard_tests {
             quantized_record_position(15, 0.9, 16, Timebase::Sixteenth, RecordQuantize::Quarter),
             (0, 0.0)
         );
+    }
+
+    #[test]
+    fn recorded_duration_is_in_steps_of_the_track_timebase() {
+        // One beat held: four 1/16 steps, one 1/4 step, two 1/8 steps.
+        assert_eq!(recorded_duration_steps(1.0, Timebase::Sixteenth, 16), 4.0);
+        assert_eq!(recorded_duration_steps(1.0, Timebase::Quarter, 16), 1.0);
+        assert_eq!(recorded_duration_steps(1.0, Timebase::Eighth, 16), 2.0);
+        // Clamped to a playable minimum regardless of timebase.
+        assert_eq!(recorded_duration_steps(0.0, Timebase::Quarter, 16), 0.15);
     }
 
     /// Load the shared sequencer keymap module into a bare editor and make

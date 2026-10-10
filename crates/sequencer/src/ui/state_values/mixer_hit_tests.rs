@@ -367,3 +367,67 @@ fn group_badge_clicks_ignore_routes_from_unavailable_mod_outputs() {
         }
     }
 }
+
+#[test]
+fn group_menu_color_row_opens_its_submenu_on_first_hover() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    set_full_grid_track_count(&mut editor, 3, 16);
+    apply_group_bindings(&mut editor, rack_group_fixture(false));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    assert!(editor.switch_active_tile_to_buffer_named("*mixer*"));
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|t| t.frame.buffer_name == "*mixer*").unwrap();
+    let layout = tile.frame.widget_layout.as_deref().unwrap();
+    let badge = find_layout_node_by_stable_key_suffix(layout, "group-badge-7").expect("group badge");
+    let at = || map_value([("col", Value::Number(20.0)), ("row", Value::Number(10.0))]);
+    editor.runtime_mut().invoke(
+        badge.props["on-right-click"].clone(),
+        vec![map_value([("col", Value::Number(20.0)), ("row", Value::Number(10.0)), ("at", at())])],
+    ).expect("open group menu");
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|t| t.frame.buffer_name == "*mixer*").unwrap();
+    let layout = tile.frame.widget_layout.as_deref().unwrap();
+    fn open_menu(node: &eseqlisp::layout::LayoutNode) -> Option<&eseqlisp::layout::LayoutNode> {
+        if node.widget_type == "context-menu" && !node.children.is_empty() { return Some(node); }
+        node.children.iter().find_map(open_menu)
+    }
+    let menu = open_menu(layout).expect("open group menu");
+    let color = find_layout_node_by_stable_key_suffix(layout, "/track-menu-:color-menu").expect("color row");
+    let (scroll_left, scroll_top) = (tile.frame.widget_layout_scroll_left, tile.frame.widget_scroll_top);
+    let at = (
+        tile.rect.col + color.rect.col + color.rect.width * 0.5 - scroll_left,
+        tile.rect.row + color.rect.row + color.rect.height * 0.5 - scroll_top,
+    );
+    // The GPU pass registers the open menu's panel; mirror that, then make
+    // a different tile active, as when the mixer was never clicked.
+    let rows = &menu.children;
+    let top = rows.iter().map(|r| r.rect.row).fold(f32::MAX, f32::min);
+    let bottom = rows.iter().map(|r| r.rect.row + r.rect.height).fold(0.0, f32::max);
+    let mixer_tile = tile.tile_id;
+    let other = frame.tiles.iter().find(|t| t.tile_id != mixer_tile).expect("another tile").tile_id;
+    editor.switch_active_tile(other);
+    eseqlisp::widget_render::push_overlay(eseqlisp::widget_render::OverlayEntry {
+        widget_id: menu.widget_id,
+        rect: eseqlisp::layout::Rect {
+            row: top - scroll_top - 0.5, col: color.rect.col - scroll_left,
+            width: color.rect.width, height: bottom - top + 1.0,
+        },
+        kind: eseqlisp::widget_render::OverlayKind::Modal,
+    });
+    editor.handle_tiled_mouse_precise(MouseEvent {
+        kind: MouseEventKind::Moved, column: at.0 as u16, row: at.1 as u16, modifiers: KeyModifiers::NONE,
+    }, at.0, at.1, 0);
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|t| t.frame.buffer_name == "*mixer*").unwrap();
+    let layout = tile.frame.widget_layout.as_deref().unwrap();
+    assert!(
+        find_layout_node_by_stable_key_suffix(layout, "/track-menu-:set-color-0").is_some(),
+        "hovering Color opens the palette submenu",
+    );
+}

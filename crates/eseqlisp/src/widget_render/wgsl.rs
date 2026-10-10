@@ -516,6 +516,10 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (input.value_t > 21.5) {
+        // swatch: a solid disc, the same in either style (a color chip whose
+        // color is the glyph's own).
+        d = length(p) - 0.46;
     } else if (input.value_t > 20.5) {
         // save: a tray with an arrow dropping into it (export's mirror).
         var tray_l: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.08), vec2<f32>(-0.46, 0.44)) - stroke;

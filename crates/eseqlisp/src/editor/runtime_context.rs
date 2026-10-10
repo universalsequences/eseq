@@ -50,7 +50,7 @@ fn is_presentation_buffer(buffer: &Buffer) -> bool {
 }
 
 impl PresentationMetadata {
-    fn matches(&self, buffers: &[Buffer], tiles: &TileNode) -> bool {
+    fn matches(&self, buffers: &[Buffer], tiles: &TileTree) -> bool {
         if self.buffers.len() != buffers.len()
             || !self.buffers.iter().zip(buffers).all(|((name, presentation), buffer)| {
                 *name == buffer.name && *presentation == is_presentation_buffer(buffer)
@@ -69,7 +69,9 @@ impl PresentationMetadata {
             }
         }
         let mut previous = self.tile_buffers.iter();
-        matches_leaves(tiles, &mut previous) && previous.next().is_none()
+        matches_leaves(&tiles.content, &mut previous)
+            && tiles.titlebar.as_ref().is_none_or(|leaf| previous.next() == Some(&leaf.buffer_idx))
+            && previous.next().is_none()
     }
 }
 

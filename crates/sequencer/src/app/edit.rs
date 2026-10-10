@@ -2720,6 +2720,41 @@ impl App {
         )))
     }
 
+    pub fn apply_recorded_track_color(
+        &mut self,
+        track: usize,
+        color: crate::track_color::TrackColor,
+    ) -> Result<EditOutcome, String> {
+        finish_active_gesture(self);
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        self.normalize_track_name_authorship();
+        self.normalize_track_colors();
+        self.normalize_track_collapsed();
+        let color = color.clamped();
+        if self.track_colors[track] == color {
+            return Ok(EditOutcome::NoOp);
+        }
+        let before = TrackPresentationState {
+            name: self.tracks[track].clone(),
+            name_user_authored: self.track_name_user_authored[track],
+            color: self.track_colors[track],
+            collapsed: self.track_collapsed[track],
+        };
+        let after = TrackPresentationState { color, ..before.clone() };
+        self.track_colors[track] = color;
+        let patch = TrackPresentationPatch {
+            changes: vec![TrackPresentationChange { track: track_id, before, after }],
+        };
+        let retained_bytes = patch.retained_bytes();
+        Ok(EditOutcome::Applied(self.history.commit(
+            "Set track color",
+            None,
+            EditPatch::TrackPresentation(patch),
+            retained_bytes,
+        )))
+    }
+
     pub fn apply_recorded_track_collapsed(
         &mut self,
         collapsed: Vec<bool>,
@@ -3885,6 +3920,24 @@ impl App {
             PatternLengthChange::Halve => "Halve drum rack patterns",
         };
         apply_recorded_pattern_geometry_commands(self, &commands, label)
+    }
+
+    pub fn set_group_color_recorded(
+        &mut self,
+        group_id: u64,
+        color: crate::track_color::TrackColor,
+    ) -> Result<(), String> {
+        let color = color.clamped();
+        let color = [color.r, color.g, color.b];
+        self.apply_recorded_bus_group_structure_mutation("Set track group color", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            if group.color == color {
+                return Err("Track group color is unchanged".to_string());
+            }
+            group.color = color;
+            Ok(())
+        })
     }
 
     pub fn rename_group_recorded(&mut self, group_id: u64, name: String) -> Result<(), String> {

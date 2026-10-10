@@ -14,6 +14,9 @@ impl Editor {
             "paste" => KeyCode::Char('v'), "select-all" => KeyCode::Char('a'),
             "delete" => KeyCode::Delete, _ => return false,
         };
+        if let Some(handled) = self.titlebar_edit_action(action) {
+            return handled;
+        }
         if self.focused_widget_id().is_some() {
             // A widget that refuses the key may still take it through its
             // :on-focus-key (the patcher's Lisp-bound copy/paste/delete).

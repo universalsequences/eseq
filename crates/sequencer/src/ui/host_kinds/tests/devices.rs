@@ -203,6 +203,33 @@ fn midi_device_params_set_through_history_with_undo() {
 }
 
 #[test]
+fn bus_effect_params_follow_each_scenes_values() {
+    let mut h = Harness::new();
+    let (bus, slot) = h.bus_with_filter();
+    let base = h.app.buses[bus].effect_slots[slot].defaults[CUTOFF];
+    h.command("clone-pattern", Value::Nil);
+    let switch = |h: &mut Harness, idx: usize| {
+        h.eval_all(&format!(
+            "(host-command \"switch-pattern\" (dict :idx {idx} :quantize \"off\"))"
+        ));
+        h.drain_and_sync();
+    };
+    switch(&mut h, 0);
+    h.eval_all(&format!(
+        r#"(def b (nth (buses) {bus})) (def bd (first b.devices)) (def bc (device-param bd "cutoff"))"#
+    ));
+    h.eval_all("(set! bc.base 1500)");
+    h.drain_and_sync();
+    assert_eq!(h.eval_all("bc.base"), Value::Number(1500.0));
+    // Scene 2 recalls its own value; the param shows it, not scene 1's.
+    switch(&mut h, 1);
+    assert_eq!(h.app.buses[bus].effect_slots[slot].defaults[CUTOFF], base);
+    assert_eq!(h.eval_all("bc.base"), Value::Number(base as f64));
+    switch(&mut h, 0);
+    assert_eq!(h.eval_all("bc.base"), Value::Number(1500.0));
+}
+
+#[test]
 fn bus_devices_read_after_sync_and_set_through_history() {
     let mut h = Harness::new();
     let (bus, slot) = h.bus_with_filter();

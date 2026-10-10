@@ -378,7 +378,8 @@ fn highlight_line_with_known(
     while idx < chars.len() {
         let ch = chars[idx].1;
         match ch {
-            ';' | '#' => {
+            // `#'sym` is a reactive-binding quote, not a comment.
+            ';' | '#' if !(ch == '#' && chars.get(idx + 1).is_some_and(|(_, c)| *c == '\'')) => {
                 spans.push(TokenSpan {
                     start: idx,
                     end: chars.len(),
@@ -546,7 +547,8 @@ fn enclosing_form_tokens_before_cursor(
             continue;
         }
         match byte {
-            b';' | b'#' => in_comment = true,
+            b';' => in_comment = true,
+            b'#' if bytes.get(index + 1) != Some(&b'\'') => in_comment = true,
             b'"' => in_string = true,
             b'(' => stack.push(index),
             b')' => {
@@ -594,7 +596,7 @@ fn top_level_form_tokens(source: &str) -> Vec<String> {
             continue;
         }
         match byte {
-            b';' | b'#' if depth == 0 => {
+            b';' | b'#' if depth == 0 && !(byte == b'#' && bytes.get(index + 1) == Some(&b'\'')) => {
                 finish_token(index, &mut token_start, &mut tokens);
                 in_comment = true;
             }
@@ -895,6 +897,22 @@ mod tests {
         assert_eq!(class_of("0b1011"), Some(TokenClass::Number));
         assert_eq!(class_of("-0x10"), Some(TokenClass::Number));
         assert_ne!(class_of("0xZZ"), Some(TokenClass::Number));
+    }
+
+    #[test]
+    fn hash_quote_binding_is_not_a_comment() {
+        let line = "(pill-label \"WAV\" #'master.recording :font 11) ; tail";
+        let buffer = Buffer::from_text(0, "*test*", line);
+        let spans = highlight_line(&BufferMode::ESeqLisp, line, &[], &buffer);
+        let class_at = |text: &str| {
+            let start = line.find(text).unwrap();
+            spans.iter().find(|span| span.start == start).map(|span| span.class)
+        };
+        assert_eq!(class_at(":font"), Some(TokenClass::Keyword));
+        assert_eq!(class_at("11"), Some(TokenClass::Number));
+        assert_eq!(class_at("; tail"), Some(TokenClass::Comment));
+        let comments = spans.iter().filter(|span| span.class == TokenClass::Comment).count();
+        assert_eq!(comments, 1);
     }
 
     #[test]

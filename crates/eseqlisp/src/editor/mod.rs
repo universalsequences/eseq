@@ -2,6 +2,7 @@ mod commands;
 mod minibuffer;
 mod natives;
 mod runtime_context;
+mod titlebar;
 pub use natives::{AssetMetadata, asset_metadata, asset_metadata_lisp_value, asset_option_labels};
 pub(crate) mod widget_focus;
 mod widget_interaction;
@@ -28,7 +29,7 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{
-    SplitDir, TileBufferTab, TileFrameCacheKey, TileId, TileLeaf, TileNode, TileSplit,
+    SplitDir, TileBufferTab, TileFrameCacheKey, TileId, TileLeaf, TileNode, TileSplit, TileTree,
     split_ratio_for_point, tile_body_rect, tile_tab_layouts,
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
@@ -680,7 +681,7 @@ pub struct ToastAction {
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     buffer_recency: Vec<BufferId>,
-    pub tile_root: TileNode,
+    pub tile_root: TileTree,
     pub active_tile: TileId,
     next_tile_id: TileId,
     pub minibuffer: Option<String>,
@@ -733,6 +734,8 @@ pub struct Editor {
     cached_tiled_frame_size: Option<(f32, f32)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
+    /// Rows the mounted titlebar asks for; the band is at least the native one.
+    titlebar_height: f32,
     remembered_split_ratios: HashMap<String, f32>,
     /// Last selected buffer for each declarative tab group. Unlike tile paths,
     /// a group's ordered buffer IDs remain stable when surrounding panes are
@@ -863,7 +866,7 @@ impl Editor {
         let mut editor = Editor {
             buffers: vec![Buffer::new(0, "*scratch*")],
             buffer_recency: vec![0],
-            tile_root: TileNode::Leaf(TileLeaf::new(0, 0)),
+            tile_root: TileTree::new(TileNode::Leaf(TileLeaf::new(0, 0))),
             active_tile: 0,
             next_tile_id: 1,
             minibuffer: None,
@@ -910,6 +913,7 @@ impl Editor {
             cached_tile_rects: vec![],
             cached_tiled_frame_size: None,
             tile_outer_gap: 0.0,
+            titlebar_height: 0.0,
             remembered_split_ratios: HashMap::new(),
             remembered_tab_selections: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
@@ -1215,12 +1219,30 @@ impl Editor {
             * crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT)
             / cell_w.max(1.0))
         .min(total_width as f32 * 0.5);
+        // User tiles start below the window's titlebar band: the native band
+        // (macOS draws the content view under it), grown to the mounted
+        // titlebar's requested height. A backend that measured the window's
+        // exact height runs the tiles to its bottom edge, less the same outer
+        // gap the sides keep; otherwise 1 row stays reserved for the global
+        // status bar.
+        let chrome = crate::ui::window_chrome::current();
+        let bottom = if chrome.content_rows > 0.0 {
+            let bottom_margin = horizontal_margin * cell_w.max(1.0) / cell_h.max(1.0);
+            (chrome.content_rows - bottom_margin).max(0.0)
+        } else {
+            (total_height as f32 - 1.0).max(0.0)
+        };
+        let titlebar_rows = if self.tile_root.titlebar.is_some() {
+            chrome.titlebar_rows.max(self.titlebar_height)
+        } else {
+            chrome.titlebar_rows
+        }
+        .clamp(0.0, bottom);
         let area = Rect {
-            row: 0.0,
+            row: titlebar_rows,
             col: horizontal_margin,
             width: (total_width as f32 - horizontal_margin * 2.0).max(0.0),
-            // Reserve 1 row for global status bar
-            height: (total_height as f32 - 1.0).max(0.0),
+            height: (bottom - titlebar_rows).max(0.0),
         };
         // Enforce min-size constraints before computing rects
         Self::enforce_min_sizes_node(&mut self.tile_root, area, cell_w, cell_h);
@@ -1231,6 +1253,21 @@ impl Editor {
             cell_w,
             cell_h,
         );
+        if let Some(titlebar_id) = self.tile_root.titlebar_id() {
+            // The band's left end belongs to the native window buttons
+            // (`window-titlebar-inset` tells Lisp how wide, to centre on the
+            // window rather than on this rect).
+            let left = chrome.leading_cols.max(horizontal_margin);
+            self.cached_tile_rects.push((
+                titlebar_id,
+                Rect {
+                    row: 0.0,
+                    col: left,
+                    width: (total_width as f32 - horizontal_margin - left).max(0.0),
+                    height: titlebar_rows,
+                },
+            ));
+        }
         let viewport_sizes: Vec<(TileId, f32, f32)> = self
             .cached_tile_rects
             .iter()
@@ -1411,7 +1448,9 @@ impl Editor {
     }
 
     fn tile_root_rect(&self) -> Option<Rect> {
-        let mut rects = self.cached_tile_rects.iter().map(|(_, rect)| *rect);
+        let mut rects = self.cached_tile_rects.iter()
+            .filter(|(id, _)| !self.tile_root.is_titlebar(*id))
+            .map(|(_, rect)| *rect);
         let first = rects.next()?;
         let mut min_row = first.row;
         let mut min_col = first.col;
@@ -1537,10 +1576,10 @@ impl Editor {
         let split_id = self.alloc_tile_id();
         let new_tile_id = self.alloc_tile_id();
         let existing_root = std::mem::replace(
-            &mut self.tile_root,
+            &mut self.tile_root.content,
             TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx)),
         );
-        self.tile_root = TileNode::Split(TileSplit {
+        self.tile_root.content = TileNode::Split(TileSplit {
             id: split_id,
             dir: SplitDir::Vertical,
             ratio: 0.72,
@@ -1592,7 +1631,7 @@ impl Editor {
         let removed = self.tile_root.remove_leaf(self.active_tile);
         if removed.is_some() {
             // Switch to the first remaining leaf
-            let ids = self.tile_root.leaf_ids();
+            let ids = self.tile_root.content_leaf_ids();
             self.active_tile = ids[0];
             let buffer_idx = self.active_buffer_idx();
             self.record_buffer_access_by_idx(buffer_idx);
@@ -1625,7 +1664,8 @@ impl Editor {
         use crate::tile::TileSplit;
 
         let outer_gap = match &spec {
-            LayoutSpec::Rows { gap, .. } | LayoutSpec::Cols { gap, .. } => *gap,
+            LayoutSpec::Rows { gap, outer_gap, .. }
+            | LayoutSpec::Cols { gap, outer_gap, .. } => outer_gap.unwrap_or(*gap),
             LayoutSpec::Buffer { .. } => 0.0,
         };
         let previous_active_buffer_id = self
@@ -1779,6 +1819,7 @@ impl Editor {
                     gap,
                     remember,
                     panes,
+                    ..
                 } => build_split(
                     panes,
                     SplitDir::Horizontal,
@@ -1794,6 +1835,7 @@ impl Editor {
                     gap,
                     remember,
                     panes,
+                    ..
                 } => build_split(
                     panes,
                     SplitDir::Vertical,
@@ -1904,13 +1946,13 @@ impl Editor {
                 return;
             }
         };
-        self.tile_root = new_root;
+        self.tile_root.content = new_root;
         self.prune_retained_tile_layouts();
         self.tile_outer_gap = outer_gap;
         // Enforce min-size constraints on initial ratios
         self.enforce_min_sizes_recursive();
         // Preserve the active buffer when the rebuilt layout still contains it.
-        let ids = self.tile_root.leaf_ids();
+        let ids = self.tile_root.content_leaf_ids();
         let active_tile = previous_active_buffer_id
             .and_then(|buffer_id| {
                 ids.iter().copied().find(|id| {
@@ -1973,7 +2015,12 @@ impl Editor {
 
     /// Walk the tile tree and clamp split ratios to respect min-width/min-height.
     fn enforce_min_sizes_recursive(&mut self) {
-        let rects = self.cached_tile_rects.clone();
+        let rects: Vec<_> = self
+            .cached_tile_rects
+            .iter()
+            .filter(|(id, _)| !self.tile_root.is_titlebar(*id))
+            .copied()
+            .collect();
         if rects.is_empty() {
             return;
         }
@@ -2053,7 +2100,7 @@ impl Editor {
 
     /// Cycle active tile to the next leaf in order.
     pub fn cycle_active_tile(&mut self) {
-        let ids = self.tile_root.leaf_ids();
+        let ids = self.tile_root.content_leaf_ids();
         if ids.len() <= 1 {
             return;
         }
@@ -2137,8 +2184,12 @@ impl Editor {
             else {
                 return;
             };
-            if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
-                self.update_inactive_overlay_hover(
+            // Hover alone stays on the cheap inactive-tile path; a move that
+            // opens or closes a context-menu submenu needs the full routed
+            // dispatch, which relayouts the owner tile.
+            if matches!(mouse.kind, MouseEventKind::Moved)
+                && tile_id != self.active_tile
+                && !self.update_inactive_overlay_hover(
                     entry,
                     tile_id,
                     content_col,
@@ -2146,7 +2197,8 @@ impl Editor {
                     precise_col,
                     precise_row,
                     border_inset,
-                );
+                )
+            {
                 return;
             }
             self.route_event_to_tile(tile_id, border_inset, false, |editor| {
@@ -2173,6 +2225,10 @@ impl Editor {
                     event_col,
                     event_row,
                 );
+                // An inactive owner tile renders from its cached layout, so
+                // keep a relayout from this dispatch (an opened submenu)
+                // before route_event_to_tile switches back.
+                editor.sync_layout_to_active_leaf();
             });
             if self.overlay_entry_is_open_in_tile(entry, tile_id) {
                 crate::widget_render::push_overlay(entry);
@@ -2269,6 +2325,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_titlebar_mouse(mouse, precise_col, precise_row, border_inset) {
+            return;
+        }
+
         let screen_col = precise_col;
         let screen_row = precise_row;
 
@@ -2305,7 +2365,23 @@ impl Editor {
         {
             let started_drag = match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    self.active_widget_drag_gesture_for_drag(screen_col, screen_row)
+                    // The press was recorded in the gesture tile's content
+                    // coordinates; measure the drag in the same space, or the
+                    // tile's sub-cell offset eats into the start threshold.
+                    let (drag_col, drag_row) = self
+                        .tile_content_area(self.active_tile, border_inset)
+                        .and_then(|(content_col, content_row, _, _)| {
+                            self.tile_content_precise_event_position(
+                                self.active_tile,
+                                border_inset,
+                                content_col,
+                                content_row,
+                                precise_col,
+                                precise_row,
+                            )
+                        })
+                        .unwrap_or((screen_col, screen_row));
+                    self.active_widget_drag_gesture_for_drag(drag_col, drag_row)
                 }
                 MouseEventKind::Up(MouseButton::Left) => self.active_widget_drag_gesture_for_drop(),
                 _ => None,
@@ -2702,6 +2778,8 @@ impl Editor {
         }
     }
 
+    /// Returns true when the move would change a context menu's open
+    /// submenu branch, which the caller must dispatch through the owner tile.
     fn update_inactive_overlay_hover(
         &mut self,
         entry: crate::widget_render::OverlayEntry,
@@ -2711,7 +2789,7 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
         border_inset: u16,
-    ) {
+    ) -> bool {
         let (event_col, event_row) = self
             .tile_content_precise_event_position(
                 tile_id,
@@ -2729,9 +2807,10 @@ impl Editor {
             if crate::widget_render::dropdown::hover_overlay(entry.widget_id, local_row) {
                 self.mark_needs_redraw();
             }
-            return;
+            return false;
         }
 
+        let mut branch_changes = false;
         let hit = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
             let layout = leaf.cached_layout.as_deref()?;
             let modal = widget_focus::find_node_by_id(layout, entry.widget_id)
@@ -2739,8 +2818,15 @@ impl Editor {
             let layout_col = local_col + leaf.widget_scroll_left;
             let layout_row = local_row + leaf.widget_scroll_top;
             let hit = crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)?;
-            Some((modal.widget_type == "context-menu", hit.clone()))
+            let is_menu = modal.widget_type == "context-menu";
+            branch_changes = is_menu
+                && crate::widget_render::context_menu::path_to_item(&modal, hit.widget_id)
+                    .is_some_and(|path| path != crate::widget_render::context_menu::branch(&modal));
+            Some((is_menu, hit.clone()))
         });
+        if branch_changes {
+            return true;
+        }
         if crate::widget_render::set_pointer_hover_widget(hit.as_ref().map(|(_, node)| node.widget_id)) {
             self.mark_needs_redraw();
         }
@@ -2759,6 +2845,7 @@ impl Editor {
             self.mark_needs_redraw();
         }
         self.widget_cursor = WidgetCursor::Default;
+        false
     }
 
     pub fn handle_tiled_touchpad_magnify(
@@ -4577,8 +4664,13 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// The keyboard-owning widget: a focused titlebar widget, else the active
+    /// tile's focused widget.
     pub fn focused_widget_id(&self) -> Option<u64> {
-        self.active_leaf().focused_widget_id
+        self.titlebar_focus_tile()
+            .and_then(|id| self.tile_root.find_leaf(id))
+            .and_then(|leaf| leaf.focused_widget_id)
+            .or(self.active_leaf().focused_widget_id)
     }
 
     pub fn widget_layout(&self) -> Option<Arc<crate::layout::LayoutNode>> {
@@ -5584,7 +5676,14 @@ impl Editor {
                     *selected_buffer_id != removed_id && !tab_buffer_ids.contains(&removed_id)
                 });
             // Fix up any tile leaf buffer indices that pointed past the removed slot
-            Self::fix_leaf_indices(&mut self.tile_root, idx);
+            Self::fix_leaf_indices(&mut self.tile_root.content, idx);
+            if self.tile_root.titlebar.as_ref().is_some_and(|leaf| leaf.buffer_idx == idx) {
+                self.unmount_titlebar();
+            } else if let Some(leaf) = self.tile_root.titlebar.as_mut()
+                && leaf.buffer_idx > idx
+            {
+                leaf.buffer_idx -= 1;
+            }
             true
         } else {
             false
@@ -6354,6 +6453,12 @@ impl Editor {
         // open), and never let an unhandled modal key reach editor/global
         // bindings. Escape and focused modal widgets are handled inside.
         if self.handle_open_modal_key(key) {
+            return;
+        }
+
+        // A focused titlebar widget (the transport's BPM picker) sees keys
+        // before the active tile; what it refuses continues below.
+        if self.handle_titlebar_focus_key(key) {
             return;
         }
 
@@ -9754,6 +9859,12 @@ impl Editor {
                 crate::runtime::TileOp::SetLayout(spec) => {
                     self.apply_layout_spec(spec);
                 }
+                crate::runtime::TileOp::SetTitlebar(Some(spec)) => {
+                    if let Err(error) = self.mount_titlebar(spec) {
+                        self.minibuffer = Some(format!("set-titlebar: {error}"));
+                    }
+                }
+                crate::runtime::TileOp::SetTitlebar(None) => self.unmount_titlebar(),
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         if self.active_buffer_idx() == idx {
@@ -10205,7 +10316,7 @@ impl Editor {
         ) {
             return Some(PatcherSourceTabTarget::SourceBuffer { path });
         }
-        if let Some(node) = self.focused_widget_node()
+        if let Some(node) = self.active_focused_widget_node()
             && node.widget_type == "patcher"
             && !crate::widget_render::patcher::patcher_has_text_edit(&node)
         {
@@ -10263,7 +10374,7 @@ impl Editor {
     }
 
     fn visible_tile_for_buffer_id(&self, id: BufferId) -> Option<TileId> {
-        self.tile_root.leaf_ids().into_iter().find(|tile_id| {
+        self.tile_root.content_leaf_ids().into_iter().find(|tile_id| {
             self.tile_root
                 .find_leaf(*tile_id)
                 .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
@@ -10273,7 +10384,7 @@ impl Editor {
 
     fn visible_emitted_source_tile_for_path(&self, path: &str) -> Option<TileId> {
         let source_buffer_name = crate::widget_render::patcher::emitted_source_buffer_name(path);
-        self.tile_root.leaf_ids().into_iter().find(|tile_id| {
+        self.tile_root.content_leaf_ids().into_iter().find(|tile_id| {
             self.tile_root
                 .find_leaf(*tile_id)
                 .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
@@ -10292,7 +10403,7 @@ impl Editor {
         if self.tile_root.remove_leaf(remove_tile_id).is_none() {
             return;
         }
-        let remaining_ids = self.tile_root.leaf_ids();
+        let remaining_ids = self.tile_root.content_leaf_ids();
         let next_tile = activate_tile_id
             .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
             .or_else(|| remaining_ids.first().copied());

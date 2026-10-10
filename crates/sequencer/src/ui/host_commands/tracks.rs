@@ -4,6 +4,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "reveal-sequencer-track",
     "rename-track",
     "rename-group",
+    "set-track-color",
+    "set-group-color",
     "convert-group-to-drum-rack",
     "ungroup-tracks",
     "add-track-empty",
@@ -72,6 +74,12 @@ pub(crate) fn apply_rename_group_host_command(
     let name = extract_string_from_payload(payload, "name")
         .ok_or_else(|| "Rename group requires a group id and name".to_string())?;
     app.rename_group_recorded(group_id, name)
+}
+
+/// The payload's `:color` palette index as a track color.
+fn extract_palette_color(payload: &Value) -> Option<sequencer::track_color::TrackColor> {
+    let index = extract_usize_from_payload(payload, "color")?;
+    sequencer::track_color::TRACK_COLOR_PALETTE.get(index).copied()
 }
 
 fn sync_after_track_topology_delete(
@@ -195,6 +203,53 @@ pub(super) fn handle(
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            }
+        }
+        "set-track-color" => {
+            let track = extract_usize_from_payload(&payload, "track");
+            let color = extract_palette_color(&payload);
+            match (track, color) {
+                (Some(track), Some(color)) => match app.apply_recorded_track_color(track, color) {
+                    Ok(app::edit::EditOutcome::Applied(result)) => {
+                        let rt = editor.runtime_mut();
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.show_transient_message(result.label);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(app::edit::EditOutcome::NoOp) => {}
+                    Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+                        editor.handle_host_event(HostEvent::Error(
+                            "Track color was applied without history".to_string(),
+                        ));
+                    }
+                    Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                },
+                _ => editor.handle_host_event(HostEvent::Error(
+                    "Set track color requires a track and a palette index".to_string(),
+                )),
+            }
+        }
+        "set-group-color" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let color = extract_palette_color(&payload);
+            match (group_id, color) {
+                (Some(group_id), Some(color)) => match app.set_group_color_recorded(group_id, color) {
+                    Ok(()) => {
+                        *track_groups.lock().unwrap() = app.groups.clone();
+                        let rt = editor.runtime_mut();
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.show_transient_message("Set track group color".to_string());
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Picking the color it already has is not an error.
+                    Err(error) if error.ends_with("unchanged") => {}
+                    Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                },
+                _ => editor.handle_host_event(HostEvent::Error(
+                    "Set group color requires a group id and a palette index".to_string(),
+                )),
             }
         }
         "convert-group-to-drum-rack" => {

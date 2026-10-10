@@ -1417,6 +1417,62 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "window-titlebar-inset",
+        "(window-titlebar-inset)",
+        "Width in cells that the native window buttons take at the left end of the\n\
+         titlebar band (0 without native chrome, or in full screen). A titlebar\n\
+         buffer starts after them; add this much on its right side to centre a\n\
+         control on the window.",
+        |_args, _ctx| {
+            Ok(Value::Number(crate::ui::window_chrome::current().leading_cols as f64))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-titlebar",
+        "(set-titlebar buffer &key height background-color)",
+        "Show a UI buffer in the window's titlebar band, beside the native window\n\
+         buttons, or clear the band with nil. :height is the band height in cells\n\
+         (the native titlebar band is the floor; without native chrome it is the\n\
+         strip's height). :background-color is a theme color name. The titlebar\n\
+         is not a tile: it never becomes the active tile, and a focused input\n\
+         widget in it sees keys first until Enter, Escape, Tab, or a click elsewhere.",
+        |args, ctx| {
+            let buffer = match args.first() {
+                Some(Value::String(name)) => name.clone(),
+                Some(Value::Nil) | None => {
+                    ctx.set_titlebar(None);
+                    return Ok(Value::Bool(true));
+                }
+                Some(other) => {
+                    return Err(format!("set-titlebar: expected a buffer name or nil, got {other:?}"));
+                }
+            };
+            let mut spec = crate::runtime::TitlebarSpec {
+                buffer,
+                height: 0.0,
+                background_color_name: None,
+            };
+            let mut rest = args.iter().skip(1);
+            while let Some(key) = rest.next() {
+                let (Value::Keyword(key), Some(value)) = (key, rest.next()) else {
+                    return Err("set-titlebar: options are :keyword value pairs".to_string());
+                };
+                match (key.as_str(), value) {
+                    ("height", Value::Number(n)) => spec.height = (*n as f32).max(0.0),
+                    ("background-color", Value::Keyword(name) | Value::String(name)) => {
+                        spec.background_color_name = Some(name.clone());
+                    }
+                    ("background-color", Value::Nil) => {}
+                    _ => return Err(format!("set-titlebar: bad option :{key}")),
+                }
+            }
+            ctx.set_titlebar(Some(spec));
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "set-layout",
         "(set-layout spec)",
         "Set the window layout declaratively. Spec is a nested list:\n\
@@ -1424,7 +1480,9 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
          :rows splits horizontally (top/bottom), :cols splits vertically (left/right).\n\
          Each pane is preceded by its ratio (fraction of parent space). Add\n\
          :remember \"stable-key\" to a split to restore its last user-resized ratio\n\
-         when a later set-layout rebuilds that split.",
+         when a later set-layout rebuilds that split. :gap sets the space between\n\
+         a split's panes; on the root split it is also the margin to the window\n\
+         edges unless :outer-gap gives that margin separately.",
         |args, ctx| {
             use crate::runtime::LayoutSpec;
 
@@ -1594,6 +1652,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         let mut panes = Vec::new();
                         let mut i = 1;
                         let mut gap = 0.0f32;
+                        let mut outer_gap = None;
                         let mut remember = None;
                         while i < items.len() {
                             if let Value::Keyword(k) = &*items[i].borrow() {
@@ -1608,6 +1667,17 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                         match &*gap_val {
                                             Value::Number(n) => gap = (*n as f32).max(0.0),
                                             _ => return Err(":gap expects a number".into()),
+                                        }
+                                        i += 1;
+                                        continue;
+                                    }
+                                    "outer-gap" => {
+                                        let gap_val = items[i].borrow();
+                                        match &*gap_val {
+                                            Value::Number(n) => {
+                                                outer_gap = Some((*n as f32).max(0.0))
+                                            }
+                                            _ => return Err(":outer-gap expects a number".into()),
                                         }
                                         i += 1;
                                         continue;
@@ -1650,11 +1720,13 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         Ok(match dir {
                             "rows" => LayoutSpec::Rows {
                                 gap,
+                                outer_gap,
                                 remember,
                                 panes,
                             },
                             _ => LayoutSpec::Cols {
                                 gap,
+                                outer_gap,
                                 remember,
                                 panes,
                             },

@@ -224,6 +224,10 @@ pub struct Theme {
     pub record_active_base: Color,
     pub record_idle_fg: Color,
     pub clock_fg: Color,
+    /// The transport's clock/scene LED panel.
+    pub transport_led_bg: Color,
+    /// The transport's playback-button container beside the LED.
+    pub transport_controls_bg: Color,
     pub preset_save_bg: Color,
     pub preset_save_active_bg: Color,
     pub device_enabled: Color,
@@ -557,6 +561,8 @@ theme_slots!(
     (record_active_base, RECORD_ACTIVE_BASE, Color::rgba(0.12, 0.001, 0.001, 1.0)),
     (record_idle_fg, RECORD_IDLE_FG, Color::rgba(0.65, 0.18, 0.18, 1.0)),
     (clock_fg, CLOCK_FG, Color::rgba(0.85, 0.85, 0.85, 1.0)),
+    (transport_led_bg, TRANSPORT_LED_BG, Color::rgba(0.035, 0.035, 0.040, 1.0)),
+    (transport_controls_bg, TRANSPORT_CONTROLS_BG, Color::rgba(0.075, 0.075, 0.090, 1.0)),
     (preset_save_bg, PRESET_SAVE_BG, Color::rgba(0.08, 0.08, 0.01, 1.0)),
     (preset_save_active_bg, PRESET_SAVE_ACTIVE_BG, Color::rgba(0.00, 0.35, 0.82, 1.0)),
     (device_enabled, DEVICE_ENABLED, Color::rgba(1.0, 0.8, 0.12, 1.0)),
@@ -1583,6 +1589,8 @@ mod tests {
             "patcher-agentic-send-bg",
             "patcher-agentic-send-glyph",
             "patcher-agentic-spinner",
+            "transport-led-bg",
+            "transport-controls-bg",
         ];
         for name in names {
             assert!(

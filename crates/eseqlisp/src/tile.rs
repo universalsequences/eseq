@@ -127,6 +127,81 @@ pub struct TileLeaf {
     pub cached_inactive_frame: Option<(TileFrameCacheKey, crate::backend::RenderFrame)>,
 }
 
+/// Every tile on screen: the user-arranged split tree plus the optional
+/// titlebar leaf (`set-titlebar`), which sits in the window's titlebar band
+/// outside the splits.
+///
+/// Derefs to the split tree, so structural operations (split, remove,
+/// resize, `leaf_count`) only ever see user tiles. The lookups below shadow
+/// the tree's own: they also find the titlebar leaf, so the per-tile
+/// machinery (layout caching, reactive sync, event routing) serves it
+/// unchanged.
+pub struct TileTree {
+    pub content: TileNode,
+    pub titlebar: Option<TileLeaf>,
+}
+
+impl TileTree {
+    pub fn new(content: TileNode) -> Self {
+        Self { content, titlebar: None }
+    }
+
+    pub fn titlebar_id(&self) -> Option<TileId> {
+        self.titlebar.as_ref().map(|leaf| leaf.id)
+    }
+
+    pub fn is_titlebar(&self, id: TileId) -> bool {
+        self.titlebar_id() == Some(id)
+    }
+
+    pub fn find_leaf(&self, id: TileId) -> Option<&TileLeaf> {
+        match &self.titlebar {
+            Some(leaf) if leaf.id == id => Some(leaf),
+            _ => self.content.find_leaf(id),
+        }
+    }
+
+    pub fn find_leaf_mut(&mut self, id: TileId) -> Option<&mut TileLeaf> {
+        match &mut self.titlebar {
+            Some(leaf) if leaf.id == id => Some(leaf),
+            _ => self.content.find_leaf_mut(id),
+        }
+    }
+
+    /// Every visible leaf: the split tree's in order, then the titlebar.
+    pub fn leaf_ids(&self) -> Vec<TileId> {
+        let mut ids = self.content.leaf_ids();
+        ids.extend(self.titlebar_id());
+        ids
+    }
+
+    /// The user tiles only — what tile cycling and active-tile fallback pick from.
+    pub fn content_leaf_ids(&self) -> Vec<TileId> {
+        self.content.leaf_ids()
+    }
+
+    pub fn clear_focus_except(&mut self, keep_id: TileId) {
+        self.content.clear_focus_except(keep_id);
+        if let Some(leaf) = self.titlebar.as_mut().filter(|leaf| leaf.id != keep_id) {
+            leaf.focused_widget_id = None;
+            leaf.focused_widget_node = None;
+        }
+    }
+}
+
+impl std::ops::Deref for TileTree {
+    type Target = TileNode;
+    fn deref(&self) -> &TileNode {
+        &self.content
+    }
+}
+
+impl std::ops::DerefMut for TileTree {
+    fn deref_mut(&mut self) -> &mut TileNode {
+        &mut self.content
+    }
+}
+
 pub struct TileSplit {
     pub id: TileId,
     pub dir: SplitDir,

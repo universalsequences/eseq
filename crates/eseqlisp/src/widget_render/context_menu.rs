@@ -642,7 +642,11 @@ impl WidgetDefinition for MenuItemWidget {
                 node.rect.col + ITEM_PADDING_COLS + check_cols,
                 font_size,
                 icon,
-                dim(resolve_named_color(&node.props, "text-color", crate::theme::DROPDOWN_FG())),
+                dim(resolve_named_color(
+                    &node.props,
+                    "icon-color",
+                    resolve_named_color(&node.props, "text-color", crate::theme::DROPDOWN_FG()),
+                )),
                 _viewport,
             ));
         }

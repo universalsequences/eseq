@@ -84,7 +84,15 @@ impl Editor {
         self.clear_focus_on_other_tiles();
     }
 
+    /// The widget that owns the keyboard: a focused titlebar widget, else the
+    /// active tile's focused widget.
     pub fn focused_widget_node(&self) -> Option<LayoutNode> {
+        self.titlebar_focused_widget_node()
+            .or_else(|| self.active_focused_widget_node())
+    }
+
+    /// The active tile's own focused widget.
+    pub(super) fn active_focused_widget_node(&self) -> Option<LayoutNode> {
         let focused_id = self.active_leaf().focused_widget_id?;
         if let Some(layout) = self.active_leaf().cached_layout.as_ref()
             && let Some(node) = find_node_by_id_ref(layout, focused_id)
@@ -191,7 +199,7 @@ impl Editor {
             .cloned();
         match (modal, self.modal_focus_return.is_some()) {
             (Some(modal), false) => {
-                self.modal_focus_return = Some(self.focused_widget_node());
+                self.modal_focus_return = Some(self.active_focused_widget_node());
                 self.focus_first_focusable_in(&modal);
                 self.mark_needs_redraw();
             }
@@ -320,7 +328,7 @@ impl Editor {
             .filter(|node| node.widget_type == "context-menu").cloned() else { return false; };
         let path = menu::branch(&root);
         let panel = path.last().and_then(|id| by_stable(&root, *id)).unwrap_or(&root);
-        let focused = self.focused_widget_node().filter(|node| node.widget_type == "menu-item")
+        let focused = self.active_focused_widget_node().filter(|node| node.widget_type == "menu-item")
             .and_then(|node| by_stable(&root, node.stable_widget_id.unwrap_or(node.widget_id)).cloned())
             .or_else(|| panel.children.iter().find(|node| node.widget_type == "menu-item" && !menu::item_disabled(&node.props)).cloned());
         if matches!(key.code, KeyCode::Left | KeyCode::Esc) {
@@ -623,7 +631,7 @@ impl Editor {
     }
 
     pub(super) fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
-        let Some(node) = self.focused_widget_node() else {
+        let Some(node) = self.active_focused_widget_node() else {
             return false;
         };
         // Space bar should only be consumed by text-entry widgets (for typing).
@@ -1387,7 +1395,7 @@ fn find_node_by_id_ref(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
     None
 }
 
-fn node_captures_text_input(node: &LayoutNode) -> bool {
+pub(super) fn node_captures_text_input(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "text-input" | "textbox")
         || crate::widget_render::patcher::patcher_has_text_edit(node)
         || crate::widget_render::dropdown::filter_captures_text(node)
