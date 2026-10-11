@@ -1407,6 +1407,29 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "command-group",
+        "(command-group name &key icon)",
+        "Register a command palette section: commands whose `:group` is `name` list under a header with `icon` (a button-icon name, e.g. :save). Sections show in registration order.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("command-group expects a group name string".to_string());
+            };
+            let mut icon = None;
+            let mut rest = args[1..].iter();
+            while let Some(key) = rest.next() {
+                match (key, rest.next()) {
+                    (Value::Keyword(key), Some(Value::Keyword(value) | Value::String(value))) if key == "icon" => {
+                        icon = Some(value.clone());
+                    }
+                    _ => return Err(format!("command-group: unexpected argument {key:?}")),
+                }
+            }
+            ctx.register_command_group(name.clone(), icon);
+            Ok(Value::Nil)
+        },
+    );
+
+    runtime.register_native_with_docs(
         super::palette::COMMAND_PALETTE,
         "(command-palette &optional command)",
         "Open the command palette (M-x, Cmd+Shift+P): `:command` definitions by title, then every other command by name. Naming a command with `:choices` opens straight to its choice stage.",

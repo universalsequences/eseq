@@ -1330,8 +1330,21 @@ impl PresetBankCache {
     }
 
     fn invalidate_path(&mut self, path: &Path) {
+        let dropped: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.paths.iter().any(|p| p == path))
+            .map(|(key, _)| key.instrument_name.clone())
+            .collect();
         self.entries
             .retain(|_, entry| !entry.paths.iter().any(|p| p == path));
+        // A bank appearing where no cached entry pointed (a new instrument's
+        // first bank) has no name to drop: re-index everything.
+        if dropped.is_empty() {
+            refresh_preset_name_index();
+        } else {
+            forget_indexed_preset_names(&dropped);
+        }
     }
 
     fn invalidate_key_and_path(&mut self, key: &PresetBankCacheKey, path: Option<&Path>) {
@@ -1342,12 +1355,115 @@ impl PresetBankCache {
                 invalidated_paths.push(path.to_path_buf());
             }
         }
+        let mut dropped = vec![key.instrument_name.clone()];
+        dropped.extend(
+            self.entries
+                .iter()
+                .filter(|(_, entry)| entry.paths.iter().any(|p| invalidated_paths.contains(p)))
+                .map(|(key, _)| key.instrument_name.clone()),
+        );
         self.entries.retain(|_, entry| {
             !entry
                 .paths
                 .iter()
                 .any(|p| invalidated_paths.contains(p))
         });
+        forget_indexed_preset_names(&dropped);
+    }
+}
+
+// ── Preset name index ───────────────────────────────────────────────────
+// Every saved instrument's preset names, for search (the command palette
+// finds a preset by name inside its instrument). Resolving where a bank
+// would live costs a directory walk, and instruments without a bank are
+// never kept in the bank cache, so asking each instrument on demand stalls
+// the UI. The index is built on a background thread at startup and when the
+// content library changes on disk, records "no presets" too, and drops just
+// the instruments whose bank a save or watcher invalidates (they reload on
+// their next lookup).
+
+#[derive(Default)]
+struct PresetNameIndex {
+    names: std::collections::HashMap<String, std::sync::Arc<Vec<String>>>,
+    /// A rebuild is running; `rerun` asks it to go again when it finishes.
+    building: bool,
+    rerun: bool,
+}
+
+fn preset_name_index() -> &'static std::sync::Mutex<PresetNameIndex> {
+    static INDEX: std::sync::OnceLock<std::sync::Mutex<PresetNameIndex>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| std::sync::Mutex::new(PresetNameIndex::default()))
+}
+
+/// The index key: the Instruments tree names engines with a trailing slash
+/// (`Drums/Modal Kick/`); banks are keyed without it.
+fn preset_index_key(name: &str) -> &str {
+    name.trim_end_matches('/')
+}
+
+/// An instrument's preset names (its factory and user presets, merged) from
+/// the index, without touching the disk once the index has it. A name the
+/// index has not seen is loaded now and kept.
+///
+/// While the startup build is still running, a name it has not reached yet
+/// answers empty (uncached) rather than parsing banks on the caller's (UI)
+/// thread in contention with the builder.
+pub fn indexed_instrument_preset_names(name: &str) -> std::sync::Arc<Vec<String>> {
+    let key = preset_index_key(name);
+    {
+        let index = preset_name_index().lock().unwrap();
+        if let Some(names) = index.names.get(key) {
+            return names.clone();
+        }
+        if index.building {
+            return std::sync::Arc::new(Vec::new());
+        }
+    }
+    let names = std::sync::Arc::new(load_instrument_preset_names(key).unwrap_or_default());
+    preset_name_index().lock().unwrap().names.insert(key.to_string(), names.clone());
+    names
+}
+
+/// Drops instruments from the index after their bank changed; each reloads
+/// on its next lookup.
+fn forget_indexed_preset_names(instruments: &[String]) {
+    let mut index = preset_name_index().lock().unwrap();
+    for instrument in instruments {
+        index.names.remove(preset_index_key(instrument));
+    }
+}
+
+
+/// Rebuilds the index on a background thread from every saved instrument
+/// (startup, a bank change, the content library changing on disk). The
+/// current index keeps answering until the new one replaces it.
+pub fn refresh_preset_name_index() {
+    {
+        let mut index = preset_name_index().lock().unwrap();
+        if index.building {
+            index.rerun = true;
+            return;
+        }
+        index.building = true;
+    }
+    let spawned = std::thread::Builder::new().name("preset-name-index".into()).spawn(|| loop {
+        let mut names = std::collections::HashMap::new();
+        for instrument in list_saved_instruments() {
+            let key = preset_index_key(&instrument).to_string();
+            let presets = load_instrument_preset_names(&key).unwrap_or_default();
+            names.insert(key, std::sync::Arc::new(presets));
+        }
+        let mut index = preset_name_index().lock().unwrap();
+        // Replace rather than merge: instruments that went away drop out.
+        index.names = names;
+        if std::mem::take(&mut index.rerun) {
+            continue;
+        }
+        index.building = false;
+        break;
+    });
+    if spawned.is_err() {
+        preset_name_index().lock().unwrap().building = false;
     }
 }
 
@@ -3752,5 +3868,28 @@ mod voice_metadata_tests {
         apply_instrument_voice_metadata(&mut cached, Some(&root)).unwrap();
         assert!(cached.params.iter().all(|p| p.role.is_none()));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod preset_name_index_tests {
+    use super::*;
+
+    #[test]
+    fn the_index_answers_for_tree_names_and_matches_the_bank() {
+        // The Instruments tree spells engines with a trailing slash.
+        let indexed = indexed_instrument_preset_names("Synths/Revsynt/");
+        let direct = load_instrument_preset_names("Synths/Revsynt").unwrap();
+        assert_eq!(*indexed, direct);
+        assert!(indexed.iter().any(|name| name == "Cut The Rev"), "{indexed:?}");
+        // A second lookup is served from the index (same allocation).
+        assert!(std::sync::Arc::ptr_eq(&indexed, &indexed_instrument_preset_names("Synths/Revsynt")));
+    }
+
+    #[test]
+    fn an_instrument_without_presets_is_indexed_as_empty() {
+        let names = indexed_instrument_preset_names("No Such Folder/No Such Instrument/");
+        assert!(names.is_empty());
+        assert!(std::sync::Arc::ptr_eq(&names, &indexed_instrument_preset_names("No Such Folder/No Such Instrument")));
     }
 }

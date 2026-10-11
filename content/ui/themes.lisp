@@ -27,22 +27,34 @@
 
 (def seq-current-theme-name () seq-current-theme)
 
+;; Live preview for the palette: applies a theme as the highlight lands on
+;; it (and the original again if the pick is abandoned), without a status.
+(def seq-preview-theme (theme)
+  (let ((entry (find-by-key (seq-theme-registry) :name theme)))
+    (if (= entry nil) nil (seq-load-theme-file theme (get entry :file)))))
+
 (def change-theme (theme)
   :doc "Switch the UI theme.
 Lists every theme in the registry, with the current one checked."
   :command "Change Theme"
+  :icon :swatch
   :prompt "Theme"
   :choices seq-theme-choices
   :current seq-current-theme-name
+  :preview seq-preview-theme
+  :pinned true
   (let ((entry (find-by-key (seq-theme-registry) :name theme)))
     (if (= entry nil)
       (status (str "Unknown theme: " theme))
       (seq-apply-theme-file theme (get entry :file)))))
 
+(def seq-load-theme-file (name file)
+  (load file)
+  (set! seq-current-theme name))
+
 (def seq-apply-theme-file (name file)
   (do
-    (load file)
-    (set! seq-current-theme name)
+    (seq-load-theme-file name file)
     (status (fmt "Theme applied: {}" name))))
 
 (def seq-theme-mac-osx-dark ()

@@ -72,3 +72,42 @@ fn every_shipped_command_is_documented_and_runnable_from_the_palette() {
         assert!(titles.contains(&expected), "{expected} missing from {titles:?}");
     }
 }
+
+#[test]
+fn change_theme_previews_while_browsing_and_restores_on_escape() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.runtime_mut().eval_str(r#"(command-palette "change-theme")"#).expect("open theme stage");
+    editor.refresh_runtime_side_effects();
+    let theme = |editor: &mut eseqlisp::Editor| editor.runtime_mut().eval_str("seq-current-theme").expect("theme");
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(theme(&mut editor), Some(Value::String("mac-osx-light-theme".into())), "highlight previews");
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(theme(&mut editor), Some(Value::String("mac-osx-dark".into())), "Esc restores");
+}
+
+#[test]
+fn the_home_list_is_everyday_commands_flat() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    open_palette(&mut editor);
+    let frame = editor.palette_frame().expect("open");
+    assert!(frame.rows.iter().all(|row| !row.header), "no sections before typing");
+    let rows = row_labels(&editor);
+    for expected in ["Change Theme", "Add Instrument", "Load Preset", "Play", "Set Tempo", "Show Mixer"] {
+        assert!(rows.iter().any(|row| row == expected), "{expected} missing from {rows:?}");
+    }
+    for absent in ["Quit eseq", "About eseq", "Export Package…"] {
+        assert!(!rows.iter().any(|row| row == absent), "{absent} pinned: {rows:?}");
+    }
+}
+
+#[test]
+fn set_tempo_lists_tempos_under_a_tempo_badge() {
+    // Previewing and restoring are covered in eseqlisp's palette tests; this
+    // editor has no host pushing transport values back.
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.runtime_mut().eval_str(r#"(command-palette "eseq.application-menus/set-tempo")"#).unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.palette_frame().unwrap().badge.as_deref(), Some("Tempo"));
+    let rows = row_labels(&editor);
+    assert!(rows.iter().any(|row| row == "120 BPM"), "{rows:?}");
+}

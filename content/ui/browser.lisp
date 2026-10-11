@@ -358,11 +358,12 @@
   (set! browser-view.tab "projects")
   (status "New project"))
 
-(def add-instrument-track (name)
+(def add-instrument-track (name &optional (preset ""))
   (show-loading! name)
-  (host-command "add-track-instrument" (dict :name name))
+  (host-command "add-track-instrument"
+    (if (= preset "") (dict :name name) (dict :name name :preset preset)))
   (eseq.seq-panels/seq-show-fx-lower-panel)
-  (status (str "Loading instrument: " name)))
+  (status (if (= preset "") (str "Loading instrument: " name) (str "Loading preset: " preset))))
 
 ;; i: the track's position (a drop target's address).
 (def swap-track-instrument (i name preserve-track-selection)
@@ -504,6 +505,8 @@
 (def add-sampler-track ()
   :doc "Add a sampler track."
   :command "Add Sampler Track"
+  :pinned true
+  :icon :sampler
   :group "Create"
   (host-command "add-track-sampler" (dict))
   (set! browser-view.tab "samples")
@@ -835,6 +838,7 @@
 (def enter-new-effect-editor ()
   :doc "Open the editor on a new custom audio effect."
   :command "Create Effect…"
+  :icon :audio-fx
   :group "Create"
   (clear-editor-name!)
   (host-command "enter-new-effect-editor" (dict)))
@@ -906,7 +910,7 @@
         browser.instrument
         ""))))
 
-(def load-preset (name)
+(def load-preset (name &optional quiet)
   (let ((s (selected-rack-preset-context)))
     (host-command "load-instrument-preset"
       (if s
@@ -914,7 +918,7 @@
           :instrument s.instrument)
         (dict :name name))))
   (eseq.seq-panels/seq-show-fx-lower-panel)
-  (status (str "Load preset: " name)))
+  (if quiet nil (status (str "Load preset: " name))))
 
 (def load-project (name)
   (host-command "load-project" (dict :name name))
@@ -1074,6 +1078,7 @@
 (def enter-new-instrument-editor ()
   :doc "Open the editor on a new custom instrument."
   :command "Create Instrument…"
+  :icon :piano
   :group "Create"
   (clear-editor-name!)
   (host-command "enter-new-instrument-editor" (dict)))
@@ -1121,15 +1126,48 @@
 (def palette-instrument-choices ()
   (palette-instrument-entries (seq-saved-instrument-tree "" browser.engines "" false) nil))
 
-(def add-instrument (instrument)
-  :doc "Add a new track playing an instrument.
+;; The second step: an instrument's presets, after a "Default" that loads
+;; none (kept out of search, where every instrument would list one).
+(def palette-preset-choices (instrument)
+  (append
+    (list (dict :label "Default" :value "" :search false))
+    (if (= (get instrument :kind) "instrument")
+      (seq-instrument-preset-names (get instrument :name))
+      (list))))
+
+(def add-instrument (instrument preset)
+  :doc "Add a new track playing an instrument at one of its presets.
 Lists factory, library, package and builtin instruments (sampler, rack,
-modulator) from the Instruments tab, labelled with their folder."
+modulator) from the Instruments tab, then the instrument's presets. Search
+finds a preset by name inside its instrument."
   :command "Add Instrument"
-  :choices palette-instrument-choices
-  (if (= (get instrument :kind) "builtin-instrument")
-    (add-builtin-instrument-track (get instrument :name))
-    (add-instrument-track (get instrument :name))))
+  :icon :piano
+  :pinned true
+  :searchable true
+  :choices (instrument palette-instrument-choices preset palette-preset-choices)
+  (let ((name (get instrument :name)))
+    (if (= (get instrument :kind) "builtin-instrument")
+      (add-builtin-instrument-track name)
+      (add-instrument-track name preset))))
+
+;; The palette's "Load Preset": the selected track's instrument presets,
+;; previewed live as the highlight moves.
+(def palette-track-presets () (browser-preset-items))
+(def palette-track-preset () (browser-loaded-preset))
+(def preview-track-preset (name)
+  (if (= name "") nil (load-preset name true)))
+
+(def load-track-preset (preset)
+  :doc "Load a preset on the selected track's instrument.
+Previews each preset as you move through the list; Esc puts the loaded one back."
+  :command "Load Preset"
+  :icon :preset
+  :pinned true
+  :prompt "Preset"
+  :choices palette-track-presets
+  :current palette-track-preset
+  :preview preview-track-preset
+  (load-preset preset))
 
 (def select-create-item (item)
   (let ((kind (get item :kind)))

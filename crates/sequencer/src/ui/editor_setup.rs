@@ -79,6 +79,8 @@ pub(crate) fn create_editor_with_root(
             vim_mode: true,
         },
     );
+    // Palette search finds presets by name; index them off the UI thread.
+    sequencer::lisp_host::refresh_preset_name_index();
     // The command palette's recently-run list sits beside the preferences.
     editor.set_palette_history_path(
         app_paths.preferences_path().parent().map(|dir| dir.join("command-palette-history")),

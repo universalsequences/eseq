@@ -3567,20 +3567,16 @@ fn redefining_a_documented_function_as_a_value_drops_its_header() {
 }
 
 #[test]
-fn mx_lists_commands_first_by_title() {
+fn mx_is_the_minibuffer_prompt_not_the_palette() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor
-        .runtime_mut()
-        .eval_str(
-            r#"(def zz-open-thing () :command "Alpha Thing" 1)
-               (def aa-close-thing () :command "Beta Thing" 2)
-               (def aa-plain () 3)"#,
-        )
-        .unwrap();
+    editor.runtime_mut().eval_str(r#"(def zz-thing () :command "Alpha Thing" 1) (def aa-plain () 3)"#).unwrap();
     let candidates = editor.collect_mx_candidates();
-    assert_eq!(&candidates[..2], ["zz-open-thing", "aa-close-thing"]);
-    assert!(candidates.iter().any(|name| name == "aa-plain"));
-    assert_eq!(candidates.iter().filter(|name| *name == "zz-open-thing").count(), 1);
+    let mut sorted = candidates.clone();
+    sorted.sort();
+    assert_eq!(candidates, sorted, "plain sorted names, commands not hoisted");
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+    assert!(editor.palette_frame().is_none(), "M-x does not open the palette");
+    assert_eq!(editor.minibuffer_prompt().as_deref(), Some("M-x "));
 }
 
 #[test]

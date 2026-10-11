@@ -349,7 +349,14 @@ impl Editor {
                     self.sync_runtime_context();
                 }
             }
-            "execute-extended-command" | super::palette::COMMAND_PALETTE => self.open_command_palette(),
+            "execute-extended-command" => {
+                self.dismiss_palette();
+                self.completion = None;
+                self.minibuffer = None;
+                let candidates = self.collect_mx_candidates();
+                self.minibuffer_input = Some(super::MinibufferMode::Mx { input: String::new(), candidates, selected: 0 });
+            }
+            super::palette::COMMAND_PALETTE => self.open_command_palette(),
             "switch-to-buffer" => {
                 self.completion = None;
                 self.minibuffer = None;
@@ -412,6 +419,75 @@ pub(crate) fn key_str(key: KeyEvent) -> String {
         _ => format!("{:?}", key.code),
     };
     format!("{prefix}{key_name}")
+}
+
+/// The key a [`key_str`] spelling names (`S-s-p`, `C-x`, `RET`, `PageDown`,
+/// `F(5)`), the inverse of `key_str` for a single key. Also takes the
+/// short names `SPC`, `TAB`, `PGUP` and `PGDN`.
+pub fn parse_key_str(spelling: &str) -> Option<KeyEvent> {
+    let mut modifiers = KeyModifiers::NONE;
+    let mut rest = spelling;
+    loop {
+        let modifier = match rest.get(..2) {
+            Some("C-") if rest.len() > 2 => KeyModifiers::CONTROL,
+            Some("M-") if rest.len() > 2 => KeyModifiers::ALT,
+            Some("S-") if rest.len() > 2 => KeyModifiers::SHIFT,
+            Some("s-") if rest.len() > 2 => KeyModifiers::SUPER,
+            _ => break,
+        };
+        modifiers |= modifier;
+        rest = &rest[2..];
+    }
+    let code = match rest {
+        "RET" => KeyCode::Enter,
+        "BS" => KeyCode::Backspace,
+        "ESC" => KeyCode::Esc,
+        "UP" => KeyCode::Up,
+        "DOWN" => KeyCode::Down,
+        "LEFT" => KeyCode::Left,
+        "RIGHT" => KeyCode::Right,
+        "Tab" | "TAB" => KeyCode::Tab,
+        "BackTab" => KeyCode::BackTab,
+        "PageUp" | "PGUP" => KeyCode::PageUp,
+        "PageDown" | "PGDN" => KeyCode::PageDown,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "Delete" => KeyCode::Delete,
+        "SPC" => KeyCode::Char(' '),
+        f if f.starts_with("F(") && f.ends_with(')') => KeyCode::F(f[2..f.len() - 1].parse().ok()?),
+        single => {
+            let mut chars = single.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            KeyCode::Char(ch)
+        }
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
+#[cfg(test)]
+mod key_str_round_trip_tests {
+    use super::*;
+
+    #[test]
+    fn parse_key_str_inverts_key_str() {
+        for (code, modifiers) in [
+            (KeyCode::Char('p'), KeyModifiers::SHIFT | KeyModifiers::SUPER),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::PageDown, KeyModifiers::NONE),
+            (KeyCode::Tab, KeyModifiers::CONTROL),
+            (KeyCode::F(5), KeyModifiers::NONE),
+            (KeyCode::Down, KeyModifiers::ALT),
+        ] {
+            let key = KeyEvent::new(code, modifiers);
+            assert_eq!(parse_key_str(&key_str(key)), Some(key), "{}", key_str(key));
+        }
+        assert_eq!(parse_key_str("SPC").map(|key| key.code), Some(KeyCode::Char(' ')));
+        assert_eq!(parse_key_str("nope"), None);
+    }
 }
 
 #[cfg(test)]

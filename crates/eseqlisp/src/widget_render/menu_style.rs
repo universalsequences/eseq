@@ -222,12 +222,16 @@ pub(crate) fn text_primitive(
     }
 }
 
-/// A popup search field: a recessed fill, an optional magnifier at
+/// The recessed fill filterable dropdowns give their search field.
+pub(crate) const RECESSED_FIELD_FILL: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 };
+
+/// A popup search field: a `fill`ed rounded field, an optional magnifier at
 /// `icon_col`, then the input (or a dim placeholder) at `text_col` with a
 /// caret — after the input, or before the placeholder when empty. Shared by
 /// filterable dropdowns and the command palette.
 pub(crate) fn search_field_primitives(
     field: Rect,
+    fill: Color,
     radius_px: f32,
     icon_col: Option<f32>,
     text_col: f32,
@@ -236,7 +240,7 @@ pub(crate) fn search_field_primitives(
     font_size: f32,
     viewport: WidgetViewport,
 ) -> Vec<GpuPrimitive> {
-    let mut prims = vec![rounded_rect_primitive(field, Color::rgba(0.0, 0.0, 0.0, 0.28), radius_px, viewport)];
+    let mut prims = vec![rounded_rect_primitive(field, fill, radius_px, viewport)];
     if let Some(col) = icon_col {
         prims.push(magnifier_primitive(field, col, font_size, crate::theme::DIM(), viewport));
     }

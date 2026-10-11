@@ -1387,6 +1387,7 @@ impl WidgetDefinition for DropdownWidget {
                     .unwrap_or_else(|| "Filter…".to_string());
                 for primitive in super::menu_style::search_field_primitives(
                     field,
+                    super::menu_style::RECESSED_FIELD_FILL,
                     12.0,
                     Some(icon_col),
                     icon_col + 1.4,

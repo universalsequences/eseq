@@ -941,6 +941,14 @@ pub enum LayoutSpec {
     },
 }
 
+/// A palette section (docs/command-palette-spec.md §5): commands whose
+/// `:group` names it list under a header with this icon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandGroup {
+    pub name: String,
+    pub icon: Option<String>,
+}
+
 /// One entry of a command's `:choices` (docs/command-palette-spec.md §3.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandChoice {
@@ -948,6 +956,9 @@ pub struct CommandChoice {
     /// What the command is called with.
     pub value: Value,
     pub detail: Option<String>,
+    /// False for a choice with `:search false`: kept out of the palette's
+    /// search across `:searchable` commands (a per-instrument "Default").
+    pub searchable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1018,6 +1029,9 @@ pub(crate) struct RuntimeBridgeState {
     /// scroll into view once that buffer's tile has a layout.
     pub pending_widget_reveal: Option<(String, String)>,
     pub pending_save: bool,
+    /// `(command-group name :icon icon)` registrations, in first-registered
+    /// order: the palette's section order and header icons.
+    pub command_groups: Vec<CommandGroup>,
     /// `(command-palette [command])` asked the editor to open the palette,
     /// on that command's choice stage when one is named.
     pub pending_open_command_palette: Option<Option<String>>,
@@ -1437,6 +1451,15 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::DeleteOtherWindows);
+    }
+
+    /// Registers (or re-icons) a palette command group.
+    pub fn register_command_group(&mut self, name: String, icon: Option<String>) {
+        let groups = &mut self.shared.borrow_mut().command_groups;
+        match groups.iter_mut().find(|group| group.name == name) {
+            Some(group) => group.icon = icon,
+            None => groups.push(CommandGroup { name, icon }),
+        }
     }
 
     pub fn open_command_palette(&mut self, command: Option<String>) {
@@ -3850,23 +3873,39 @@ impl Runtime {
         headers.get(name).or_else(|| headers.get(&crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name)))
     }
 
-    /// Every `:command` definition, by display name, sorted by title
-    /// (docs/command-palette-spec.md §4).
+    /// Every `:command` definition, by display name, in definition order —
+    /// the order its source lists them, which the palette keeps within a
+    /// section (docs/command-palette-spec.md §4).
     pub fn commands(&self) -> Vec<(String, &crate::lang::def_header::DefinitionHeader)> {
-        let mut commands = self
+        let mut commands: Vec<(usize, &String, &crate::lang::def_header::DefinitionHeader)> = self
             .vm
             .definition_headers
             .iter()
             .filter(|(_, header)| header.command.is_some())
-            .map(|(global, header)| (crate::modules::strip_implicit(global).to_string(), header))
-            .collect::<Vec<_>>();
-        let title = |header: &crate::lang::def_header::DefinitionHeader| {
-            header.command.as_deref().unwrap_or_default().to_lowercase()
-        };
-        commands.sort_by(|a, b| {
-            title(a.1).cmp(&title(b.1)).then_with(|| a.1.command.cmp(&b.1.command)).then_with(|| a.0.cmp(&b.0))
-        });
+            .map(|(global, header)| (usize::MAX, global, header))
+            .collect();
+        let wanted: HashSet<&str> = commands.iter().map(|(_, global, _)| global.as_str()).collect();
+        let order: HashMap<&str, usize> = self
+            .vm
+            .global_names()
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| wanted.contains(name.as_str()))
+            .map(|(idx, name)| (name.as_str(), idx))
+            .collect();
+        for command in &mut commands {
+            command.0 = order.get(command.1.as_str()).copied().unwrap_or(usize::MAX);
+        }
+        commands.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
         commands
+            .into_iter()
+            .map(|(_, global, header)| (crate::modules::strip_implicit(global).to_string(), header))
+            .collect()
+    }
+
+    /// Registered palette groups, in registration order.
+    pub fn command_groups(&self) -> Vec<CommandGroup> {
+        self.shared.borrow().command_groups.clone()
     }
 
     /// Display names of every global holding a callable (a function, native
@@ -3882,10 +3921,7 @@ impl Runtime {
     /// resolved in `command`'s module (then globally): a function is called
     /// with no arguments, any other global is read as is.
     fn header_symbol_value(&mut self, command: &str, symbol: &str) -> Result<Value, String> {
-        let qualified = crate::modules::split_qualified(command)
-            .map(|(module, _)| crate::modules::qualify(module, symbol))
-            .filter(|name| self.vm.has_global(name));
-        let name = qualified.unwrap_or_else(|| symbol.to_string());
+        let name = self.header_symbol_global(command, symbol);
         match self.vm.global_value(&name) {
             Some(value) if crate::lang::vm::is_callable(&value) => self
                 .invoke_global(&name, Vec::new())
@@ -3896,14 +3932,55 @@ impl Runtime {
         }
     }
 
-    /// A command's `:choices`, as palette entries (spec §3.2): each item is a
-    /// plain value, or a dict with `:label`, `:value` and optional `:detail`.
-    pub fn command_choices(&mut self, command: &str) -> Result<Vec<CommandChoice>, String> {
-        let Some(symbol) = self.definition_header(command).and_then(|header| header.choices.clone()) else {
+    /// The choices for `command`'s next argument after `picked`, as palette
+    /// entries (spec §3.2): each item is a plain value, or a dict with
+    /// `:label`, `:value` and optional `:detail`. The step's source function
+    /// is called with `picked`.
+    pub fn command_choices(&mut self, command: &str, picked: &[Value]) -> Result<Vec<CommandChoice>, String> {
+        let Some(source) = self.command_choice_sources(command)?.into_iter().nth(picked.len()) else {
             return Ok(Vec::new());
         };
-        let Value::List(items) = self.header_symbol_value(command, &symbol)? else {
-            return Err(format!("{command}: :choices `{symbol}` did not return a list"));
+        self.choices_from_source(command, &source, picked)
+    }
+
+    /// Each `:choices` step's source, resolved once: the function to call
+    /// with the picks so far, or the global's value. A walk over every
+    /// choice (palette search) resolves these once rather than per call.
+    pub fn command_choice_sources(&mut self, command: &str) -> Result<Vec<Value>, String> {
+        let symbols: Vec<String> = self
+            .definition_header(command)
+            .map(|header| header.choices.iter().map(|step| step.source.clone()).collect())
+            .unwrap_or_default();
+        symbols
+            .into_iter()
+            .map(|symbol| {
+                let name = self.header_symbol_global(command, &symbol);
+                self.vm.global_value(&name).ok_or_else(|| format!("{command}: no function or global named `{symbol}`"))
+            })
+            .collect()
+    }
+
+    /// The choices a resolved `source` (see [`Self::command_choice_sources`])
+    /// gives after `picked`.
+    pub fn choices_from_source(
+        &mut self,
+        command: &str,
+        source: &Value,
+        picked: &[Value],
+    ) -> Result<Vec<CommandChoice>, String> {
+        // A choice source is a query: call the VM directly, without the UI
+        // flush (theme sync, widget trees) a command's invocation pays —
+        // palette search calls one source per instrument.
+        let list = if crate::lang::vm::is_callable(source) {
+            self.vm
+                .invoke(source.clone(), picked.to_vec())
+                .map_err(|error| format!("{command}: :choices failed: {error:?}"))?
+                .unwrap_or(Value::Nil)
+        } else {
+            source.clone()
+        };
+        let Value::List(items) = list else {
+            return Err(format!("{command}: :choices did not return a list"));
         };
         Ok(items
             .iter()
@@ -3923,9 +4000,29 @@ impl Runtime {
                     Some(Value::Nil) | None => None,
                     Some(other) => Some(self.format_value(&other)),
                 };
-                CommandChoice { label, value, detail }
+                let searchable = !matches!(field("search"), Some(Value::Bool(false)));
+                CommandChoice { label, value, detail, searchable }
             })
             .collect())
+    }
+
+    /// The global a header symbol names: `symbol` in `command`'s module when
+    /// it is defined there, else as written.
+    fn header_symbol_global(&self, command: &str, symbol: &str) -> String {
+        crate::modules::split_qualified(command)
+            .map(|(module, _)| crate::modules::qualify(module, symbol))
+            .filter(|name| self.vm.has_global(name))
+            .unwrap_or_else(|| symbol.to_string())
+    }
+
+    /// Calls `command`'s `:preview` with `value` (the command itself for
+    /// `:preview true`). Returns false when it has none.
+    pub fn command_preview(&mut self, command: &str, value: Value) -> Result<bool, String> {
+        let Some(symbol) = self.definition_header(command).and_then(|header| header.preview.clone()) else {
+            return Ok(false);
+        };
+        let name = if symbol == "true" { command.to_string() } else { self.header_symbol_global(command, &symbol) };
+        self.invoke_global(&name, vec![value]).map(|_| true).map_err(|error| format!("{symbol}: {error:?}"))
     }
 
     /// A command's `:current` value, if it declares one and it resolves.

@@ -73,6 +73,8 @@ pub(crate) fn content_library_epoch() -> u64 {
 /// Re-list the instrument/effect library in the browser: bumps the content
 /// library epoch, which the next tick pushes to `browser.library-epoch`.
 pub(crate) fn bump_content_library_epoch(editor: &mut Editor) {
+    // Instruments came or went: the preset index rebuilds in the background.
+    sequencer::lisp_host::refresh_preset_name_index();
     CONTENT_LIBRARY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     editor.mark_needs_redraw();
 }

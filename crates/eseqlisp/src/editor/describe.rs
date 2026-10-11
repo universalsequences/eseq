@@ -34,8 +34,8 @@ impl Editor {
             text.push('\n');
             if let Some(title) = &header.command {
                 text.push_str(&format!("\nCommand: {title}\n"));
-                if header.choices.is_some() {
-                    let prompt = header.choice_prompt().unwrap_or_else(|| "Value".to_string());
+                for step in 0..header.choices.len() {
+                    let prompt = header.step_prompt(step).unwrap_or_else(|| "Value".to_string());
                     text.push_str(&format!("Choice: {prompt}\n"));
                 }
             }

@@ -19,6 +19,9 @@
 (def export-song ()
   :doc "Bounce the arrangement to an audio file."
   :command "Export Audio…"
+  :pinned true
+  :icon :export
+  :shortcut "S-s-e"
   :group "File"
   (host-command "export-song-open" (dict)))
 (def open () (set! export-draft.open true))

@@ -34,6 +34,20 @@ impl Editor {
             }
 
             MinibufferMode::Palette(state) => self.handle_palette_key(key, state),
+            MinibufferMode::Mx { mut input, candidates, mut selected } => {
+                match step_completing_read(key, &mut input, &candidates, &mut selected) {
+                    CompletingRead::Cancel => self.minibuffer = None,
+                    CompletingRead::Accept(name) => {
+                        if !name.is_empty() {
+                            self.execute_mx_command(&name);
+                        }
+                        return true;
+                    }
+                    CompletingRead::Pending => {
+                        self.minibuffer_input = Some(MinibufferMode::Mx { input, candidates, selected });
+                    }
+                }
+            }
             MinibufferMode::DescribeFunction { mut input, candidates, mut selected } => {
                 match step_completing_read(key, &mut input, &candidates, &mut selected) {
                     CompletingRead::Cancel => self.minibuffer = None,
@@ -189,18 +203,17 @@ impl Editor {
         self.call_lisp_handler(name);
     }
 
-    /// Commands currently offered by M-x: `:command` definitions first (by
-    /// title), then builtins, Lisp globals and bound handlers by name.
+    /// Every name M-x offers: builtins, Lisp globals and bound handlers,
+    /// sorted (the command palette is separate: ⌘⇧P).
     pub fn collect_mx_candidates(&mut self) -> Vec<String> {
-        let commands: Vec<String> = self.runtime.commands().into_iter().map(|(name, _)| name).collect();
-        let command_set: std::collections::HashSet<&str> = commands.iter().map(String::as_str).collect();
-        let mut names = self.non_command_mx_names(&command_set);
+        let mut names: Vec<String> = self.builtins.values().cloned().collect();
         let symbols = self.runtime.completion_symbols();
-        names.extend(symbols.iter().filter(|name| !command_set.contains(name.as_str())).cloned());
+        names.extend(symbols.iter().cloned());
+        // Also include lisp binding handler names
+        names.extend(self.lisp_bindings.values().cloned());
         names.sort();
         names.dedup();
-        drop(command_set);
-        commands.into_iter().chain(names).collect()
+        names
     }
 
     /// Builtins, bound handlers and callable globals that are not in
@@ -229,6 +242,9 @@ impl Editor {
             }
 
             Some(MinibufferMode::Palette(state)) => Some(Self::palette_prompt(state)),
+            Some(MinibufferMode::Mx { input, candidates, selected }) => {
+                Some(completing_prompt("M-x", input, candidates, *selected))
+            }
             Some(MinibufferMode::DescribeFunction { input, candidates, selected }) => {
                 Some(completing_prompt("Describe function:", input, candidates, *selected))
             }
@@ -312,7 +328,7 @@ impl Editor {
     }
 }
 
-/// What a key did to a completing read (switch-to-buffer,
+/// What a key did to a completing read (M-x, switch-to-buffer,
 /// describe-function).
 pub(super) enum CompletingRead {
     Pending,

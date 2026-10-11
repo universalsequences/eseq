@@ -87,6 +87,17 @@ impl Color {
     pub const GRAY: Self = Self::rgb(0.7, 0.7, 0.7);
 
     /// Relative luminance (ITU-R BT.709).
+    /// `self` moved `t` of the way to `other` (RGB; keeps `self`'s alpha).
+    pub fn mix(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        Self {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a,
+        }
+    }
+
     /// The same color with its alpha scaled by `factor`.
     pub fn with_alpha(self, factor: f32) -> Self {
         Self { a: self.a * factor, ..self }
@@ -149,22 +160,31 @@ pub struct PaletteFrame {
     pub input: String,
     /// The visible window of rows (already scrolled).
     pub rows: Vec<PaletteRowFrame>,
-    /// Index into `rows` of the highlighted row.
+    /// Index into `rows` of the highlighted row (always an item).
     pub selected: Option<usize>,
     /// Shown instead of rows when nothing matches.
     pub empty_text: Option<String>,
     /// Signature and first doc line of the highlighted row, if documented.
     pub footer: Option<(String, String)>,
+    /// `(first visible row, total rows)` when the list is longer than the
+    /// window: the renderer draws a scrollbar.
+    pub scroll: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaletteRowFrame {
+    /// A section header (a `:group`) rather than a selectable item.
+    pub header: bool,
     pub label: String,
-    /// Right column: the current value or the key binding.
+    /// A `button-icon` glyph name drawn before the label.
+    pub icon: Option<String>,
+    /// The current value (`Merino Dark`), dim, truncated from the left.
     pub detail: Option<String>,
+    /// A key binding label (`⇧⌘P`).
+    pub shortcut: Option<String>,
     /// Opens a choice stage (`›`).
     pub submenu: bool,
-    /// The current choice (`✓`).
+    /// The current choice, or an on state (`✓`).
     pub checked: bool,
 }
 

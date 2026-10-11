@@ -2,7 +2,7 @@
 (module eseq.application-menus)
 (import eseq.menus :as menus)
 (import eseq.seq-core-state)
-(import eseq.kinds :refer (tracks buses selection browser project))
+(import eseq.kinds :refer (tracks buses selection browser project transport))
 (export application-menu-items install-default-menus)
 
 (def commands-enabled? () (not (get (native-menu-context) :blocked)))
@@ -37,27 +37,107 @@
 ;; the menus below call these, so the menu and the palette run one thing.
 ;; Menus call them through lambdas, which look the name up on each click, so
 ;; an `override` or redefinition reaches the menu as it does the palette.
+;; `:shortcut` mirrors the menu accelerator so the palette can show it.
 
-(def request-new-project () :doc "Start a new, empty project, asking to save first." :command "New Project"
+(command-group "File" :icon :document)
+(command-group "Create" :icon :plus)
+(command-group "Pattern" :icon :clips)
+
+;; The palette's home list (`:pinned`) is what you reach for while making
+;; music: transport, tempo, views, adding tracks. The rest are found by
+;; typing.
+
+(command-group "Transport" :icon :sliders)
+(command-group "View" :icon :clips)
+
+(def playing? () transport.playing)
+(def recording? () transport.recording)
+(def metronome-on? () transport.metronome)
+(def roll-mode-on? () transport.roll-mode)
+
+(def toggle-playback () :doc "Start or stop the transport." :command "Play" :group "Transport"
+  :current playing? :shortcut "SPC" :pinned true
+  (set! transport.playing (not transport.playing)))
+(def toggle-recording () :doc "Arm or disarm recording into the playing patterns." :command "Record"
+  :group "Transport" :current recording? :pinned true
+  (set! transport.recording (not transport.recording)))
+(def toggle-metronome () :doc "Click on every beat while the transport runs." :command "Metronome"
+  :group "Transport" :current metronome-on? :pinned true
+  (set! transport.metronome (not transport.metronome)))
+(def toggle-roll-mode () :doc "Hold steps to roll them at the roll rate." :command "Roll Mode"
+  :group "Transport" :current roll-mode-on?
+  (set! transport.roll-mode (not transport.roll-mode)))
+
+(def tempo-choices ()
+  (map (lambda (bpm) (dict :label (str bpm " BPM") :value bpm))
+       (list 60 70 80 85 90 95 100 110 120 124 126 128 130 135 140 150 160 170 174 180)))
+(def current-tempo () transport.bpm)
+(def set-tempo (bpm) :doc "Set the project tempo. Previews as you move through the list."
+  :command "Set Tempo" :group "Transport" :prompt "Tempo" :choices tempo-choices :current current-tempo
+  :preview true :pinned true
+  (set! transport.bpm bpm))
+
+(def quantize-choices () eseq.kinds/launch-quantize-options)
+(def current-launch-quantize () transport.launch-quantize)
+(def set-launch-quantize (quantize) :doc "Where a launched scene or clip waits to start."
+  :command "Launch Quantize" :group "Transport" :prompt "Quantize" :choices quantize-choices
+  :current current-launch-quantize :pinned true
+  (set! transport.launch-quantize quantize))
+(def record-quantize-choices () eseq.kinds/record-quantize-options)
+(def current-record-quantize () transport.record-quantize)
+(def set-record-quantize (quantize) :doc "Snap recorded notes to this grid."
+  :command "Record Quantize" :group "Transport" :prompt "Quantize" :choices record-quantize-choices
+  :current current-record-quantize
+  (set! transport.record-quantize quantize))
+
+(def show-sequencer () :doc "Show the step sequencer." :command "Go to Sequencer" :group "View" :pinned true
+  (eseq.seq-panels/seq-show-sequencer-main))
+(def show-arrangement () :doc "Show the arrangement timeline." :command "Go to Arrangement" :group "View"
+  :pinned true
+  (eseq.seq-panels/seq-open-arrangement))
+(def show-piano-roll () :doc "Show the piano roll for the selected track." :command "Go to Piano Roll"
+  :group "View" :pinned true
+  (eseq.seq-panels/seq-open-piano-roll-preferred))
+(def browser-visible? () eseq.seq-core-state/samples-sidebar-visible)
+(def mixer-visible? () eseq.seq-core-state/mixer-panel-visible)
+(def track-fx-visible? () eseq.seq-core-state/lower-panel-visible)
+(def patch-macros-visible? () eseq.seq-core-state/patch-macros-panel-visible)
+(def toggle-browser () :doc "Show or hide the browser sidebar." :command "Show Browser" :group "View"
+  :current browser-visible? :pinned true
+  (eseq.seq-panels/seq-toggle-samples-sidebar))
+(def toggle-mixer () :doc "Show or hide the mixer." :command "Show Mixer" :group "View"
+  :current mixer-visible? :pinned true
+  (eseq.seq-panels/seq-toggle-mixer-panel))
+(def toggle-track-fx () :doc "Show or hide the selected track's effects." :command "Show Track FX" :group "View"
+  :current track-fx-visible? :pinned true
+  (eseq.seq-panels/seq-toggle-fx-panel))
+(def toggle-patch-macros () :doc "Show or hide the patch macro knobs." :command "Show Patch Macros"
+  :group "View" :current patch-macros-visible?
+  (eseq.seq-panels/seq-toggle-patch-macros-panel))
+(def collapse-all-tracks () :doc "Fold every track row to its header." :command "Collapse All Tracks"
+  :group "View"
+  (eseq.sequencer/collapse-all-tracks))
+
+(def request-new-project () :doc "Start a new, empty project, asking to save first." :command "New Project" :pinned true :icon :project :shortcut "s-n"
   :group "File"
   (host-command "project-new-request" (dict)))
-(def save-project () :doc "Save the project." :command "Save" :group "File"
+(def save-project () :doc "Save the project." :command "Save" :pinned true :icon :save :shortcut "s-s" :group "File"
   (eseq.transport/file-menu-save))
-(def save-project-as () :doc "Save the project under a new name." :command "Save As…" :group "File"
+(def save-project-as () :doc "Save the project under a new name." :command "Save As…" :icon :save :shortcut "S-s-s" :group "File"
   (eseq.transport/file-menu-save-as))
-(def open-project () :doc "Open a saved project." :command "Open Project…" :group "File"
+(def open-project () :doc "Open a saved project." :command "Open Project…" :pinned true :icon :folder :shortcut "s-o" :group "File"
   (eseq.transport/file-menu-open-project))
-(def import-samples () :doc "Copy sample files into the library." :command "Import Samples…" :group "File"
+(def import-samples () :doc "Copy sample files into the library." :command "Import Samples…" :icon :download :group "File"
   (host-command "menu-import-samples" (dict)))
-(def import-package () :doc "Install a package from an .eseqpack file." :command "Import Package…" :group "File"
+(def import-package () :doc "Install a package from an .eseqpack file." :command "Import Package…" :icon :download :group "File"
   (host-command "menu-import-package" (dict)))
-(def export-package () :doc "Bundle a package into an .eseqpack file." :command "Export Package…" :group "File"
+(def export-package () :doc "Bundle a package into an .eseqpack file." :command "Export Package…" :icon :upload :group "File"
   (host-command "menu-export-package" (dict)))
-(def show-settings () :doc "Open the Settings window." :command "Settings…" :group "File"
+(def show-settings () :doc "Open the Settings window." :command "Settings…" :icon :sliders :shortcut "s-," :group "File"
   (host-command "settings-open" (dict)))
-(def open-init () :doc "Open your init.lisp, loaded at every start." :command "Open init.lisp" :group "File"
+(def open-init () :doc "Open your init.lisp, loaded at every start." :command "Open init.lisp" :icon :document :group "File"
   (host-command "packages-open-init" (dict)))
-(def open-project-scratch () :doc "Open this project's scratch Lisp buffer." :command "Open Project Scratch" :group "File"
+(def open-project-scratch () :doc "Open this project's scratch Lisp buffer." :command "Open Project Scratch" :icon :document :group "File"
   (host-command "packages-open-scratch" (dict)))
 (def open-help () :doc "Open the manual." :command "Help" :group "File"
   (host-command "open-help" (dict)))
@@ -66,11 +146,11 @@
 (def quit-eseq () :doc "Quit, asking to save unsaved changes." :command "Quit eseq" :group "File"
   (host-command "app-quit-request" (dict)))
 
-(def add-bus () :doc "Add a mixer bus." :command "Add Bus" :group "Create"
+(def add-bus () :doc "Add a mixer bus." :command "Add Bus" :icon :sliders :group "Create"
   (host-command "add-bus" (dict)))
-(def add-midi-track () :doc "Add an empty MIDI track." :command "Add MIDI Track" :group "Create"
+(def add-midi-track () :doc "Add an empty MIDI track." :command "Add MIDI Track" :pinned true :icon :midi :group "Create"
   (host-command "add-track-empty" (dict)))
-(def add-drum-rack () :doc "Add a drum rack track." :command "Add Drum Rack" :group "Create"
+(def add-drum-rack () :doc "Add a drum rack track." :command "Add Drum Rack" :pinned true :icon :sampler :group "Create"
   (host-command "add-track-rack" (dict)))
 (def add-layer-rack () :doc "Add a layer rack track." :command "Add Layer Rack" :group "Create"
   (host-command "add-track-layer-rack" (dict)))
@@ -79,17 +159,17 @@
 (def add-scene-bank () :doc "Add a scene bank." :command "Add Scene Bank" :group "Create"
   (eseq.transport/select-scene-bank "New bank"))
 
-(def double-pattern-length () :doc "Double the track pattern's length, repeating its steps." :command "Double Pattern Length" :group "Pattern"
+(def double-pattern-length () :doc "Double the track pattern's length, repeating its steps." :command "Double Pattern Length" :shortcut "s-+" :group "Pattern"
   (host-command "menu-pattern-double" (dict)))
-(def half-pattern-length () :doc "Halve the track pattern's length." :command "Half Pattern Length" :group "Pattern"
+(def half-pattern-length () :doc "Halve the track pattern's length." :command "Half Pattern Length" :shortcut "s--" :group "Pattern"
   (host-command "menu-pattern-half" (dict)))
 (def clone-track-pattern () :doc "Copy the track pattern into a new pattern." :command "Clone Track Pattern" :group "Pattern"
   (host-command "menu-pattern-clone" (dict)))
 ;; Recover a freely played phrase without enabling recording or transport.
-(def capture-midi () :doc "Turn what you just played into a pattern." :command "Capture MIDI…" :group "Pattern"
+(def capture-midi () :doc "Turn what you just played into a pattern." :command "Capture MIDI…" :pinned true :icon :midi :group "Pattern"
   (host-command "retrospective-open" (dict)))
 ;; Print the last 30 seconds of master output into a crop-and-keep modal.
-(def capture-resample () :doc "Record the last 30 seconds of output to a sample." :command "Resample Last 30 s…"
+(def capture-resample () :doc "Record the last 30 seconds of output to a sample." :command "Resample Last 30 s…" :icon :waveform
   :group "Pattern"
   (host-command "resample-open" (dict)))
 (def shift-steps-left () :doc "Rotate the track pattern one step left." :command "Shift Steps Left" :group "Pattern"
@@ -99,7 +179,7 @@
 (def transpose-choices ()
   (list (dict :label "Up Semitone" :value 1) (dict :label "Down Semitone" :value -1)
         (dict :label "Up Octave" :value 12) (dict :label "Down Octave" :value -12)))
-(def transpose-pattern (semitones) :doc "Transpose the track pattern's notes." :command "Transpose Pattern"
+(def transpose-pattern (semitones) :doc "Transpose the track pattern's notes." :command "Transpose Pattern" :icon :note-arrow
   :group "Pattern" :prompt "Transpose" :choices transpose-choices
   (host-command "menu-pattern-transpose" (dict :semitones semitones)))
 (def clear-track-pattern () :doc "Clear every step of the track pattern, after asking." :command "Clear Track Pattern…" :group "Pattern"
@@ -194,6 +274,9 @@
     (and (not (= t nil)) (= t.instrument-type "custom"))))
 
 (def restore-default-layout ()
+  :doc "Show the browser and mixer and reset panel sizes."
+  :command "Restore Default Layout"
+  :group "View"
   (set! eseq.seq-core-state/samples-sidebar-visible true)
   (set! eseq.seq-core-state/mixer-panel-visible true)
   (set! eseq.seq-core-state/lower-panel-visible true)
@@ -282,21 +365,21 @@
 (install-default-menus)
 (menus/register-menu (dict :id "View" :label "View" :enabled-when commands-enabled?
   :items (list
-    (application-menu-entry "view-sequencer" "Sequencer" "" (lambda () (eseq.seq-panels/seq-show-sequencer-main)))
-    (application-menu-entry "view-arrangement" "Arrangement" "" (lambda () (eseq.seq-panels/seq-open-arrangement)))
-    (application-menu-entry "view-piano-roll" "Piano Roll" "" (lambda () (eseq.seq-panels/seq-open-piano-roll-preferred)))
+    (application-menu-entry "view-sequencer" "Sequencer" "" (lambda () (show-sequencer)))
+    (application-menu-entry "view-arrangement" "Arrangement" "" (lambda () (show-arrangement)))
+    (application-menu-entry "view-piano-roll" "Piano Roll" "" (lambda () (show-piano-roll)))
     nil
-    (dict :id "view-browser" :label "Show Browser" :checked-when (lambda () eseq.seq-core-state/samples-sidebar-visible)
-      :on-select (lambda () (eseq.seq-panels/seq-toggle-samples-sidebar)))
-    (dict :id "view-mixer" :label "Show Mixer" :checked-when (lambda () eseq.seq-core-state/mixer-panel-visible)
-      :on-select (lambda () (eseq.seq-panels/seq-toggle-mixer-panel)))
-    (dict :id "view-fx" :label "Show Track FX" :checked-when (lambda () eseq.seq-core-state/lower-panel-visible)
-      :on-select (lambda () (eseq.seq-panels/seq-toggle-fx-panel)))
-    (dict :id "view-macros" :label "Show Patch Macros" :checked-when (lambda () eseq.seq-core-state/patch-macros-panel-visible)
-      :on-select (lambda () (eseq.seq-panels/seq-toggle-patch-macros-panel)))
+    (dict :id "view-browser" :label "Show Browser" :checked-when (lambda () (browser-visible?))
+      :on-select (lambda () (toggle-browser)))
+    (dict :id "view-mixer" :label "Show Mixer" :checked-when (lambda () (mixer-visible?))
+      :on-select (lambda () (toggle-mixer)))
+    (dict :id "view-fx" :label "Show Track FX" :checked-when (lambda () (track-fx-visible?))
+      :on-select (lambda () (toggle-track-fx)))
+    (dict :id "view-macros" :label "Show Patch Macros" :checked-when (lambda () (patch-macros-visible?))
+      :on-select (lambda () (toggle-patch-macros)))
     nil
-    (application-menu-entry "view-collapse" "Collapse All Tracks" "" (lambda () (eseq.sequencer/collapse-all-tracks)))
-    (application-menu-entry "view-reset" "Restore Default Layout" "" restore-default-layout))))
+    (application-menu-entry "view-collapse" "Collapse All Tracks" "" (lambda () (collapse-all-tracks)))
+    (application-menu-entry "view-reset" "Restore Default Layout" "" (lambda () (restore-default-layout))))))
 (menus/register-menu (dict :id "Help" :label "Help" :enabled-when commands-enabled?
   :items (list
     (application-menu-entry "help-search" "Search Commands…" "" (lambda () (host-command "menu-search-commands" (dict))))

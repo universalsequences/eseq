@@ -1,4 +1,5 @@
 mod commands;
+pub use commands::parse_key_str;
 mod describe;
 mod palette;
 mod minibuffer;
@@ -427,6 +428,11 @@ enum MinibufferMode {
         title: String,
         input: String,
         entries: Vec<(String, HostCommand)>,
+        selected: usize,
+    },
+    Mx {
+        input: String,
+        candidates: Vec<String>,
         selected: usize,
     },
     Palette(Box<palette::PaletteState>),
@@ -2907,6 +2913,11 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
+        // The command palette floats above every tile: scrolling over it
+        // scrolls its list, never the tile behind.
+        if self.handle_palette_touchpad_scroll(precise_col, precise_row, delta_y) {
+            return true;
+        }
         let modal_entry = crate::widget_render::topmost_overlay()
             .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal);
         let modal_open = modal_entry.is_some();
@@ -3073,8 +3084,13 @@ impl Editor {
         )
     }
 
+    /// Prompt input the active tile's status row must show. The command
+    /// palette is not: it draws its own panel, and forcing the row open
+    /// would push a status line into a UI-only tile (the transport).
     fn active_status_input_is_pending(&self) -> bool {
-        self.pending_key.is_some() || self.minibuffer_input.is_some() || self.save_prompt.is_some()
+        self.pending_key.is_some()
+            || (self.minibuffer_input.is_some() && !self.palette_is_open())
+            || self.save_prompt.is_some()
     }
 
     fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {
@@ -3792,6 +3808,7 @@ impl Editor {
     }
 
     pub fn update_timers(&mut self) {
+        self.update_palette_preview();
         if self
             .minibuffer_expires_at
             .is_some_and(|expires_at| Instant::now() >= expires_at)

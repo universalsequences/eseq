@@ -6639,6 +6639,20 @@ pub(crate) fn init_runtime(
         };
         Ok(build_preset_tree_from_list(args.first(), query, instrument, args.get(3)))
     });
+    runtime.register_native_with_docs(
+        "seq-instrument-preset-names",
+        "(seq-instrument-preset-names instrument)",
+        "The preset names a saved instrument can load (its factory and user presets, merged), or an empty list.",
+        |args, _ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("seq-instrument-preset-names expects an instrument name".to_string());
+            };
+            // From the background-built index: asking each instrument's
+            // bank on demand stalls a palette search across 300 instruments.
+            let names = sequencer::lisp_host::indexed_instrument_preset_names(name);
+            Ok(Value::List(names.iter().map(|name| Rc::new(RefCell::new(Value::String(name.clone())))).collect()))
+        },
+    );
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
             sequencer::lisp_host::list_saved_instruments()

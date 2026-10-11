@@ -28,11 +28,42 @@ pub struct DefinitionHeader {
     pub command: Option<String>,
     pub prompt: Option<String>,
     pub group: Option<String>,
-    /// `:choices` / `:current`: a function (called with no arguments) or a
-    /// global, named by symbol and resolved in the command's module when the
-    /// palette asks (spec §6).
-    pub choices: Option<String>,
+    /// A `button-icon` glyph name (`:save`, `:swatch`), drawn before the
+    /// palette row's title.
+    pub icon: Option<String>,
+    /// Where the command is bound outside the editor's keymap (a menu
+    /// accelerator, `s-s`), shown in the palette's shortcut column.
+    pub shortcut: Option<String>,
+    /// `:pinned true`: listed when the palette opens, before anything is
+    /// typed (the home list, in definition order).
+    pub pinned: bool,
+    /// `:searchable true`: the palette's search also lists this command's
+    /// final choices (each with the picks before it), so typing a preset
+    /// name finds it inside its instrument.
+    pub searchable: bool,
+    /// `:choices`: one step per argument the palette picks, in order. The
+    /// symbol form `:choices themes` is one step for the first parameter;
+    /// the list form `:choices (instrument instruments preset presets)`
+    /// pairs parameters with sources. A source is a function or global,
+    /// named by symbol and resolved in the command's module; a function is
+    /// called with the values picked so far (spec §6).
+    pub choices: Vec<ChoiceStep>,
+    /// `:current`: like a `:choices` source, the value a one-step command
+    /// holds now.
     pub current: Option<String>,
+    /// `:preview`: a function the palette calls with each choice as the
+    /// highlight lands on it, then with the `:current` value it opened on if
+    /// the pick is abandoned — `true` names the command itself (spec §6).
+    pub preview: Option<String>,
+}
+
+/// One argument the palette picks for a command (see
+/// [`DefinitionHeader::choices`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceStep {
+    /// The parameter it fills; `None` for the symbol form (the first one).
+    pub param: Option<String>,
+    pub source: String,
 }
 
 impl DefinitionHeader {
@@ -41,25 +72,32 @@ impl DefinitionHeader {
         self.doc.as_deref().and_then(first_doc_line)
     }
 
-    /// The badge noun for this command's choice stage: `:prompt`, else the
-    /// first required parameter title-cased (`instrument-type` →
+    /// The badge noun for choice step `step`: `:prompt` on a one-step
+    /// command, else its parameter title-cased (`instrument-type` →
     /// `Instrument Type`).
-    pub fn choice_prompt(&self) -> Option<String> {
-        self.prompt.clone().or_else(|| self.first_param.as_deref().map(title_case))
+    pub fn step_prompt(&self, step: usize) -> Option<String> {
+        if self.choices.len() <= 1
+            && let Some(prompt) = &self.prompt
+        {
+            return Some(prompt.clone());
+        }
+        let param = self.choices.get(step).and_then(|choice| choice.param.as_deref());
+        let param = param.or(if step == 0 { self.first_param.as_deref() } else { None })?;
+        Some(title_case(param))
     }
 
-    /// Why a `:command` can't run from the palette, if it can't: it must
-    /// take no required arguments, or exactly one that `:choices` supplies
+    /// Why a `:command` can't run from the palette, if it can't: its
+    /// required arguments must be exactly the ones `:choices` supplies
     /// (spec §4).
     pub fn command_problem(&self, name: &str) -> Option<String> {
         self.command.as_ref()?;
-        let supplied = usize::from(self.choices.is_some());
+        let supplied = self.choices.len();
         (self.required_arity != supplied).then(|| {
             let display = super::modules::strip_implicit(name);
-            if supplied == 1 {
+            if supplied > 0 {
                 format!(
-                    "warning: command `{display}` has :choices, so it must take exactly one \
-                     required argument (it takes {})",
+                    "warning: command `{display}` picks {supplied} argument(s) with :choices, \
+                     so it must take exactly that many required arguments (it takes {})",
                     self.required_arity
                 )
             } else {
@@ -79,6 +117,10 @@ impl DefinitionHeader {
             Expression::String(text) => Ok(text.clone()),
             _ => Err(format!("{name}: header :{key} must be a string literal")),
         };
+        let name_like = || match value {
+            Expression::Keyword(name) | Expression::String(name) => Ok(name.clone()),
+            _ => Err(format!("{name}: header :{key} must be a keyword or string")),
+        };
         let symbol = || match value {
             Expression::Symbol(symbol) => Ok(symbol.clone()),
             _ => Err(format!("{name}: header :{key} must name a function or global (a symbol)")),
@@ -89,8 +131,19 @@ impl DefinitionHeader {
             "command" => put(&mut self.command, text()?, duplicate),
             "prompt" => put(&mut self.prompt, text()?, duplicate),
             "group" => put(&mut self.group, text()?, duplicate),
-            "choices" => put(&mut self.choices, symbol()?, duplicate),
+            "icon" => put(&mut self.icon, name_like()?, duplicate),
+            "shortcut" => put(&mut self.shortcut, text()?, duplicate),
+            "choices" => {
+                if !self.choices.is_empty() {
+                    return Err(duplicate());
+                }
+                self.choices = choice_steps(name, value)?;
+                Ok(true)
+            }
             "current" => put(&mut self.current, symbol()?, duplicate),
+            "preview" => put(&mut self.preview, symbol()?, duplicate),
+            "pinned" => flag(&mut self.pinned, name, key, value),
+            "searchable" => flag(&mut self.searchable, name, key, value),
             _ => Ok(false),
         }
     }
@@ -102,6 +155,35 @@ fn put<T>(slot: &mut Option<T>, value: T, duplicate: impl Fn() -> String) -> Res
     }
     *slot = Some(value);
     Ok(true)
+}
+
+/// A `true`/`false` header value.
+fn flag(slot: &mut bool, name: &str, key: &str, value: &Expression) -> Result<bool, String> {
+    match value {
+        Expression::Symbol(flag) if flag == "true" || flag == "false" => {
+            *slot = flag == "true";
+            Ok(true)
+        }
+        _ => Err(format!("{name}: header :{key} must be true or false")),
+    }
+}
+
+/// `:choices`' steps: a symbol, or `(param source param source …)`.
+fn choice_steps(name: &str, value: &Expression) -> Result<Vec<ChoiceStep>, String> {
+    let error = || format!("{name}: header :choices must be a symbol or (param source …) pairs of symbols");
+    match value {
+        Expression::Symbol(source) => Ok(vec![ChoiceStep { param: None, source: source.clone() }]),
+        Expression::List(items) if !items.is_empty() && items.len() % 2 == 0 => items
+            .chunks(2)
+            .map(|pair| match pair {
+                [Expression::Symbol(param), Expression::Symbol(source)] => {
+                    Ok(ChoiceStep { param: Some(param.clone()), source: source.clone() })
+                }
+                _ => Err(error()),
+            })
+            .collect(),
+        _ => Err(error()),
+    }
 }
 
 /// The first non-blank line of a docstring.
@@ -228,10 +310,10 @@ mod tests {
         assert_eq!(header.signature, "(add-instrument instrument-type &optional slot)");
         assert_eq!(header.summary(), Some("Add a track."));
         assert_eq!(header.command.as_deref(), Some("Add Instrument"));
-        assert_eq!(header.choices.as_deref(), Some("instrument-choices"));
+        assert_eq!(header.choices, [ChoiceStep { param: None, source: "instrument-choices".into() }]);
         assert_eq!(header.required_arity, 1);
         assert_eq!(header.first_param.as_deref(), Some("instrument-type"));
-        assert_eq!(header.choice_prompt().as_deref(), Some("Instrument Type"));
+        assert_eq!(header.step_prompt(0).as_deref(), Some("Instrument Type"));
     }
 
     #[test]
@@ -252,8 +334,8 @@ mod tests {
     fn non_string_doc_and_duplicates_are_errors() {
         let (name, args, body) = def_parts(r#"(def f () :doc 3 (g))"#);
         assert!(split_header(&name, &args, &body).unwrap_err().contains(":doc must be a string"));
-        let (name, args, body) = def_parts(r#"(def f (x) :choices (list 1 2) (g x))"#);
-        assert!(split_header(&name, &args, &body).unwrap_err().contains("(a symbol)"));
+        let (name, args, body) = def_parts(r#"(def f (x) :choices (list 1 2 3) (g x))"#);
+        assert!(split_header(&name, &args, &body).unwrap_err().contains("pairs of symbols"));
         let (name, args, body) = def_parts(r#"(def f () :doc "a" :doc "b" (g))"#);
         assert!(split_header(&name, &args, &body).unwrap_err().contains("twice"));
     }
@@ -273,14 +355,29 @@ mod tests {
         assert!(problem(r#"(def f () :command "F" (g))"#).is_none());
         assert!(problem(r#"(def f (x &optional y) :command "F" :choices xs (g x))"#).is_none());
         assert!(problem(r#"(def f (x) :command "F" (g x))"#).unwrap().contains(":choices"));
-        assert!(problem(r#"(def f () :command "F" :choices xs (g))"#).unwrap().contains("exactly one"));
+        assert!(problem(r#"(def f () :command "F" :choices xs (g))"#).unwrap().contains("exactly that many"));
+        assert!(problem(r#"(def f (a b) :command "F" :choices (a as b bs) (g a b))"#).is_none());
+        assert!(problem(r#"(def f (a) :command "F" :choices (a as b bs) (g a))"#).is_some());
         assert!(problem(r#"(def f (x) :doc "not a command" (g x))"#).is_none());
     }
 
     #[test]
-    fn explicit_prompt_wins_over_param_name() {
-        let (name, args, body) = def_parts(r#"(def f (theme) :prompt "Look" (g theme))"#);
+    fn list_choices_name_a_prompt_per_parameter() {
+        let (name, args, body) =
+            def_parts(r#"(def f (instrument preset) :choices (instrument instruments preset presets-for) (g))"#);
         let (header, _) = split_header(&name, &args, &body).unwrap().unwrap();
-        assert_eq!(header.choice_prompt().as_deref(), Some("Look"));
+        assert_eq!(header.choices.len(), 2);
+        assert_eq!(header.choices[1].source, "presets-for");
+        assert_eq!(header.step_prompt(0).as_deref(), Some("Instrument"));
+        assert_eq!(header.step_prompt(1).as_deref(), Some("Preset"));
+    }
+
+    #[test]
+    fn explicit_prompt_wins_over_param_name() {
+        let (name, args, body) = def_parts(r#"(def f (theme) :prompt "Look" :icon :swatch :shortcut "s-t" (g theme))"#);
+        let (header, _) = split_header(&name, &args, &body).unwrap().unwrap();
+        assert_eq!(header.step_prompt(0).as_deref(), Some("Look"));
+        assert_eq!(header.icon.as_deref(), Some("swatch"));
+        assert_eq!(header.shortcut.as_deref(), Some("s-t"));
     }
 }

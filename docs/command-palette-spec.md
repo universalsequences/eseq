@@ -170,8 +170,41 @@ One list, three tiers (`editor/palette.rs`):
   `seq-theme-registry` with labels) and **Add Instrument**
   (`eseq.browser/add-instrument`, the Instruments tab tree flattened, each
   choice's detail its folder).
-- Not built: `:preview` (live preview on highlight, reverted on Esc) and
-  multi-parameter commands with stacked badges — see the epic's follow-ups.
+- `:preview fn` (or `:preview true` for the command itself) live-previews:
+  the palette calls it with each choice as the highlight lands on it, and
+  with the value `:current` had when the stage opened if the pick is
+  abandoned (Esc, C-g, a press outside, Backspace out of the stage). Enter
+  runs the command. Change Theme previews through `seq-preview-theme`.
+- Multi-step: `:choices (instrument instruments preset presets-for)` picks
+  one argument per stage; each source after the first is called with the
+  picks so far; the badge is a breadcrumb (`Revsynt › Preset`) and Backspace
+  on an empty field steps back.
+- `:searchable true` adds a command's final choices to the top-level search
+  (walked on the first keystroke, cached until the Lisp definitions
+  change), each in a section named for the command with its earlier picks
+  as its value; a choice dict's `:search false` keeps it out; identical
+  breadcrumbs are listed once. Add Instrument uses it, so typing a preset
+  name finds it inside its instrument.
+
+### 6.2 Home list and M-x (rev 3)
+
+Before anything is typed the palette shows a flat home list — recently run
+commands, then `:pinned true` ones in definition order (every command when
+none is pinned) — with no sections; sections appear only while typing. M-x
+is untouched: the classic minibuffer completing read over every name. The
+palette opens with ⌘⇧P or `(command-palette [command])`, and does not force
+the active tile's status row open.
+
+### 6.1 Row detail (rev 2, after the reference review)
+
+Rows are `[icon] Title ··· value  shortcut  ›|✓`. Header keys `:icon`
+(a `button-icon` name) and `:shortcut` (a `key_str` spelling shown when the
+binding lives outside the editor keymap, e.g. a menu accelerator) feed the
+row; `(command-group "File" :icon :document)` registers a section's header
+icon and order. Values truncate from the left (`…k/Apps/rex-app`); a
+`:current` true/false on a command without `:choices` shows ✓; the field
+has a clear button; a scrolling list draws a thin thumb in its own gutter.
+Matched characters are not highlighted (tried, rejected as noisy).
 
 ## 7. UI (phase 3, as built)
 

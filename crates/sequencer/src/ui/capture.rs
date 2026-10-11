@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(target_os = "macos")]
 use eseqlisp::frame::build_render_frame;
 use eseqlisp::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
@@ -46,6 +46,10 @@ pub(crate) struct CaptureArgs {
     /// `--noui`: load the bare `-noui` root (`ui/noui.lisp`) instead of the
     /// DAW, so a `metal_seq noui` view file renders as it does there.
     noui: bool,
+    /// `--type TEXT` and `--keys "DOWN*3 RET"`, in argument order:
+    /// keystrokes sent to the editor after the script settles, before the
+    /// frame (palette and minibuffer states can only be reached by typing).
+    keystrokes: Vec<KeyEvent>,
 }
 
 impl CaptureArgs {
@@ -77,6 +81,7 @@ impl CaptureArgs {
         let mut all_panels = false;
         let mut edit_frames = 0;
         let mut noui = false;
+        let mut keystrokes = Vec::new();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -104,6 +109,12 @@ impl CaptureArgs {
                 "--all-panels" => all_panels = true,
                 "--edit-frames" => edit_frames = parse_usize_arg(&mut args, "--edit-frames")?,
                 "--noui" => noui = true,
+                "--type" => keystrokes.extend(
+                    next_arg(&mut args, "--type")?
+                        .chars()
+                        .map(|ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                ),
+                "--keys" => keystrokes.extend(parse_capture_keys(&next_arg(&mut args, "--keys")?)?),
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -138,13 +149,32 @@ impl CaptureArgs {
             all_panels,
             edit_frames,
             noui,
+            keystrokes,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui]"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui] [--type TEXT] [--keys 'DOWN*3 RET']"
             .to_string()
     }
+}
+
+/// `--keys`: space-separated key spellings as bindings write them
+/// (`DOWN`, `RET`, `S-s-p`, `PageDown`, `SPC`), each with an optional `*N`
+/// repeat (`DOWN*12`).
+fn parse_capture_keys(spec: &str) -> Result<Vec<KeyEvent>, String> {
+    let mut keys = Vec::new();
+    for token in spec.split_whitespace() {
+        let (name, repeat) = match token.rsplit_once('*') {
+            Some((name, count)) if !name.is_empty() => {
+                (name, count.parse::<usize>().map_err(|_| format!("--keys: bad repeat in {token}"))?)
+            }
+            _ => (token, 1),
+        };
+        let key = eseqlisp::editor::parse_key_str(name).ok_or_else(|| format!("--keys: unknown key {name}"))?;
+        keys.extend(std::iter::repeat_n(key, repeat));
+    }
+    Ok(keys)
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -1491,6 +1521,21 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         frame = build_render_frame(&mut editor, columns, rows);
     }
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
+        frame = build_render_frame(&mut editor, columns, rows);
+    }
+    if !args.keystrokes.is_empty() {
+        // Lay the palette out at this window size first, as the live loop's
+        // previous frame would, so keys that page by its visible rows (and
+        // its scroll window) see the real page size.
+        let viewport = eseqlisp::widget_render::WidgetViewport::window(
+            cell_width, cell_height, args.width as f32, args.height as f32, 0.0,
+        );
+        for key in &args.keystrokes {
+            if let Some(palette) = editor.palette_frame() {
+                eseqlisp::widget_render::command_palette::primitives(&palette, viewport);
+            }
+            editor.handle_key(*key);
+        }
         frame = build_render_frame(&mut editor, columns, rows);
     }
 
