@@ -204,7 +204,7 @@ impl Editor {
     }
 
     /// Every name M-x offers: builtins, Lisp globals and bound handlers,
-    /// sorted (the command palette is separate: ⌘⇧P).
+    /// sorted (the command palette is separate: `/`).
     pub fn collect_mx_candidates(&mut self) -> Vec<String> {
         let mut names: Vec<String> = self.builtins.values().cloned().collect();
         let symbols = self.runtime.completion_symbols();

@@ -959,6 +959,8 @@ pub struct CommandChoice {
     /// False for a choice with `:search false`: kept out of the palette's
     /// search across `:searchable` commands (a per-instrument "Default").
     pub searchable: bool,
+    /// A `sound-glyph` source key (`:glyph`): the row draws that glyph.
+    pub glyph: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4001,7 +4003,11 @@ impl Runtime {
                     Some(other) => Some(self.format_value(&other)),
                 };
                 let searchable = !matches!(field("search"), Some(Value::Bool(false)));
-                CommandChoice { label, value, detail, searchable }
+                let glyph = match field("glyph") {
+                    Some(Value::String(key)) if !key.is_empty() => Some(key),
+                    _ => None,
+                };
+                CommandChoice { label, value, detail, searchable, glyph }
             })
             .collect())
     }

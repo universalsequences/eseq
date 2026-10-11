@@ -235,9 +235,13 @@ pub(crate) fn present_kit_presets(files: Vec<PresetFile>) {
     seed(|p| p.kit_presets.set(files));
 }
 
-/// The open sound palette (the `sound-palette` kind; `None` while closed).
+/// The sound palette's track and sounds (the `sound-palette` kind; `None`
+/// while nothing reads them).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Palette {
+    /// The overlay is open. Closed, the sounds are the selected track's,
+    /// published while the command palette browses them.
+    pub(crate) open: bool,
     pub(crate) track: usize,
     pub(crate) target: PaletteTarget,
     pub(crate) instrument: String,

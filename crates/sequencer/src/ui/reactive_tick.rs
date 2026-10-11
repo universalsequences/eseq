@@ -236,7 +236,16 @@ pub(crate) fn sync_reactive_tick(
         }
         needs_reactive_cycle |= crate::retrospective::sync(editor.runtime_mut(), &app);
         let pattern_glyphs_visible = editor.has_visible_widget_source("sound-glyph", "pattern-glyph:");
-        if sync_sound_palette(&app, &mut ctx.frame.sound_palette, pattern_glyphs_visible) {
+        // While the command palette shows its home list or Apply Sound, the
+        // selected track's sounds are published for them, re-read once they
+        // land (after this tick's kind push).
+        let browse_track = editor.palette_shows_live_choices().then_some(ct);
+        let synced =
+            sync_sound_palette(&app, &mut ctx.frame.sound_palette, pattern_glyphs_visible, browse_track);
+        if synced.sounds {
+            editor.mark_palette_choices_stale();
+        }
+        if synced.paint {
             editor.mark_needs_redraw();
         }
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —

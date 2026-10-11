@@ -29,7 +29,8 @@
         track-down
         track-relative
         scene-previous
-        scene-next)
+        scene-next
+        open-command-palette)
 
 (def mode-name "eseq.sequencer-keys/sequencer-keys")
 
@@ -89,6 +90,10 @@
 (def scene-previous () (scene-step -1))
 (def scene-next () (scene-step 1))
 
+;; /: the command palette. Only sequencer views bind it, so a slash still
+;; types into code buffers and focused text fields.
+(def open-command-palette () (do (command-palette) true))
+
 (define-mode "eseq.sequencer-keys/sequencer-keys" :read-only true :live-keys true)
 (mode-bind-key mode-name "LEFT" "cursor-left")
 (mode-bind-key mode-name "RIGHT" "cursor-right")
@@ -103,3 +108,4 @@
 (mode-bind-key mode-name "s-RIGHT" "scene-next")
 (mode-bind-key mode-name "C-LEFT" "scene-previous")
 (mode-bind-key mode-name "C-RIGHT" "scene-next")
+(mode-bind-key mode-name "/" "open-command-palette")

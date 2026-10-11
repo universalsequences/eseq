@@ -330,7 +330,7 @@ impl HostKinds {
             PaletteTarget::Pattern(id) => ("pattern", id.0 as f64),
             PaletteTarget::Cell => ("cell", -1.0),
         };
-        pusher.push(palette, f::PALETTE_OPEN, Value::Bool(true));
+        pusher.push(palette, f::PALETTE_OPEN, Value::Bool(open.open));
         pusher.push(palette, f::PALETTE_TRACK, Value::Instance(track));
         pusher.push(palette, f::PALETTE_TARGET, text(target));
         pusher.push(palette, f::PALETTE_TARGET_ID, number(target_id));

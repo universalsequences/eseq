@@ -37,6 +37,9 @@ pub struct DefinitionHeader {
     /// `:pinned true`: listed when the palette opens, before anything is
     /// typed (the home list, in definition order).
     pub pinned: bool,
+    /// `:pinned N`: pinned at the very top of the home list, above the
+    /// recently run commands, ascending by `N`.
+    pub pin_rank: Option<u32>,
     /// `:searchable true`: the palette's search also lists this command's
     /// final choices (each with the picks before it), so typing a preset
     /// name finds it inside its instrument.
@@ -142,7 +145,15 @@ impl DefinitionHeader {
             }
             "current" => put(&mut self.current, symbol()?, duplicate),
             "preview" => put(&mut self.preview, symbol()?, duplicate),
-            "pinned" => flag(&mut self.pinned, name, key, value),
+            "pinned" => match value {
+                Expression::Number(rank) if *rank >= 0.0 && rank.fract() == 0.0 => {
+                    self.pinned = true;
+                    self.pin_rank = Some(*rank as u32);
+                    Ok(true)
+                }
+                Expression::Number(_) => Err(format!("{name}: header :pinned rank must be a whole number")),
+                _ => flag(&mut self.pinned, name, key, value),
+            },
             "searchable" => flag(&mut self.searchable, name, key, value),
             _ => Ok(false),
         }

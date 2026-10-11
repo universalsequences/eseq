@@ -1,6 +1,6 @@
 # Command Palette + Definition Docs — spec rev 1
 
-Status: rev 1, 2026-10-10. Phases 1–5 COMMITTED 2026-10-10. Follow-up: eseq-cmdp.6 (:preview, multi-parameter stages). Epic: see `bd show` for the `command-palette` epic.
+Status: rev 4, 2026-10-11 (rev 1 2026-10-10). Phases 1–5 COMMITTED 2026-10-10. Follow-up: eseq-cmdp.6 (:preview, multi-parameter stages). Epic: see `bd show` for the `command-palette` epic.
 
 ## 1. Goal
 
@@ -186,13 +186,34 @@ One list, three tiers (`editor/palette.rs`):
   breadcrumbs are listed once. Add Instrument uses it, so typing a preset
   name finds it inside its instrument.
 
+### 6.3 Apply Sound: the sound pool as a command (rev 4)
+
+**Apply Sound** (`eseq.sound-palette/apply-sound`, `:pinned 1`) picks
+from the selected track's sound pool — the overlay's cards as rows: the
+sound's glyph, its name, then where it is used and what it was loaded
+from (`S4 S6 P4 P6 · Grandfather Clock Bells`); the current sound is
+checked and is the command row's value. Enter applies it like the
+overlay's click (`apply-sound!`).
+
+- The pool is host data: while the command palette is open (and the
+  overlay is not) the `sound-palette` kind carries the selected track's
+  sounds with `open` false. The tick that publishes them calls
+  `Editor::mark_palette_choices_stale`; on the next timer tick the palette
+  re-reads its commands' `:current` values and its choice stage, keeping
+  the typed input and the highlighted value.
+- A choice dict's `:glyph` names a `sound-glyph` source key; a list with
+  any glyph draws taller two-line rows (glyph, title, detail beneath) and
+  pages by that height.
+- `:pinned N` ranks a command into a fixed block at the top of the home
+  list, above the recently run ones.
+
 ### 6.2 Home list and M-x (rev 3)
 
 Before anything is typed the palette shows a flat home list — recently run
 commands, then `:pinned true` ones in definition order (every command when
 none is pinned) — with no sections; sections appear only while typing. M-x
 is untouched: the classic minibuffer completing read over every name. The
-palette opens with ⌘⇧P or `(command-palette [command])`, and does not force
+palette opens with `/` in sequencer views (bound in `eseq.sequencer-keys`, so a slash still types into code buffers and text fields) or `(command-palette [command])`, and does not force
 the active tile's status row open.
 
 ### 6.1 Row detail (rev 2, after the reference review)
@@ -209,7 +230,7 @@ Matched characters are not highlighted (tried, rejected as noisy).
 ## 7. UI (phase 3, as built)
 
 The palette is M-x: `execute-extended-command`, `command-palette` (bound
-`S-s-p`, ⌘⇧P) and the `(command-palette)` native all open it. Its state
+`/` in sequencer views) and the `(command-palette)` native all open it. Its state
 lives in the minibuffer slot (`MinibufferMode::Palette`), so it takes the
 keyboard from whichever tile is active; the status line echoes `M-x …`,
 which is the TUI's only view of it.

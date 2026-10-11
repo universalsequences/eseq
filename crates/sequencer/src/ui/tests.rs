@@ -8287,6 +8287,7 @@
                 &app,
                 &mut frame_diff.sound_palette,
                 true,
+                None,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -8388,7 +8389,7 @@
                     frame.prev_sound_binding_epoch = app.sound_binding_epoch;
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
-                let _ = super::state_values::sync_sound_palette(app, &mut frame.sound_palette, true);
+                let _ = super::state_values::sync_sound_palette(app, &mut frame.sound_palette, true, None);
                 let tick_sync_done = Instant::now();
                 let ct = current_track.load(Ordering::Relaxed);
                 let invalidations = ui_invalidations.drain();

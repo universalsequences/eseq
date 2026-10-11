@@ -186,6 +186,9 @@ pub struct PaletteRowFrame {
     pub submenu: bool,
     /// The current choice, or an on state (`✓`).
     pub checked: bool,
+    /// A `sound-glyph` source key drawn in place of the icon; a list with
+    /// any glyph draws taller two-line rows.
+    pub glyph: Option<String>,
 }
 
 /// Visible palette rows at most; the list scrolls past this.

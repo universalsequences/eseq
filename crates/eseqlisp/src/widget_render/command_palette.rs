@@ -28,8 +28,12 @@ const FOOTER_FONT_SIZE: f32 = 10.5;
 const PANEL_WIDTH_PX: f32 = 620.0;
 const PANEL_RADIUS_PX: f32 = 22.0;
 const FIELD_RADIUS_PX: f32 = 18.0;
-/// Row and field heights, in rows.
+/// Row and field heights, in rows. A list with glyphs (Apply Sound's
+/// sounds) draws taller two-line rows so the glyph reads.
 const ROW_HEIGHT: f32 = 1.42;
+const GLYPH_ROW_HEIGHT: f32 = 3.1;
+/// The glyph's side, as a share of its row's height.
+const GLYPH_SIDE: f32 = 0.84;
 const FIELD_HEIGHT: f32 = 1.7;
 /// Vertical padding inside the panel, in rows.
 const PAD_V: f32 = 0.35;
@@ -147,8 +151,9 @@ pub struct PaletteHitMap {
     pub list_top: f32,
     pub row_height: f32,
     pub rows: usize,
-    /// Rows that fit the window: the page size the editor scrolls by.
-    pub capacity: usize,
+    /// The list's height that fits the window, in rows: the page size the
+    /// editor scrolls by follows from it ([`page_size`]).
+    pub available: f32,
     /// The field's clear button, while there is input to clear.
     pub clear: Option<Rect>,
 }
@@ -195,30 +200,53 @@ pub fn hit_map() -> Option<PaletteHitMap> {
     HIT_MAP.with(std::cell::Cell::get)
 }
 
+/// How many rows of the given height fit `available` rows of list.
+fn capacity(available: f32, glyph_rows: bool) -> usize {
+    ((available / row_height_for(glyph_rows)).floor().max(1.0) as usize).min(PALETTE_MAX_ROWS)
+}
+
+fn row_height_for(glyph_rows: bool) -> f32 {
+    if glyph_rows { GLYPH_ROW_HEIGHT } else { ROW_HEIGHT }
+}
+
+/// The rows a list shows at once (glyph rows are taller): what fit the
+/// window when the palette was last drawn.
+pub fn page_size(glyph_rows: bool) -> usize {
+    hit_map().map_or(PALETTE_MAX_ROWS, |map| capacity(map.available, glyph_rows))
+}
+
 /// Forgets the drawn geometry (the palette closed or stopped drawing).
 pub fn clear_hit_map() {
     HIT_MAP.with(|map| map.set(None));
 }
 
-/// The panel's top row and how many list rows fit below it in the window.
-fn placement(frame: &PaletteFrame, viewport: WidgetViewport) -> (f32, usize) {
+fn glyph_rows(frame: &PaletteFrame) -> bool {
+    frame.rows.iter().any(|row| row.glyph.is_some())
+}
+
+fn row_height(frame: &PaletteFrame) -> f32 {
+    row_height_for(glyph_rows(frame))
+}
+
+/// The panel's top row, the list height that fits below it in the window,
+/// and how many of the frame's rows that holds.
+fn placement(frame: &PaletteFrame, viewport: WidgetViewport) -> (f32, f32, usize) {
     let total_rows = viewport.vp_h / viewport.cell_h.max(1.0);
     let top = (total_rows * 0.14).max(2.0);
     let footer = if frame.footer.is_some() { FOOTER_HEIGHT } else { 0.0 };
     let chrome = PAD_V * 3.0 + FIELD_HEIGHT + footer;
     let available = total_rows - top - chrome - 1.0;
-    let capacity = ((available / ROW_HEIGHT).floor().max(1.0) as usize).min(PALETTE_MAX_ROWS);
-    (top, capacity)
+    (top, available, capacity(available, glyph_rows(frame)))
 }
 
 /// Where the panel sits in the window, and the list rows it draws.
 pub fn panel_rect(frame: &PaletteFrame, viewport: WidgetViewport) -> (Rect, usize) {
     let total_cols = viewport.vp_w / viewport.cell_w.max(1.0);
     let width = (ui_design_px(PANEL_WIDTH_PX) / viewport.cell_w.max(1.0)).min(total_cols - 4.0).max(10.0);
-    let (top, capacity) = placement(frame, viewport);
+    let (top, _, capacity) = placement(frame, viewport);
     let list_rows = frame.rows.len().min(capacity).max(usize::from(frame.empty_text.is_some()));
     let footer = if frame.footer.is_some() { FOOTER_HEIGHT } else { 0.0 };
-    let height = PAD_V + FIELD_HEIGHT + PAD_V + list_rows as f32 * ROW_HEIGHT + PAD_V + footer;
+    let height = PAD_V + FIELD_HEIGHT + PAD_V + list_rows as f32 * row_height(frame) + PAD_V + footer;
     let rect = Rect { row: top, col: ((total_cols - width) * 0.5).max(0.0), width, height };
     (rect, list_rows)
 }
@@ -226,8 +254,9 @@ pub fn panel_rect(frame: &PaletteFrame, viewport: WidgetViewport) -> (Rect, usiz
 /// The palette's primitives in window cell coordinates. Records the hit map.
 pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
     let (panel, list_rows) = panel_rect(frame, viewport);
-    let (_, capacity) = placement(frame, viewport);
+    let (_, available, capacity) = placement(frame, viewport);
     let drawn_rows = frame.rows.len().min(capacity);
+    let row_h = row_height(frame);
     let fg = theme::DROPDOWN_FG();
     let dim = theme::DIM();
     // Equal visual insets on both axes: convert the vertical pad to columns.
@@ -297,7 +326,7 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
     // ── Rows.
     let list_top = field.row + field.height + PAD_V;
     HIT_MAP.with(|map| {
-        map.set(Some(PaletteHitMap { panel, list_top, row_height: ROW_HEIGHT, rows: drawn_rows, capacity, clear }))
+        map.set(Some(PaletteHitMap { panel, list_top, row_height: row_h, rows: drawn_rows, available, clear }))
     });
     // A scrolling list gives the scrollbar its own gutter: rows (and the
     // highlight) stop short of it rather than running underneath.
@@ -305,10 +334,10 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
     let scrollbar_inset = ui_design_px(SCROLLBAR_INSET_PX) / viewport.cell_w.max(1.0);
     let gutter = if frame.scroll.is_some() { scrollbar_w + scrollbar_inset * 2.0 - pad_h * 0.5 } else { 0.0 };
     let row_rect = |idx: usize| Rect {
-        row: list_top + idx as f32 * ROW_HEIGHT,
+        row: list_top + idx as f32 * row_h,
         col: panel.col,
         width: panel.width - gutter.max(0.0),
-        height: ROW_HEIGHT,
+        height: row_h,
     };
     if let Some(empty) = &frame.empty_text {
         prims.push(text(text_row(row_rect(0)), panel.col + pad_h + text_pad, empty.clone(), FONT_SIZE, dim));
@@ -332,7 +361,7 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
             row: list_top + 0.2,
             col: panel.col + panel.width - scrollbar_inset - scrollbar_w,
             width: scrollbar_w,
-            height: (list_rows as f32 * ROW_HEIGHT - 0.4).max(0.0),
+            height: (list_rows as f32 * row_h - 0.4).max(0.0),
         };
         let min_height = (ui_design_px(SCROLLBAR_MIN_PX) / viewport.cell_h.max(1.0)).min(track.height);
         let height = (track.height * (drawn_rows as f32 / total.max(1) as f32).min(1.0)).max(min_height);
@@ -347,7 +376,7 @@ pub fn primitives(frame: &PaletteFrame, viewport: WidgetViewport) -> Vec<GpuPrim
 
     // ── Footer: the highlighted entry's signature and first doc line.
     if let Some((signature, summary)) = &frame.footer {
-        let top = list_top + list_rows as f32 * ROW_HEIGHT + PAD_V;
+        let top = list_top + list_rows as f32 * row_h + PAD_V;
         let rule =
             Rect { row: top, col: panel.col + pad_h, width: (panel.width - pad_h * 2.0).max(0.0), height: 0.04 };
         prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect: rule, color: fg.with_alpha(0.12) }));
@@ -412,6 +441,10 @@ fn item_row(
         prims.push(aligned_text(text_row, edge, shortcut_w, 1.0, shortcut.clone(), FONT_SIZE, quiet));
         edge -= shortcut_w + COLUMN_GAP;
     }
+    if let Some(glyph) = &row.glyph {
+        prims.extend(glyph_row_body(rect, row, glyph, selected, span.start..edge, viewport));
+        return prims;
+    }
     let mut label_left = span.start;
     if let Some(icon) = row.icon.as_deref().and_then(super::button::icon_name_value) {
         // Glyphs sit quieter than the title, as native menus draw them.
@@ -436,5 +469,57 @@ fn item_row(
     }
     let label = truncate_text_to_width(&row.label, label_max, FONT_SIZE, viewport.cell_w);
     prims.push(text(text_row, label_left, label, FONT_SIZE, fg));
+    prims
+}
+
+/// A glyph row's left part: the sound glyph on a dark tile, then the title
+/// over its detail (where the sound is used, what it was loaded from).
+fn glyph_row_body(
+    rect: Rect,
+    row: &PaletteRowFrame,
+    glyph: &str,
+    selected: bool,
+    span: std::ops::Range<f32>,
+    viewport: WidgetViewport,
+) -> Vec<GpuPrimitive> {
+    let fg = theme::list_row_fg(selected, theme::DROPDOWN_FG());
+    let mut prims = Vec::new();
+    let side = rect.height * GLYPH_SIDE;
+    let tile = Rect {
+        row: rect.row + (rect.height - side) * 0.5,
+        col: span.start - 0.3,
+        width: side * viewport.cell_h / viewport.cell_w.max(1.0),
+        height: side,
+    };
+    prims.push(rounded_rect_primitive(tile, theme::BG(), 8.0, viewport));
+    let node = crate::layout::LayoutNode {
+        widget_id: 0,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "sound-glyph".to_string(),
+        rect: tile,
+        props: std::collections::HashMap::from([(
+            "source".to_string(),
+            crate::vm::Value::String(glyph.to_string()),
+        )]),
+        children: Vec::new(),
+        focusable: false,
+        animation: Default::default(),
+    };
+    use super::WidgetDefinition;
+    prims.extend(super::sound_glyph::SOUND_GLYPH_WIDGET.build_primitives("sound-glyph", &node, viewport));
+
+    let left = tile.col + tile.width + 1.0;
+    let max = (span.end - left).max(0.0);
+    let middle = rect.row + rect.height * 0.5;
+    let label = truncate_text_to_width(&row.label, max, FONT_SIZE, viewport.cell_w);
+    prims.push(text(middle - 1.0, left, label, FONT_SIZE, fg));
+    if let Some(detail) = row.detail.as_ref().filter(|detail| !detail.is_empty()) {
+        let quiet = if selected { fg.with_alpha(0.75) } else { fg.with_alpha(0.5) };
+        let detail = truncate_text_to_width(detail, max, HEADER_FONT_SIZE, viewport.cell_w);
+        prims.push(text(middle + 0.05, left, detail, HEADER_FONT_SIZE, quiet));
+    }
     prims
 }

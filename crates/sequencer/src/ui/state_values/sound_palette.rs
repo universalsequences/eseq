@@ -26,7 +26,7 @@ pub(crate) struct SoundPaletteFrameState {
     cached: Option<crate::presented::Palette>,
     /// Whether anything was ever published (so the first closed frame does
     /// not publish Nil over the registered default).
-    published_open: bool,
+    published: bool,
     glyphs: GlyphFrames,
 }
 
@@ -1291,23 +1291,40 @@ fn palette_instrument_name(app: &app::App, track: usize) -> String {
     }
 }
 
-/// Publish the palette read surfaces; returns whether a paint resource
-/// (a glyph frame) changed. Ungated (cheap, and it also mounts in the *step*
-/// side panel).
+/// What [`sync_sound_palette`] changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SoundPaletteSync {
+    /// A paint resource (a glyph frame).
+    pub(crate) paint: bool,
+    /// The published sounds.
+    pub(crate) sounds: bool,
+}
+
+/// Publish the palette read surfaces: the open overlay's, else
+/// `browse_track`'s sounds (the command palette's Apply Sound reads them
+/// while it is open). Ungated otherwise (cheap, and it also mounts in the
+/// *step* side panel).
 pub(crate) fn sync_sound_palette(
     app: &app::App,
     frame: &mut SoundPaletteFrameState,
     pattern_glyphs_visible: bool,
-) -> bool {
+    browse_track: Option<usize>,
+) -> SoundPaletteSync {
     let paint_before = eseqlisp::widget_render::widget_state_generation();
+    let mut sounds = false;
     if pattern_glyphs_visible {
         sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
     }
-    match app.sound_palette_open {
-        Some((track, target)) => {
+    let shown = app.sound_palette_open.map(|(track, target)| (true, track, target)).or_else(|| {
+        let track = browse_track.filter(|&track| track < app.tracks.len())?;
+        Some((false, track, app.palette_target_or_binding(track, None)))
+    });
+    match shown {
+        Some((open, track, target)) => {
             let entries = app.sound_palette_entries(track, target);
             sync_glyph_frames(app, track, &entries, &mut frame.glyphs);
             let palette = crate::presented::Palette {
+                open,
                 track,
                 target,
                 instrument: palette_instrument_name(app, track),
@@ -1316,20 +1333,28 @@ pub(crate) fn sync_sound_palette(
             if frame.cached.as_ref() != Some(&palette) {
                 frame.cached = Some(palette.clone());
                 crate::presented::present_palette(Some(palette));
-                frame.published_open = true;
+                frame.published = true;
+                sounds = true;
             }
         }
         None => {
-            if frame.published_open || frame.cached.is_some() {
+            if frame.published || frame.cached.is_some() {
+                // A closed browse keeps its glyphs for the next `/` (the next
+                // sync evicts whatever it does not show); a closed overlay
+                // drops them.
+                let browsed = frame.cached.as_ref().is_some_and(|palette| !palette.open);
                 crate::presented::present_palette(None);
                 frame.cached = None;
-                frame.published_open = false;
-                retain_sound_glyph_frames("sound-glyph:", &HashSet::new());
-                frame.glyphs.published.clear();
+                frame.published = false;
+                if !browsed {
+                    retain_sound_glyph_frames("sound-glyph:", &HashSet::new());
+                    frame.glyphs.published.clear();
+                }
+                sounds = true;
             }
         }
     }
-    paint_before != eseqlisp::widget_render::widget_state_generation()
+    SoundPaletteSync { paint: paint_before != eseqlisp::widget_render::widget_state_generation(), sounds }
 }
 
 /// Rack composite surface tests (docs/rack-glyph-spec.md §4). These exercise

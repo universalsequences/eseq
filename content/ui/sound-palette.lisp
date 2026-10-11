@@ -19,7 +19,7 @@
 
 (import eseq.kinds :refer (selection song sound-palette apply-sound! apply-sound-with-mix!
                            fork-sound! open-sound-palette! close-sound-palette!))
-(import eseq.view-kit :refer (color-rgba))
+(import eseq.view-kit :refer (color-rgba find))
 
 (export sound-rename
         open?
@@ -31,6 +31,7 @@
         commit-rename
         open-for-clip
         toggle-open
+        apply-sound
         panel)
 
 ;; The inline rename: the sound being renamed (nil while none) and its
@@ -43,9 +44,11 @@
 (def open? ()
   sound-palette.open)
 
-;; The palette's sounds (none while closed).
+;; The palette's sounds (none while closed: the kind also carries the
+;; selected track's sounds while the command palette browses them, and the
+;; closed modal still evaluates its children).
 (def entries ()
-  sound-palette.sounds)
+  (if (open?) sound-palette.sounds (list)))
 
 ;; The gesture target the overlay's Apply/Fork act on (17.6): the override
 ;; pattern's entity under an active launch — what you hear — surfaced here
@@ -273,6 +276,42 @@
       (if c
         (open-for-clip c)
         (if t (open-sound-palette! t) nil)))))
+
+;; ── Apply Sound (the command palette's view of the pool) ──
+
+;; Where a sound is used and what it was loaded from: "S6 P6 · Grandfather
+;; Clock Bell", the two lines the overlay's card shows around its glyph.
+(def sound-origin (s)
+  (let ((used s.referents-short)
+        (source (entry-source s)))
+    (if (= source "")
+      (if (= used "") "unused" used)
+      (if (= used "") source (str used " · " source)))))
+
+;; The selected track's sounds as choices: the host publishes them while the
+;; command palette is open, so the stage fills a frame after it opens.
+(def sound-choices ()
+  (map (lambda (s)
+         (dict :label (str s.name (if s.base " (scene)" "") (if s.track-sound " · TRK" ""))
+               :value s
+               :detail (sound-origin s)
+               :glyph s.glyph-key))
+       sound-palette.sounds))
+
+(def current-sound ()
+  (find (lambda (s) s.current) sound-palette.sounds))
+
+(def apply-sound (sound)
+  :doc "Make one of the track's sounds what it plays.
+Lists the selected track's sound pool with each sound's glyph, where it is
+used and what it was loaded from; the current one is checked."
+  :command "Apply Sound"
+  :icon :bubbles
+  :prompt "Sound"
+  :choices sound-choices
+  :current current-sound
+  :pinned 1
+  (apply-sound! sound))
 
 ;; The palette surface (modal spec §4): a centered modal over the whole
 ;; frame instead of a band prepended to the arrangement view. The open state

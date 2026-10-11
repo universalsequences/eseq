@@ -49,7 +49,7 @@ impl Harness {
 
     /// The sound palette publish, as the tick runs it.
     fn publish_palette(&mut self) {
-        sync_sound_palette(&self.app, &mut self.frame.sound_palette, false);
+        sync_sound_palette(&self.app, &mut self.frame.sound_palette, false, None);
     }
 }
 

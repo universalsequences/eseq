@@ -17,11 +17,11 @@ use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 use super::minibuffer::{ReadKey, classify_read_key};
 use super::{Editor, MinibufferMode};
-use crate::backend::{PALETTE_MAX_ROWS, PaletteFrame, PaletteRowFrame};
+use crate::backend::{PaletteFrame, PaletteRowFrame};
 use crate::vm::Value;
 use crate::widget_render::command_palette::{self, PaletteHit};
 
-/// The command that opens the palette (bound to ⌘⇧P; M-x opens it too).
+/// The command that opens the palette (bound to `/` in sequencer views).
 pub(super) const COMMAND_PALETTE: &str = "command-palette";
 /// Recently run commands kept for the empty-query list.
 const HISTORY_LIMIT: usize = 30;
@@ -56,6 +56,10 @@ pub(super) struct PaletteState {
     /// The last change was a pointer hover: it moves the highlight but
     /// does not preview (sweeping the list would apply every row).
     hovering: bool,
+    /// The host republished data the palette lists (the selected track's
+    /// sounds): `:current` values and the choice stage are re-read on the
+    /// next timer tick.
+    stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,10 +115,13 @@ struct PaletteEntry {
     icon: Option<String>,
     group: Option<String>,
     pinned: bool,
+    /// `:pinned N`: in the home list's top block, by `N`.
+    pin_rank: Option<u32>,
     detail: Option<String>,
     shortcut: Option<String>,
     submenu: bool,
     checked: bool,
+    glyph: Option<String>,
     /// Curated: a `:command` or a choice, ranked above uncurated names and
     /// matched by subsequence too.
     curated: bool,
@@ -135,13 +142,24 @@ impl PaletteEntry {
             icon: None,
             group: None,
             pinned: false,
+            pin_rank: None,
             detail: None,
             shortcut: None,
             submenu: false,
             checked: false,
+            glyph: None,
             curated,
             args: None,
         }
+    }
+
+    /// Shows the command's `:current` value: a check, or its label.
+    fn set_current(&mut self, display: CurrentDisplay) {
+        self.checked = matches!(display, CurrentDisplay::On);
+        self.detail = match display {
+            CurrentDisplay::Label(label) => Some(label),
+            _ => None,
+        };
     }
 }
 
@@ -161,22 +179,24 @@ impl Stage {
         self.selected = self.first_item_from(0, 1).unwrap_or(0);
     }
 
-    /// The empty-query home list, flat: recently run commands, then the
-    /// pinned ones in definition order — or every command when none is
-    /// pinned.
+    /// The empty-query home list, flat: the `:pinned N` commands by rank,
+    /// recently run commands, then the other pinned ones in definition
+    /// order — or every command when none is pinned.
     fn browse_rows(&self, history: &[String]) -> Vec<Row> {
         let curated: Vec<usize> = (0..self.entries.len()).filter(|&idx| self.entries[idx].curated).collect();
+        let mut top: Vec<usize> = curated.iter().copied().filter(|&idx| self.entries[idx].pin_rank.is_some()).collect();
+        top.sort_by_key(|&idx| self.entries[idx].pin_rank);
         let recent: Vec<usize> = history
             .iter()
             .filter_map(|name| curated.iter().copied().find(|&idx| &self.entries[idx].name == name))
+            .filter(|idx| !top.contains(idx))
             .take(RECENT_SHOWN)
             .collect();
         let any_pinned = curated.iter().any(|&idx| self.entries[idx].pinned);
-        let home = curated
-            .iter()
-            .copied()
-            .filter(|idx| !recent.contains(idx) && (!any_pinned || self.entries[*idx].pinned));
-        recent.iter().copied().chain(home).map(Row::Item).collect()
+        let home = curated.iter().copied().filter(|idx| {
+            !top.contains(idx) && !recent.contains(idx) && (!any_pinned || self.entries[*idx].pinned)
+        });
+        top.iter().chain(&recent).copied().chain(home).map(Row::Item).collect()
     }
 
     /// Ranked matches for `input`, sectioned: ungrouped and each group
@@ -245,6 +265,24 @@ impl Stage {
 
     fn selected_entry(&self) -> Option<&PaletteEntry> {
         self.selected_index().map(|entry| &self.entries[entry])
+    }
+
+    /// Rows this stage shows at once: what fit the window when the palette
+    /// was last drawn, at this stage's row height (glyph rows are taller).
+    fn page(&self) -> usize {
+        command_palette::page_size(self.has_glyphs())
+    }
+
+    fn has_glyphs(&self) -> bool {
+        self.entries.iter().any(|entry| entry.glyph.is_some())
+    }
+
+    /// Whether live host data keeps this stage current: the home list (its
+    /// `:current` values) or a glyph list (Apply Sound's sounds), which may
+    /// open empty before the host publishes. Other pick stages read their
+    /// choices once.
+    fn is_live(&self) -> bool {
+        matches!(self.kind, StageKind::Commands) || self.entries.is_empty() || self.has_glyphs()
     }
 
     fn selected_index(&self) -> Option<usize> {
@@ -352,6 +390,7 @@ impl PaletteState {
                     shortcut: None,
                     submenu: false,
                     checked: false,
+                    glyph: None,
                 },
                 Row::Item(entry) => {
                     let entry = &stage.entries[*entry];
@@ -363,6 +402,7 @@ impl PaletteState {
                         shortcut: entry.shortcut.clone(),
                         submenu: entry.submenu,
                         checked: entry.checked,
+                        glyph: entry.glyph.clone(),
                     }
                 }
             })
@@ -464,7 +504,7 @@ pub(super) fn binding_label(binding: &str) -> String {
 }
 
 impl Editor {
-    /// Opens the palette on its commands stage (⌘⇧P, `(command-palette)`;
+    /// Opens the palette on its commands stage (`/`, `(command-palette)`;
     /// M-x stays the minibuffer prompt).
     pub(super) fn open_command_palette(&mut self) {
         self.dismiss_palette();
@@ -478,6 +518,7 @@ impl Editor {
             icon: Option<String>,
             group: Option<String>,
             pinned: bool,
+            pin_rank: Option<u32>,
             shortcut: Option<String>,
             has_choices: bool,
             has_current: bool,
@@ -491,6 +532,7 @@ impl Editor {
                 icon: header.icon.clone(),
                 group: header.group.clone(),
                 pinned: header.pinned,
+                pin_rank: header.pin_rank,
                 shortcut: header.shortcut.as_deref().map(binding_label),
                 has_choices: !header.choices.is_empty(),
                 has_current: header.current.is_some(),
@@ -503,14 +545,11 @@ impl Editor {
             entry.icon = command.icon.clone();
             entry.group = command.group.clone();
             entry.pinned = command.pinned;
+            entry.pin_rank = command.pin_rank;
             entry.submenu = command.has_choices;
             entry.shortcut = command.shortcut.clone().or_else(|| bindings.get(&command.name).cloned());
             if command.has_current {
-                match self.command_current_display(&command.name, command.has_choices) {
-                    CurrentDisplay::On => entry.checked = true,
-                    CurrentDisplay::Label(label) => entry.detail = Some(label),
-                    CurrentDisplay::Nothing => {}
-                }
+                entry.set_current(self.command_current_display(&command.name, command.has_choices));
             }
             entries.push(entry);
         }
@@ -533,6 +572,7 @@ impl Editor {
             previewed_at: None,
             preview_due: false,
             hovering: false,
+            stale: false,
         }));
     }
 
@@ -691,6 +731,7 @@ impl Editor {
             .map(|choice| {
                 let mut entry = PaletteEntry::new(choice.label, String::new(), true);
                 entry.detail = choice.detail;
+                entry.glyph = choice.glyph;
                 entry.checked = current.as_ref() == Some(&choice.value);
                 values.push(choice.value);
                 entry
@@ -711,7 +752,7 @@ impl Editor {
             stage.rows.iter().position(|row| matches!(row, Row::Item(entry) if stage.entries[*entry].checked))
         {
             stage.selected = at;
-            stage.scroll_to_selection(self.palette_page());
+            stage.scroll_to_selection(stage.page());
         }
         // Opening on the current value previews nothing new.
         let opened_on = stage.selected_index();
@@ -735,8 +776,8 @@ impl Editor {
                 return;
             }
             read @ (ReadKey::Step(_) | ReadKey::Page(_)) => {
-                let page = self.palette_page();
-                state.top_mut().move_selection(read, page);
+                let stage = state.top_mut();
+                stage.move_selection(read, stage.page());
             }
             ReadKey::Backspace => {
                 let stage = state.top_mut();
@@ -801,9 +842,82 @@ impl Editor {
         self.refresh_runtime_side_effects();
     }
 
+    /// The host republished data an open palette may list; see
+    /// [`PaletteState::stale`].
+    pub fn mark_palette_choices_stale(&mut self) {
+        if let Some(MinibufferMode::Palette(state)) = &mut self.minibuffer_input {
+            state.stale = true;
+            self.mark_needs_redraw();
+        }
+    }
+
+    /// Re-reads a stale palette: the commands' `:current` values, and the
+    /// choice stage on top (keeping its input and highlighted value). A
+    /// live-preview stage is left alone; its original value is in play.
+    fn refresh_stale_palette(&mut self) {
+        if !matches!(&self.minibuffer_input, Some(MinibufferMode::Palette(state)) if state.stale) {
+            return;
+        }
+        let Some(MinibufferMode::Palette(mut state)) = self.minibuffer_input.take() else {
+            return;
+        };
+        state.stale = false;
+        let with_current: Vec<(usize, String, bool)> = state.stages[0]
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.curated && entry.args.is_none())
+            .filter_map(|(at, entry)| {
+                let header = self.runtime.definition_header(&entry.name)?;
+                header.current.is_some().then(|| (at, entry.name.clone(), !header.choices.is_empty()))
+            })
+            .collect();
+        for (at, name, has_choices) in with_current {
+            let display = self.command_current_display(&name, has_choices);
+            state.stages[0].entries[at].set_current(display);
+        }
+        // Only a live list re-reads: a stale mark must not rerun another
+        // stage's choice source.
+        let refreshable = state.stages.len() > 1
+            && state.top().is_live()
+            && matches!(&state.top().kind, StageKind::Choices { preview: None, .. });
+        if refreshable && let Some(old) = state.stages.pop() {
+            let StageKind::Choices { command, picked, picked_labels, values, .. } = &old.kind else {
+                unreachable!("checked above");
+            };
+            let was = old.selected_index().map(|entry| values[entry].clone());
+            let depth = state.stages.len();
+            self.push_choice_stage(&mut state, command.clone(), picked.clone(), picked_labels.clone());
+            if state.stages.len() == depth {
+                state.stages.push(old);
+            } else {
+                let stage = state.top_mut();
+                let page = stage.page();
+                if !old.input.is_empty() {
+                    stage.input = old.input.clone();
+                    stage.refilter(&[]);
+                }
+                // The value highlighted before, else the current one.
+                let StageKind::Choices { values, .. } = &stage.kind else { unreachable!("just pushed") };
+                let at = was
+                    .and_then(|was| values.iter().position(|value| *value == was))
+                    .or_else(|| stage.entries.iter().position(|entry| entry.checked));
+                if let Some(row) =
+                    at.and_then(|at| stage.rows.iter().position(|row| matches!(row, Row::Item(entry) if *entry == at)))
+                {
+                    stage.selected = row;
+                }
+                stage.scroll = old.scroll.min(stage.rows.len().saturating_sub(page));
+                stage.scroll_to_selection(page);
+            }
+        }
+        self.store_palette(state);
+    }
+
     /// Timer tick: applies a live preview that was waiting for the
     /// highlight to settle.
     pub(super) fn update_palette_preview(&mut self) {
+        self.refresh_stale_palette();
         let due = match &self.minibuffer_input {
             Some(MinibufferMode::Palette(state)) => {
                 state.preview_due
@@ -1019,20 +1133,31 @@ impl Editor {
         self.handle_palette_touchpad_scroll(col, row, -10.0)
     }
 
-    /// Rows the palette shows at once: what fit the window when it was last
-    /// drawn.
+    /// Rows the open palette's top stage shows at once.
     fn palette_page(&self) -> usize {
-        command_palette::hit_map().map_or(PALETTE_MAX_ROWS, |map| map.capacity).max(1)
+        match &self.minibuffer_input {
+            Some(MinibufferMode::Palette(state)) => state.top().page(),
+            _ => command_palette::page_size(false),
+        }
     }
 
     pub fn palette_is_open(&self) -> bool {
         matches!(self.minibuffer_input, Some(MinibufferMode::Palette(_)))
     }
 
+    /// Whether the open palette shows a stage live host data keeps current
+    /// (see `Stage::is_live`).
+    pub fn palette_shows_live_choices(&self) -> bool {
+        match &self.minibuffer_input {
+            Some(MinibufferMode::Palette(state)) => state.top().is_live(),
+            _ => false,
+        }
+    }
+
     /// The palette as the backends draw it, while open.
     pub fn palette_frame(&self) -> Option<PaletteFrame> {
         match &self.minibuffer_input {
-            Some(MinibufferMode::Palette(state)) => Some(state.frame(self.palette_page())),
+            Some(MinibufferMode::Palette(state)) => Some(state.frame(state.top().page())),
             _ => None,
         }
     }
@@ -1254,6 +1379,11 @@ mod tests {
             .unwrap();
         editor.run_command(COMMAND_PALETTE);
         assert_eq!(rows(&editor), ["New Track", "Export Song"], "pinned only, flat, definition order");
+        editor.handle_key(key(KeyCode::Esc));
+        editor.runtime_mut().eval_str(r#"(def pal-top () :command "Top Thing" :pinned 1 (set! ran "top"))"#).unwrap();
+        editor.runtime_mut().eval_str("(command-palette)").unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(rows(&editor), ["Top Thing", "New Track", "Export Song"], "a ranked pin leads");
         type_text(&mut editor, "t");
         assert!(rows(&editor).iter().any(|row| row == "# Look"), "{:?}", rows(&editor));
         let frame = editor.palette_frame().unwrap();
@@ -1571,5 +1701,41 @@ mod tests {
         assert_eq!(editor.palette_frame().unwrap().badge.as_deref(), Some("Theme"));
         editor.handle_key(key(KeyCode::Backspace));
         assert_eq!(editor.palette_frame().unwrap().badge, None, "the commands stage is beneath");
+    }
+    #[test]
+    fn a_stale_choice_stage_rereads_its_source_and_keeps_the_highlight() {
+        let mut editor = palette_editor();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(def pal-sounds (list))
+                   (def pal-current-sound nil)
+                   (def pal-sound-choices ()
+                     (map (lambda (name) (dict :label name :value name :glyph (str "glyph:" name))) pal-sounds))
+                   (def pal-apply-sound (sound) :command "Apply Sound" :choices pal-sound-choices
+                     :current pal-current-sound (set! ran sound))"#,
+            )
+            .unwrap();
+        editor.runtime_mut().eval_str(r#"(command-palette "pal-apply-sound")"#).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert!(labels(&editor).is_empty(), "the host has not published yet");
+
+        editor.runtime_mut().eval_str(r#"(set! pal-sounds (list "one" "two" "three"))"#).unwrap();
+        editor.runtime_mut().eval_str(r#"(set! pal-current-sound "two")"#).unwrap();
+        editor.mark_palette_choices_stale();
+        editor.update_palette_preview();
+        let frame = editor.palette_frame().unwrap();
+        assert_eq!(labels(&editor), ["one", "two", "three"]);
+        assert_eq!(frame.rows[1].glyph.as_deref(), Some("glyph:two"));
+        assert_eq!(frame.selected, Some(1), "opens on the current sound");
+
+        editor.handle_key(key(KeyCode::Down));
+        editor.runtime_mut().eval_str(r#"(set! pal-sounds (list "zero" "one" "two" "three"))"#).unwrap();
+        editor.mark_palette_choices_stale();
+        editor.update_palette_preview();
+        assert_eq!(labels(&editor), ["zero", "one", "two", "three"]);
+        assert_eq!(editor.palette_frame().unwrap().selected, Some(3), "the highlight follows its value");
+        editor.handle_key(key(KeyCode::Enter));
+        assert_eq!(ran(&editor), Some(Value::String("three".into())));
     }
 }

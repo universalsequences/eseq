@@ -1459,7 +1459,8 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)?;
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
-    let _ = sync_sound_palette(&app, &mut SoundPaletteFrameState::default(), true);
+    let mut sound_palette_frame = SoundPaletteFrameState::default();
+    let _ = sync_sound_palette(&app, &mut sound_palette_frame, true, None);
     publish_capture_sound_glyphs(&mut editor)?;
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -1535,6 +1536,15 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
                 eseqlisp::widget_render::command_palette::primitives(&palette, viewport);
             }
             editor.handle_key(*key);
+            // As the live tick does: the open command palette browses the
+            // selected track's sounds (Apply Sound), re-read once pushed.
+            let browse = editor.palette_shows_live_choices().then_some(args.track);
+            if sync_sound_palette(&app, &mut sound_palette_frame, true, browse).sounds {
+                sync_host_kinds(&mut editor, &app);
+                editor.runtime_mut().run_reactive_cycle();
+                editor.mark_palette_choices_stale();
+                editor.update_timers();
+            }
         }
         frame = build_render_frame(&mut editor, columns, rows);
     }

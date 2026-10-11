@@ -92,7 +92,8 @@ fn the_home_list_is_everyday_commands_flat() {
     let frame = editor.palette_frame().expect("open");
     assert!(frame.rows.iter().all(|row| !row.header), "no sections before typing");
     let rows = row_labels(&editor);
-    for expected in ["Change Theme", "Add Instrument", "Load Preset", "Play", "Set Tempo", "Show Mixer"] {
+    assert_eq!(rows.first().map(String::as_str), Some("Apply Sound"), "ranked first: {rows:?}");
+    for expected in ["Change Theme", "Add Instrument", "Load Preset", "Play", "Set Tempo", "Show Browser"] {
         assert!(rows.iter().any(|row| row == expected), "{expected} missing from {rows:?}");
     }
     for absent in ["Quit eseq", "About eseq", "Export Package…"] {
@@ -110,4 +111,18 @@ fn set_tempo_lists_tempos_under_a_tempo_badge() {
     assert_eq!(editor.palette_frame().unwrap().badge.as_deref(), Some("Tempo"));
     let rows = row_labels(&editor);
     assert!(rows.iter().any(|row| row == "120 BPM"), "{rows:?}");
+}
+
+#[test]
+fn slash_opens_the_palette_from_sequencer_views_but_types_in_text_buffers() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+    type_text(&mut editor, "/");
+    assert!(editor.palette_frame().is_some(), "/ opens the palette");
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    editor.open_scratch_buffer("*source*", "");
+    type_text(&mut editor, "/");
+    assert!(editor.palette_frame().is_none());
+    assert_eq!(editor.active_buffer().text(), "/");
 }
