@@ -147,6 +147,9 @@ thread_local! {
     static SDF_VISUAL_SCALE_ANIMS: RefCell<HashMap<u64, VisualScaleAnim>> = RefCell::new(HashMap::new());
     static SDF_TIME_ORIGIN: Instant = Instant::now();
     static SDF_TIME_SECONDS: RefCell<f32> = const { RefCell::new(0.0) };
+    /// When `SDF_TIME_SECONDS` was last set, so the fallback clock
+    /// continues it between frames.
+    static SDF_TIME_SET_AT: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static SDF_LAST_PRESENTED_TIME_SECONDS: RefCell<Option<f32>> = const { RefCell::new(None) };
     static SDF_VISUAL_ANIMATION_UNTIL_SECONDS: RefCell<f32> = const { RefCell::new(0.0) };
 }
@@ -188,14 +191,36 @@ pub fn set_sdf_time_seconds(time_seconds: f32) {
     SDF_TIME_SECONDS.with(|slot| {
         *slot.borrow_mut() = time_seconds.max(0.0);
     });
+    SDF_TIME_SET_AT.with(|slot| *slot.borrow_mut() = Some(Instant::now()));
+}
+
+/// Shader `itime` as of this instant, between frames too. An action stamps
+/// this as an animation's start, and a shader compares `itime` against it.
+pub fn sdf_animation_clock_now() -> f32 {
+    current_sdf_time_fallback_seconds()
+}
+
+/// Keep frames coming until shader `itime` reaches `until_seconds`, so a
+/// one-shot animation runs to its end and then lets the loop idle again.
+pub fn request_sdf_animation_until(until_seconds: f32) {
+    SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| {
+        let mut deadline = deadline.borrow_mut();
+        *deadline = (*deadline).max(until_seconds);
+    });
 }
 
 pub fn current_sdf_time_seconds() -> f32 {
     SDF_TIME_SECONDS.with(|slot| *slot.borrow())
 }
 
+/// SDF time outside a render (input hit testing, between frames): the last
+/// set time advanced by the wall time since, so it continues the renderer's
+/// `itime` clock rather than starting one of its own.
 pub fn current_sdf_time_fallback_seconds() -> f32 {
-    SDF_TIME_ORIGIN.with(|origin| origin.elapsed().as_secs_f32())
+    match SDF_TIME_SET_AT.with(|slot| *slot.borrow()) {
+        Some(set_at) => current_sdf_time_seconds() + set_at.elapsed().as_secs_f32(),
+        None => SDF_TIME_ORIGIN.with(|origin| origin.elapsed().as_secs_f32()),
+    }
 }
 
 pub fn note_sdf_frame_presented(time_seconds: f32) {
@@ -411,10 +436,7 @@ fn visual_scale_anim_uniforms(
                 duration,
                 ease,
             };
-            SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| {
-                let mut deadline = deadline.borrow_mut();
-                *deadline = (*deadline).max(now + duration);
-            });
+            request_sdf_animation_until(now + duration);
         }
         (
             [
@@ -1099,6 +1121,19 @@ pub fn sdf_widget_shader_sources() -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::parser::Expression;
+
+    #[test]
+    fn animation_clock_follows_itime_and_deadline_keeps_frames_until_it_passes() {
+        set_sdf_time_seconds(40.0);
+        // Input events re-stamp SDF time from the fallback between frames;
+        // that must not move the clock off the renderer's.
+        set_sdf_time_seconds(current_sdf_time_fallback_seconds());
+        let now = sdf_animation_clock_now();
+        assert!((40.0..40.5).contains(&now), "clock {now} should continue the last itime");
+        request_sdf_animation_until(now + 0.5);
+        assert!(sdf_visual_animations_active(now + 0.25));
+        assert!(!sdf_visual_animations_active(now + 0.6));
+    }
 
     fn number_cell(n: f64) -> Rc<RefCell<Value>> {
         Rc::new(RefCell::new(Value::Number(n)))

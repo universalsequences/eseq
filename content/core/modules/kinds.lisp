@@ -449,7 +449,8 @@
          (variant-color :rgb  :doc "The step's p-lock variant color (gray for sequencer-only locks)")
          (variant variant :doc "The step variant the step plays (one of its track's variants); nil when it plays none")
          (timebase :string :set set-step-timebase :options timebase-options :default ""
-                   :doc "The timebase the step plays at: its timebase p-lock's label (one of timebase-options), else the track's own. Setting a label p-locks the step to it; the empty string clears the lock")))
+                   :doc "The timebase the step plays at: its timebase p-lock's label (one of timebase-options), else the track's own. Setting a label p-locks the step to it; the empty string clears the lock")
+         (toggled-at :number :doc "When `active` last flipped, on the shader `itime` clock (see animation-start): (- itime step.toggled-at) times a toggle animation. Far in the past before any flip")))
 
 ;; One track's send to one bus (not the main mix): (nth t.sends 0).
 (def-kind send

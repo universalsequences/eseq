@@ -2001,6 +2001,30 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "animation-start",
+        "(animation-start &optional duration)",
+        "Start a one-shot shader animation: returns now on the clock shader `itime` reads, and keeps frames coming for `duration` seconds (none without it). Store the result in state a `defwidget` reads and animate on (- itime start); no reset is needed, the shader settles once the time has passed.",
+        |args, _ctx| {
+            let now = crate::widget_render::sdf_widget::sdf_animation_clock_now();
+            match args.first() {
+                Some(Value::Number(duration)) if *duration > 0.0 => {
+                    crate::widget_render::sdf_widget::request_sdf_animation_until(
+                        now + *duration as f32,
+                    );
+                }
+                Some(Value::Number(_)) | None => {}
+                Some(other) => {
+                    return Err(format!(
+                        "animation-start expects a duration in seconds, got {}",
+                        format_lisp_value(other)
+                    ));
+                }
+            }
+            Ok(Value::Number(now as f64))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "toast",
         "(toast text &key :kind :progress)",
         "Show a bottom-right window toast. :kind is :success (default, ~1.2s), :error (~4s, dismissed by the next keypress), or :loading (animated spinner that stays until the next toast replaces it; calling again updates it in place). :progress 0..1 adds a progress bar to a :loading toast.",

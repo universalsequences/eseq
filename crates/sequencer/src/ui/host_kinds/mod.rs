@@ -909,6 +909,7 @@ pub(crate) mod f {
     pub(crate) const STEP_VARIANT_COLOR: FieldKey = (STEP, "variant-color");
     pub(crate) const STEP_VARIANT: FieldKey = (STEP, "variant");
     pub(crate) const STEP_TIMEBASE: FieldKey = (STEP, "timebase");
+    pub(crate) const STEP_TOGGLED_AT: FieldKey = (STEP, "toggled-at");
 
     pub(crate) const SEND_TRACK: FieldKey = (SEND, "track");
     pub(crate) const SEND_BUS: FieldKey = (SEND, "bus");
@@ -1486,6 +1487,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STEP_VARIANT, "variant", Live),
     // The step's timebase p-lock, else the track's timebase.
     (f::STEP_TIMEBASE, ":string", Live),
+    // The animation clock (shader `itime`) when the gate last flipped,
+    // stamped by the step diff.
+    (f::STEP_TOGGLED_AT, ":number", Live),
     (f::SEND_TRACK, "track", Model),
     (f::SEND_BUS, "bus", Model),
     (f::SEND_AMOUNT, ":number", Live),

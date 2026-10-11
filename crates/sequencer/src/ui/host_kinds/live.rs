@@ -730,6 +730,8 @@ pub(super) fn live_value<S: KindStore>(
                 f::STEP_TIMEBASE => {
                     Value::String(step_timebase_label(&sources.state, track, step).to_string())
                 }
+                // Only the step diff sees a flip; a fresh read predates any.
+                f::STEP_TOGGLED_AT => number(STEP_NEVER_TOGGLED),
                 f::STEP_VARIANT => {
                     let vid = track_plock_render(sources, shared, track)
                         .get(step)?

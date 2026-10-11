@@ -98,6 +98,7 @@
         track-cursor
         set-track-cursor
         cursor-step-changed
+        flash-copied-steps
         current-selected-step
         current-param-mode
         current-number-picker-key
@@ -144,6 +145,19 @@
 (def-kind grid-cursor
   :key ()
   :state ((step 0)))
+
+;; The last step copy, for the step grid box's flash: `start` is the
+;; `animation-start` stamp (shader `itime`), `track` the copied track's
+;; index. The shader runs the flash out on its own; nothing resets these.
+(def-kind copy-flash
+  :key ()
+  :state ((start 0) (track -1)))
+
+;; Steps of the track at position `track` were copied: flash its grid box.
+;; Frames run a little past `seqv-copy-flash`'s 0.45s so its last one lands.
+(def flash-copied-steps (track)
+  (set! copy-flash.track track)
+  (set! copy-flash.start (animation-start 0.5)))
 
 ;; The stable end of a Finder-style range selection (shift-click); a plain
 ;; selection starts a new range, cmd-click leaves it alone.
@@ -806,17 +820,27 @@
 ;; The step shell's layers, shared by the grid's `seqv-step-shell` and the
 ;; expanded editor's `seqv-slot-shell`: the gate `active`, the p-lock kind
 ;; `lock` (0 none, 1 a lock, 2 a p-lock variant) with the variant's color
-;; `variant` (a vec3), and `under`, layers drawn first (the grid's duration
+;; `variant` (a vec3), `toggled` when the gate last flipped (`itime` clock,
+;; `step.toggled-at`) and `under`, layers drawn first (the grid's duration
 ;; span). The widget declares `track`, `selected` and `off-fill-r/-g/-b`.
+;; A flip pops the fill in (a quick overshoot) or shrinks it away, and eases
+;; the rim between its on and off sizes, over `toggle-k`'s 0.14s.
 ;; Shaders spell it `eseq.sequencer/step-shell-shader` (hazard h).
-(defmacro step-shell-shader (active lock variant &rest under)
+(defmacro step-shell-shader (active lock variant toggled &rest under)
   `(let ((active ,active)
          (plock-kind ,lock)
          (muted (- 1.0 track.audible))
          (tc (if (= track.governed 1) (eseq.sequencer/silenced track.color) track.color))
          (vcol (rgba ,variant 1.0))
          (seqcol (rgba 0.545 0.545 0.588 0.95))
-         (radius (if (= active 1) 1 0.7))
+         (toggle-k (clamp (/ (- itime ,toggled) 0.14) 0.0 1.0))
+         (toggle-u (- toggle-k 1.0))
+         ;; on: ease-out-back 0 -> 1 (overshoots ~10%); off: ease-out 1 -> 0
+         (pop (if (= active 1)
+                (+ 1.0 (* 2.70158 toggle-u toggle-u toggle-u) (* 1.70158 toggle-u toggle-u))
+                (* toggle-u toggle-u)))
+         (fill-on (if (= active 1) 1 (if (< toggle-k 1.0) 1 0)))
+         (radius (+ 0.7 (* 0.3 (min 1.0 pop))))
          (border input-color)
          (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
      (sdf/layer
@@ -856,11 +880,11 @@
                      :blur (if (= muted 1) 0.0 (if (= plock-kind 2) 0.12 0.0))
                      :offset (vec2 0 0))))
        ;; toggled fill
-       (sdf/fill (sdf/circle (* 1 (if (= selected 1) 0.35 0.6)))
+       (sdf/fill (sdf/circle (* pop (if (= selected 1) 0.35 0.6)))
          (material
            :lighting (lighting :edge-min -0.25 :edge-max 1.25
              :light (vec3 0.01 -0.2 0.8) :shininess 32.0)
-           :color (if (= active 1)
+           :color (if (= fill-on 1)
                     (if (= muted 1)
                       (* 0.7 (eseq.materials/color offcol border))
                       (eseq.materials/color
@@ -881,6 +905,7 @@
   :state (step track selected off-fill-r off-fill-g off-fill-b)
   :shader
   (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color
+    step.toggled-at
     ;; duration span
     (sdf/fill
       (sdf/translate 0.0 0.0
@@ -895,6 +920,30 @@
                             (mix border (rgba (* tc 0.85) 0.5) (if (= selected 1) 0.8 0.6))
                             (if (= selected 1) border (rgba tc 0.6))))
                         (rgba 0 0 0 0)))))))
+
+;; The copy flash over the copied track's step grid box (`grid-box`): a
+;; bright band sweeping left to right along its frame for 0.45s once
+;; `flash-start` (bound: `copy-flash.start`) is stamped. Transparent otherwise.
+(defwidget seqv-copy-flash
+  :width 40 :height 3
+  :state (flash-start)
+  :shader
+  (let ((age (- itime flash-start))
+        (p (/ age 0.45)))
+    (if (= (* (if (> p 0) 1 0) (if (< p 1) 1 0)) 0)
+      (rgba 0 0 0 0)
+      (let ((tail (* 0.45 width)) ; the band's trailing glow, not its duration
+            (head (- (* p (+ (* 2 width) tail)) width))
+            (behind (- head x))
+            (glow (* (- 1 (smoothstep 0 tail behind))
+                     (smoothstep -0.25 0 behind)
+                     (- 1 (* p p))))
+            (frame (sdf/rounded-rect (* width 0.995) (* height 0.985) 0.04)))
+        (sdf/layer
+          (sdf/fill frame
+            (material :color (rgba 1 1 1 (* 0.10 glow))))
+          (sdf/stroke frame 0.09
+            (rgba 1 1 1 (* 0.95 glow))))))))
 
 ;; The step cursor's frame around step `index` of `track`: drawn while the
 ;; track is selected and `cursor` (bound: the grid's `grid-cursor.step`, an
@@ -1242,7 +1291,9 @@
   (let ((rows (chunks t.steps row-width))
         (count (max 1 (len rows))))
     (box :key (str "track-step-grid-" t.index) :padding 0.15
-      (box :background-color :buffer-bg
+      ;; Only the last-copied track's box carries the flash: any `:background`
+      ;; costs the box a clip segment and its shader a quad every frame.
+      (grid-box (= copy-flash.track t.index)
         (v-stack :gap -0.04
           (box :width 0.1 :height 0.342 :bg :transparent)
           (each (range 0 count) |row|
@@ -1258,6 +1309,15 @@
                         (box :width step-cell-width :height step-cell-height)))))
                 (h-stack (box :width 1)
                   (playhead-row t row))))))))))
+
+;; The box behind a track's step rows, with the copy flash when `flash`.
+(def grid-box (flash body)
+  (if flash
+    (box :background-color :buffer-bg
+      :background "seqv-copy-flash"
+      :flash-start #'copy-flash.start
+      body)
+    (box :background-color :buffer-bg body)))
 
 ;; ── The expanded step editor ──
 ;; One track's editor: a tab per built-in step param and a selector over its
@@ -1275,7 +1335,8 @@
   :paint-margin 1
   :state (step track selected off-fill-r off-fill-g off-fill-b)
   :shader
-  (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color))
+  (eseq.sequencer/step-shell-shader step.active step.lock-kind step.variant-color
+    step.toggled-at))
 
 ;; A slot past the pattern's end: an off step's shell.
 (defwidget seqv-slot-shell-off
@@ -1283,7 +1344,8 @@
   :paint-margin 1
   :state (track selected off-fill-r off-fill-g off-fill-b)
   :shader
-  (eseq.sequencer/step-shell-shader 0 0 (vec3 0 0 0)))
+  ;; -100: never toggled (the host's STEP_NEVER_TOGGLED), so no shrink at boot.
+  (eseq.sequencer/step-shell-shader 0 0 (vec3 0 0 0) -100))
 
 ;; Expanded view twin of the grid's length underline: amber bar beneath the
 ;; number of step `index`, while a length lane last set `track`'s pattern

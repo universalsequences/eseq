@@ -2,6 +2,7 @@
 //! from.
 
 use super::*;
+use eseqlisp::widget_render::sdf_widget;
 
 /// The observed-mask bits (in `STEP_LIVE` order) the per-tick step diff
 /// uses, computed once.
@@ -19,7 +20,18 @@ struct StepBits {
     variant: ObservedMask,
     /// `timebase`.
     timebase: ObservedMask,
+    /// `toggled-at`.
+    toggled_at: ObservedMask,
 }
+
+/// `step.toggled-at` before the gate has flipped: far enough in the past
+/// that a toggle animation has long settled.
+pub(super) const STEP_NEVER_TOGGLED: f64 = -100.0;
+
+/// How long frames keep coming after a gate flips, for the step shell's
+/// grow/shrink (`content/ui/sequencer.lisp`, `step-shell-shader`): at least
+/// its 0.14s `toggle-k` span.
+const STEP_TOGGLE_ANIMATION_SECONDS: f32 = 0.2;
 
 static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
     active: STEP_LIVE.bit(f::STEP_ACTIVE),
@@ -31,6 +43,7 @@ static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
     variant_color: STEP_LIVE.bit(f::STEP_VARIANT_COLOR),
     variant: STEP_LIVE.bit(f::STEP_VARIANT),
     timebase: STEP_LIVE.bit(f::STEP_TIMEBASE),
+    toggled_at: STEP_LIVE.bit(f::STEP_TOGGLED_AT),
 });
 
 /// The step selection as of the last sync, so `step.selected` is
@@ -105,6 +118,9 @@ pub(super) struct StepDiff {
     /// every step is a candidate.
     primed: bool,
     active: Vec<bool>,
+    /// Per step, the animation clock when its gate last flipped (once
+    /// primed: loading a track's steps is not a toggle).
+    toggled_at: Vec<f64>,
     selected: Vec<bool>,
     playing: Option<usize>,
     /// The values last pushed of each [`STEP_VALUES`] field, per step; empty
@@ -176,15 +192,25 @@ pub(super) fn sync_steps(
     changes.clear();
     changes.resize(num_steps, 0);
     diff.active.resize(num_steps, false);
+    diff.toggled_at.resize(num_steps, STEP_NEVER_TOGGLED);
     diff.selected.resize(num_steps, false);
     let state = &pusher.sources.state;
     let pattern = &state.pattern.patterns[track];
+    let mut toggle_clock = None;
     for (step, previous) in diff.active.iter_mut().enumerate() {
         let active = pattern.is_active(step);
         if !primed || *previous != active {
             *previous = active;
             changes[step] |= bits.active;
+            if primed && union & bits.toggled_at != 0 {
+                let now = *toggle_clock.get_or_insert_with(sdf_widget::sdf_animation_clock_now);
+                diff.toggled_at[step] = f64::from(now);
+                changes[step] |= bits.toggled_at;
+            }
         }
+    }
+    if let Some(now) = toggle_clock {
+        sdf_widget::request_sdf_animation_until(now + STEP_TOGGLE_ANIMATION_SECONDS);
     }
     if !primed || selection_changed {
         for (step, previous) in diff.selected.iter_mut().enumerate() {
@@ -306,6 +332,10 @@ pub(super) fn sync_steps(
         for (bit, key) in STEP_LIVE.keys.iter().enumerate() {
             let bit = 1 << bit;
             if wanted & bit == 0 {
+                continue;
+            }
+            if bit == bits.toggled_at {
+                pusher.push_computed(id, *key, number(diff.toggled_at[step]));
                 continue;
             }
             // The render is a whole-track scan: push the one just made.

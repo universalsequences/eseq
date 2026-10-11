@@ -1522,6 +1522,13 @@ pub(crate) fn perform_step_clipboard_action(
                     .collect();
                 let count = clipboard.len();
                 *step_clipboard.lock().unwrap() = Some((track, clipboard));
+                if let Err(error) = editor.runtime_mut().invoke_global(
+                    "eseq.sequencer/flash-copied-steps",
+                    vec![Value::Number(track as f64)],
+                ) {
+                    eprintln!("step copy flash failed: {error:?}");
+                }
+                editor.mark_needs_redraw();
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Copied {} step{}",
                     count,
