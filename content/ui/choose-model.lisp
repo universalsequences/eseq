@@ -129,8 +129,6 @@
           :font-size 11
           :on-change (lambda (v) (select-model v)))
         (box :flex 1 :bg :transparent))
-      ;; No escaped quotes here: the lexer does not support \" inside a string
-      ;; literal, and silently reads the rest as symbols.
       (label "Default (auto) restores the built-in provider preference."
         :key "hint"
         :font-size 8.5 :color :dim :bg :transparent))))

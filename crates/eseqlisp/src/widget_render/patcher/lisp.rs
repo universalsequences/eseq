@@ -528,8 +528,11 @@ pub(super) fn normalize_editor_node_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut depth = 0i32;
     let mut in_string = false;
+    let mut escaped = false;
     for ch in text.chars() {
         match ch {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
             '"' => in_string = !in_string,
             '[' if !in_string => depth += 1,
             ']' if !in_string => depth -= 1,

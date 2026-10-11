@@ -520,20 +520,30 @@ fn resolve_module_file(roots: &[eseqlisp::ModuleLoadRoot], module: &str) -> Opti
 }
 
 /// Source with `;` comments dropped and string contents blanked, so neither
-/// can look like a form (eseqlisp strings have no escapes). String state
+/// can look like a form (a `\` escape inside a string is skipped). String state
 /// carries across lines (strings may span them); newlines are always kept so
 /// reported line numbers stay correct.
 fn code_only(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut in_string = false;
     let mut in_comment = false;
+    let mut escaped = false;
     for ch in source.chars() {
         match ch {
             '\n' => {
                 in_comment = false;
+                escaped = false;
                 out.push('\n');
             }
             _ if in_comment => {}
+            _ if escaped => {
+                escaped = false;
+                out.push(' ');
+            }
+            '\\' if in_string => {
+                escaped = true;
+                out.push(' ');
+            }
             '"' => {
                 in_string = !in_string;
                 out.push('"');

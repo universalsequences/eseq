@@ -1,4 +1,5 @@
 mod commands;
+mod describe;
 mod minibuffer;
 mod natives;
 mod runtime_context;
@@ -433,6 +434,11 @@ enum MinibufferMode {
         selected: usize,
     },
     SwitchBuffer {
+        input: String,
+        candidates: Vec<String>,
+        selected: usize,
+    },
+    DescribeFunction {
         input: String,
         candidates: Vec<String>,
         selected: usize,
@@ -8000,8 +8006,9 @@ impl Editor {
             self.eval_preview_handler(fn_name);
             return true;
         }
-        if fn_name == "find-file" {
-            self.run_command("find-file");
+        // Editor commands that open their own minibuffer prompt.
+        if matches!(fn_name, "find-file" | "describe-function") {
+            self.run_command(fn_name);
             return true;
         }
         self.sync_runtime_source_context();

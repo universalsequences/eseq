@@ -2951,6 +2951,9 @@ pub struct VM {
     /// snapshotted: transactional-eval rollback clears it instead.
     subtree_render_cache: HashMap<u64, SubtreeRenderCache>,
     pub macros: HashMap<String, MacroDef>,
+    /// Latest definition header per qualified global
+    /// (docs/command-palette-spec.md §3).
+    pub definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
     /// Deprecations already reported (`:bindable`, `reactive-value`): each
@@ -3046,6 +3049,7 @@ pub struct VmStateSnapshot {
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
     current_subtree_reactive_reads: HashMap<u64, HashSet<ReactiveFieldKey>>,
     macros: HashMap<String, MacroDef>,
+    definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
     source_manager: SourceManager,
     source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
@@ -5296,6 +5300,7 @@ impl VM {
             current_subtree_reactive_reads: HashMap::new(),
             subtree_render_cache: HashMap::new(),
             macros: HashMap::new(),
+            definition_headers: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             deprecations_warned: HashSet::new(),
@@ -5955,6 +5960,7 @@ impl VM {
                         let next_node_id = compiler.next_node_id();
                         let macros = compiler.take_macros();
                         let warnings = compiler.take_warnings();
+                        let headers = compiler.take_definition_headers();
                         let refer_error = compiler.validate_refers(&module_exports).err();
                         let context = compiler.take_module_context();
                         Ok((
@@ -5966,6 +5972,7 @@ impl VM {
                             next_node_id,
                             macros,
                             warnings,
+                            headers,
                             refer_error,
                             context,
                         ))
@@ -5987,6 +5994,7 @@ impl VM {
                     next_node_id,
                     macros,
                     warnings,
+                    headers,
                     refer_error,
                     context,
                 )) => {
@@ -5997,6 +6005,7 @@ impl VM {
                     self.scene_bindings = scenes;
                     self.dag.next_id = next_node_id;
                     self.macros = macros;
+                    self.apply_definition_headers(headers);
                     for warning in warnings {
                         self.source_manager.push_diagnostic(warning);
                     }
@@ -6192,6 +6201,7 @@ impl VM {
             current_subtree_capture_stack: self.current_subtree_capture_stack.clone(),
             current_subtree_reactive_reads: self.current_subtree_reactive_reads.clone(),
             macros: self.macros.clone(),
+            definition_headers: self.definition_headers.clone(),
             source_manager: self.source_manager.clone(),
             source_load_errors: self.source_load_errors.clone(),
             preserve_state_on_redefinition: self.preserve_state_on_redefinition,
@@ -6283,6 +6293,7 @@ impl VM {
         self.current_subtree_capture_stack = snapshot.current_subtree_capture_stack;
         self.current_subtree_reactive_reads = snapshot.current_subtree_reactive_reads;
         self.macros = snapshot.macros;
+        self.definition_headers = snapshot.definition_headers;
         self.source_manager = snapshot.source_manager;
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
@@ -6380,6 +6391,7 @@ impl VM {
                     compiler.next_node_id(),
                     compiler.take_macros(),
                     compiler.take_warnings(),
+                    compiler.take_definition_headers(),
                 )),
                 Err(error) => Err((
                     error,
@@ -6389,7 +6401,7 @@ impl VM {
             }
         };
         match compile_result {
-            Ok((chunks, names, derived, states, scenes, next_node_id, macros, warnings)) => {
+            Ok((chunks, names, derived, states, scenes, next_node_id, macros, warnings, headers)) => {
                 self.chunks = chunks;
                 self.global_names = names;
                 self.derived_bindings = derived;
@@ -6397,6 +6409,7 @@ impl VM {
                 self.scene_bindings = scenes;
                 self.dag.next_id = next_node_id;
                 self.macros = macros;
+                self.apply_definition_headers(headers);
                 for warning in warnings {
                     self.source_manager.push_diagnostic(warning);
                 }
@@ -6652,6 +6665,26 @@ impl VM {
             self.globals.resize(idx + 1, None);
         }
         self.globals[idx] = Some(Rc::new(RefCell::new(value)));
+    }
+
+    /// Applies a compile unit's definition headers, keyed by the global
+    /// index the compiler stored each definition into.
+    fn apply_definition_headers(
+        &mut self,
+        headers: Vec<(usize, Option<crate::lang::def_header::DefinitionHeader>)>,
+    ) {
+        for (idx, header) in headers {
+            let Some(global) = self.global_names.get(idx) else { continue };
+            match header {
+                Some(header) => {
+                    self.definition_headers.insert(global.clone(), header);
+                }
+                None if !self.definition_headers.is_empty() => {
+                    self.definition_headers.remove(global);
+                }
+                None => {}
+            }
+        }
     }
 
     pub fn global_names(&self) -> &[String] {

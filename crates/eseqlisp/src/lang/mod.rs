@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod def_header;
 pub mod modules;
 pub mod parser;
 pub mod sdf_codegen;

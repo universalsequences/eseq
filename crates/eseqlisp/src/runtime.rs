@@ -3827,6 +3827,13 @@ impl Runtime {
             || self.vm.has_live_reactive_consumers(namespace, field)
     }
 
+    /// The definition header of a Lisp function, by qualified or display
+    /// name (docs/command-palette-spec.md §3).
+    pub fn definition_header(&self, name: &str) -> Option<&crate::lang::def_header::DefinitionHeader> {
+        let headers = &self.vm.definition_headers;
+        headers.get(name).or_else(|| headers.get(&crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name)))
+    }
+
     pub fn symbol_metadata(&self) -> &HashMap<String, SymbolMetadata> {
         &self.symbol_metadata
     }
@@ -3881,12 +3888,29 @@ impl Runtime {
         modules
     }
 
+    /// One symbol's completion metadata, without cloning the whole map.
+    pub fn completion_metadata_for(&mut self, name: &str) -> Option<SymbolMetadata> {
+        if self.cached_completion_metadata.is_none() {
+            self.completion_metadata();
+        }
+        self.cached_completion_metadata.as_ref()?.get(name).cloned()
+    }
+
     pub fn completion_metadata(&mut self) -> HashMap<String, SymbolMetadata> {
         if let Some(metadata) = &self.cached_completion_metadata {
             return metadata.clone();
         }
 
         let mut metadata = self.symbol_metadata.clone();
+        // A documented Lisp `def` is the live definition, so its header wins
+        // over a native it shadows.
+        for (global, header) in &self.vm.definition_headers {
+            let Some(docs) = header.doc.clone() else { continue };
+            metadata.insert(
+                crate::modules::strip_implicit(global).to_string(),
+                SymbolMetadata { signature: header.signature.clone(), docs, keyword_args: Vec::new() },
+            );
+        }
         for (name, definition) in &self.vm.macros {
             let display = crate::modules::strip_implicit(name);
             metadata.entry(display.to_string()).or_insert_with(|| {

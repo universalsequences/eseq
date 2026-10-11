@@ -172,13 +172,12 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
-    // A promoted expr body with a `"` in it (docs/expr-process-spec.md §8):
-    // eseqlisp strings have no escapes, so the My processes module spells
-    // the body `(str "…" (string-from-char-code 34) "…")` under `:expr`.
+    // Promoted expr modules written before string escapes spell a `"` in
+    // their body `(str "…" (string-from-char-code 34) "…")` under `:expr`.
     runtime.register_native_with_docs(
         super::expr_promote::STRING_FROM_CHAR_CODE_NATIVE,
         "(string-from-char-code code)",
-        "The one-character string of Unicode code point `code` (34 is a double quote, which string literals cannot hold).",
+        "The one-character string of Unicode code point `code` (34 is a double quote).",
         |args, _ctx| {
             let code = match args.first() {
                 Some(EValue::Number(code)) if code.fract() == 0.0 && *code >= 0.0 => *code as u32,

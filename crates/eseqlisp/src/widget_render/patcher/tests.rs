@@ -26793,3 +26793,12 @@ fn context_menu_payload_reports_a_probe_view() {
     assert_eq!(probe_view_at("p1"), Value::String("scope".to_string()));
     assert_eq!(probe_view_at("ph"), Value::Nil);
 }
+
+#[test]
+fn editor_node_comma_rewrite_skips_escaped_quotes_in_strings() {
+    // `\"` inside a string must not end it: the comma after it stays text.
+    assert_eq!(
+        super::lisp::normalize_editor_node_text(r#"[a, "x\", y", b]"#),
+        r#"[a  "x\", y"  b]"#
+    );
+}

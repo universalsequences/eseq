@@ -234,6 +234,23 @@ impl SpannedToken {
     }
 }
 
+/// `text` as an eseqlisp string literal that reads back as exactly `text`:
+/// quoted, with `\\` and `"` escaped. Line breaks stay literal (strings may
+/// span lines), which keeps generated source readable.
+pub fn string_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 impl Parser {
     pub fn new(text: String) -> Self {
         #[cfg(test)]
@@ -427,7 +444,45 @@ impl Parser {
         {
             self.profile.borrow_mut().parse_string_calls += 1;
         }
-        let text = self.parse_text(false, Some(b'"'), false)?;
+        // Fast path: no escapes before the closing quote, so the literal is
+        // a plain slice of the source.
+        let start = self.pos;
+        let rest = &self.text.as_bytes()[start..];
+        let end = rest.iter().position(|&b| b == b'"' || b == b'\\').unwrap_or(rest.len());
+        if rest.get(end) != Some(&b'\\') {
+            self.pos = start + end;
+            return Ok(Token::String(self.text[start..self.pos].to_string()));
+        }
+        // Escapes: \n \t \r \" \\. An unknown escape keeps its backslash, so
+        // a stray `\` (a regex, a Windows path) reads as written.
+        let mut text = String::with_capacity(end + 16);
+        text.push_str(&self.text[start..start + end]);
+        self.pos = start + end;
+        while let Some(ch) = self.peek() {
+            match ch {
+                b'"' => break,
+                b'\\' => {
+                    self.next();
+                    match self.advance_char() {
+                        Some('n') => text.push('\n'),
+                        Some('t') => text.push('\t'),
+                        Some('r') => text.push('\r'),
+                        Some('"') => text.push('"'),
+                        Some('\\') => text.push('\\'),
+                        Some(other) => {
+                            text.push('\\');
+                            text.push(other);
+                        }
+                        None => text.push('\\'),
+                    }
+                }
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        text.push(ch);
+                    }
+                }
+            }
+        }
         Ok(Token::String(text))
     }
 
@@ -1036,7 +1091,7 @@ pub fn format_expression(expr: &Expression) -> String {
         }
         Expression::Symbol(s) => s.clone(),
         Expression::Keyword(s) => format!(":{}", s),
-        Expression::String(s) => format!("\"{}\"", s),
+        Expression::String(s) => string_literal(s),
         Expression::QuoteSymbol(s) => format!("'{}", s),
         Expression::QuoteList(items) => {
             let inner: Vec<String> = items.iter().map(format_expression).collect();
@@ -1060,6 +1115,30 @@ mod tests {
         let tokens = Parser::new(input.to_string()).parse().unwrap();
         let mut ast = ASTParser::new(tokens);
         ast.parse().unwrap()
+    }
+
+    #[test]
+    fn string_escapes_decode() {
+        assert_eq!(
+            parse_str(r#"(a "line\nnext\ttab \"q\" back\\slash" "plain")"#),
+            vec![Expression::List(vec![
+                Expression::Symbol("a".into()),
+                Expression::String("line\nnext\ttab \"q\" back\\slash".into()),
+                Expression::String("plain".into()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn unknown_escape_keeps_its_backslash() {
+        assert_eq!(parse_str(r#""C:\dir \d+""#), vec![Expression::String(r"C:\dir \d+".into())]);
+    }
+
+    #[test]
+    fn string_literal_round_trips() {
+        for text in ["", "plain", "a \"quoted\" word", "back\\slash\\", "two\nlines", "\\n stays"] {
+            assert_eq!(parse_str(&string_literal(text)), vec![Expression::String(text.into())], "{text:?}");
+        }
     }
 
     fn parse_spanned_str(input: &str) -> Vec<Expr> {

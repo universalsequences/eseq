@@ -218,7 +218,8 @@ to grow last in the row.
   `(dict :a 1)` builds one. `(nth list i)`, `(len list)`, `(range a b)`,
   `(append list (list x))`, `(reduce f init list)`, `(map f list)`,
   `(filter f list)`.
-- Strings have no escape sequences; `str` concatenates anything.
+- Strings support `\n` `\t` `\"` `\\` escapes and may span lines; `str`
+  concatenates anything.
 - Replace a list element by rebuilding the list:
   `(map (lambda (j) (if (= j i) new (nth xs j))) (range 0 (len xs)))`.
 - Qualified calls across modules: `my.pulse-core/tick`. Only exported names

@@ -175,15 +175,14 @@ fn managed_block_lines(editor: &mut Editor) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-/// A value as eseqlisp source. eseqlisp strings have no escape sequences, so
-/// a string containing a quote cannot be written; nested containers are
-/// spelled with `list`/`dict` so they evaluate back to themselves.
+/// A value as eseqlisp source. Nested containers are spelled with
+/// `list`/`dict` so they evaluate back to themselves.
 pub(super) fn lisp_literal(value: &Value) -> Option<String> {
     match value {
         Value::Number(_) | Value::Bool(_) | Value::Nil | Value::Keyword(_) => {
             Some(format_lisp_value(value))
         }
-        Value::String(text) => (!text.contains('"')).then(|| format!("\"{text}\"")),
+        Value::String(text) => Some(eseqlisp::parser::string_literal(text)),
         Value::List(items) => {
             let mut rendered = Vec::with_capacity(items.len());
             for item in items {
@@ -327,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn lisp_literals_round_trip_and_refuse_unwritable_strings() {
+    fn lisp_literals_round_trip_and_escape_strings() {
         assert_eq!(lisp_literal(&Value::Number(9.0)).as_deref(), Some("9"));
         assert_eq!(lisp_literal(&Value::Number(0.25)).as_deref(), Some("0.25"));
         assert_eq!(lisp_literal(&Value::Bool(false)).as_deref(), Some("false"));
@@ -339,7 +338,10 @@ mod tests {
             lisp_literal(&Value::String("soft".into())).as_deref(),
             Some("\"soft\"")
         );
-        assert_eq!(lisp_literal(&Value::String("a\"b".into())), None);
+        assert_eq!(
+            lisp_literal(&Value::String("a\"b\\c".into())).as_deref(),
+            Some("\"a\\\"b\\\\c\"")
+        );
         let list = Value::List(vec![
             Rc::new(RefCell::new(Value::Number(1.0))),
             Rc::new(RefCell::new(Value::String("x".into()))),

@@ -391,9 +391,12 @@ fn highlight_line_with_known(
                 let start = idx;
                 idx += 1;
                 while idx < chars.len() {
-                    let closing_quote = chars[idx].1 == '"';
+                    let ch = chars[idx].1;
                     idx += 1;
-                    if closing_quote {
+                    if ch == '\\' {
+                        // An escape: the next character is content.
+                        idx = (idx + 1).min(chars.len());
+                    } else if ch == '"' {
                         break;
                     }
                 }
@@ -883,6 +886,15 @@ mod tests {
     use crate::runtime::SymbolMetadata;
     use std::borrow::Cow;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn escaped_quote_stays_inside_the_string_token() {
+        let line = r#"(f "a\"b" x)"#;
+        let buffer = Buffer::from_text(0, "*test*", line);
+        let spans = highlight_line(&BufferMode::ESeqLisp, line, &[], &buffer);
+        let string = spans.iter().find(|span| span.class == TokenClass::String).expect("string span");
+        assert_eq!((string.start, string.end), (3, 9));
+    }
 
     #[test]
     fn hex_and_binary_literals_highlight_as_numbers() {

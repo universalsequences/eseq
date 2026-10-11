@@ -33,134 +33,58 @@ impl Editor {
                 self.minibuffer_input = Some(MinibufferMode::CommandChoices { title, input, entries, selected });
             }
 
-            MinibufferMode::Mx {
-                mut input,
-                candidates,
-                mut selected,
-            } => match key.code {
-                KeyCode::Esc => {
-                    self.minibuffer = None;
-                }
-                KeyCode::Enter => {
-                    let filtered = filter_candidates(&candidates, &input);
-                    let name = if let Some(sel) = filtered.get(selected) {
-                        sel.clone()
-                    } else {
-                        input.clone()
-                    };
-                    if !name.is_empty() {
-                        self.execute_mx_command(&name);
+            MinibufferMode::Mx { mut input, candidates, mut selected } => {
+                match step_completing_read(key, &mut input, &candidates, &mut selected) {
+                    CompletingRead::Cancel => self.minibuffer = None,
+                    CompletingRead::Accept(name) => {
+                        if !name.is_empty() {
+                            self.execute_mx_command(&name);
+                        }
+                        return true;
                     }
-                    return true;
-                }
-                KeyCode::Tab => {
-                    let filtered = filter_candidates(&candidates, &input);
-                    if !filtered.is_empty() {
-                        selected = (selected + 1) % filtered.len();
+                    CompletingRead::Pending => {
+                        self.minibuffer_input = Some(MinibufferMode::Mx { input, candidates, selected });
                     }
-                    self.minibuffer_input = Some(MinibufferMode::Mx {
-                        input,
-                        candidates,
-                        selected,
-                    });
                 }
-                KeyCode::Backspace => {
-                    input.pop();
-                    selected = 0;
-                    self.minibuffer_input = Some(MinibufferMode::Mx {
-                        input,
-                        candidates,
-                        selected,
-                    });
-                }
-                KeyCode::Char(c)
-                    if key.modifiers == KeyModifiers::NONE
-                        || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    input.push(c);
-                    selected = 0;
-                    self.minibuffer_input = Some(MinibufferMode::Mx {
-                        input,
-                        candidates,
-                        selected,
-                    });
-                }
-                _ => {
-                    self.minibuffer_input = Some(MinibufferMode::Mx {
-                        input,
-                        candidates,
-                        selected,
-                    });
-                }
-            },
-            MinibufferMode::SwitchBuffer {
-                mut input,
-                candidates,
-                mut selected,
-            } => match key.code {
-                KeyCode::Esc => {
-                    self.minibuffer = None;
-                }
-                KeyCode::Enter => {
-                    let filtered = filter_candidates(&candidates, &input);
-                    let name = if let Some(sel) = filtered.get(selected) {
-                        sel.clone()
-                    } else {
-                        input.clone()
-                    };
-                    if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
-                        self.active_leaf_mut().buffer_idx = idx;
-                        self.record_buffer_access_by_idx(idx);
-                        self.mark_needs_redraw();
-                        self.sync_runtime_context();
-                        self.completion = None;
-                        self.clear_mark();
-                        self.minibuffer = Some(format!("Switched to {name}"));
-                    } else {
-                        self.minibuffer = Some(format!("No buffer named '{name}'"));
+            }
+            MinibufferMode::DescribeFunction { mut input, candidates, mut selected } => {
+                match step_completing_read(key, &mut input, &candidates, &mut selected) {
+                    CompletingRead::Cancel => self.minibuffer = None,
+                    CompletingRead::Accept(name) => {
+                        if !name.is_empty() {
+                            self.describe_function(&name);
+                        }
+                        return true;
                     }
-                    return true;
-                }
-                KeyCode::Tab => {
-                    let filtered = filter_candidates(&candidates, &input);
-                    if !filtered.is_empty() {
-                        selected = (selected + 1) % filtered.len();
+                    CompletingRead::Pending => {
+                        self.minibuffer_input =
+                            Some(MinibufferMode::DescribeFunction { input, candidates, selected });
                     }
-                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
-                        input,
-                        candidates,
-                        selected,
-                    });
                 }
-                KeyCode::Backspace => {
-                    input.pop();
-                    selected = 0;
-                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
-                        input,
-                        candidates,
-                        selected,
-                    });
+            }
+            MinibufferMode::SwitchBuffer { mut input, candidates, mut selected } => {
+                match step_completing_read(key, &mut input, &candidates, &mut selected) {
+                    CompletingRead::Cancel => self.minibuffer = None,
+                    CompletingRead::Accept(name) => {
+                        if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                            self.active_leaf_mut().buffer_idx = idx;
+                            self.record_buffer_access_by_idx(idx);
+                            self.mark_needs_redraw();
+                            self.sync_runtime_context();
+                            self.completion = None;
+                            self.clear_mark();
+                            self.minibuffer = Some(format!("Switched to {name}"));
+                        } else {
+                            self.minibuffer = Some(format!("No buffer named '{name}'"));
+                        }
+                        return true;
+                    }
+                    CompletingRead::Pending => {
+                        self.minibuffer_input =
+                            Some(MinibufferMode::SwitchBuffer { input, candidates, selected });
+                    }
                 }
-                KeyCode::Char(c)
-                    if key.modifiers == KeyModifiers::NONE
-                        || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    input.push(c);
-                    selected = 0;
-                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
-                        input,
-                        candidates,
-                        selected,
-                    });
-                }
-                _ => {
-                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
-                        input,
-                        candidates,
-                        selected,
-                    });
-                }
-            },
+            }
             MinibufferMode::FindFile {
                 mut input,
                 mut selected,
@@ -300,31 +224,14 @@ impl Editor {
                 Some(format!("{title}: {input}  [{hint}]"))
             }
 
-            Some(MinibufferMode::Mx {
-                input,
-                candidates,
-                selected,
-            }) => {
-                let filtered = filter_candidates(candidates, input);
-                let hint = filtered.get(*selected).map(|s| s.as_str()).unwrap_or("");
-                if hint.is_empty() || input.is_empty() {
-                    Some(format!("M-x {input}"))
-                } else {
-                    Some(format!("M-x {input}  [{hint}]"))
-                }
+            Some(MinibufferMode::Mx { input, candidates, selected }) => {
+                Some(completing_prompt("M-x", input, candidates, *selected))
             }
-            Some(MinibufferMode::SwitchBuffer {
-                input,
-                candidates,
-                selected,
-            }) => {
-                let filtered = filter_candidates(candidates, input);
-                let hint = filtered.get(*selected).map(|s| s.as_str()).unwrap_or("");
-                if hint.is_empty() || input.is_empty() {
-                    Some(format!("Switch to buffer: {input}"))
-                } else {
-                    Some(format!("Switch to buffer: {input}  [{hint}]"))
-                }
+            Some(MinibufferMode::DescribeFunction { input, candidates, selected }) => {
+                Some(completing_prompt("Describe function:", input, candidates, *selected))
+            }
+            Some(MinibufferMode::SwitchBuffer { input, candidates, selected }) => {
+                Some(completing_prompt("Switch to buffer:", input, candidates, *selected))
             }
             Some(MinibufferMode::FindFile { input, selected }) => {
                 let candidates = self.collect_find_file_candidates(input);
@@ -400,5 +307,65 @@ impl Editor {
             .collect::<Vec<_>>();
         out.sort();
         out
+    }
+}
+
+/// What a key did to a completing read (M-x, switch-to-buffer,
+/// describe-function).
+pub(super) enum CompletingRead {
+    Pending,
+    Cancel,
+    /// The selected filtered candidate, or the raw input when none match.
+    Accept(String),
+}
+
+/// One key of a completing read: Esc cancels, Enter accepts, Tab/Down and
+/// Up cycle the filtered candidates, Backspace and characters edit.
+pub(super) fn step_completing_read(
+    key: KeyEvent,
+    input: &mut String,
+    candidates: &[String],
+    selected: &mut usize,
+) -> CompletingRead {
+    match key.code {
+        KeyCode::Esc => CompletingRead::Cancel,
+        KeyCode::Enter => {
+            let filtered = filter_candidates(candidates, input);
+            CompletingRead::Accept(filtered.get(*selected).cloned().unwrap_or_else(|| input.clone()))
+        }
+        KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+            let count = filter_candidates(candidates, input).len();
+            if count > 0 {
+                *selected = if key.code == KeyCode::Up {
+                    (*selected + count - 1) % count
+                } else {
+                    (*selected + 1) % count
+                };
+            }
+            CompletingRead::Pending
+        }
+        KeyCode::Backspace => {
+            input.pop();
+            *selected = 0;
+            CompletingRead::Pending
+        }
+        KeyCode::Char(c)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            input.push(c);
+            *selected = 0;
+            CompletingRead::Pending
+        }
+        _ => CompletingRead::Pending,
+    }
+}
+
+/// `prefix input  [selected candidate]`, without the hint while the input
+/// is empty or nothing matches.
+fn completing_prompt(prefix: &str, input: &str, candidates: &[String], selected: usize) -> String {
+    let filtered = filter_candidates(candidates, input);
+    match filtered.get(selected) {
+        Some(hint) if !input.is_empty() => format!("{prefix} {input}  [{hint}]"),
+        _ => format!("{prefix} {input}"),
     }
 }

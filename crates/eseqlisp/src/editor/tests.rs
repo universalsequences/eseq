@@ -3523,6 +3523,81 @@ fn evaluated_symbols_refresh_active_and_inactive_text_frames_and_gpu_keys() {
 }
 
 #[test]
+fn def_header_docs_reach_completion_and_clear_on_redefinition() {
+    let mut runtime = Runtime::new();
+    runtime.completion_metadata();
+    runtime
+        .eval_str(
+            r#"(def palette-pick (theme)
+                 :doc "Pick a theme.
+Second line."
+                 :command "Change Theme"
+                 (str "picked " theme))"#,
+        )
+        .unwrap();
+    let metadata = &runtime.completion_metadata()["palette-pick"];
+    assert_eq!(metadata.signature, "(palette-pick theme)");
+    assert_eq!(metadata.docs, "Pick a theme.\nSecond line.");
+    let header = runtime.definition_header("palette-pick").expect("header");
+    assert_eq!(header.command.as_deref(), Some("Change Theme"));
+    // The header compiles to nothing: the body still runs and returns.
+    assert_eq!(
+        runtime.eval_str(r#"(palette-pick "dark")"#).unwrap(),
+        Some(Value::String("picked dark".into()))
+    );
+
+    runtime.eval_str("(def palette-pick (theme) theme)").unwrap();
+    assert!(runtime.definition_header("palette-pick").is_none());
+    assert!(!runtime.completion_metadata().contains_key("palette-pick"));
+
+    runtime.eval_str(r#"(module palette-demo)
+(def pick () :doc "Module pick." 1)"#).unwrap();
+    assert_eq!(runtime.completion_metadata()["palette-demo/pick"].docs, "Module pick.");
+    assert!(runtime.definition_header("palette-demo/pick").is_some());
+}
+
+#[test]
+fn redefining_a_documented_function_as_a_value_drops_its_header() {
+    let mut runtime = Runtime::new();
+    runtime.eval_str(r#"(def doc-then-value () :doc "Doc." 1)"#).unwrap();
+    assert!(runtime.definition_header("doc-then-value").is_some());
+    runtime.eval_str("(def doc-then-value 3)").unwrap();
+    assert!(runtime.definition_header("doc-then-value").is_none());
+    assert!(!runtime.completion_metadata().contains_key("doc-then-value"));
+}
+
+#[test]
+fn def_header_errors_fail_the_load() {
+    let mut runtime = Runtime::new();
+    assert!(runtime.eval_str("(def bad-doc () :doc 3 (+ 1 2))").is_err());
+}
+
+#[test]
+fn describe_function_shows_header_in_help_buffer() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(def add-instrument (instrument-type)
+                 :doc "Add a track playing an instrument."
+                 :command "Add Instrument"
+                 :choices instrument-choices
+                 instrument-type)"#,
+        )
+        .unwrap();
+    editor.describe_function("add-instrument");
+    let buffer = editor.active_buffer();
+    assert_eq!(buffer.name, "*Help*");
+    assert!(buffer.read_only);
+    assert_eq!(
+        buffer.text(),
+        "(add-instrument instrument-type)\n\nAdd a track playing an instrument.\n\n\
+         Command: Add Instrument\nChoice: Instrument Type\n"
+    );
+    assert!(editor.collect_mx_candidates().iter().any(|name| name == "describe-function"));
+}
+
+#[test]
 fn macro_completion_refreshes_names_and_signatures_after_evaluation() {
     let mut runtime = Runtime::new();
     // Populate both caches before adding macros from another source buffer.

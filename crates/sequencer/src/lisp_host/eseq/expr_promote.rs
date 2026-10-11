@@ -147,7 +147,6 @@ pub fn promoted_doc(source: &str) -> String {
     if first.starts_with(';') {
         let text = first.trim_start_matches(';').trim();
         if !text.is_empty() {
-            // `:doc` is a literal string: no `"` (no escapes).
             return text.replace('"', "'");
         }
     }
@@ -164,30 +163,22 @@ pub fn promoted_doc(source: &str) -> String {
     format!("promoted from an expr card: {preview}{ellipsis}").replace('"', "'")
 }
 
-/// The native a module file calls for a `"` inside an `:expr` body
-/// (eseqlisp strings have no escapes): `(string-from-char-code 34)`.
+/// `(string-from-char-code 34)`: how promoted modules written before string
+/// escapes spelled a `"` inside an `:expr` body. Still loaded by them.
 pub const STRING_FROM_CHAR_CODE_NATIVE: &str = "string-from-char-code";
 
-/// `text` as an eseqlisp expression that evaluates to exactly `text`: a
-/// plain string literal, or, when it holds a `"` (strings have no escapes),
-/// `(str "…" (string-from-char-code 34) "…")`. `:expr` is evaluated when the
-/// module loads, so the body keeps every character, comments included.
+/// `text` as an eseqlisp string literal that evaluates to exactly `text`.
+/// `:expr` is evaluated when the module loads, so the body keeps every
+/// character, comments included.
 fn lisp_string_expression(text: &str) -> String {
-    if !text.contains('"') {
-        return format!("\"{text}\"");
-    }
-    let quote = format!("({STRING_FROM_CHAR_CODE_NATIVE} 34)");
-    let parts: Vec<String> = text.split('"').map(|part| format!("\"{part}\"")).collect();
-    format!("(str {})", parts.join(&format!(" {quote} ")))
+    eseqlisp::parser::string_literal(text)
 }
 
 /// The module text of a promoted process: the header, then one
 /// `def-process` with `:doc`, one `:in` entry per inlet (`inlets` = the
 /// body's inlets in order with the card's current values, which become the
 /// defaults; the range is the expr default until per-slot ranges exist) and
-/// the body verbatim under `:expr`. A body with a `"` in it (a string
-/// literal, or quotes in a comment) is spelled with
-/// [`STRING_FROM_CHAR_CODE_NATIVE`], since eseqlisp strings have no escapes.
+/// the body verbatim under `:expr` as an escaped string literal.
 pub fn promoted_process_module_source(
     name: &str,
     source: &str,
@@ -422,10 +413,10 @@ mod tests {
         );
         // No comment: a generic doc naming the body.
         assert_eq!(promoted_doc("(sin in)"), "promoted from an expr card: (sin in)");
-        // A `"` (strings have no escapes) is spelled with a char-code call.
-        let text = promoted_process_module_source("x", "; say \"hi\"\n(choose \"a\" 1)", &[]).unwrap();
+        // A `"` or `\\` in the body is escaped in the literal.
+        let text = promoted_process_module_source("x", "; say \"hi\"\n(choose \"a\\\\b\" 1)", &[]).unwrap();
         assert!(
-            text.contains(":expr (str \"; say \" (string-from-char-code 34) \"hi\" (string-from-char-code 34) \"\n(choose \" (string-from-char-code 34) \"a\" (string-from-char-code 34) \" 1)\"))"),
+            text.contains(":expr \"; say \\\"hi\\\"\n(choose \\\"a\\\\\\\\b\\\" 1)\""),
             "{text}"
         );
         assert!(text.contains(":doc \"say 'hi'\""), "{text}");

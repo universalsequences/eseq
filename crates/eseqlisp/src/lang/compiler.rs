@@ -447,6 +447,10 @@ pub struct Compiler<'a> {
     /// Non-fatal compile diagnostics (visibility references, escape-hatch
     /// defs). Drained by the VM into the diagnostics channel.
     warnings: Vec<String>,
+    /// Every named function `def` this unit compiled, by global index, with
+    /// its definition header if it has one (`None` clears a header a previous
+    /// definition left). Drained by the VM.
+    definition_headers: Vec<(usize, Option<super::def_header::DefinitionHeader>)>,
     /// Fatal resolution errors (unknown alias/namespace, malformed module
     /// forms) recorded mid-compile and reported when `compile` finishes.
     errors: Vec<String>,
@@ -1081,6 +1085,7 @@ impl<'a> Compiler<'a> {
             known_namespaces: std::collections::HashSet::new(),
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
+            definition_headers: Vec::new(),
             errors: Vec::new(),
             initial_global_count: 0,
             defined_globals: HashSet::new(),
@@ -1131,6 +1136,7 @@ impl<'a> Compiler<'a> {
             known_namespaces: std::collections::HashSet::new(),
             module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
+            definition_headers: Vec::new(),
             errors: Vec::new(),
             initial_global_count: existing_global_names_len,
             defined_globals: HashSet::new(),
@@ -1189,6 +1195,12 @@ impl<'a> Compiler<'a> {
 
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    pub fn take_definition_headers(
+        &mut self,
+    ) -> Vec<(usize, Option<super::def_header::DefinitionHeader>)> {
+        std::mem::take(&mut self.definition_headers)
     }
 
     pub fn set_module_exports(&mut self, exports: super::modules::ModuleExportRegistry) {
@@ -3196,7 +3208,8 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn emit_symbol_store(&mut self, name: &str) {
+    /// Returns the global index when the store went to a global.
+    fn emit_symbol_store(&mut self, name: &str) -> Option<usize> {
         match self.resolve_symbol(name) {
             SymbolResolution::Global(idx) => {
                 self.defined_globals.insert(idx);
@@ -3204,9 +3217,16 @@ impl<'a> Compiler<'a> {
                     Some(node_id) => self.emit(OpCode::StoreState(node_id)),
                     None => self.emit(OpCode::StoreGlobal(idx)),
                 }
+                Some(idx)
             }
-            SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
-            SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
+            SymbolResolution::Local(idx) => {
+                self.emit(OpCode::StoreLocal(idx));
+                None
+            }
+            SymbolResolution::Upvalue(idx) => {
+                self.emit(OpCode::StoreUpvalue(idx));
+                None
+            }
         }
     }
 
@@ -3218,7 +3238,7 @@ impl<'a> Compiler<'a> {
     /// `select` builtin-widget collision found in S3 batch 1. Shadowing a
     /// flat/core name from a module warns (spec §3) and creates the
     /// module's own entry instead.
-    fn emit_symbol_store_for_definition(&mut self, name: &str) {
+    fn emit_symbol_store_for_definition(&mut self, name: &str) -> Option<usize> {
         if self.declared_module().is_some()
             && !super::modules::is_qualified(name)
             && !self.reactive_namespaces.contains(name)
@@ -3228,9 +3248,9 @@ impl<'a> Compiler<'a> {
                 Some(node_id) => self.emit(OpCode::StoreState(node_id)),
                 None => self.emit(OpCode::StoreGlobal(idx)),
             }
-            return;
+            return Some(idx);
         }
-        self.emit_symbol_store(name);
+        self.emit_symbol_store(name)
     }
 
     /// Index for a definition-site global: in a declared module, always the
@@ -3409,7 +3429,7 @@ impl<'a> Compiler<'a> {
         name: Option<String>,
         args: Vec<Expression>,
         body: Vec<Expression>,
-    ) -> Result<(), CompilerError> {
+    ) -> Result<Option<usize>, CompilerError> {
         let mut symbols = Vec::with_capacity(args.len());
         let mut wrapped_body = if body.len() == 1 {
             body[0].clone()
@@ -3554,12 +3574,13 @@ impl<'a> Compiler<'a> {
             }
         }
         self.emit(OpCode::MakeClosure(new_chunk_idx, scope.upvalues.len()));
+        let mut global = None;
         if let Some(name) = name {
-            self.emit_symbol_store_for_definition(&name);
+            global = self.emit_symbol_store_for_definition(&name);
             self.emit(OpCode::PushNil);
         }
 
-        Ok(())
+        Ok(global)
     }
 
     pub fn op_idx(&self) -> usize {
@@ -3835,7 +3856,20 @@ impl<'a> Compiler<'a> {
         }
 
         if let Some((name, args, body)) = extract_function_definition(list) {
-            return self.compile_function(name, args, body);
+            let Some(name) = name else {
+                return self.compile_function(None, args, body).map(|_| ());
+            };
+            let mut body = body;
+            let header = super::def_header::split_header(&name, &args, &body)
+                .map_err(CompilerError::Message)?
+                .map(|(header, body_start)| {
+                    body.drain(..body_start);
+                    header
+                });
+            if let Some(global) = self.compile_function(Some(name), args, body)? {
+                self.definition_headers.push((global, header));
+            }
+            return Ok(());
         }
 
         if let Some((cond, then_body, else_body)) = extract_if_statement(list) {
@@ -4488,7 +4522,11 @@ impl<'a> Compiler<'a> {
                 Expression::Symbol(s) if s == ">=" => self.emit(OpCode::Gte),
                 Expression::Symbol(s) if s == "def" => {
                     if let Some(Expression::Symbol(s)) = list.get(1) {
-                        self.emit_symbol_store_for_definition(s);
+                        // A value definition replaces a documented function
+                        // of the same name: drop its header.
+                        if let Some(global) = self.emit_symbol_store_for_definition(s) {
+                            self.definition_headers.push((global, None));
+                        }
                         self.emit(OpCode::PushNil);
                     }
                 }
