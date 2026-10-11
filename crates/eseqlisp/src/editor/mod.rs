@@ -1,5 +1,6 @@
 mod commands;
 mod describe;
+mod palette;
 mod minibuffer;
 mod natives;
 mod runtime_context;
@@ -428,11 +429,7 @@ enum MinibufferMode {
         entries: Vec<(String, HostCommand)>,
         selected: usize,
     },
-    Mx {
-        input: String,
-        candidates: Vec<String>,
-        selected: usize,
-    },
+    Palette(Box<palette::PaletteState>),
     SwitchBuffer {
         input: String,
         candidates: Vec<String>,
@@ -704,6 +701,9 @@ pub struct Editor {
     builtins: HashMap<KeyEvent, String>,
     default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
+    /// Command-palette names, most recently run first.
+    palette_history: Vec<String>,
+    palette_history_path: Option<PathBuf>,
     runtime: Runtime,
     runtime_source_context_revision: Option<RuntimeSourceContextRevision>,
     runtime_context_cache: runtime_context::RuntimeContextCache,
@@ -884,6 +884,8 @@ impl Editor {
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
+            palette_history: Vec::new(),
+            palette_history_path: None,
             runtime,
             runtime_source_context_revision: None,
             runtime_context_cache: runtime_context::RuntimeContextCache::default(),
@@ -2150,6 +2152,10 @@ impl Editor {
 
         // The toast floats above every tile and modal.
         if self.handle_toast_mouse(mouse, precise_col, precise_row) {
+            return;
+        }
+        // The command palette floats above the toast's peers too.
+        if self.handle_palette_mouse(mouse, precise_col, precise_row) {
             return;
         }
 
@@ -8007,7 +8013,7 @@ impl Editor {
             return true;
         }
         // Editor commands that open their own minibuffer prompt.
-        if matches!(fn_name, "find-file" | "describe-function") {
+        if matches!(fn_name, "find-file" | "describe-function" | palette::COMMAND_PALETTE) {
             self.run_command(fn_name);
             return true;
         }
@@ -9775,6 +9781,12 @@ impl Editor {
             }
         }
 
+        if let Some(command) = self.runtime.take_pending_open_command_palette() {
+            self.open_command_palette();
+            if let Some(command) = command {
+                self.open_palette_choices(&command);
+            }
+        }
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
                 Ok(path) => {

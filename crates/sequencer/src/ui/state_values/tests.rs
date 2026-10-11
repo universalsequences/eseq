@@ -46240,6 +46240,8 @@ mod mnm_ui_tests;
 mod manual_ui_tests;
 #[path = "customize_ui_tests.rs"]
 mod customize_ui_tests;
+#[path = "command_palette_ui_tests.rs"]
+mod command_palette_ui_tests;
 
 #[path = "about_ui_tests.rs"]
 mod about_ui_tests;

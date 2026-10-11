@@ -6687,6 +6687,13 @@ impl VM {
         }
     }
 
+    /// Names of globals currently holding a callable.
+    pub fn callable_global_names(&self) -> impl Iterator<Item = &str> {
+        self.global_names.iter().zip(&self.globals).filter_map(|(name, value)| {
+            value.as_ref().filter(|value| is_callable(&value.borrow())).map(|_| name.as_str())
+        })
+    }
+
     pub fn global_names(&self) -> &[String] {
         &self.global_names
     }
@@ -11031,6 +11038,18 @@ mod tests {
             vm.global_value("test.host-private/host-only"),
             Some(Value::Number(42.0))
         );
+    }
+
+    #[test]
+    fn command_needing_unsupplied_arguments_warns_but_loads() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str(r#"(def needs-arg (x) :command "Needs Arg" x)"#).expect("loads");
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(
+            diagnostics.iter().any(|d| d.contains("command `needs-arg`") && d.contains(":choices")),
+            "{diagnostics:?}"
+        );
+        assert!(vm.definition_headers.keys().any(|global| crate::modules::strip_implicit(global) == "needs-arg"));
     }
 
     #[test]

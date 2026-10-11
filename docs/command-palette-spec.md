@@ -1,6 +1,6 @@
 # Command Palette + Definition Docs — spec rev 1
 
-Status: rev 1, 2026-10-10. Phase 1 BUILT (uncommitted) 2026-10-10. Epic: see `bd show` for the `command-palette` epic.
+Status: rev 1, 2026-10-10. Phase 1 COMMITTED 22f08155f; phases 2–4 BUILT 2026-10-10. Epic: see `bd show` for the `command-palette` epic.
 
 ## 1. Goal
 
@@ -74,7 +74,9 @@ Rules:
    reload clears it.
 6. The signature is derived from the arglist (`(seq-theme-pick theme)`), so
    docs need not repeat it.
-7. Multi-line docs: strings may span lines and support `\n` `\t` `\"` `\\`
+7. Docs follow the Emacs convention: the first line is a complete
+   sentence, because one-line surfaces (the palette footer) show only it.
+8. Multi-line docs: strings may span lines and support `\n` `\t` `\"` `\\`
    escapes (the lexer gained escapes alongside this spec; unknown escapes
    keep their backslash). The first non-empty line is the summary.
 
@@ -125,45 +127,73 @@ The selected entry's `:value` (or the plain item) is passed as the command's
 required arguments or declares `:choices` for its single required argument.
 Violations are compile warnings (not errors — user init must keep loading).
 
-M-x stays the escape hatch: it still offers every global, but ranks commands
-first and filters out globals whose required arity can't be satisfied.
+M-x stays the escape hatch: it still offers every global, but lists
+`:command` definitions first (by title). Arity is only known for headed
+definitions — the VM binds a fixed-arity function's missing arguments to
+`nil` rather than failing — so undocumented globals are not filtered.
+`Runtime::commands()` is the command listing both M-x and the palette read.
 
-## 5. Palette ranking (phase 3)
+## 5. Palette ranking (phase 3, as built)
 
-One list, three tiers:
+One list, three tiers (`editor/palette.rs`):
 
-1. **Empty query:** pinned seed commands, then recent/frequent commands
-   (usage counts persisted in user data, decayed). Optionally grouped by
-   `:group`.
-2. **Typing:** fuzzy match over `:command` titles, then over their names;
-   row subtitle = first line of `:doc`; right column = `:current` value or the
-   key binding (reverse lookup of `lisp_bindings` + builtin binds).
-3. **No command match / prefix `(`:** every documented global by raw name,
-   then undocumented globals — today's M-x behavior.
+1. **Empty query:** `:command` definitions only — recently run first (an
+   MRU list of 30, persisted one name per line at
+   `set_palette_history_path`; the app keeps it beside `prefs.json`), the
+   rest by title. `:group` sections are not drawn yet.
+2. **Typing:** commands matched on title and name (prefix > word start >
+   substring > in-order subsequence), ranked above everything else; right
+   column = key binding (shortest, as glyphs: `⇧⌘P`, `⌃X 2`); the footer
+   shows the highlighted entry's signature and first doc line.
+3. **Every other M-x candidate**, matched as a substring of its name only
+   (subsequence matching over thousands of names is noise). `map.field`
+   completions are excluded — they read data, they are not commands.
 
-## 6. Choice stages (phase 4)
+## 6. Choice stages (phase 4, as built)
 
-- Enter on a row with `:choices` pushes a stage: the search field shows a
-  badge (`:prompt` or the title-cased parameter name) and the placeholder
-  `Select <Prompt>…`.
-- Typing filters entries; `✓` marks the `:current` value; Enter calls the
-  command with the entry value; Backspace on empty input pops the stage; Esc
-  closes.
-- Optional live preview: a command may declare `:preview fn` (phase 4.1),
-  called on selection change and reverted on Esc. Themes are the first user.
-- Multi-argument commands (later): `:choices` per parameter
-  (`:choices (instrument instrument-choices preset preset-choices)`); badges
-  stack as breadcrumbs **Instrument › Preset**. Not in rev 1 scope.
+- `:choices` and `:current` name a symbol: a function (called with no
+  arguments) or a global, resolved in the command's module first, then
+  globally (`Runtime::command_choices` / `command_current`). Inline forms
+  are rejected at definition time — they would need module-aware evaluation
+  when the palette opens.
+- A command row with `:choices` shows `›`; with `:current`, its right
+  column is the current choice's label (else the value).
+- Enter on it pushes a stage: the search field shows the badge (`:prompt`,
+  else the first parameter title-cased) and `Select <Prompt>…`; rows list the
+  choices in declared order, `✓` on the current one, which starts
+  highlighted. Typing filters; Enter calls the command with the entry's
+  `:value`; Backspace on an empty field pops back to the commands; Esc / C-g
+  close.
+- `(command-palette "change-theme")` opens straight onto a command's choice
+  stage, with the commands stage beneath it.
+- Shipped: **Change Theme** (`change-theme`, content/ui/themes.lisp, over
+  `seq-theme-registry` with labels) and **Add Instrument**
+  (`eseq.browser/add-instrument`, the Instruments tab tree flattened, each
+  choice's detail its folder).
+- Not built: `:preview` (live preview on highlight, reverted on Esc) and
+  multi-parameter commands with stacked badges — see the epic's follow-ups.
 
-## 7. UI (phase 3)
+## 7. UI (phase 3, as built)
 
-Rendered in Lisp as a window-level overlay, opened by the palette hotkey and
-by M-x (M-x can keep the minibuffer skin behind a customize toggle).
+The palette is M-x: `execute-extended-command`, `command-palette` (bound
+`S-s-p`, ⌘⇧P) and the `(command-palette)` native all open it. Its state
+lives in the minibuffer slot (`MinibufferMode::Palette`), so it takes the
+keyboard from whichever tile is active; the status line echoes `M-x …`,
+which is the TUI's only view of it.
 
-Risk: today a modal receives pointer input only through the **active** tile
-(see `content/ui/choose-model.lisp`). A global palette needs a window-level
-overlay that takes keyboard focus regardless of tile; settle that seam before
-the visual work.
+Drawing is native rather than a Lisp widget tree: a Lisp modal only renders
+while its host buffer is on screen and only takes pointer input through its
+tile, which a window-level palette cannot depend on. The editor publishes a
+pure-data `PaletteFrame` in `TiledRenderFrame`; `widget_render::
+command_palette::primitives` lays it out with the popup-menu style shared by
+dropdowns and context menus (panel chrome, row highlight, magnifier,
+checkmark, theme `DROPDOWN_*` colors), and the Metal and wgpu backends add
+those primitives to their global overlay pass, above every tile and modal.
+The renderer records the panel's hit map; pointer input hovers rows, runs a
+clicked row, scrolls with the wheel and closes on a press outside.
+
+Keys: type to filter, ↑/↓ (Tab, C-n/C-p, PageUp/PageDown) move, Enter
+runs, Esc / C-g close.
 
 ## 8. Backfill
 

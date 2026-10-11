@@ -3866,6 +3866,9 @@ impl<'a> Compiler<'a> {
                     body.drain(..body_start);
                     header
                 });
+            if let Some(problem) = header.as_ref().and_then(|header| header.command_problem(&name)) {
+                self.warn_once(problem);
+            }
             if let Some(global) = self.compile_function(Some(name), args, body)? {
                 self.definition_headers.push((global, header));
             }

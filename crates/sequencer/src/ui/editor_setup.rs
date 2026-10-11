@@ -79,6 +79,10 @@ pub(crate) fn create_editor_with_root(
             vim_mode: true,
         },
     );
+    // The command palette's recently-run list sits beside the preferences.
+    editor.set_palette_history_path(
+        app_paths.preferences_path().parent().map(|dir| dir.join("command-palette-history")),
+    );
 
     // Invalid packages were excluded from the load path; surface each one the
     // same way a failed user init is surfaced instead of aborting boot.

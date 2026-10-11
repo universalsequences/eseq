@@ -64,10 +64,16 @@ fn shape_primitive(
     }
 }
 
+pub(crate) fn rounded_rect_primitive(
+    rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport,
+) -> GpuPrimitive {
+    shape_primitive("dropdown", rect, color, radius_px, true, viewport)
+}
+
 pub(crate) fn emit_rounded_rect_overlay(
     rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport,
 ) {
-    super::push_overlay_primitive(shape_primitive("dropdown", rect, color, radius_px, true, viewport));
+    super::push_overlay_primitive(rounded_rect_primitive(rect, color, radius_px, viewport));
 }
 
 pub(crate) fn emit_panel_chrome(
@@ -76,6 +82,19 @@ pub(crate) fn emit_panel_chrome(
     border: Color,
     viewport: WidgetViewport,
 ) {
+    for primitive in panel_chrome_primitives(panel_rect, background, border, CORNER_RADIUS_PX, viewport) {
+        super::push_overlay_primitive(primitive);
+    }
+}
+
+/// A popup panel's 1px border and fill, as primitives.
+pub(crate) fn panel_chrome_primitives(
+    panel_rect: Rect,
+    background: Color,
+    border: Color,
+    radius_px: f32,
+    viewport: WidgetViewport,
+) -> [GpuPrimitive; 2] {
     let border_design_px = 1.0;
     let border_px = super::ui_design_px(border_design_px);
     let border_row = border_px / viewport.cell_h.max(1.0);
@@ -86,13 +105,10 @@ pub(crate) fn emit_panel_chrome(
         width: panel_rect.width + border_col * 2.0,
         height: panel_rect.height + border_row * 2.0,
     };
-    emit_rounded_rect_overlay(
-        border_rect,
-        border,
-        CORNER_RADIUS_PX + border_design_px,
-        viewport,
-    );
-    emit_rounded_rect_overlay(panel_rect, background, CORNER_RADIUS_PX, viewport);
+    [
+        rounded_rect_primitive(border_rect, border, radius_px + border_design_px, viewport),
+        rounded_rect_primitive(panel_rect, background, radius_px, viewport),
+    ]
 }
 
 /// Use the panel's vertical padding on both axes in framebuffer space. Cell
@@ -124,13 +140,20 @@ pub(crate) fn emit_row_highlight(row_rect: Rect, color: Color, viewport: WidgetV
 pub(crate) fn checkmark_primitive(
     row_rect: Rect, font_size: f32, color: Color, viewport: WidgetViewport,
 ) -> GpuPrimitive {
+    checkmark_primitive_at(row_rect, row_rect.col + TEXT_PADDING_H, font_size, color, viewport)
+}
+
+/// [`checkmark_primitive`] centered in a 1.5-column slot starting at `col`.
+pub(crate) fn checkmark_primitive_at(
+    row_rect: Rect, col: f32, font_size: f32, color: Color, viewport: WidgetViewport,
+) -> GpuPrimitive {
     let height_px = super::ui_design_px(font_size * super::UI_DESIGN_REFERENCE_SCALE * 1.2);
     let width_px = height_px * 0.85;
     let width = width_px / viewport.cell_w.max(1.0);
     let height = height_px / viewport.cell_h.max(1.0);
     let rect = Rect {
         row: row_rect.row + (row_rect.height - height) * 0.5,
-        col: row_rect.col + TEXT_PADDING_H + (1.5 - width) * 0.5,
+        col: col + (1.5 - width) * 0.5,
         width,
         height,
     };
@@ -179,6 +202,60 @@ pub(crate) fn icon_primitive(
         },
         is_background: false,
     }
+}
+
+/// A left-aligned popup text run.
+pub(crate) fn text_primitive(
+    row: f32, col: f32, text: String, font_size: f32, fg: Color,
+) -> super::GpuProportionalTextPrimitive {
+    super::GpuProportionalTextPrimitive {
+        row,
+        col,
+        align_width: 0.0,
+        h_align: 0.0,
+        text,
+        font_size,
+        scale: 1.0,
+        fg,
+        bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
+        mono: false,
+    }
+}
+
+/// A popup search field: a recessed fill, an optional magnifier at
+/// `icon_col`, then the input (or a dim placeholder) at `text_col` with a
+/// caret — after the input, or before the placeholder when empty. Shared by
+/// filterable dropdowns and the command palette.
+pub(crate) fn search_field_primitives(
+    field: Rect,
+    radius_px: f32,
+    icon_col: Option<f32>,
+    text_col: f32,
+    input: &str,
+    placeholder: &str,
+    font_size: f32,
+    viewport: WidgetViewport,
+) -> Vec<GpuPrimitive> {
+    let mut prims = vec![rounded_rect_primitive(field, Color::rgba(0.0, 0.0, 0.0, 0.28), radius_px, viewport)];
+    if let Some(col) = icon_col {
+        prims.push(magnifier_primitive(field, col, font_size, crate::theme::DIM(), viewport));
+    }
+    let text_row = field.row + (field.height - 1.0) * 0.5;
+    let (shown, fg, shown_col, caret_col) = if input.is_empty() {
+        (placeholder.to_string(), crate::theme::DIM(), text_col + 0.3, text_col)
+    } else {
+        let width = super::dropdown::render_text_width_cells(input, font_size, viewport.cell_w);
+        (input.to_string(), crate::theme::FG(), text_col, text_col + width + 0.08)
+    };
+    prims.push(GpuPrimitive::ProportionalText(text_primitive(text_row, shown_col, shown, font_size, fg)));
+    let inset = field.height * 0.2;
+    prims.push(rounded_rect_primitive(
+        Rect { row: field.row + inset, col: caret_col, width: 0.09, height: field.height - inset * 2.0 },
+        crate::theme::FG(),
+        1.0,
+        viewport,
+    ));
+    prims
 }
 
 /// The search glyph at the left of a filterable dropdown's filter row,

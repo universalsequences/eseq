@@ -1407,6 +1407,20 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        super::palette::COMMAND_PALETTE,
+        "(command-palette &optional command)",
+        "Open the command palette (M-x, Cmd+Shift+P): `:command` definitions by title, then every other command by name. Naming a command with `:choices` opens straight to its choice stage.",
+        |args, ctx| {
+            let command = match args.first() {
+                Some(Value::String(name) | Value::Symbol(name)) => Some(name.clone()),
+                _ => None,
+            };
+            ctx.open_command_palette(command);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "other-window",
         "(other-window)",
         "Cycle focus to the next tile (C-x o).",

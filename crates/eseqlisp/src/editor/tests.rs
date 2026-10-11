@@ -3567,6 +3567,23 @@ fn redefining_a_documented_function_as_a_value_drops_its_header() {
 }
 
 #[test]
+fn mx_lists_commands_first_by_title() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(def zz-open-thing () :command "Alpha Thing" 1)
+               (def aa-close-thing () :command "Beta Thing" 2)
+               (def aa-plain () 3)"#,
+        )
+        .unwrap();
+    let candidates = editor.collect_mx_candidates();
+    assert_eq!(&candidates[..2], ["zz-open-thing", "aa-close-thing"]);
+    assert!(candidates.iter().any(|name| name == "aa-plain"));
+    assert_eq!(candidates.iter().filter(|name| *name == "zz-open-thing").count(), 1);
+}
+
+#[test]
 fn def_header_errors_fail_the_load() {
     let mut runtime = Runtime::new();
     assert!(runtime.eval_str("(def bad-doc () :doc 3 (+ 1 2))").is_err());

@@ -556,7 +556,7 @@ fn text_width_cells(
     }
 }
 
-fn render_text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
+pub(super) fn render_text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
     // Fixed-size parents and retained layouts can skip intrinsic measurement.
     // Use the current render font and cell width, never measure-pass side effects
     // or cell widths cached under an earlier display scale.
@@ -565,7 +565,7 @@ fn render_text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
     }).unwrap_or_else(|| text_width_cells(text, font_size, cell_w, None))
 }
 
-fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32, cell_w: f32) -> String {
+pub(super) fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32, cell_w: f32) -> String {
     if max_width <= 0.0 || text.is_empty() {
         return String::new();
     }
@@ -1382,53 +1382,21 @@ impl WidgetDefinition for DropdownWidget {
                     width: (menu_width - 0.7).max(0.0),
                     height: MENU_ROW_HEIGHT,
                 };
-                super::menu_style::emit_rounded_rect_overlay(
-                    field,
-                    Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 },
-                    12.0,
-                    viewport,
-                );
                 let icon_col = field.col + 0.55;
-                super::push_overlay_primitive(super::menu_style::magnifier_primitive(
-                    field,
-                    icon_col,
-                    menu_font_size,
-                    theme::DIM(),
-                    viewport,
-                ));
-                let text_col = icon_col + 1.4;
                 let placeholder = string_prop(&node.props, "filter-placeholder")
                     .unwrap_or_else(|| "Filter…".to_string());
-                let (text, fg) = if state.filter.is_empty() {
-                    (placeholder, theme::DIM())
-                } else {
-                    (state.filter.clone(), theme::FG())
-                };
-                let text_row = field.row + (field.height - 1.0) * 0.5;
-                super::push_overlay_primitive(GpuPrimitive::ProportionalText(
-                    GpuProportionalTextPrimitive {
-                        row: text_row,
-                        col: text_col,
-                        align_width: 0.0,
-                        h_align: 0.0,
-                        text,
-                        font_size: menu_font_size,
-                        scale: 1.0,
-                        fg,
-                        bg: transparent,
-                        mono: false,
-                    },
-                ));
-                // Caret after the typed text.
-                let caret_col = text_col
-                    + if state.filter.is_empty() { 0.0 } else { text_w(&state.filter, menu_font_size) }
-                    + 0.08;
-                super::menu_style::emit_rounded_rect_overlay(
-                    Rect { row: field.row + 0.25, col: caret_col, width: 0.09, height: field.height - 0.5 },
-                    theme::FG(),
-                    1.0,
+                for primitive in super::menu_style::search_field_primitives(
+                    field,
+                    12.0,
+                    Some(icon_col),
+                    icon_col + 1.4,
+                    &state.filter,
+                    &placeholder,
+                    menu_font_size,
                     viewport,
-                );
+                ) {
+                    super::push_overlay_primitive(primitive);
+                }
             }
 
             let list_rect = Rect {

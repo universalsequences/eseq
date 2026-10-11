@@ -2182,6 +2182,16 @@ impl WgpuAppBackend {
             }
         }
 
+        if let Some(palette) = &tiled.palette {
+            global_overlay_prims.extend(widget_render::command_palette::primitives(
+                palette,
+                widget_render::WidgetViewport::window(cell_w, cell_h, vp_w, vp_h, render_time_seconds),
+            ));
+        } else {
+            // Closed: nothing on screen for pointer input to hit.
+            widget_render::command_palette::clear_hit_map();
+        }
+
         // ── Global overlay pass (dropdown menus, etc.) ───────────────────────
         if !global_overlay_prims.is_empty() {
             let overlay_prims = std::mem::take(&mut global_overlay_prims);

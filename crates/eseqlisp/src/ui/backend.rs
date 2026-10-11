@@ -87,6 +87,11 @@ impl Color {
     pub const GRAY: Self = Self::rgb(0.7, 0.7, 0.7);
 
     /// Relative luminance (ITU-R BT.709).
+    /// The same color with its alpha scaled by `factor`.
+    pub fn with_alpha(self, factor: f32) -> Self {
+        Self { a: self.a * factor, ..self }
+    }
+
     pub fn luma(self) -> f32 {
         0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
     }
@@ -133,6 +138,38 @@ impl Cell {
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
+
+/// The command palette (docs/command-palette-spec.md §7): a window-level
+/// search panel drawn above every tile. Pure data; the renderer lays it out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaletteFrame {
+    /// The choice stage's badge (`Theme`), shown inside the search field.
+    pub badge: Option<String>,
+    pub placeholder: String,
+    pub input: String,
+    /// The visible window of rows (already scrolled).
+    pub rows: Vec<PaletteRowFrame>,
+    /// Index into `rows` of the highlighted row.
+    pub selected: Option<usize>,
+    /// Shown instead of rows when nothing matches.
+    pub empty_text: Option<String>,
+    /// Signature and first doc line of the highlighted row, if documented.
+    pub footer: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaletteRowFrame {
+    pub label: String,
+    /// Right column: the current value or the key binding.
+    pub detail: Option<String>,
+    /// Opens a choice stage (`›`).
+    pub submenu: bool,
+    /// The current choice (`✓`).
+    pub checked: bool,
+}
+
+/// Visible palette rows at most; the list scrolls past this.
+pub const PALETTE_MAX_ROWS: usize = 14;
 
 /// Window-level toast, drawn bottom-right above every tile.
 #[derive(Clone, Debug, PartialEq)]
@@ -718,6 +755,8 @@ pub struct TiledRenderFrame {
     pub toast: Option<ToastFrame>,           // bottom-right toast (global)
     /// The tile shown in the window titlebar band (`set-titlebar`), if any.
     pub titlebar_tile: Option<TileId>,
+    /// The command palette, when open (global, above everything).
+    pub palette: Option<PaletteFrame>,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

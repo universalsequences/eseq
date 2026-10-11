@@ -28,16 +28,17 @@ pub struct DefinitionHeader {
     pub command: Option<String>,
     pub prompt: Option<String>,
     pub group: Option<String>,
-    /// Unevaluated `:choices` / `:current` forms; phase 4 of the spec gives
-    /// them behavior.
-    pub choices: Option<Expression>,
-    pub current: Option<Expression>,
+    /// `:choices` / `:current`: a function (called with no arguments) or a
+    /// global, named by symbol and resolved in the command's module when the
+    /// palette asks (spec §6).
+    pub choices: Option<String>,
+    pub current: Option<String>,
 }
 
 impl DefinitionHeader {
     /// First line of `:doc`, for one-line surfaces (palette rows).
     pub fn summary(&self) -> Option<&str> {
-        self.doc.as_deref().and_then(|doc| doc.lines().map(str::trim).find(|line| !line.is_empty()))
+        self.doc.as_deref().and_then(first_doc_line)
     }
 
     /// The badge noun for this command's choice stage: `:prompt`, else the
@@ -47,6 +48,30 @@ impl DefinitionHeader {
         self.prompt.clone().or_else(|| self.first_param.as_deref().map(title_case))
     }
 
+    /// Why a `:command` can't run from the palette, if it can't: it must
+    /// take no required arguments, or exactly one that `:choices` supplies
+    /// (spec §4).
+    pub fn command_problem(&self, name: &str) -> Option<String> {
+        self.command.as_ref()?;
+        let supplied = usize::from(self.choices.is_some());
+        (self.required_arity != supplied).then(|| {
+            let display = super::modules::strip_implicit(name);
+            if supplied == 1 {
+                format!(
+                    "warning: command `{display}` has :choices, so it must take exactly one \
+                     required argument (it takes {})",
+                    self.required_arity
+                )
+            } else {
+                format!(
+                    "warning: command `{display}` takes {} required argument(s); give it \
+                     :choices for one, or make them &optional",
+                    self.required_arity
+                )
+            }
+        })
+    }
+
     /// Records one `:key value` pair. `Ok(false)` when `key` is not a header
     /// key, which ends the header.
     fn set(&mut self, name: &str, key: &str, value: &Expression) -> Result<bool, String> {
@@ -54,14 +79,18 @@ impl DefinitionHeader {
             Expression::String(text) => Ok(text.clone()),
             _ => Err(format!("{name}: header :{key} must be a string literal")),
         };
+        let symbol = || match value {
+            Expression::Symbol(symbol) => Ok(symbol.clone()),
+            _ => Err(format!("{name}: header :{key} must name a function or global (a symbol)")),
+        };
         let duplicate = || format!("{name}: header :{key} appears twice");
         match key {
             "doc" => put(&mut self.doc, text()?, duplicate),
             "command" => put(&mut self.command, text()?, duplicate),
             "prompt" => put(&mut self.prompt, text()?, duplicate),
             "group" => put(&mut self.group, text()?, duplicate),
-            "choices" => put(&mut self.choices, value.clone(), duplicate),
-            "current" => put(&mut self.current, value.clone(), duplicate),
+            "choices" => put(&mut self.choices, symbol()?, duplicate),
+            "current" => put(&mut self.current, symbol()?, duplicate),
             _ => Ok(false),
         }
     }
@@ -73,6 +102,11 @@ fn put<T>(slot: &mut Option<T>, value: T, duplicate: impl Fn() -> String) -> Res
     }
     *slot = Some(value);
     Ok(true)
+}
+
+/// The first non-blank line of a docstring.
+pub fn first_doc_line(doc: &str) -> Option<&str> {
+    doc.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 fn title_case(name: &str) -> String {
@@ -194,7 +228,7 @@ mod tests {
         assert_eq!(header.signature, "(add-instrument instrument-type &optional slot)");
         assert_eq!(header.summary(), Some("Add a track."));
         assert_eq!(header.command.as_deref(), Some("Add Instrument"));
-        assert!(matches!(header.choices, Some(Expression::Symbol(ref s)) if s == "instrument-choices"));
+        assert_eq!(header.choices.as_deref(), Some("instrument-choices"));
         assert_eq!(header.required_arity, 1);
         assert_eq!(header.first_param.as_deref(), Some("instrument-type"));
         assert_eq!(header.choice_prompt().as_deref(), Some("Instrument Type"));
@@ -218,6 +252,8 @@ mod tests {
     fn non_string_doc_and_duplicates_are_errors() {
         let (name, args, body) = def_parts(r#"(def f () :doc 3 (g))"#);
         assert!(split_header(&name, &args, &body).unwrap_err().contains(":doc must be a string"));
+        let (name, args, body) = def_parts(r#"(def f (x) :choices (list 1 2) (g x))"#);
+        assert!(split_header(&name, &args, &body).unwrap_err().contains("(a symbol)"));
         let (name, args, body) = def_parts(r#"(def f () :doc "a" :doc "b" (g))"#);
         assert!(split_header(&name, &args, &body).unwrap_err().contains("twice"));
     }
@@ -226,6 +262,19 @@ mod tests {
     fn header_pair_without_a_body_after_it_is_an_error() {
         let (name, args, body) = def_parts(r#"(def f () :doc "a" :command "b")"#);
         assert!(split_header(&name, &args, &body).unwrap_err().contains("needs a body form"));
+    }
+
+    #[test]
+    fn command_arity_must_match_choices() {
+        let problem = |src: &str| {
+            let (name, args, body) = def_parts(src);
+            split_header(&name, &args, &body).unwrap().unwrap().0.command_problem(&name)
+        };
+        assert!(problem(r#"(def f () :command "F" (g))"#).is_none());
+        assert!(problem(r#"(def f (x &optional y) :command "F" :choices xs (g x))"#).is_none());
+        assert!(problem(r#"(def f (x) :command "F" (g x))"#).unwrap().contains(":choices"));
+        assert!(problem(r#"(def f () :command "F" :choices xs (g))"#).unwrap().contains("exactly one"));
+        assert!(problem(r#"(def f (x) :doc "not a command" (g x))"#).is_none());
     }
 
     #[test]

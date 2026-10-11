@@ -3,6 +3,7 @@ pub mod box_widget;
 pub mod button;
 pub mod cable;
 pub mod compressor_display;
+pub mod command_palette;
 pub mod context_menu;
 pub mod device_meter;
 pub mod dropdown;
@@ -738,6 +739,26 @@ pub struct WidgetViewport {
     pub scroll_left: f32,
     /// True when a parent container is currently hovered.
     pub inherited_hover: bool,
+}
+
+impl WidgetViewport {
+    /// A viewport for primitives laid out in window cell coordinates (the
+    /// global overlay pass), with no tile scroll or focus.
+    pub fn window(cell_w: f32, cell_h: f32, vp_w: f32, vp_h: f32, time_seconds: f32) -> Self {
+        Self {
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+            time_seconds,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: vp_h / cell_h.max(1.0),
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]

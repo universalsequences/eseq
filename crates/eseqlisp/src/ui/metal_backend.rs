@@ -6019,6 +6019,18 @@ fragment float4 live_spectrogram_frag(
                 }
             }
 
+            // The command palette rides the same pass, after every tile's
+            // overlays, so it sits on top of open dropdowns and modals too.
+            if let Some(palette) = &tiled.palette {
+                global_overlay_prims.extend(widget_render::command_palette::primitives(
+                    palette,
+                    WidgetViewport::window(cell_w, cell_h, vp_w, vp_h, render_time_seconds),
+                ));
+            } else {
+                // Closed: nothing on screen for pointer input to hit.
+                widget_render::command_palette::clear_hit_map();
+            }
+
             // ── Global overlay pass (dropdown menus, etc.) ──────────────────
             // Drawn after tiles and patch cables so open dropdowns always sit
             // above interactive wiring and tile chrome.
@@ -11035,7 +11047,7 @@ fragment float4 live_spectrogram_frag(
             root.children = vec![label, knob, envelope, styled];
             let area = Rect { col: 3.0, row: 2.0,
                 width: width as f32 / cell_w - 6.0, height: height as f32 / cell_h - 4.0 };
-            let mut tiled = TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, tiles: vec![TileFrame {
+            let mut tiled = TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, palette: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,
@@ -11121,7 +11133,7 @@ fragment float4 live_spectrogram_frag(
                 label.rect = Rect { col, row: row + 3.0, width: 6.0, height: 1.0 };
                 root.children.extend([knob, label]);
             }
-            TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, tiles: vec![TileFrame {
+            TiledRenderFrame { completion: None, toast: None, titlebar_tile: None, palette: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,

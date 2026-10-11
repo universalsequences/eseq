@@ -33,20 +33,7 @@ impl Editor {
                 self.minibuffer_input = Some(MinibufferMode::CommandChoices { title, input, entries, selected });
             }
 
-            MinibufferMode::Mx { mut input, candidates, mut selected } => {
-                match step_completing_read(key, &mut input, &candidates, &mut selected) {
-                    CompletingRead::Cancel => self.minibuffer = None,
-                    CompletingRead::Accept(name) => {
-                        if !name.is_empty() {
-                            self.execute_mx_command(&name);
-                        }
-                        return true;
-                    }
-                    CompletingRead::Pending => {
-                        self.minibuffer_input = Some(MinibufferMode::Mx { input, candidates, selected });
-                    }
-                }
-            }
+            MinibufferMode::Palette(state) => self.handle_palette_key(key, state),
             MinibufferMode::DescribeFunction { mut input, candidates, mut selected } => {
                 match step_completing_read(key, &mut input, &candidates, &mut selected) {
                     CompletingRead::Cancel => self.minibuffer = None,
@@ -202,14 +189,31 @@ impl Editor {
         self.call_lisp_handler(name);
     }
 
-    /// Commands currently offered by M-x, including Lisp globals added by
-    /// user init files.
+    /// Commands currently offered by M-x: `:command` definitions first (by
+    /// title), then builtins, Lisp globals and bound handlers by name.
     pub fn collect_mx_candidates(&mut self) -> Vec<String> {
-        let mut names: Vec<String> = self.builtins.values().cloned().collect();
+        let commands: Vec<String> = self.runtime.commands().into_iter().map(|(name, _)| name).collect();
+        let command_set: std::collections::HashSet<&str> = commands.iter().map(String::as_str).collect();
+        let mut names = self.non_command_mx_names(&command_set);
         let symbols = self.runtime.completion_symbols();
-        names.extend(symbols.iter().cloned());
-        // Also include lisp binding handler names
-        names.extend(self.lisp_bindings.values().cloned());
+        names.extend(symbols.iter().filter(|name| !command_set.contains(name.as_str())).cloned());
+        names.sort();
+        names.dedup();
+        drop(command_set);
+        commands.into_iter().chain(names).collect()
+    }
+
+    /// Builtins, bound handlers and callable globals that are not in
+    /// `commands`, sorted: what the palette offers below the commands.
+    pub(super) fn non_command_mx_names(&self, commands: &std::collections::HashSet<&str>) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .builtins
+            .values()
+            .chain(self.lisp_bindings.values())
+            .cloned()
+            .chain(self.runtime.callable_global_names())
+            .filter(|name| !commands.contains(name.as_str()))
+            .collect();
         names.sort();
         names.dedup();
         names
@@ -224,9 +228,7 @@ impl Editor {
                 Some(format!("{title}: {input}  [{hint}]"))
             }
 
-            Some(MinibufferMode::Mx { input, candidates, selected }) => {
-                Some(completing_prompt("M-x", input, candidates, *selected))
-            }
+            Some(MinibufferMode::Palette(state)) => Some(Self::palette_prompt(state)),
             Some(MinibufferMode::DescribeFunction { input, candidates, selected }) => {
                 Some(completing_prompt("Describe function:", input, candidates, *selected))
             }
@@ -310,7 +312,7 @@ impl Editor {
     }
 }
 
-/// What a key did to a completing read (M-x, switch-to-buffer,
+/// What a key did to a completing read (switch-to-buffer,
 /// describe-function).
 pub(super) enum CompletingRead {
     Pending,
@@ -319,45 +321,74 @@ pub(super) enum CompletingRead {
     Accept(String),
 }
 
-/// One key of a completing read: Esc cancels, Enter accepts, Tab/Down and
-/// Up cycle the filtered candidates, Backspace and characters edit.
+/// What a key means to a list-picking prompt (completing reads and the
+/// command palette), so they share one keymap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadKey {
+    Cancel,
+    Accept,
+    /// Move the highlight by one, wrapping (±1).
+    Step(isize),
+    /// Move the highlight by a page, clamping (±1 = one page).
+    Page(isize),
+    Backspace,
+    Insert(char),
+    Ignore,
+}
+
+/// Esc / C-g cancel, Enter accepts, Tab / Down / C-n and BackTab / Up / C-p
+/// step, PageUp / PageDown page, Backspace and plain characters edit.
+pub(super) fn classify_read_key(key: KeyEvent) -> ReadKey {
+    let ctrl = key.modifiers == KeyModifiers::CONTROL;
+    match key.code {
+        KeyCode::Esc => ReadKey::Cancel,
+        KeyCode::Char('g') if ctrl => ReadKey::Cancel,
+        KeyCode::Enter => ReadKey::Accept,
+        KeyCode::Tab | KeyCode::Down => ReadKey::Step(1),
+        KeyCode::Char('n') if ctrl => ReadKey::Step(1),
+        KeyCode::BackTab | KeyCode::Up => ReadKey::Step(-1),
+        KeyCode::Char('p') if ctrl => ReadKey::Step(-1),
+        KeyCode::PageDown => ReadKey::Page(1),
+        KeyCode::PageUp => ReadKey::Page(-1),
+        KeyCode::Backspace => ReadKey::Backspace,
+        KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
+            ReadKey::Insert(c)
+        }
+        _ => ReadKey::Ignore,
+    }
+}
+
+/// One key of a completing read over `candidates` (see [`classify_read_key`]).
 pub(super) fn step_completing_read(
     key: KeyEvent,
     input: &mut String,
     candidates: &[String],
     selected: &mut usize,
 ) -> CompletingRead {
-    match key.code {
-        KeyCode::Esc => CompletingRead::Cancel,
-        KeyCode::Enter => {
+    let count = || filter_candidates(candidates, input).len();
+    match classify_read_key(key) {
+        ReadKey::Cancel => return CompletingRead::Cancel,
+        ReadKey::Accept => {
             let filtered = filter_candidates(candidates, input);
-            CompletingRead::Accept(filtered.get(*selected).cloned().unwrap_or_else(|| input.clone()))
+            return CompletingRead::Accept(filtered.get(*selected).cloned().unwrap_or_else(|| input.clone()));
         }
-        KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
-            let count = filter_candidates(candidates, input).len();
+        ReadKey::Step(delta) | ReadKey::Page(delta) => {
+            let count = count();
             if count > 0 {
-                *selected = if key.code == KeyCode::Up {
-                    (*selected + count - 1) % count
-                } else {
-                    (*selected + 1) % count
-                };
+                *selected = (*selected as isize + delta).rem_euclid(count as isize) as usize;
             }
-            CompletingRead::Pending
         }
-        KeyCode::Backspace => {
+        ReadKey::Backspace => {
             input.pop();
             *selected = 0;
-            CompletingRead::Pending
         }
-        KeyCode::Char(c)
-            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-        {
+        ReadKey::Insert(c) => {
             input.push(c);
             *selected = 0;
-            CompletingRead::Pending
         }
-        _ => CompletingRead::Pending,
+        ReadKey::Ignore => {}
     }
+    CompletingRead::Pending
 }
 
 /// `prefix input  [selected candidate]`, without the hint while the input

@@ -636,9 +636,12 @@ fn build_render_frame_with_layout_viewport(
 }
 
 fn active_status_content(editor: &Editor, show_status: bool) -> StatusContent<'_> {
+    // A palette the GUI draws needs no status-line echo; the TUI, which
+    // never draws it, keeps the echo as its only view.
+    let palette_drawn = editor.palette_is_open() && crate::widget_render::command_palette::hit_map().is_some();
     if !show_status {
         StatusContent::Hidden
-    } else if let Some(prompt) = editor.minibuffer_prompt() {
+    } else if let Some(prompt) = editor.minibuffer_prompt().filter(|_| !palette_drawn) {
         StatusContent::Message(Cow::Owned(format!(" {prompt}")))
     } else if let Some(prompt) = editor.prompt_text() {
         StatusContent::Message(Cow::Owned(prompt))
@@ -1628,7 +1631,13 @@ fn build_tiled_render_frame_impl(
             .as_ref()
             .and_then(|toast| crate::backend::toast_placement(toast, total_width, total_height)),
     );
-    TiledRenderFrame { tiles, completion, toast, titlebar_tile: editor.tile_root.titlebar_id() }
+    TiledRenderFrame {
+        tiles,
+        completion,
+        toast,
+        titlebar_tile: editor.tile_root.titlebar_id(),
+        palette: editor.palette_frame(),
+    }
 }
 
 /// Build a simple RenderFrame for an inactive (non-focused) tile.

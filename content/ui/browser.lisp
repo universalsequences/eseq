@@ -1093,6 +1093,35 @@
     (swap-track-builtin-instrument (current-index) name false)
     (add-builtin-instrument-track name)))
 
+;; The palette's "Add Instrument" choices: every instrument row of the
+;; Instruments tab tree (factory, library, packages, builtins), flattened, each
+;; labelled with the folder it sits in.
+(def palette-instrument-entries (items folder)
+  (reduce
+    (lambda (acc item)
+      (let ((kind (get item :kind)))
+        (if (or (= kind "instrument") (= kind "builtin-instrument"))
+          (append acc (list (dict :label (get item :label) :value item :detail folder)))
+          (let ((children (get item :children)))
+            (if children
+              (append acc (palette-instrument-entries children (get item :label)))
+              acc)))))
+    (list)
+    items))
+
+(def palette-instrument-choices ()
+  (palette-instrument-entries (seq-saved-instrument-tree "" browser.engines "" false) nil))
+
+(def add-instrument (instrument)
+  :doc "Add a new track playing an instrument.
+Lists factory, library, package and builtin instruments (sampler, rack,
+modulator) from the Instruments tab, labelled with their folder."
+  :command "Add Instrument"
+  :choices palette-instrument-choices
+  (if (= (get instrument :kind) "builtin-instrument")
+    (add-builtin-instrument-track (get instrument :name))
+    (add-instrument-track (get instrument :name))))
+
 (def select-create-item (item)
   (let ((kind (get item :kind)))
     (if (= kind "header")

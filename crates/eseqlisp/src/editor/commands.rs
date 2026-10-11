@@ -141,6 +141,7 @@ impl Editor {
             ("C-x o", "other-window"),
             ("C-x C-f", "find-file"),
             ("C-h f", "describe-function"),
+            ("S-s-p", super::palette::COMMAND_PALETTE),
             // Meta, never an "ESC" prefix: Escape must stay a plain key so
             // Vim's Esc-then-command never turns into a chord.
             ("M-.", "goto-definition"),
@@ -348,16 +349,7 @@ impl Editor {
                     self.sync_runtime_context();
                 }
             }
-            "execute-extended-command" => {
-                self.completion = None;
-                self.minibuffer = None;
-                let candidates = self.collect_mx_candidates();
-                self.minibuffer_input = Some(super::MinibufferMode::Mx {
-                    input: String::new(),
-                    candidates,
-                    selected: 0,
-                });
-            }
+            "execute-extended-command" | super::palette::COMMAND_PALETTE => self.open_command_palette(),
             "switch-to-buffer" => {
                 self.completion = None;
                 self.minibuffer = None;
