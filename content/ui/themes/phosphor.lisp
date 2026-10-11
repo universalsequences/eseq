@@ -193,7 +193,7 @@
       :fg-match-paren                     '(0.035 0.055 0.008)
       :buffer-bg                          '(0.045 0.070 0.012)
       :buffer-tab-bar-bg                  '(0.043 0.061 0.031)
-      :buffer-tab-selected-bg             '(0.064 0.092 0.034)
+      :buffer-tab-selected-bg             '(0.035 0.051 0.019)
       :buffer-tab-selected-border         '(0.360 0.540 0.210)
       :buffer-tab-fg                      '(0.429 0.568 0.238)
       :buffer-tab-selected-fg             '(0.660 0.940 0.400)

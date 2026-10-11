@@ -1771,6 +1771,17 @@ pub(crate) fn tile_chrome_instance_px(
     })
 }
 
+/// Lip colors of the inset tile-tab trough (the unselected strip): light
+/// falls on its lower lip, the upper lip sits in shadow.
+pub(crate) const TILE_TAB_TROUGH_LIGHT: Color = Color::rgba(1.0, 1.0, 1.0, 0.07);
+pub(crate) const TILE_TAB_TROUGH_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.45);
+
+/// Light a `tile-chrome` border instance from above: the shader reads the
+/// rim strength from `uniform_a.y`, and the active tile catches more light.
+pub(crate) fn set_tile_border_rim(instance: &mut WidgetInstance, is_active: bool) {
+    instance.uniform_a[1] = if is_active { 1.0 } else { 0.55 };
+}
+
 // ── Segmenting, z-ordering, offsets ──────────────────────────────────────────
 
 pub(crate) fn full_viewport_scissor(vp_w: f32, vp_h: f32) -> ScissorRect {

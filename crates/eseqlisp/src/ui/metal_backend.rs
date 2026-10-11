@@ -740,6 +740,16 @@ float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
 }
 
+// Which way a rounded rect's nearest edge faces vertically: +1 on the top
+// edge, -1 on the bottom, rolling through the corner arcs. `q` is
+// abs(p) - (half_size - radius); uv.y points up, so p.y > 0 is the top.
+float rounded_rect_facing(float2 p, float2 q) {
+    float2 qc = max(q, 0.0);
+    float l = length(qc);
+    float ny = l > 1e-5 ? qc.y / l : (q.x > q.y ? 0.0 : 1.0);
+    return p.y > 0.0 ? ny : -ny;
+}
+
 float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
                           float borderPixels, thread float& outerMask) {
     float outerDist = sdf_rounded_rect(localPos, outerSize, cornerRadius);
@@ -5768,7 +5778,7 @@ fragment float4 live_spectrogram_frag(
                     } else {
                         theme::BORDER_INACTIVE()
                     };
-                    if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                    if let (Some(tile_chrome_pipeline), Some(mut instance)) = (
                         tile_chrome_pipeline.as_ref(),
                         tile_chrome_instance_px(
                             frame_left_px,
@@ -5783,6 +5793,7 @@ fragment float4 live_spectrogram_frag(
                             vp_h,
                         ),
                     ) {
+                        crate::ui::gpu_scene::set_tile_border_rim(&mut instance, tile.is_active);
                         draw_widget_instances(
                             &enc,
                             &self.device,
@@ -5856,8 +5867,8 @@ fragment float4 live_spectrogram_frag(
                     group_visual_height,
                     group_bg,
                     Color::rgba(0.0, 0.0, 0.0, 0.0),
-                    Color::rgba(1.0, 1.0, 1.0, 0.04),
-                    Color::rgba(0.0, 0.0, 0.0, 0.10),
+                    crate::ui::gpu_scene::TILE_TAB_TROUGH_LIGHT,
+                    crate::ui::gpu_scene::TILE_TAB_TROUGH_SHADOW,
                     0.0,
                     0.95,
                     cell_w,

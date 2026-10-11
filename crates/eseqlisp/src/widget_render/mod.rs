@@ -1804,6 +1804,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     // runs diagonally, fattening the stroke there; fwidth(p) does not.
     float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
     float outer_mask = smoothstep(pixel, -pixel, d);
+    if (outer_mask <= 0.002) {
+        discard_fragment();
+    }
 
     float border_px = max(in.uniform_a.x, 0.0);
     float border_mask = 0.0;
@@ -1817,13 +1820,39 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         fill_mask = inner_mask;
     }
 
+    // Rim light from above (uniform_a.y = strength 0..1, 0 = flat stroke).
+    // The nearest edge's facing makes the top edge catch the light, the
+    // corner arcs roll it off and the sides fade down to a dim bottom.
+    float rim_strength = clamp(in.uniform_a.y, 0.0, 1.0);
+    // The border overlay's fill is transparent, so interior pixels past the
+    // sheen's reach (exp(-x/14) * 0.013 < 0.002 beyond ~27px) draw nothing.
+    float inside_px = max(-d / pixel - border_px, 0.0);
+    if (in.color_a.a <= 0.0 && border_mask <= 0.0 && (rim_strength <= 0.0 || inside_px > 28.0)) {
+        discard_fragment();
+    }
+    float facing = rounded_rect_facing(p, abs(p) - (half_size - radius));
+    float vertical = clamp(in.uv.y, 0.0, 1.0);
+    float rim = clamp(max(facing, 0.0) * 0.75 + vertical * vertical * 0.35, 0.0, 1.0) * rim_strength;
+    float shade = clamp(-facing, 0.0, 1.0) * rim_strength;
+    float3 border_rgb = in.color_b.rgb + (1.0 - in.color_b.rgb) * rim * 0.1;
+    float border_a = in.color_b.a * clamp(1.0 - shade * 0.05, 0.0, 1.0);
+    border_a = max(border_a, rim * 0.052);
+
+    // A faint sheen just inside the top edge, like light grazing a bevel.
+    float sheen = exp(-inside_px / 14.0) * clamp(facing, 0.0, 1.0) * rim_strength * 0.013;
+
     float4 fill = float4(in.color_a.rgb, in.color_a.a * fill_mask);
-    float4 border = float4(in.color_b.rgb, in.color_b.a * border_mask);
+    float4 border = float4(border_rgb, border_a * border_mask);
+    float glow_a = sheen * fill_mask;
     float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    float3 out_rgb = out_alpha > 0.0
+        ? (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha
+        : float3(1.0);
+    out_rgb = mix(out_rgb, float3(1.0), glow_a / max(out_alpha + glow_a, 0.0001));
+    out_alpha = out_alpha + glow_a * (1.0 - out_alpha);
     if (out_alpha <= 0.002) {
         discard_fragment();
     }
-    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
 "#, wgsl::TILE_CHROME_SHADER);
@@ -1841,29 +1870,53 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     // Isotropic pixel size (fwidth(d) fattens the stroke on corner arcs).
     float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
-    float edge = pixel * 1.2;
+    float edge = pixel * 0.9;
     float mask = smoothstep(edge, -edge, d);
     if (mask < 0.002) { discard_fragment(); }
 
-    float border_px = in.value_t > 0.5 ? 1.25 : 0.0;
+    bool selected = in.value_t > 0.5;
+    float border_px = selected ? 1.4 : 1.0;
     float inner_d = d + border_px * pixel;
     float inner_mask = smoothstep(edge, -edge, inner_d);
     float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
 
-    float top_light = smoothstep(1.0, 0.10, in.uv.y);
-    float bottom_shadow = smoothstep(0.35, 1.0, in.uv.y);
-    float3 fill_lit = in.color_a.rgb;
-    fill_lit = mix(fill_lit, in.color_c.rgb, in.color_c.a * top_light * 0.05);
-    fill_lit = mix(fill_lit, in.color_d.rgb, in.color_d.a * bottom_shadow * 0.05);
-    float3 border_lit = in.color_b.rgb;
-    border_lit = mix(border_lit, in.color_c.rgb, in.color_c.a * top_light);
-    border_lit = mix(border_lit, in.color_d.rgb, in.color_d.a * bottom_shadow);
+    float facing = rounded_rect_facing(p, q);
+    float top = clamp(facing, 0.0, 1.0);
+    float bottom = clamp(-facing, 0.0, 1.0);
+    float y = 1.0 - clamp(in.uv.y, 0.0, 1.0);
+    float inside_px = max(-d / pixel - border_px, 0.0);
 
-    float4 fill = float4(fill_lit, in.color_a.a * inner_mask);
-    float4 border = float4(border_lit, in.color_b.a * border_mask);
-    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    float3 fill_rgb = in.color_a.rgb;
+    float3 border_rgb;
+    float border_a;
+    if (selected) {
+        // Raised pill, lit from above: the light lives on the border (a
+        // bright rim on the top edge rolling off round the ends, a darker
+        // underside) and spills only a few pixels into the flat fill.
+        fill_rgb = mix(fill_rgb, in.color_c.rgb, in.color_c.a * exp(-inside_px / 2.5) * top * 0.8);
+        float rim = clamp(top * 0.9 + (1.0 - y) * 0.3, 0.0, 1.0);
+        border_rgb = mix(in.color_b.rgb, in.color_c.rgb, clamp(in.color_c.a * 2.4, 0.0, 1.0) * (0.15 + 0.7 * rim));
+        border_rgb = mix(border_rgb, in.color_d.rgb, in.color_d.a * bottom * 0.42);
+        border_a = in.color_b.a * (0.6 + 0.17 * rim);
+    } else {
+        // Inset trough: the light falls on its lower lip, its upper lip is in
+        // shadow; the flat floor only picks up a short shadow under that lip.
+        // Sink the floor below the surface around it: deep on dark themes,
+        // a gentle dip on light ones.
+        float lum = dot(fill_rgb, float3(0.2126, 0.7152, 0.0722));
+        fill_rgb *= mix(0.72, 0.94, clamp(lum * 1.4, 0.0, 1.0));
+        fill_rgb = mix(fill_rgb, in.color_d.rgb, in.color_d.a * exp(-inside_px / 2.5) * top * 0.6);
+        float lip = clamp(bottom * 1.2 + (y - 0.5), 0.0, 1.0);
+        border_rgb = mix(in.color_d.rgb, in.color_c.rgb, lip);
+        border_a = mix(in.color_d.a, in.color_c.a, lip);
+    }
+
+    float4 fill = float4(fill_rgb, in.color_a.a * inner_mask);
+    float4 border = float4(border_rgb, border_a * border_mask);
+    // Border over fill: the trough's translucent lip must read on top.
+    float out_alpha = border.a + fill.a * (1.0 - border.a);
     if (out_alpha <= 0.002) { discard_fragment(); }
-    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    float3 out_rgb = (border.rgb * border.a + fill.rgb * fill.a * (1.0 - border.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
 "#, wgsl::TILE_TAB_SHADER);

@@ -1989,7 +1989,8 @@ impl WgpuAppBackend {
                         )
                     })
                     .flatten();
-                if let Some(instance) = chrome {
+                if let Some(mut instance) = chrome {
+                    gpu_scene::set_tile_border_rim(&mut instance, tile.is_active);
                     Self::plan_widget_instances(
                         &mut plan,
                         tile_scissor,
@@ -2053,8 +2054,8 @@ impl WgpuAppBackend {
                 group_visual_height,
                 group_bg,
                 Color::rgba(0.0, 0.0, 0.0, 0.0),
-                Color::rgba(1.0, 1.0, 1.0, 0.04),
-                Color::rgba(0.0, 0.0, 0.0, 0.10),
+                gpu_scene::TILE_TAB_TROUGH_LIGHT,
+                gpu_scene::TILE_TAB_TROUGH_SHADOW,
                 0.0,
                 0.95,
                 cell_w,

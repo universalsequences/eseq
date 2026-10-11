@@ -389,7 +389,7 @@ fn item_row(
     span: std::ops::Range<f32>,
     viewport: WidgetViewport,
 ) -> Vec<GpuPrimitive> {
-    let fg = theme::DROPDOWN_FG();
+    let fg = theme::list_row_fg(selected, theme::DROPDOWN_FG());
     let mut prims = Vec::new();
     if selected {
         prims.push(row_highlight_primitive(rect, theme::DROPDOWN_HOVER_BG(), viewport));

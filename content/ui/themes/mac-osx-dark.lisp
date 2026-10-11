@@ -186,7 +186,7 @@
       ;; Buffer/panel surfaces
       :buffer-bg        '(0.12 0.13 0.14)  ; Main rounded buffer surface
       :buffer-tab-bar-bg '(0.14 0.14 0.15)
-      :buffer-tab-selected-bg '(0.28 0.28 0.30)
+      :buffer-tab-selected-bg '(0.154 0.154 0.165)
       :buffer-tab-selected-border '(0.43 0.43 0.46)
       :buffer-tab-fg '(0.52 0.52 0.55)
       :buffer-tab-selected-fg '(0.92 0.92 0.94)

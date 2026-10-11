@@ -285,6 +285,9 @@ pub struct Theme {
     pub inspect_overlay_fill: Color,
     pub inspect_overlay_border: Color,
     pub widget_focus_bg: Color,
+    /// Text drawn on a selected list row's accent fill (tree, command
+    /// palette). Transparent (the default) keeps each widget's foreground.
+    pub list_selected_fg: Color,
     pub widget_label_fg: Color,
     pub widget_slider_filled: Color,
     pub widget_slider_track: Color,
@@ -390,6 +393,16 @@ pub struct Theme {
     /// [`WidgetSlots`]): part of the theme value, so a `current()` snapshot
     /// and `set_current` carry them on every thread.
     pub widgets: WidgetSlots,
+}
+
+/// A list row's text color: on a selected row the theme's
+/// `list_selected_fg` when it sets one (alpha > 0), otherwise `base`.
+pub fn list_row_fg(selected: bool, base: Color) -> Color {
+    if !selected {
+        return base;
+    }
+    let fg = LIST_SELECTED_FG();
+    if fg.a > 0.0 { fg } else { base }
 }
 
 macro_rules! theme_slots {
@@ -681,7 +694,7 @@ theme_slots!(
     (
         buffer_tab_selected_bg,
         BUFFER_TAB_SELECTED_BG,
-        Color::from_hex(0x48, 0x48, 0x4d)
+        Color::from_hex(0x28, 0x28, 0x2a)
     ),
     (
         buffer_tab_selected_border,
@@ -1011,6 +1024,11 @@ theme_slots!(
         widget_focus_bg,
         WIDGET_FOCUS_BG,
         Color::from_hex(0x2f, 0x36, 0x12)
+    ),
+    (
+        list_selected_fg,
+        LIST_SELECTED_FG,
+        Color::rgba(0.0, 0.0, 0.0, 0.0)
     ),
     (
         widget_label_fg,

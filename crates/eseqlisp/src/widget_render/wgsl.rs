@@ -2655,6 +2655,9 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     // runs diagonally, fattening the stroke there; fwidth(p) does not.
     var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
     var outer_mask: f32 = smoothstep(pixel, -pixel, d);
+    if (outer_mask <= 0.002) {
+        discard;
+    }
 
     var border_px: f32 = max(input.uniform_a.x, 0.0);
     var border_mask: f32 = 0.0;
@@ -2668,13 +2671,40 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         fill_mask = inner_mask;
     }
 
+    // Rim light from above (uniform_a.y = strength 0..1, 0 = flat stroke).
+    // The nearest edge's facing makes the top edge catch the light, the
+    // corner arcs roll it off and the sides fade down to a dim bottom.
+    var rim_strength: f32 = clamp(input.uniform_a.y, 0.0, 1.0);
+    // The border overlay's fill is transparent, so interior pixels past the
+    // sheen's reach (exp(-x/14) * 0.013 < 0.002 beyond ~27px) draw nothing.
+    var inside_px: f32 = max(-d / pixel - border_px, 0.0);
+    if (input.color_a.a <= 0.0 && border_mask <= 0.0 && (rim_strength <= 0.0 || inside_px > 28.0)) {
+        discard;
+    }
+    var facing: f32 = rounded_rect_facing(p, abs(p) - (half_size - vec2<f32>(radius)));
+    var vertical: f32 = clamp(input.uv.y, 0.0, 1.0);
+    var rim: f32 = clamp(max(facing, 0.0) * 0.75 + vertical * vertical * 0.35, 0.0, 1.0) * rim_strength;
+    var shade: f32 = clamp(-facing, 0.0, 1.0) * rim_strength;
+    var border_rgb: vec3<f32> = input.color_b.rgb + (vec3<f32>(1.0) - input.color_b.rgb) * rim * 0.1;
+    var border_a: f32 = input.color_b.a * clamp(1.0 - shade * 0.05, 0.0, 1.0);
+    border_a = max(border_a, rim * 0.052);
+
+    // A faint sheen just inside the top edge, like light grazing a bevel.
+    var sheen: f32 = exp(-inside_px / 14.0) * clamp(facing, 0.0, 1.0) * rim_strength * 0.013;
+
     var fill: vec4<f32> = vec4<f32>(input.color_a.rgb, input.color_a.a * fill_mask);
-    var border: vec4<f32> = vec4<f32>(input.color_b.rgb, input.color_b.a * border_mask);
+    var border: vec4<f32> = vec4<f32>(border_rgb, border_a * border_mask);
+    var glow_a: f32 = sheen * fill_mask;
     var out_alpha: f32 = fill.a + border.a * (1.0 - fill.a);
+    var out_rgb: vec3<f32> = vec3<f32>(1.0);
+    if (out_alpha > 0.0) {
+        out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    }
+    out_rgb = mix(out_rgb, vec3<f32>(1.0), glow_a / max(out_alpha + glow_a, 0.0001));
+    out_alpha = out_alpha + glow_a * (1.0 - out_alpha);
     if (out_alpha <= 0.002) {
         discard;
     }
-    var out_rgb: vec3<f32> = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return vec4<f32>(out_rgb, out_alpha);
 }"#;
 
@@ -2692,29 +2722,53 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 
     // Isotropic pixel size (fwidth(d) fattens the stroke on corner arcs).
     var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
-    var edge: f32 = pixel * 1.2;
+    var edge: f32 = pixel * 0.9;
     var mask: f32 = smoothstep(edge, -edge, d);
     if (mask < 0.002) { discard; }
 
-    var border_px: f32 = select(0.0, 1.25, input.value_t > 0.5);
+    var selected: bool = input.value_t > 0.5;
+    var border_px: f32 = select(1.0, 1.4, selected);
     var inner_d: f32 = d + border_px * pixel;
     var inner_mask: f32 = smoothstep(edge, -edge, inner_d);
     var border_mask: f32 = clamp(mask - inner_mask, 0.0, 1.0);
 
-    var top_light: f32 = smoothstep(1.0, 0.10, input.uv.y);
-    var bottom_shadow: f32 = smoothstep(0.35, 1.0, input.uv.y);
-    var fill_lit: vec3<f32> = input.color_a.rgb;
-    fill_lit = mix(fill_lit, input.color_c.rgb, input.color_c.a * top_light * 0.05);
-    fill_lit = mix(fill_lit, input.color_d.rgb, input.color_d.a * bottom_shadow * 0.05);
-    var border_lit: vec3<f32> = input.color_b.rgb;
-    border_lit = mix(border_lit, input.color_c.rgb, input.color_c.a * top_light);
-    border_lit = mix(border_lit, input.color_d.rgb, input.color_d.a * bottom_shadow);
+    var facing: f32 = rounded_rect_facing(p, q);
+    var top: f32 = clamp(facing, 0.0, 1.0);
+    var bottom: f32 = clamp(-facing, 0.0, 1.0);
+    var y: f32 = 1.0 - clamp(input.uv.y, 0.0, 1.0);
+    var inside_px: f32 = max(-d / pixel - border_px, 0.0);
 
-    var fill: vec4<f32> = vec4<f32>(fill_lit, input.color_a.a * inner_mask);
-    var border: vec4<f32> = vec4<f32>(border_lit, input.color_b.a * border_mask);
-    var out_alpha: f32 = fill.a + border.a * (1.0 - fill.a);
+    var fill_rgb: vec3<f32> = input.color_a.rgb;
+    var border_rgb: vec3<f32>;
+    var border_a: f32;
+    if (selected) {
+        // Raised pill, lit from above: the light lives on the border (a
+        // bright rim on the top edge rolling off round the ends, a darker
+        // underside) and spills only a few pixels into the flat fill.
+        fill_rgb = mix(fill_rgb, input.color_c.rgb, input.color_c.a * exp(-inside_px / 2.5) * top * 0.8);
+        var rim: f32 = clamp(top * 0.9 + (1.0 - y) * 0.3, 0.0, 1.0);
+        border_rgb = mix(input.color_b.rgb, input.color_c.rgb, clamp(input.color_c.a * 2.4, 0.0, 1.0) * (0.15 + 0.7 * rim));
+        border_rgb = mix(border_rgb, input.color_d.rgb, input.color_d.a * bottom * 0.42);
+        border_a = input.color_b.a * (0.6 + 0.17 * rim);
+    } else {
+        // Inset trough: the light falls on its lower lip, its upper lip is in
+        // shadow; the flat floor only picks up a short shadow under that lip.
+        // Sink the floor below the surface around it: deep on dark themes,
+        // a gentle dip on light ones.
+        var lum: f32 = dot(fill_rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        fill_rgb = fill_rgb * mix(0.72, 0.94, clamp(lum * 1.4, 0.0, 1.0));
+        fill_rgb = mix(fill_rgb, input.color_d.rgb, input.color_d.a * exp(-inside_px / 2.5) * top * 0.6);
+        var lip: f32 = clamp(bottom * 1.2 + (y - 0.5), 0.0, 1.0);
+        border_rgb = mix(input.color_d.rgb, input.color_c.rgb, lip);
+        border_a = mix(input.color_d.a, input.color_c.a, lip);
+    }
+
+    var fill: vec4<f32> = vec4<f32>(fill_rgb, input.color_a.a * inner_mask);
+    var border: vec4<f32> = vec4<f32>(border_rgb, border_a * border_mask);
+    // Border over fill: the trough's translucent lip must read on top.
+    var out_alpha: f32 = border.a + fill.a * (1.0 - border.a);
     if (out_alpha <= 0.002) { discard; }
-    var out_rgb: vec3<f32> = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    var out_rgb: vec3<f32> = (border.rgb * border.a + fill.rgb * fill.a * (1.0 - border.a)) / out_alpha;
     return vec4<f32>(out_rgb, out_alpha);
 }"#;
 

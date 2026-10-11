@@ -179,7 +179,7 @@
 
       :buffer-bg        '(0.170 0.170 0.162)
       :buffer-tab-bar-bg '(0.190 0.190 0.182)
-      :buffer-tab-selected-bg '(0.270 0.270 0.258)
+      :buffer-tab-selected-bg '(0.149 0.149 0.142)
       :buffer-tab-selected-border '(0.43 0.43 0.40)
       :buffer-tab-fg '(0.56 0.56 0.54)
       :buffer-tab-selected-fg '(0.88 0.88 0.86)

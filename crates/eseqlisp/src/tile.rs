@@ -61,7 +61,7 @@ pub struct TileTabLayout {
     pub selected: bool,
 }
 
-pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.28;
+pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.54;
 pub const TILE_TAB_TOP_INSET: f32 = 0.18;
 const TILE_TAB_LABEL_PAD: f32 = 2.0;
 const TILE_TAB_HORIZONTAL_INSET: f32 = 0.55;

@@ -553,6 +553,16 @@ fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     return length(max(d, vec2<f32>(0.0))) + min(max(d.x, d.y), 0.0) - radius;
 }
 
+// Which way a rounded rect's nearest edge faces vertically: +1 on the top
+// edge, -1 on the bottom, rolling through the corner arcs. `q` is
+// abs(p) - (half_size - radius); uv.y points up, so p.y > 0 is the top.
+fn rounded_rect_facing(p: vec2<f32>, q: vec2<f32>) -> f32 {
+    let qc = max(q, vec2<f32>(0.0));
+    let l = length(qc);
+    let ny = select(select(1.0, 0.0, q.x > q.y), qc.y / l, l > 1e-5);
+    return select(-ny, ny, p.y > 0.0);
+}
+
 // MSL passed the outer mask back through a `thread float&` out-parameter;
 // WGSL's function-address-space pointer is the direct equivalent. Call it as
 //   var outer_mask: f32;

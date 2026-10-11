@@ -197,7 +197,7 @@
       ;; Window, buffer, and tab surfaces
       :buffer-bg                       '(0.0350 0.0450 0.0575)
       :buffer-tab-bar-bg               '(0.0375 0.0475 0.0610)
-      :buffer-tab-selected-bg          '(0.0575 0.0725 0.0920)
+      :buffer-tab-selected-bg          '(0.032 0.040 0.051)
       :buffer-tab-selected-border      '(0.26 0.32 0.39)
       :buffer-tab-fg                   '(0.54 0.60 0.66)
       :buffer-tab-selected-fg          '(0.92 0.95 0.98)

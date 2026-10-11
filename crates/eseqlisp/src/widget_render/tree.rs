@@ -1566,6 +1566,7 @@ impl WidgetDefinition for TreeWidget {
             } else {
                 file_fg
             };
+            let fg = theme::list_row_fg(is_selected, fg);
             let transparent = Color {
                 r: 0.0,
                 g: 0.0,
@@ -1809,7 +1810,7 @@ impl WidgetDefinition for TreeWidget {
                             text: detail.to_string(),
                             font_size: font_size * 0.82,
                             scale: 1.0,
-                            fg: detail_fg,
+                            fg: theme::list_row_fg(is_selected, detail_fg),
                             bg: transparent,
                             mono: false,
                         },
