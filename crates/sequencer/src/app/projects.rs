@@ -1328,13 +1328,14 @@ impl App {
             })
             .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
         project.normalize_device_instances()?;
-        let migration_notes = super::instances::migrate_legacy_kind_sources(
+        let mut migration_notes = super::instances::migrate_legacy_kind_sources(
             project.version,
             &mut project.groups,
             &mut project.scratch,
             &mut project.instances,
             crate::lisp_host::declared_kinds_for_module,
         );
+        migration_notes.extend(super::instances::rekey_reserved_instance_ids(&mut project));
         for note in &migration_notes {
             eprintln!("project-load: instance migration: {note}");
         }

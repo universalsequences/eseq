@@ -202,7 +202,7 @@
       :status-accent     '(0.66 0.69 0.72)
 
       :border-active   '(0.62 0.66 0.70)
-      :border-inactive '(0.175 0.185 0.200)
+      :border-inactive '(0.275 0.285 0.270)
 
       ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
       :list-icon-detail     '(0.23 0.24 0.26)   ; cutouts match the row bg

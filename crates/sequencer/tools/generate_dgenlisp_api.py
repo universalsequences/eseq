@@ -75,6 +75,25 @@ CURATED_OPERATORS = {
     "gte": {"category": "comparison", "summary": "Greater than or equal.", "signatures": ["(gte a b)", "(>= a b)"], "arity": {"minimum": 2, "maximum": 2}},
     "lte": {"category": "comparison", "summary": "Less than or equal.", "signatures": ["(lte a b)", "(<= a b)"], "arity": {"minimum": 2, "maximum": 2}},
     "eq": {"category": "comparison", "summary": "Equality.", "signatures": ["(eq a b)", "(== a b)"], "arity": {"minimum": 2, "maximum": 2}},
+    "and": {
+        "category": "logic",
+        "summary": "Logical AND: 1 when both inputs are nonzero, else 0. The parser rewrites n-ary forms into nested binary calls.",
+        "signatures": ["(and a b)", "(and a b c ...)"],
+        "arity": {"minimum": 2, "maximum": 2, "parser_rewrites_nary": True},
+    },
+    "or": {
+        "category": "logic",
+        "summary": "Logical OR: 1 when either input is nonzero, else 0. The parser rewrites n-ary forms into nested binary calls.",
+        "signatures": ["(or a b)", "(or a b c ...)"],
+        "arity": {"minimum": 2, "maximum": 2, "parser_rewrites_nary": True},
+    },
+    "xor": {
+        "category": "logic",
+        "summary": "Logical XOR: 1 when exactly one input is nonzero, else 0. The parser rewrites n-ary forms into nested binary calls.",
+        "signatures": ["(xor a b)", "(xor a b c ...)"],
+        "arity": {"minimum": 2, "maximum": 2, "parser_rewrites_nary": True},
+    },
+    "not": {"category": "logic", "summary": "Logical NOT: 1 when the input is zero, else 0.", "signatures": ["(not x)"], "arity": {"minimum": 1, "maximum": 1}},
     "phasor": {"category": "signal_generator", "summary": "Ramp oscillator from 0 to 1.", "signatures": ["(phasor freq)", "(phasor freq reset)"], "arity": {"minimum": 1, "maximum": 2}},
     "stateful-phasor": {"category": "signal_generator", "summary": "Forced stateful phasor variant.", "signatures": ["(stateful-phasor freq)"], "arity": {"minimum": 1, "maximum": 1}},
     "noise": {"category": "signal_generator", "summary": "White noise, or per-bin tensor noise with optional hop-rate updates.", "signatures": ["(noise)", "(noise @size 1024)", "(noise @size 1024 @hop 256)"], "arity": {"minimum": 0, "maximum": None}},
@@ -901,7 +920,7 @@ def result_kind_for_operator(name: str, category: str) -> str:
         return "tensor"
     if name in {"peek-row", "buffer", "spectrum-delay", "spectrum-delay-mod"}:
         return "signalTensor"
-    if category in {"arithmetic", "math", "comparison", "conditional", "reduction"}:
+    if category in {"arithmetic", "math", "comparison", "logic", "conditional", "reduction"}:
         return "same-as-inputs"
     return "value"
 

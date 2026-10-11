@@ -1495,6 +1495,62 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "logic",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalComparison",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "inputs": [
+          {
+            "kind": "value",
+            "name": "a",
+            "required": true,
+            "summary": "Left operand."
+          },
+          {
+            "kind": "value",
+            "name": "b",
+            "required": true,
+            "summary": "Right operand."
+          }
+        ],
+        "name": "and",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "same-as-inputs",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(and a b)",
+          "(and a b c ...)"
+        ],
+        "summary": "Logical AND: 1 when both inputs are nonzero, else 0. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 3,
           "minimum": 3
         },
@@ -4675,6 +4731,53 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "logic",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalNot",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "inputs": [
+          {
+            "kind": "value",
+            "name": "x",
+            "required": true,
+            "summary": "Input value."
+          }
+        ],
+        "name": "not",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "same-as-inputs",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(not x)"
+        ],
+        "summary": "Logical NOT: 1 when the input is zero, else 0."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": null,
           "minimum": 1
         },
@@ -4720,6 +4823,62 @@
           "(ones d1 d2 ...)"
         ],
         "summary": "All-ones tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "logic",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalComparison",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "inputs": [
+          {
+            "kind": "value",
+            "name": "a",
+            "required": true,
+            "summary": "Left operand."
+          },
+          {
+            "kind": "value",
+            "name": "b",
+            "required": true,
+            "summary": "Right operand."
+          }
+        ],
+        "name": "or",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "same-as-inputs",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(or a b)",
+          "(or a b c ...)"
+        ],
+        "summary": "Logical OR: 1 when either input is nonzero, else 0. The parser rewrites n-ary forms into nested binary calls."
       },
       {
         "aliases": [],
@@ -8343,6 +8502,62 @@
           "(wrap sig min max)"
         ],
         "summary": "Wrap into a range. Defaults to 0..1 when bounds are omitted."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "logic",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalComparison",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "inputs": [
+          {
+            "kind": "value",
+            "name": "a",
+            "required": true,
+            "summary": "Left operand."
+          },
+          {
+            "kind": "value",
+            "name": "b",
+            "required": true,
+            "summary": "Right operand."
+          }
+        ],
+        "name": "xor",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "same-as-inputs",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(xor a b)",
+          "(xor a b c ...)"
+        ],
+        "summary": "Logical XOR: 1 when exactly one input is nonzero, else 0. The parser rewrites n-ary forms into nested binary calls."
       },
       {
         "aliases": [],

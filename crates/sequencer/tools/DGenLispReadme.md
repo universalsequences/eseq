@@ -184,6 +184,20 @@ Return 1.0 for true, 0.0 for false:
 (eq a b)     ; a == b
 ```
 
+### Logic
+
+Any nonzero input counts as true. Return 1.0 for true, 0.0 for false, so they
+compose with the comparisons:
+
+```lisp
+(and a b)    ; both nonzero
+(or a b)     ; either nonzero
+(xor a b)    ; exactly one nonzero
+(not x)      ; x == 0
+```
+
+`and`, `or`, and `xor` auto-nest like arithmetic operators.
+
 ### Signal Generators
 
 ```lisp

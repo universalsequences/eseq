@@ -6678,6 +6678,43 @@ mod tests {
         assert_eq!(overrides.node_count, None);
     }
 
+    /// A legacy-migrated instance kept its full-width sequencer id, which
+    /// the UI VM reserves; opening re-keys it below that range and carries
+    /// its overrides and document slots along, leaving other ids alone.
+    #[test]
+    fn reserved_instance_ids_rekey_with_their_overrides_and_slots() {
+        let legacy = 2_873_872_815_981_259;
+        let mut project = sample_project();
+        project.instances = serde_json::from_value(serde_json::json!({
+            "list": [
+                {"id": 1, "kind": "alez/jaki:jaki", "owner": "project", "label": "jaki 1"},
+                {"id": legacy, "kind": "alez/neural:neural", "owner": {"rack": 1}, "label": "neural 1"}
+            ],
+            "next_id": 2
+        }))
+        .unwrap();
+        project.patterns[0].graph_overrides[0].sequencer_id = legacy;
+        let slot = crate::lisp_host::instance_document_slot(legacy, "figures");
+        project.patterns[0]
+            .scene_slots
+            .insert(slot.clone(), crate::process::ProcessLiteral::Number(1.0));
+
+        let notes = crate::app::rekey_reserved_instance_ids(&mut project);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let ids: Vec<u64> = project.instances.list.iter().map(|instance| instance.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(project.instances.next_id, 3);
+        assert_eq!(project.patterns[0].graph_overrides[0].sequencer_id, 2);
+        assert!(!project.patterns[0].scene_slots.contains_key(&slot));
+        assert_eq!(
+            project.patterns[0]
+                .scene_slots
+                .get(&crate::lisp_host::instance_document_slot(2, "figures")),
+            Some(&crate::process::ProcessLiteral::Number(1.0))
+        );
+        assert!(crate::app::rekey_reserved_instance_ids(&mut project).is_empty(), "idempotent");
+    }
+
     #[test]
     fn scene_slots_roundtrip_and_default_empty_for_older_projects() {
         let mut project = sample_project();

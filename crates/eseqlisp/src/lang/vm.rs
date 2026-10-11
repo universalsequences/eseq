@@ -22,7 +22,8 @@ mod lambda_list_tests;
 pub use instances::{
     CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
     HostFieldReader, INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId,
-    InstanceKey, InstanceKindSchema, InstanceLabelHook, KIND_KEYS_NAMESPACE_PREFIX, KindField,
+    InstanceKey, InstanceKindSchema, InstanceLabelHook, KEYED_INSTANCE_ID_BASE,
+    KIND_KEYS_NAMESPACE_PREFIX, KindField,
     KindKey, MAX_OBSERVED_FIELDS, ObservedMask, SCRATCH_KIND_PACKAGE, SdfStatePlan, kind_id,
     kind_name_of,
 };
@@ -2951,6 +2952,8 @@ pub struct VM {
     /// snapshotted: transactional-eval rollback clears it instead.
     subtree_render_cache: HashMap<u64, SubtreeRenderCache>,
     pub macros: HashMap<String, MacroDef>,
+    /// [`VM::definition_generation`].
+    definition_generation: u64,
     /// Latest definition header per qualified global
     /// (docs/command-palette-spec.md §3).
     pub definition_headers: HashMap<String, crate::lang::def_header::DefinitionHeader>,
@@ -5300,6 +5303,7 @@ impl VM {
             current_subtree_reactive_reads: HashMap::new(),
             subtree_render_cache: HashMap::new(),
             macros: HashMap::new(),
+            definition_generation: 0,
             definition_headers: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
@@ -5616,6 +5620,13 @@ impl VM {
             .get(self.current_chunk)
             .and_then(|chunk| chunk.source_file.clone())
             .or_else(|| self.source_manager.current_source_file())
+    }
+
+    /// Moves whenever a compile (or a rollback) replaces the macros and
+    /// the global definitions, so a cache of what expanding source against
+    /// them yields can tell when it went stale.
+    pub(crate) fn definition_generation(&self) -> u64 {
+        self.definition_generation
     }
 
     /// Names that may head a macro call in source about to be compiled.
@@ -6005,6 +6016,7 @@ impl VM {
                     self.scene_bindings = scenes;
                     self.dag.next_id = next_node_id;
                     self.macros = macros;
+                    self.definition_generation += 1;
                     self.apply_definition_headers(headers);
                     for warning in warnings {
                         self.source_manager.push_diagnostic(warning);
@@ -6293,6 +6305,7 @@ impl VM {
         self.current_subtree_capture_stack = snapshot.current_subtree_capture_stack;
         self.current_subtree_reactive_reads = snapshot.current_subtree_reactive_reads;
         self.macros = snapshot.macros;
+        self.definition_generation += 1;
         self.definition_headers = snapshot.definition_headers;
         self.source_manager = snapshot.source_manager;
         self.source_load_errors = snapshot.source_load_errors;
@@ -6409,6 +6422,7 @@ impl VM {
                 self.scene_bindings = scenes;
                 self.dag.next_id = next_node_id;
                 self.macros = macros;
+                self.definition_generation += 1;
                 self.apply_definition_headers(headers);
                 for warning in warnings {
                     self.source_manager.push_diagnostic(warning);

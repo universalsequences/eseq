@@ -707,3 +707,31 @@ fn singleton_fields_read_in_materials_and_sdf_to_metal() {
     };
     assert_eq!(read_float_slot(&slot), 1.0);
 }
+
+/// A material compiles once per source: a re-render reuses its shader, and
+/// redefining a macro it expands compiles it again.
+#[test]
+fn a_material_recompiles_when_a_macro_it_expands_is_redefined() {
+    let mut host = host();
+    let shader = |host: &mut Host| {
+        let Some(Value::Map(map)) = host
+            .runtime
+            .eval_str("(hslider :min 0 :max 1 :value 0.5 :material (material :color (test-tint)))")
+            .expect("material slider")
+        else {
+            panic!("slider map");
+        };
+        map[crate::widget_render::sdf_widget::SHADER_TYPE_PROP]
+            .borrow()
+            .clone()
+    };
+    host.runtime
+        .eval_str("(defmacro test-tint () '(rgba 1 0 0 1))")
+        .expect("defmacro");
+    let red = shader(&mut host);
+    assert_eq!(shader(&mut host), red, "a re-render reuses the shader");
+    host.runtime
+        .eval_str("(defmacro test-tint () '(rgba 0 1 0 1))")
+        .expect("redefine");
+    assert_ne!(shader(&mut host), red, "the redefined macro recompiles");
+}

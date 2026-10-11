@@ -5449,6 +5449,23 @@ fn dgenlisp_gather_projects_as_documented_tensor_operator() {
 }
 
 #[test]
+fn dgenlisp_logic_operators_project_with_documented_ports() {
+    let patch = parse(
+        "(def both (and a b))\n(def either (or a b))\n(def one (xor a b))\n(def off (not a))",
+    );
+    let docs = dgenlisp_operator_documentation();
+    for (op, inlets) in [("and", 2), ("or", 2), ("xor", 2), ("not", 1)] {
+        let node = patch.nodes.iter().find(|node| node.op == op).unwrap();
+        assert_eq!(node.args.len(), inlets, "{op} args");
+        assert_eq!(node.diagnostic, None, "{op} diagnostic");
+        let doc = docs.get(op).unwrap_or_else(|| panic!("{op} operator metadata"));
+        assert_eq!(doc.category.as_deref(), Some("logic"));
+        assert_eq!(doc.inputs.len(), inlets, "{op} documented inlets");
+        assert_eq!(doc.outputs.len(), 1, "{op} documented outlets");
+    }
+}
+
+#[test]
 fn spectral_bloom_mod_gather_nodes_are_known_to_patcher() {
     let source = fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

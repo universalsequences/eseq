@@ -468,7 +468,7 @@
     (if t
       (box
         :key "step-track-badge"
-        :width 14.55 :height 1.0
+        :width 11.55 :height 1.0
         :padding 0
         :corner-radius 8
         :v-align :center
@@ -476,7 +476,7 @@
         :background-color (track-rgba t true)
         :muted-background-color (track-rgba t false)
         (label (track-short-label t)
-          :width 14.55
+          :width 11.55
           :font-size 10
           :v-align :center
           :h-align :center

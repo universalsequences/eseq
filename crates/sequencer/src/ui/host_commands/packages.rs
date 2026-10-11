@@ -1822,7 +1822,7 @@ fn copy_module_to_local(source: &Path, module: &str, local_root: &Path) -> Resul
 
 /// Re-list every package surface after the import record or the package
 /// set changed: the text view if it is open, and the browser tab.
-fn refresh_package_listings(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
+pub(super) fn refresh_package_listings(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     if ctx.sessions.package_view_session.is_some() {
         refresh_packages_view(editor, ctx);
     }

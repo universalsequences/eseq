@@ -1259,6 +1259,81 @@ pub fn migrate_legacy_kind_sources(
     notes
 }
 
+/// Move every instance whose id the UI VM reserves for its own keyed and
+/// singleton instances ([`eseqlisp::vm::KEYED_INSTANCE_ID_BASE`] up) onto a
+/// fresh host id, rewriting the graph overrides and document slots saved
+/// under the old id. [`migrate_legacy_kind_sources`] kept the full-width
+/// legacy sequencer id so those overrides still matched; the VM refuses to
+/// create a record for such an id, so the instance would play but get no
+/// view and no tab. Returns a note per re-keyed instance. Idempotent.
+pub fn rekey_reserved_instance_ids(project: &mut crate::project::ProjectFile) -> Vec<String> {
+    let mut remap: HashMap<u64, u64> = HashMap::new();
+    let mut notes = Vec::new();
+    let instances = &mut project.instances;
+    let taken: HashSet<u64> = instances.list.iter().map(|instance| instance.id).collect();
+    let mut next = instances.next_id.max(1);
+    for instance in &mut instances.list {
+        if instance.id < eseqlisp::vm::KEYED_INSTANCE_ID_BASE {
+            continue;
+        }
+        while taken.contains(&next) {
+            next += 1;
+        }
+        notes.push(format!("re-keyed '{}' from instance id {} to {next}", instance.label, instance.id));
+        remap.insert(instance.id, next);
+        instance.id = next;
+        next += 1;
+    }
+    if remap.is_empty() {
+        return notes;
+    }
+    instances.next_id = next;
+    let rekey_overrides = |overrides: &mut Vec<ProjectGraphOverrides>| {
+        for entry in overrides {
+            if let Some(id) = remap.get(&entry.sequencer_id) {
+                entry.sequencer_id = *id;
+            }
+        }
+    };
+    let rekey_slots = |slots: &mut std::collections::BTreeMap<String, crate::process::ProcessLiteral>| {
+        let moved: Vec<String> = slots
+            .keys()
+            .filter(|name| {
+                crate::lisp_host::instance_document_slot_owner(name)
+                    .is_some_and(|owner| remap.contains_key(&owner))
+            })
+            .cloned()
+            .collect();
+        for name in moved {
+            let owner = crate::lisp_host::instance_document_slot_owner(&name).unwrap();
+            let field = name.rsplit_once('/').map(|(_, field)| field).unwrap_or_default();
+            let renamed = crate::lisp_host::instance_document_slot(remap[&owner], field);
+            if let Some(value) = slots.remove(&name) {
+                slots.insert(renamed, value);
+            }
+        }
+    };
+    let rekey_pattern = |pattern: &mut crate::project::ProjectPattern| {
+        rekey_overrides(&mut pattern.graph_overrides);
+        rekey_slots(&mut pattern.scene_slots);
+    };
+    project.patterns.iter_mut().for_each(rekey_pattern);
+    for rack in project.groups.iter_mut().filter_map(|group| group.rack.as_mut()) {
+        for clip in &mut rack.clips {
+            rekey_overrides(&mut clip.graph_overrides);
+            rekey_slots(&mut clip.scene_slots);
+            rekey_pattern(&mut clip.pattern);
+        }
+    }
+    for take in project.take_pools.iter_mut().flat_map(|pool| &mut pool.takes) {
+        take.chunks.iter_mut().for_each(rekey_pattern);
+    }
+    for orphan in project.track_sounds.iter_mut().flat_map(|sounds| &mut sounds.orphan_sounds) {
+        rekey_pattern(&mut orphan.data);
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

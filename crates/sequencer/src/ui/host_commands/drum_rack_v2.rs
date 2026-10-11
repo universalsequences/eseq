@@ -385,6 +385,9 @@ pub(super) fn handle(
                         let mut failures = attach_rack_instance_packages(editor, app, group_id);
                         failures.extend(evaluate_rack_sequencers(editor, app, group_id));
                         refresh_after_rack_scripts(editor);
+                        // The attach above edited the import record; re-list
+                        // the Packages surfaces the way an explicit attach does.
+                        super::packages::refresh_package_listings(editor, ctx);
                         let mut status = format!("Auditioned kit '{name}'");
                         if !failures.is_empty() {
                             status = format!("{status} ({})", failures.join("; "));
@@ -416,6 +419,9 @@ pub(super) fn handle(
                         failures.extend(attach_rack_instance_packages(editor, app, group_id));
                         failures.extend(evaluate_rack_sequencers(editor, app, group_id));
                         refresh_after_rack_scripts(editor);
+                        // The attach above edited the import record; re-list
+                        // the Packages surfaces the way an explicit attach does.
+                        super::packages::refresh_package_listings(editor, ctx);
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
                         } else {

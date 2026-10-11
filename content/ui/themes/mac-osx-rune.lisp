@@ -107,8 +107,8 @@
       :arrangement-return-fg          '(0.10 0.045 0.02 1.0)
       :record-active-base             '(0.12 0.001 0.001 1.0)
       :record-idle-fg                 '(0.65 0.18 0.18 1.0)
-      :clock-fg                       '(0.15 0.15 0.15 1.0)
-      :transport-led-bg               '(0.162 0.171 0.176 1.0)  ; LED panel: well below the playback container
+      :clock-fg                       '(0.85 0.85 0.85 1.0)
+      :transport-led-bg               '(0.062 0.071 0.076 1.0)  ; LED panel: well below the playback container
       :transport-controls-bg          '(0.262 0.271 0.276 1.0)  ; playback buttons: a shade darker than :bg
       :preset-save-bg                 '(0.08 0.08 0.01 1.0)
       :preset-save-active-bg          '(0.00 0.35 0.82 1.0)
@@ -230,7 +230,7 @@
       :instrument-group-selected-bg '(0.205 0.255 0.245)
       :mixer-strip-bg    '(0.585 0.595 0.610)
       :mixer-strip-selected-bg '(0.745 0.758 0.782)
-      :mixer-strip-muted-bg '(0.170 0.180 0.195)
+      :mixer-strip-muted-bg '(0.270 0.280 0.295)
       :mixer-strip-border '(0.445 0.458 0.475)
       :mixer-strip-selected-border '(0.94 0.96 0.98)
       :mixer-control-bg  '(0.585 0.585 0.610)
@@ -266,7 +266,7 @@
       :widget-knob-filled   '(0.30 0.70 0.82)
       :widget-knob-track    '(0.125 0.135 0.148)
       :widget-knob-mod-dot  '(1.00 0.78 0.32)
-      :sequencer-step-border          '(0.02 0.02 0.03)
+      :sequencer-step-border          '(0.12 0.12 0.13)
       :sequencer-step-selected-border '(0.96 0.97 0.99)
       :sequencer-step-off-fill        '(0.305 0.305 0.31)
       :sequencer-step-off-fill-alt    '(0.47 0.485 0.51)

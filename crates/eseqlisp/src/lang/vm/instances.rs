@@ -316,7 +316,7 @@ impl KindKey {
 /// (same store, equality, tombstones), allocated by the VM in a range of
 /// their own: they are never saved, so they must not collide with the ids
 /// the host assigns and saves for created instances (counting up from 1).
-pub(crate) const KEYED_INSTANCE_ID_BASE: InstanceId = 1 << 32;
+pub const KEYED_INSTANCE_ID_BASE: InstanceId = 1 << 32;
 
 /// Singleton instances take ids from here up, one per singleton kind, so
 /// they never collide with host-assigned instance ids (which count up from

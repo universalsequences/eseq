@@ -445,7 +445,7 @@
         (material :color panel-col)))))
 
 (defwidget session-view-icon
-  :width 2.8 :height 1.6
+  :width 3.8 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -463,19 +463,19 @@
         (material :color bg-col))
       (sdf/fill
         (sdf/translate -0.34 0.22
-          (sdf/rounded-rect 0.09 0.32 0.09))
+          (sdf/rounded-rect 0.09 0.22 0.09))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.0 0.08
-          (sdf/rounded-rect 0.09 0.46 0.09))
+          (sdf/rounded-rect 0.09 0.36 0.09))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.34 -0.08
-          (sdf/rounded-rect 0.09 0.62 0.09))
+          (sdf/rounded-rect 0.09 0.52 0.09))
         (material :color line-col)))))
 
 (defwidget arrangement-view-icon
-  :width 2.8 :height 1.6
+  :width 3.8 :height 1.6
   :paint-margin 0.5
   :state (active)
   :shader
@@ -493,15 +493,15 @@
         (material :color bg-col))
       (sdf/fill
         (sdf/translate -0.20 -0.32
-          (sdf/rounded-rect 0.44 0.08 0.08))
+          (sdf/rounded-rect 0.34 0.08 0.08))
         (material :color line-col))
       (sdf/fill
         (sdf/translate -0.08 0.0
-          (sdf/rounded-rect 0.56 0.08 0.08))
+          (sdf/rounded-rect 0.46 0.08 0.08))
         (material :color line-col))
       (sdf/fill
         (sdf/translate 0.04 0.32
-          (sdf/rounded-rect 0.68 0.08 0.08))
+          (sdf/rounded-rect 0.58 0.08 0.08))
         (material :color line-col)))))
 
 (defwidget transport-tool-chip-bg
@@ -542,7 +542,7 @@
   (let ((fg-col (if (= active 1) :icon-active-fg :icon-fg)))
     (sdf/layer
       (if (= active 1)
-        (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
+        (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.4)
           (material
             :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
               :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
@@ -596,7 +596,7 @@
     (rgba 0 0 0 0)))
 
 (defwidget rec-icon
-  :width 2.5 :height 1.8
+  :width 2.5 :height 1.9
   :paint-margin 0.5
   :state (active)
   :shader
@@ -995,7 +995,7 @@
 ;; Transport buttons in a shared rounded-rect container, about three quarters
 ;; the LED's height.
 (def transport-playback ()
-  (box :key "transport-playback-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.0015 :height 1.6
+  (box :key "transport-playback-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.0015 :height 1.9
     (h-stack :gap 0.2 :align :center
       (box :width 0.3)
       (subtree :key "transport-stop-button"
@@ -1005,121 +1005,124 @@
       (box :width 3.0
         :on-click |x y r| (toggle! transport.playing)
         (play-icon :width 3.0 :height 2.0 :active #'transport.playing))
-          (box :width 3.0
-            :v-align :center
-            :on-click |x y r| (toggle! transport.recording)
-            (rec-icon :width 3.0 :height 2.0 :active #'transport.recording
-              ))
-          (subtree :key "transport-master-record-button"
-            (box :debug-name "transport-master-record-button"
-              :width 4.6 :height 2
-              :background "pattern-pill-bg"
-              :active #'master.recording
-              :style transport-icon-style
-              :v-align :center
-              :on-click |x y r| (toggle! master.recording)
-              (pill-label "WAV" #'master.recording :font 11
-                )
-              )
+      (box :width 3.0
+        :v-align :center
+        :on-click |x y r| (toggle! transport.recording)
+        
+        (rec-icon :width 3.0 :height 2.0 :active #'transport.recording
+          ))
+      (subtree :key "transport-master-record-button"
+        (box :debug-name "transport-master-record-button"
+          :width 4.6 :height 1.5
+          :background "pattern-pill-bg"
+          :active #'master.recording
+          :style transport-icon-style
+          :v-align :center
+          :on-click |x y r| (toggle! master.recording)
+          (pill-label "WAV" #'master.recording :font 11
             )
-          ;; Back to Arrangement (unified-transport spec; Ableton semantics):
-          ;; lights the moment a manual launch overrides the arrangement,
-          ;; SURVIVES transport stop, and clicking hands the latched lanes
-          ;; back to the arrangement. The box is ALWAYS laid out (the icon
-          ;; binds the latch, so a flip only repaints); the icon is
-          ;; transparent while nothing is latched, and the click guards at
-          ;; event time.
-          (subtree :key "transport-back-to-arrangement"
-            (box :debug-name "transport-back-to-arrangement"
-              :width 3.0 :height 2.0
-              :style transport-icon-style
-              :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
-              (back-to-arrangement-icon :width 3.0 :height 2.0 :active #'song.manual-latch)))
-                (box :width 0.3))))
+          )
+        )
+      ;; Back to Arrangement (unified-transport spec; Ableton semantics):
+      ;; lights the moment a manual launch overrides the arrangement,
+      ;; SURVIVES transport stop, and clicking hands the latched lanes
+      ;; back to the arrangement. The box is ALWAYS laid out (the icon
+      ;; binds the latch, so a flip only repaints); the icon is
+      ;; transparent while nothing is latched, and the click guards at
+      ;; event time.
+      (subtree :key "transport-back-to-arrangement"
+        (box :debug-name "transport-back-to-arrangement"
+          :width 3.0 :height 2.0
+          :style transport-icon-style
+          :on-click |x y r| (when song.manual-latch (set! song.manual-latch false))
+          (back-to-arrangement-icon :width 3.0 :height 2.0 :active #'song.manual-latch)))
+      (box :width 0.3))))
 
 ;; The clock group on the LED's left half, two rows like a hardware LCD:
 ;; clock, BPM and scene transpose on top; launch/record quantize, MET and
 ;; ROLL beneath.
 (def transport-clock-panel ()
-            (v-stack :key "transport-clock-panel" :gap 0.15 :align :start
-              (subtree :key "transport-clock"
-                (h-stack :width :fill :gap 0 :align :center
-                  (transport-clock
-                    ;; One transport (docs/unified-transport-spec.md 4/8): the
-                    ;; parked arrangement cursor while stopped, the live absolute
-                    ;; arrangement clock during playback/capture.
-                    :playhead #'transport.position
-                    :song-position-beats
-                    (if (= song.mode "stopped") #'song.cursor #'song.position)
-                      :use-song-position true
-                      :font-size 17 :width 11 :height 1.2
-                      :color :clock-fg
-                      :bg :transparent)
-                    (box :width 0.6)
-                    (number-picker :value transport.bpm :min 20 :max 300 :decimals 1
-                      :key "transport-bpm"
-                      :noui true
-                      :font-size 17
-                      :text-color :clock-fg
-                      :on-change (lambda (v) (set! transport.bpm (floor v)))
-                      :width 7.5 :height 1.2)
-                    (subtree :key "transport-scene-transpose"
-                      (number-picker :value scene-transpose
-                        :key "transport-scene-transpose-picker"
-                        :debug-name "transport-scene-transpose"
-                        :on-right-click open-transpose-menu
-                        :min -48 :max 48 :step 1 :decimals 0 :unit "st"
-                        :noui true :font-size 17 :text-color :clock-fg
-                        :on-change (lambda (v) (set! scene-transpose (round v)))
-                        :width 6 :height 1.2))))
-                (h-stack :width :fill :gap 0.4 :align :center
-                  (subtree :key "transport-scene-launch-quantize"
-                    (dropdown
-                      :bg-color :transport-led-bg
-                      :border-color :bg
-                      :badge-color :transparent
-                      :key "transport-scene-launch-quantize-dropdown"
-                      :debug-name "transport-scene-launch-quantize"
-                      :value (launch-quantize)
-                      :options launch-quantize-options
-                      :on-change seq-set-scene-launch-quantize
-                      :width 5.2 :height 1.0 :font-size 9))
-                  (subtree :key "transport-record-quantize"
-                    (dropdown
-                      :bg-color :transport-led-bg
-                      :border-color :bg
-                      :badge-color :transparent
-                      :key "transport-record-quantize-dropdown"
-                      :debug-name "transport-record-quantize"
-                      :value (label-or transport.record-quantize "1/16")
-                      :options record-quantize-options
-                      :on-change seq-set-record-quantize
-                      :width 5.2 :height 1.0 :font-size 9))
-                  (box :width 0.4)
-                  (subtree :key "transport-metronome-toggle"
-                    (box :debug-name "transport-metronome-toggle"
-                      :width 3.4 :height 1.0
-                      :v-align :center
-                      :background "pattern-pill-bg"
-                      :on-click |x y r| (toggle! transport.metronome)
-                      (v-stack :align :center
-                        (pill-label "MET" #'transport.metronome))))
-                          ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
-                          ;; display. Rate keys 1-8 switch the rate while roll mode is on.
-                          (subtree :key "transport-roll-toggle"
-                            (box :debug-name "transport-roll-toggle"
-                              :width 5.5 :height 1.0
-                              :background-color (if transport.sequence-rolling
-                                '(rgba 0.72 0.10 0.12 1)
-                                "pattern-pill-bg")
-                              :on-click |x y r| (toggle! transport.roll-mode)
-                              (h-stack :align :baseline :gap 0.3
-                                (box :width 0.2)
-                                (pill-label "ROLL" #'transport.roll-mode)
-                                  (label (if transport.roll-mode transport.roll-rate "")
-                                    :font-size 9
-                                    :color '(rgba 0.63 0.88 0.41 1)
-                                    :bg :transparent)))))))
+  (v-stack :key "transport-clock-panel" :gap 0.15 :align :start
+    (subtree :key "transport-clock"
+      (h-stack :width :fill :gap 0 :align :center
+        (transport-clock
+          ;; One transport (docs/unified-transport-spec.md 4/8): the
+          ;; parked arrangement cursor while stopped, the live absolute
+          ;; arrangement clock during playback/capture.
+          :playhead #'transport.position
+          :song-position-beats
+          (if (= song.mode "stopped") #'song.cursor #'song.position)
+          :use-song-position true
+          :font-size 17 :width 11 :height 1.2
+          :color :clock-fg
+          :bg :transparent)
+        (box :width 0.6)
+        (number-picker :value transport.bpm :min 20 :max 300 :decimals 1
+          :key "transport-bpm"
+          :noui true
+          :font-size 17
+          :text-color :clock-fg
+          :on-change (lambda (v) (set! transport.bpm (floor v)))
+          :width 7.5 :height 1.2)
+        (subtree :key "transport-scene-transpose"
+          (number-picker :value scene-transpose
+            :key "transport-scene-transpose-picker"
+            :debug-name "transport-scene-transpose"
+            :on-right-click open-transpose-menu
+            :min -48 :max 48 :step 1 :decimals 0 :unit "st"
+            :noui true :font-size 17 :text-color :clock-fg
+            :on-change (lambda (v) (set! scene-transpose (round v)))
+            :width 6 :height 1.2))))
+    (h-stack :width :fill :gap 0.4 :align :center
+      (subtree :key "transport-scene-launch-quantize"
+        (dropdown
+          :bg-color :transport-led-bg
+          :border-color :bg
+          :text-color :clock-fg
+          :badge-color :transparent
+          :key "transport-scene-launch-quantize-dropdown"
+          :debug-name "transport-scene-launch-quantize"
+          :value (launch-quantize)
+          :options launch-quantize-options
+          :on-change seq-set-scene-launch-quantize
+          :width 5.2 :height 1.0 :font-size 9))
+      (subtree :key "transport-record-quantize"
+        (dropdown
+          :bg-color :transport-led-bg
+          :border-color :bg
+          :badge-color :transparent
+          :text-color :clock-fg
+          :key "transport-record-quantize-dropdown"
+          :debug-name "transport-record-quantize"
+          :value (label-or transport.record-quantize "1/16")
+          :options record-quantize-options
+          :on-change seq-set-record-quantize
+          :width 5.2 :height 1.0 :font-size 9))
+      (box :width 0.4)
+      (subtree :key "transport-metronome-toggle"
+        (box :debug-name "transport-metronome-toggle"
+          :width 3.4 :height 1.0
+          :v-align :center
+          :background "pattern-pill-bg"
+          :on-click |x y r| (toggle! transport.metronome)
+          (v-stack :align :center
+            (pill-label "MET" #'transport.metronome))))
+      ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
+      ;; display. Rate keys 1-8 switch the rate while roll mode is on.
+      (subtree :key "transport-roll-toggle"
+        (box :debug-name "transport-roll-toggle"
+          :width 5.5 :height 1.0
+          :background-color (if transport.sequence-rolling
+            '(rgba 0.72 0.10 0.12 1)
+            "pattern-pill-bg")
+          :on-click |x y r| (toggle! transport.roll-mode)
+          (h-stack :align :baseline :gap 0.3
+            (box :width 0.2)
+            (pill-label "ROLL" #'transport.roll-mode)
+            (label (if transport.roll-mode transport.roll-rate "")
+              :font-size 9
+              :color '(rgba 0.63 0.88 0.41 1)
+              :bg :transparent)))))))
 
 ;; The LED: one dark panel, two rows tall, holding the clock group on its
 ;; left half and the scene launcher, wrapped onto two rows, on its right.
@@ -1135,7 +1138,7 @@
 ;; The master meters, CPU and output latency on their own LED panel, hugging
 ;; the right end of the *transport* row.
 (def transport-meter-panel ()
-  (box :key "transport-meter-panel" :background-color :transport-controls-bg :corner-radius 64 :height 1.4
+  (box :key "transport-meter-panel" :background-color :transport-controls-bg :corner-radius 64 :height 1.9
     :width 27
     (h-stack :align :center :gap 0.3
       (box :width 0.6)
@@ -1221,7 +1224,6 @@
           :font-size 11
           :color (if s.queued :scene-active-fg :dimmer)
           :active #'s.active :active-color :scene-active-fg
-          :hover-color :white
           :bg :transparent)))))
 
 ;; A "+" / "-" button of the strip; `enabled` lights it and lets it click.
@@ -1293,7 +1295,7 @@
   ;; stay centred whatever the menus and the meters measure.
   (h-stack :key "transport-bar" :width :fill :height :fill :gap 0.5
     :padding-left 0.5 :padding-right 0.5 :align :center
-    (box :key "transport-leading-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.4
+    (box :key "transport-leading-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.9
       (h-stack :key "transport-left" :width 0 :flex 1 :height :fill :gap 0.2 :align :center
         (titlebar-leading)
         (transport-leading))
@@ -1341,8 +1343,8 @@
 ;; Session and arrangement are app views, not tabs in the main buffer: the
 ;; pair sits at the titlebar's right end.
 (def titlebar-trailing ()
-  (box :key "transport-trailing-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.4
-    (h-stack :gap 0.1
+  (box :key "transport-trailing-controls" :background-color :transport-controls-bg :corner-radius 72 :padding 0.015 :height 1.9
+    (h-stack :gap 0.1  :align :center
       (list
         (subtree :key "transport-session-view-button"
           (session-view-icon

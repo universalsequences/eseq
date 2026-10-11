@@ -89,14 +89,14 @@
       :filterbank-control-on                '(0.98 0.78 0.14 1.0)
       :filterbank-readout                   '(0.93 0.88 0.72 1.0)
       ;; Semantic control roles preserve the original UI independently of accent.
-      :scene-active-base              '(0.00 0.01 0.02 0.5)
+      :scene-active-base              '(0.80 0.38 0.16 1.0)
       :scene-hover-base               '(0.10 0.10 0.12 0.72)
       :scene-push-base                '(0.04 0.24 0.88 1.0)
       :scene-queued-base              '(0.01 0.03 0.38 1.0)
       :scene-queued-pulse             '(0.04 0.10 0.30 0.0)
       :scene-bank-indicator           '(0.20 0.52 1.0 1.0)
       :scene-action-base              '(0.00 0.01 0.02 1.0)
-      :scene-active-fg                '(0.92 0.92 0.94)
+      :scene-active-fg                '(0.12 0.12 0.14)
       :scene-clip-bg                  '(0.52 0.56 0.62 1.0)
       :scene-clip-fg                  '(0.2 0.2 0.2 1.0)
       :clip-label-fg                  '(0.2 0.2 0.2 1.0)
@@ -213,6 +213,7 @@
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
       :border-inactive '(0.15 0.15 .155)    ; Match buffer background
       
+      :list-selected-fg '(0.9 0.9 0.9)
       ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
       :list-icon-detail     '(0.12 0.13 0.14)   ; cutouts match the row bg
       :list-icon-folder     '(0.45 0.75 0.98)   ; Finder's light sky-blue folder

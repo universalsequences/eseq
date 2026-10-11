@@ -548,11 +548,14 @@
       (track-b (if (= active 1) (* 1.1 track-b) track-b))
       (outer (if (= selected 1)
           (rgba 0.94 0.96 1.0 1.0)
-          (rgba track-r track-g track-b 1.0)))
-      (middle (rgba track-r track-g track-b 1.0))
+          (if (= active 0) (rgba 0 0 0 0.3)   (rgba track-r track-g track-b 1.0))))
+      (middle (if (= active 0) 
+          (rgba track-r track-g track-b 1.0)
+          (rgba track-r track-g track-b 1.0)
+          ))
       (inner (if (= active 0)
-          (rgba 0.02 0.025 0.03 0.7)
-          (rgba 0.1 0.1 0.1 0.3)
+          (rgba (* track-r 0.2) (* track-g 0.2) (* track-b 0.2) 1)
+          track-col 
           )))
     ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
     ;; of the glyph; this background always draws underneath it). Liveness
@@ -564,8 +567,8 @@
         (material :color outer))
       (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92))
-          (* (if (= active 1) 0.8 0.92) height) (if (= active 1) 0.1 0.22))
+      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.92 0.92))
+          (* (if (= active 1) 0.92 0.92) height) (if (= active 1) 0.2 0.22))
         (material :color inner)))))
 
 ;; `track-pattern-cell-bg` for a cell whose quantized launch is pending:

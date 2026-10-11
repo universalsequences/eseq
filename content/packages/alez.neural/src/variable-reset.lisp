@@ -827,8 +827,8 @@
 
 (def gvr-graph-panel (self g)
   (let ((active-count (len g.nodes))
-        (expanded self.expanded-node)
-        (editing (when (>= expanded 0) (nth g.nodes expanded))))
+      (expanded self.expanded-node)
+      (editing (when (>= expanded 0) (nth g.nodes expanded))))
     (box
       :padding 0.85
       :gap 0.6
@@ -836,7 +836,7 @@
         ;; ── sequencer-level config (on top) ──
         (box
           ;; Rack-owned: room for the corner chip past the spectrogram.
-          :width (if g.owner 102 90.5)
+          :width (if g.owner 112 90.5)
           :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
           (h-stack
             (v-stack
@@ -924,10 +924,10 @@
             (box :flex 1 :height 1.0)
             (gvr-owner-rack-badge g)
             (box :width 1 :height 1.0)))
-
+        
         (h-stack
           (let ((jakis (gvr-jakis g))
-                (menu (gvr-route-menu (gvr-route-tracks-labels g) jakis)))
+              (menu (gvr-route-menu (gvr-route-tracks-labels g) jakis)))
             (if editing
               (gvr-expanded-editor self g editing jakis menu)
               (box
@@ -938,10 +938,10 @@
                   (v-stack :gap gvr-row-gap
                     (gvr-header)
                     (each g.nodes |n| (gvr-row self n jakis menu)))))))
-
+          
           (gvr-column-matrix "graph-variable-reset-trigger-matrix" active-count 1 1 (lambda () g.triggers))
           (gvr-column-matrix "graph-variable-reset-energy-matrix" active-count 2 4 (lambda () g.energy))
-
+          
           ;; The weights are read inside a subtree: a cell drag re-runs the
           ;; matrix, not the rows beside it.
           (v-stack :gap gvr-matrix-column-gap

@@ -611,6 +611,10 @@ use std::hash::{Hash, Hasher};
 
 thread_local! {
     static MATERIAL_SHADER_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
+    /// A material's source, widget props and the definitions and kinds it
+    /// expands against -> its shader name: a re-render skips the expansion
+    /// and state plan [`MATERIAL_SHADER_CACHE`] is keyed after.
+    static MATERIAL_SOURCE_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
     /// Theme generation the SDF widget registry was last recompiled against.
     static SDF_THEME_RECOMPILE_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -803,8 +807,6 @@ fn compile_widget_material(
     let material_expr =
         crate::lang::sdf_codegen::value_to_expression(material_val).map_err(|e| e.to_string())?;
 
-    let shader_expr = build_material_shader_expr(widget_type, &material_expr)?;
-
     // The material's state names: the widget's props (plus origin_t for a
     // vslider, so it gets a uniform slot); captured defstates read too.
     let mut state_names: Vec<String> = prop_binding_keys.to_vec();
@@ -813,6 +815,36 @@ fn compile_widget_material(
     }
     state_names.sort();
     state_names.dedup();
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+
+    // Everything the expansion and the plan read: the same source against
+    // the same definitions and kinds compiles to the same shader.
+    let mut hasher = DefaultHasher::new();
+    widget_type.hash(&mut hasher);
+    expr_to_source(&material_expr).hash(&mut hasher);
+    state_names.hash(&mut hasher);
+    vm.definition_generation().hash(&mut hasher);
+    vm.instance_kind_schema_generation().hash(&mut hasher);
+    options.hash(&mut hasher);
+    let source_key = hasher.finish();
+    if let Some(name) = MATERIAL_SOURCE_CACHE.with(|c| c.borrow().get(&source_key).cloned()) {
+        return Ok(name);
+    }
+    let name = compile_material_shader(widget_type, &material_expr, vm, state_names, options)?;
+    MATERIAL_SOURCE_CACHE.with(|c| c.borrow_mut().insert(source_key, name.clone()));
+    Ok(name)
+}
+
+/// [`compile_widget_material`] past its source cache: expand and plan the
+/// material, then compile it unless an identical expansion already was.
+fn compile_material_shader(
+    widget_type: &str,
+    material_expr: &crate::parser::Expression,
+    vm: &mut VM,
+    state_names: Vec<String>,
+    options: crate::lang::sdf_codegen::SdfShaderOptions,
+) -> Result<String, String> {
+    let shader_expr = build_material_shader_expr(widget_type, material_expr)?;
     let expanded = expand_sdf_expression(&shader_expr, vm)?;
     let plan = plan_sdf_state("material", vm, &state_names, &expanded)?;
     let state_symbols = plan.uniforms();
@@ -825,7 +857,6 @@ fn compile_widget_material(
     for field in &plan.fields {
         (&field.kind, &field.field, field.rgb).hash(&mut hasher);
     }
-    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
     options.hash(&mut hasher);
     let cache_key = hasher.finish();
 

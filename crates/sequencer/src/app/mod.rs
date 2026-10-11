@@ -44,6 +44,7 @@ mod hooks;
 mod instances;
 pub use instances::{
     import_forms, import_modules, legacy_import_module, migrate_legacy_kind_sources,
+    rekey_reserved_instance_ids,
     source_forms, source_with_import, source_with_leading_import, source_without_import,
     INSTANCE_KINDS_PROJECT_VERSION,
 };

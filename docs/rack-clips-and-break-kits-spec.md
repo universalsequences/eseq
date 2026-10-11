@@ -647,7 +647,8 @@ Each phase is independently shippable and independently valuable.
   (`ProjectRackClip::bus_chain`) and applies nothing, so the answer costs no
   format change either way. Revisit once a real break kit exists.
 - Do rack clips want their own arrangement lane, or does the arrangement keep
-  addressing project scenes only? Rev 1: project scenes only.
+  addressing project scenes only? Rev 1: project scenes only. Superseded by
+  `docs/arrangement-rack-lanes-spec.md` (rack lanes, epic eseq-qkv0).
 - Should the clip pointer itself be boundary-scheduled on a quantized launch,
   so the edit target and the lit cell move with the sound rather than ahead of
   it? Phase 3 says no (it would mean new boundary code); revisit if the lead
