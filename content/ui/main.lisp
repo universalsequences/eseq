@@ -43,14 +43,6 @@
   (host-command "open-learn-patch"
     (dict :patcher-buffer (current-buffer-name))))
 
-;; Recover a freely played phrase without enabling recording or transport.
-(def capture-midi ()
-  (host-command "retrospective-open" (dict)))
-
-;; Print the last 30 seconds of master output into a crop-and-keep modal.
-(def capture-resample ()
-  (host-command "resample-open" (dict)))
-
 ;; Promote to factory (dev checkouts): copy the current track as a Sound, its
 ;; drum rack as a kit, or its current preset into content/ so it ships.
 ;; Non-factory dependencies are listed in the modal and skipped.

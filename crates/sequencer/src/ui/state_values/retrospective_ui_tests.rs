@@ -58,7 +58,7 @@ fn retrospective_command_opens_real_capture_and_cancel_keeps_patterns() {
     app.retrospective.note_on(1, app.track_registry.id_at(0).unwrap(), 0.0, 0.7, now);
     app.retrospective.note_off(1, now);
     editor.drain_host_commands();
-    editor.runtime_mut().eval_str("(capture-midi)").unwrap();
+    editor.runtime_mut().eval_str("(eseq.application-menus/capture-midi)").unwrap();
     let command = editor.drain_host_commands().into_iter().find(|command| matches!(command,
         HostCommand::Custom { name, .. } if name == "retrospective-open")).expect("M-x command");
     let HostCommand::Custom { name, payload } = command else { unreachable!() };

@@ -50,7 +50,7 @@ fn resample_command_prints_the_ring_and_sends_the_crop_with_name_and_tags() {
     let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
     editor.set_active_buffer(id);
     editor.drain_host_commands();
-    eval(&mut editor, "(capture-resample)");
+    eval(&mut editor, "(eseq.application-menus/capture-resample)");
     assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
         HostCommand::Custom { name, .. } if name == "resample-open")), "M-x command");
     crate::host_commands::resample::open(&app, &mut editor).unwrap();

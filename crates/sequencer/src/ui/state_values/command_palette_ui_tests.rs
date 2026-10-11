@@ -57,3 +57,18 @@ fn add_instrument_lists_the_instruments_tab_flattened() {
     assert!(!frame.rows.is_empty(), "instruments listed");
     assert!(frame.rows.iter().all(|row| !row.submenu), "folders are flattened away");
 }
+
+#[test]
+fn every_shipped_command_is_documented_and_runnable_from_the_palette() {
+    let editor = full_grid_editor_for_scroll_tests();
+    let commands = editor.runtime().commands();
+    assert!(commands.len() >= 30, "menu actions are commands: {}", commands.len());
+    for (name, header) in &commands {
+        assert!(header.summary().is_some(), "{name} has no :doc");
+        assert!(header.command_problem(name).is_none(), "{name}: {:?}", header.command_problem(name));
+    }
+    let titles: Vec<_> = commands.iter().filter_map(|(_, header)| header.command.as_deref()).collect();
+    for expected in ["New Project", "Save", "Transpose Pattern", "Choose Agent Model…", "Change Theme"] {
+        assert!(titles.contains(&expected), "{expected} missing from {titles:?}");
+    }
+}

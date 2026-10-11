@@ -502,6 +502,9 @@
         (status (str "Adding instrument track: " name))))))
 
 (def add-sampler-track ()
+  :doc "Add a sampler track."
+  :command "Add Sampler Track"
+  :group "Create"
   (host-command "add-track-sampler" (dict))
   (set! browser-view.tab "samples")
   (status "Add sampler track"))
@@ -830,6 +833,9 @@
         (dict :source instrument-pick.audio-effect)))))
 
 (def enter-new-effect-editor ()
+  :doc "Open the editor on a new custom audio effect."
+  :command "Create Effect…"
+  :group "Create"
   (clear-editor-name!)
   (host-command "enter-new-effect-editor" (dict)))
 
@@ -1066,6 +1072,9 @@
           (toggle-instrument-favorite instrument-menu.item))))))
 
 (def enter-new-instrument-editor ()
+  :doc "Open the editor on a new custom instrument."
+  :command "Create Instrument…"
+  :group "Create"
   (clear-editor-name!)
   (host-command "enter-new-instrument-editor" (dict)))
 

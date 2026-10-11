@@ -1,6 +1,6 @@
 # Command Palette + Definition Docs — spec rev 1
 
-Status: rev 1, 2026-10-10. Phase 1 COMMITTED 22f08155f; phases 2–4 BUILT 2026-10-10. Epic: see `bd show` for the `command-palette` epic.
+Status: rev 1, 2026-10-10. Phases 1–5 COMMITTED 2026-10-10. Follow-up: eseq-cmdp.6 (:preview, multi-parameter stages). Epic: see `bd show` for the `command-palette` epic.
 
 ## 1. Goal
 
@@ -195,11 +195,27 @@ clicked row, scrolls with the wheel and closes on a press outside.
 Keys: type to filter, ↑/↓ (Tab, C-n/C-p, PageUp/PageDown) move, Enter
 runs, Esc / C-g close.
 
-## 8. Backfill
+## 8. Backfill (phase 5, as built)
 
-Do not document the ~12k defs. Document what people actually run: theme
-commands, track/rack add commands, customize, file/export/import,
-choose-model, packages. A test pins that every `:command` has `:doc`.
+The ~12k defs stay undocumented; the commands people run are curated:
+
+- **Menu actions** — every File / Create / Pattern menu item is a
+  documented `:command` (with `:group`), and the menus call those
+  functions through click-time lambdas, so the menu and the palette run one
+  definition and both follow an `override`. The header sits on the
+  canonical function where one already existed (`eseq.customize/customize`,
+  `eseq.export-song/export-song`, `eseq.browser/add-sampler-track`,
+  `enter-new-instrument-editor`, `enter-new-effect-editor`); the rest live
+  in `content/ui/application-menus.lisp` (`capture-midi` and
+  `capture-resample` moved there from main.lisp). Transpose is one command
+  with a `:choices` stage (the menu still lists its four entries).
+- **Change Theme**, **Add Instrument**, **Choose Agent Model…**.
+- `command_palette_ui_tests::every_shipped_command_is_documented_and_runnable_from_the_palette`
+  pins that every shipped `:command` has a `:doc` and an arity the palette
+  can satisfy.
+
+Adding a command from user code is the same header:
+`(def my-thing () :doc "One sentence." :command "My Thing" …)`.
 
 ## 9. Phases
 

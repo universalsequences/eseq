@@ -249,6 +249,9 @@
 ;; M-x entry point: the host activates the tile that mounts `panel`, then
 ;; opens the modal.
 (def customize ()
+  :doc "Edit customizable options and overrides by module."
+  :command "Customize…"
+  :group "File"
   (host-command "customize-open" (dict)))
 
 (def customize-save ()

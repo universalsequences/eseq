@@ -82,6 +82,8 @@
 ;; candidate list shows it qualified (`eseq.choose-model/choose-model`), which
 ;; still filters on the typed "choose-model".
 (def choose-model ()
+  :doc "Pick the model the patcher's agent bubbles run on."
+  :command "Choose Agent Model…"
   (open))
 
 (def select-model (value)

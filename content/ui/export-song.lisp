@@ -16,7 +16,11 @@
           (rate "48000")
           (tail "10")))
 
-(def export-song () (host-command "export-song-open" (dict)))
+(def export-song ()
+  :doc "Bounce the arrangement to an audio file."
+  :command "Export Audio…"
+  :group "File"
+  (host-command "export-song-open" (dict)))
 (def open () (set! export-draft.open true))
 (def close () (set! export-draft.open false))
 ;; Fresh settings for a new export: the suggested file name and the

@@ -32,80 +32,138 @@
       (lambda () (host-command "menu-open-recent" (dict :name name)))))
     (seq-recent-projects)))
 
+;; ── Commands ────────────────────────────────────────────────────────────
+;; Each menu action is a palette command too (docs/command-palette-spec.md):
+;; the menus below call these, so the menu and the palette run one thing.
+;; Menus call them through lambdas, which look the name up on each click, so
+;; an `override` or redefinition reaches the menu as it does the palette.
+
+(def request-new-project () :doc "Start a new, empty project, asking to save first." :command "New Project"
+  :group "File"
+  (host-command "project-new-request" (dict)))
+(def save-project () :doc "Save the project." :command "Save" :group "File"
+  (eseq.transport/file-menu-save))
+(def save-project-as () :doc "Save the project under a new name." :command "Save As…" :group "File"
+  (eseq.transport/file-menu-save-as))
+(def open-project () :doc "Open a saved project." :command "Open Project…" :group "File"
+  (eseq.transport/file-menu-open-project))
+(def import-samples () :doc "Copy sample files into the library." :command "Import Samples…" :group "File"
+  (host-command "menu-import-samples" (dict)))
+(def import-package () :doc "Install a package from an .eseqpack file." :command "Import Package…" :group "File"
+  (host-command "menu-import-package" (dict)))
+(def export-package () :doc "Bundle a package into an .eseqpack file." :command "Export Package…" :group "File"
+  (host-command "menu-export-package" (dict)))
+(def show-settings () :doc "Open the Settings window." :command "Settings…" :group "File"
+  (host-command "settings-open" (dict)))
+(def open-init () :doc "Open your init.lisp, loaded at every start." :command "Open init.lisp" :group "File"
+  (host-command "packages-open-init" (dict)))
+(def open-project-scratch () :doc "Open this project's scratch Lisp buffer." :command "Open Project Scratch" :group "File"
+  (host-command "packages-open-scratch" (dict)))
+(def open-help () :doc "Open the manual." :command "Help" :group "File"
+  (host-command "open-help" (dict)))
+(def about-eseq () :doc "Show the version and credits." :command "About eseq" :group "File"
+  (host-command "about-open" (dict)))
+(def quit-eseq () :doc "Quit, asking to save unsaved changes." :command "Quit eseq" :group "File"
+  (host-command "app-quit-request" (dict)))
+
+(def add-bus () :doc "Add a mixer bus." :command "Add Bus" :group "Create"
+  (host-command "add-bus" (dict)))
+(def add-midi-track () :doc "Add an empty MIDI track." :command "Add MIDI Track" :group "Create"
+  (host-command "add-track-empty" (dict)))
+(def add-drum-rack () :doc "Add a drum rack track." :command "Add Drum Rack" :group "Create"
+  (host-command "add-track-rack" (dict)))
+(def add-layer-rack () :doc "Add a layer rack track." :command "Add Layer Rack" :group "Create"
+  (host-command "add-track-layer-rack" (dict)))
+(def add-scene () :doc "Add a scene cloned from the current one." :command "Add Scene" :group "Create"
+  (host-command "clone-pattern" (dict)))
+(def add-scene-bank () :doc "Add a scene bank." :command "Add Scene Bank" :group "Create"
+  (eseq.transport/select-scene-bank "New bank"))
+
+(def double-pattern-length () :doc "Double the track pattern's length, repeating its steps." :command "Double Pattern Length" :group "Pattern"
+  (host-command "menu-pattern-double" (dict)))
+(def half-pattern-length () :doc "Halve the track pattern's length." :command "Half Pattern Length" :group "Pattern"
+  (host-command "menu-pattern-half" (dict)))
+(def clone-track-pattern () :doc "Copy the track pattern into a new pattern." :command "Clone Track Pattern" :group "Pattern"
+  (host-command "menu-pattern-clone" (dict)))
+;; Recover a freely played phrase without enabling recording or transport.
+(def capture-midi () :doc "Turn what you just played into a pattern." :command "Capture MIDI…" :group "Pattern"
+  (host-command "retrospective-open" (dict)))
+;; Print the last 30 seconds of master output into a crop-and-keep modal.
+(def capture-resample () :doc "Record the last 30 seconds of output to a sample." :command "Resample Last 30 s…"
+  :group "Pattern"
+  (host-command "resample-open" (dict)))
+(def shift-steps-left () :doc "Rotate the track pattern one step left." :command "Shift Steps Left" :group "Pattern"
+  (host-command "menu-pattern-transform" (dict :operation "left")))
+(def shift-steps-right () :doc "Rotate the track pattern one step right." :command "Shift Steps Right" :group "Pattern"
+  (host-command "menu-pattern-transform" (dict :operation "right")))
+(def transpose-choices ()
+  (list (dict :label "Up Semitone" :value 1) (dict :label "Down Semitone" :value -1)
+        (dict :label "Up Octave" :value 12) (dict :label "Down Octave" :value -12)))
+(def transpose-pattern (semitones) :doc "Transpose the track pattern's notes." :command "Transpose Pattern"
+  :group "Pattern" :prompt "Transpose" :choices transpose-choices
+  (host-command "menu-pattern-transpose" (dict :semitones semitones)))
+(def clear-track-pattern () :doc "Clear every step of the track pattern, after asking." :command "Clear Track Pattern…" :group "Pattern"
+  (host-command "menu-pattern-clear-request" (dict)))
+
 (def application-menu-items (name)
   (if (= name "File")
     (list
-      (application-menu-entry "file-menu-new-project" "New Project" "n"
-        (lambda () (host-command "project-new-request" (dict))))
+      (application-menu-entry "file-menu-new-project" "New Project" "n" (lambda () (request-new-project)))
       nil
-      (application-menu-entry "file-menu-save" "Save" "s" (lambda () (eseq.transport/file-menu-save)))
-      (merge (application-menu-entry "file-menu-save-as" "Save As…" "s" (lambda () (eseq.transport/file-menu-save-as))) :shortcut (dict :key "s" :modifiers (list :primary :shift)))
-      (application-menu-entry "file-menu-open-project" "Open Project…" "o" (lambda () (eseq.transport/file-menu-open-project)))
+      (application-menu-entry "file-menu-save" "Save" "s" (lambda () (save-project)))
+      (merge (application-menu-entry "file-menu-save-as" "Save As…" "s" (lambda () (save-project-as))) :shortcut (dict :key "s" :modifiers (list :primary :shift)))
+      (application-menu-entry "file-menu-open-project" "Open Project…" "o" (lambda () (open-project)))
       (dict :id "file-recent" :label "Open Recent" :items-when recent-project-items)
       nil
       (merge (application-menu-entry "file-menu-export" "Export Audio…" "e" (lambda () (eseq.export-song/export-song))) :shortcut (dict :key "e" :modifiers (list :primary :shift)))
-      (application-menu-entry "file-menu-import" "Import Samples…" "" (lambda () (host-command "menu-import-samples" (dict))))
-      (application-menu-entry "file-menu-import-package" "Import Package…" "" (lambda () (host-command "menu-import-package" (dict))))
-      (application-menu-entry "file-menu-export-package" "Export Package…" "" (lambda () (host-command "menu-export-package" (dict))))
-      (application-menu-entry "file-menu-settings" "Settings…" "," (lambda () (host-command "settings-open" (dict))))
-      (application-menu-entry "file-menu-customize" "Customize…" "" (lambda () (host-command "customize-open" (dict))))
-      (application-menu-entry "file-menu-open-init" "Open init.lisp" "" (lambda () (host-command "packages-open-init" (dict))))
-      (application-menu-entry "file-menu-open-scratch" "Open Project Scratch" "" (lambda () (host-command "packages-open-scratch" (dict))))
+      (application-menu-entry "file-menu-import" "Import Samples…" "" (lambda () (import-samples)))
+      (application-menu-entry "file-menu-import-package" "Import Package…" "" (lambda () (import-package)))
+      (application-menu-entry "file-menu-export-package" "Export Package…" "" (lambda () (export-package)))
+      (application-menu-entry "file-menu-settings" "Settings…" "," (lambda () (show-settings)))
+      (application-menu-entry "file-menu-customize" "Customize…" "" (lambda () (eseq.customize/customize)))
+      (application-menu-entry "file-menu-open-init" "Open init.lisp" "" (lambda () (open-init)))
+      (application-menu-entry "file-menu-open-scratch" "Open Project Scratch" "" (lambda () (open-project-scratch)))
       nil
-      (application-menu-entry "file-menu-help" "Help" "" (lambda () (host-command "open-help" (dict))))
-      (application-menu-entry "file-menu-about" "About eseq" "" (lambda () (host-command "about-open" (dict))))
+      (application-menu-entry "file-menu-help" "Help" "" (lambda () (open-help)))
+      (application-menu-entry "file-menu-about" "About eseq" "" (lambda () (about-eseq)))
       nil
       ;; No shortcut: Cmd+Q lives on the application menu's Quit item. Both
       ;; go through the unsaved-changes prompt.
-      (application-menu-entry "file-menu-quit" "Quit eseq" "" (lambda () (host-command "app-quit-request" (dict)))))
+      (application-menu-entry "file-menu-quit" "Quit eseq" "" (lambda () (quit-eseq))))
     (if (= name "Create")
       (list
         (application-menu-entry "create-menu-instrument" "Create Instrument…" ""
-          (lambda () (host-command "enter-new-instrument-editor" (dict))))
+          (lambda () (eseq.browser/enter-new-instrument-editor)))
         (application-menu-entry "create-menu-effect" "Create Effect…" ""
           (lambda () (eseq.browser/enter-new-effect-editor)))
         nil
-        (application-menu-entry "create-menu-bus" "Bus" ""
-          (lambda () (host-command "add-bus" (dict))))
-        (application-menu-entry "create-menu-midi" "MIDI Track" ""
-          (lambda () (host-command "add-track-empty" (dict))))
+        (application-menu-entry "create-menu-bus" "Bus" "" (lambda () (add-bus)))
+        (application-menu-entry "create-menu-midi" "MIDI Track" "" (lambda () (add-midi-track)))
         (application-menu-entry "create-menu-sampler" "Sampler Track" ""
           (lambda () (eseq.browser/add-sampler-track)))
-        (application-menu-entry "create-menu-drum-rack" "Drum Rack" ""
-          (lambda () (host-command "add-track-rack" (dict))))
-        (application-menu-entry "create-menu-layer-rack" "Layer Rack" ""
-          (lambda () (host-command "add-track-layer-rack" (dict))))
+        (application-menu-entry "create-menu-drum-rack" "Drum Rack" "" (lambda () (add-drum-rack)))
+        (application-menu-entry "create-menu-layer-rack" "Layer Rack" "" (lambda () (add-layer-rack)))
         nil
-        (application-menu-entry "create-menu-scene" "Scene" ""
-          (lambda () (host-command "clone-pattern" (dict))))
-        (application-menu-entry "create-menu-scene-bank" "Scene Bank" ""
-          (lambda () (eseq.transport/select-scene-bank "New bank"))))
+        (application-menu-entry "create-menu-scene" "Scene" "" (lambda () (add-scene)))
+        (application-menu-entry "create-menu-scene-bank" "Scene Bank" "" (lambda () (add-scene-bank))))
       (if (= name "Pattern")
         (list
-          (application-menu-entry "pattern-menu-double" "Double Pattern Length" "+"
-            (lambda () (host-command "menu-pattern-double" (dict))))
-          (application-menu-entry "pattern-menu-half" "Half Pattern Length" "-"
-            (lambda () (host-command "menu-pattern-half" (dict))))
+          (application-menu-entry "pattern-menu-double" "Double Pattern Length" "+" (lambda () (double-pattern-length)))
+          (application-menu-entry "pattern-menu-half" "Half Pattern Length" "-" (lambda () (half-pattern-length)))
           nil
-          (application-menu-entry "pattern-menu-clone" "Clone Track Pattern" ""
-            (lambda () (host-command "menu-pattern-clone" (dict))))
-          (application-menu-entry "pattern-menu-capture-midi" "Capture MIDI…" ""
-            (lambda () (host-command "retrospective-open" (dict))))
-          (application-menu-entry "pattern-menu-capture-resample" "Resample Last 30 s…" ""
-            (lambda () (host-command "resample-open" (dict))))
+          (application-menu-entry "pattern-menu-clone" "Clone Track Pattern" "" (lambda () (clone-track-pattern)))
+          (application-menu-entry "pattern-menu-capture-midi" "Capture MIDI…" "" (lambda () (capture-midi)))
+          (application-menu-entry "pattern-menu-capture-resample" "Resample Last 30 s…" "" (lambda () (capture-resample)))
           nil
-          (application-menu-entry "pattern-menu-left" "Shift Steps Left" ""
-            (lambda () (host-command "menu-pattern-transform" (dict :operation "left"))))
-          (application-menu-entry "pattern-menu-right" "Shift Steps Right" ""
-            (lambda () (host-command "menu-pattern-transform" (dict :operation "right"))))
+          (application-menu-entry "pattern-menu-left" "Shift Steps Left" "" (lambda () (shift-steps-left)))
+          (application-menu-entry "pattern-menu-right" "Shift Steps Right" "" (lambda () (shift-steps-right)))
           (dict :id "pattern-menu-transpose" :label "Transpose" :items
-            (map (lambda (entry)
-              (application-menu-entry (str "pattern-transpose-" (nth entry 0)) (nth entry 1) ""
-                (lambda () (host-command "menu-pattern-transpose" (dict :semitones (nth entry 0))))))
-              (list (list 1 "Up Semitone") (list -1 "Down Semitone") (list 12 "Up Octave") (list -12 "Down Octave"))))
+            (map (lambda (choice)
+              (application-menu-entry (str "pattern-transpose-" (get choice :value)) (get choice :label) ""
+                (lambda () (transpose-pattern (get choice :value)))))
+              (transpose-choices)))
           nil
-          (application-menu-entry "pattern-menu-clear" "Clear Track Pattern…" ""
-            (lambda () (host-command "menu-pattern-clear-request" (dict)))))
+          (application-menu-entry "pattern-menu-clear" "Clear Track Pattern…" "" (lambda () (clear-track-pattern))))
         (list)))))
 
 
@@ -149,7 +207,7 @@
     (dict :id "application" :label "eseq" :native-only true
       :items (list
         (dict :id "app-about" :label "About eseq"
-          :on-select (lambda () (host-command "about-open" (dict))))
+          :on-select (lambda () (about-eseq)))
         nil
         (dict :id "app-services" :label "Services" :role :services)
         nil
@@ -243,7 +301,7 @@
   :items (list
     (application-menu-entry "help-search" "Search Commands…" "" (lambda () (host-command "menu-search-commands" (dict))))
     (application-menu-entry "help-shortcuts" "Keyboard Shortcuts" "" (lambda () (host-command "menu-keyboard-shortcuts" (dict))))
-    (application-menu-entry "help-manual" "Documentation" "" (lambda () (host-command "open-help" (dict))))
+    (application-menu-entry "help-manual" "Documentation" "" (lambda () (open-help)))
     nil
     ;; Where a coding agent writes new instruments and effects (eseq-63j4).
     (application-menu-entry "help-authoring" "Open Authoring Folder in Terminal" "" (lambda () (host-command "menu-open-authoring-folder" (dict)))))))
