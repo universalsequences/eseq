@@ -3,8 +3,8 @@
 (use-defmacro digi-fm-envelope)
 (use-defmacro voice-amp)
 (def gate (in 1 @name gate))
-(def pitch (in 2 @name pitch))
-(def velocity (in 3 @name velocity))
+(def pitch_in (in 2 @name pitch))
+(def velocity_in (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
 (def mod1 (in 5 @name mod1 @modulator 1))
 (def mod2 (in 6 @name mod2 @modulator 2))
@@ -71,6 +71,48 @@
   (write-history h value)
   value)
 (defmacro df-db (db) (exp (* .11512925465 db)))
+; Amp/filter ADSR. A note into a silent voice is the host `adsr` preamble
+; exactly (linear attack, one-pole decay/release, same coefficients). A
+; retrigger of a SOUNDING voice (repeated note, steal, release overlap)
+; with duck on fades the old note out over a 5 ms raised cosine -- the
+; preamble's 3 ms one-pole duck has a ~0.4 ms time constant, a hard cut --
+; and reports `fresh` only when that fade reaches silence, so every other
+; per-note reset in the voice (phases, mod envelopes, smoothers, routing)
+; also lands on silence. duck off restarts the attack from the current
+; level. -> (level fresh ducking)
+(defmacro df-env (gate trig duck attack_ms decay_ms sustain release_ms)
+  (make-history env-h)
+  (make-history gate-h)
+  (make-history stage-h)
+  (make-history duck-h)
+  (make-history from-h)
+  (def prev (read-history env-h))
+  (def prev_stage (read-history stage-h))
+  (def on (gt gate .5))
+  (def retrig (gt (+ (* on (lte (read-history gate-h) .5)) (gt trig .5)) 0))
+  (def start_duck (* on retrig (gt prev .0001) (gt duck .5)))
+  (def duck_p (gswitch start_duck 0 (read-history duck-h)))
+  (def duck_from (gswitch start_duck prev (read-history from-h)))
+  (def duck_next (min 1 (+ duck_p (/ 1 (* .005 samplerate)))))
+  ; stages: 0 release/idle, 1 attack, 2 decay/sustain, 3 duck
+  (def held_stage (gswitch (* (eq prev_stage 3) (gte duck_p 1)) 1
+    (gswitch (* (eq prev_stage 1) (gte prev .999)) 2 prev_stage)))
+  (def stage (gswitch on (gswitch retrig (gswitch start_duck 3 1) held_stage) 0))
+  (def attack_level (+ prev (/ 1 (max 1 (* attack_ms .001 samplerate)))))
+  (def decay_coeff (- 1 (exp (/ -6.907755 (max 1 (* decay_ms .001 samplerate))))))
+  (def release_coeff (- 1 (exp (/ -6.907755 (max 1 (* release_ms .001 samplerate))))))
+  (def level (clip (selector (+ stage 1)
+    (+ prev (* release_coeff (- 0 prev)))
+    attack_level
+    (+ prev (* decay_coeff (- sustain prev)))
+    (* duck_from .5 (+ 1 (cos (* pi duck_next))))) 0 1))
+  (def fresh (* (eq stage 1) (gt (+ (- 1 (eq prev_stage 1)) retrig) 0)))
+  (write-history env-h level)
+  (write-history gate-h gate)
+  (write-history stage-h stage)
+  (write-history duck-h duck_next)
+  (write-history from-h duck_from)
+  (tuple level fresh (eq stage 3)))
 ; Cumulative harmonic tables evaluated at the phase INCLUDING incoming PM.
 ; sample wraps phase and interpolates phase and morph; limit interpolation
 ; preserves the frequency-dependent partial fade at the 4x internal rate.
@@ -130,7 +172,15 @@
 
 ; Discrete routing changes fade to zero for 2 ms, switch the complete graph,
 ; then fade in for 2 ms. No fractional edges or mixed feedback topology.
-(def reset (gt trigger .5))
+(def (env_amp reset ducking) (df-env gate trigger 1 (max 0 (mod amp_attack_ms)) (max 0 (mod amp_decay_ms)) (clip (mod amp_sustain) 0 1) (max 0 (mod amp_release_ms))))
+; The outgoing note keeps its pitch and velocity while it fades out; the
+; incoming one takes over at `reset`, on silence.
+(make-history note-pitch-h)
+(def pitch (gswitch ducking (read-history note-pitch-h) pitch_in))
+(write-history note-pitch-h pitch)
+(make-history note-velocity-h)
+(def velocity (gswitch ducking (read-history note-velocity-h) velocity_in))
+(write-history note-velocity-h velocity)
 (make-history algorithm-h)
 (make-history routing-gain-h)
 (def requested-algorithm (clip (round algorithm) 1 8))
@@ -154,10 +204,9 @@
 (write-history algorithm-h alg)
 (write-history routing-gain-h routing-gain)
 
-(def env_a (digi-fm-envelope gate trigger (mod a_delay_ms) (mod a_attack_ms) (mod a_decay_ms) (clip (mod a_end) 0 1) a_gated a_reset a_hold))
-(def env_b (digi-fm-envelope gate trigger (mod b_delay_ms) (mod b_attack_ms) (mod b_decay_ms) (clip (mod b_end) 0 1) b_gated b_reset b_hold))
-(def env_amp (adsr gate trigger (max 0 (mod amp_attack_ms)) (max 0 (mod amp_decay_ms)) (clip (mod amp_sustain) 0 1) (max 0 (mod amp_release_ms))))
-(def env_filter (adsr gate trigger (max 0 (mod filter_attack_ms)) (max 0 (mod filter_decay_ms)) (clip (mod filter_sustain) 0 1) (max 0 (mod filter_release_ms))))
+(def env_a (digi-fm-envelope gate reset (mod a_delay_ms) (mod a_attack_ms) (mod a_decay_ms) (clip (mod a_end) 0 1) a_gated a_reset a_hold))
+(def env_b (digi-fm-envelope gate reset (mod b_delay_ms) (mod b_attack_ms) (mod b_decay_ms) (clip (mod b_end) 0 1) b_gated b_reset b_hold))
+(def (env_filter filter_fresh filter_ducking) (df-env gate reset 0 (max 0 (mod filter_attack_ms)) (max 0 (mod filter_decay_ms)) (clip (mod filter_sustain) 0 1) (max 0 (mod filter_release_ms))))
 (def f_c (df-smooth (clip (* pitch (+ (mod c_ratio) (mod c_fine))) .1 (* samplerate 1.8)) reset))
 (def g_c (* (df-db (df-smooth (clip (mod c_level_db) -60 6) reset)) 1))
 (make-history phase_c)
