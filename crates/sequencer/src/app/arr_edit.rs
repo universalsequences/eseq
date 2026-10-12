@@ -14,9 +14,10 @@
 //! placement gesture instead requires an empty span, preserving existing clips.
 
 use crate::sequencer::{
-    insert_clip_sorted, lower_rows_to_arrangement, occlude_span, pattern_play_step,
-    restamped_clip, stamp_scene_clips, ArrClip, ClipId, LaneSource, ProjectArrangement,
-    ProjectScenes, ProjectSongRow, SongCompileContext, SongRowId,
+    insert_clip_sorted, insert_rack_clip_sorted, lower_rows_to_arrangement, occlude_rack_span,
+    occlude_span, pattern_play_step, restamped_clip, stamp_scene_clips, ArrClip, ClipId, LaneSpan,
+    LaneSource, ProjectArrangement, ProjectScenes, ProjectSongRow, RackArrClip, RackClipId,
+    SongCompileContext, SongRowId,
 };
 
 use super::edit::finish_active_gesture;
@@ -251,7 +252,7 @@ impl App {
             let data = scenes.track_pools.get(track).and_then(|pool| pool.get(pattern))
                 .ok_or_else(|| "The pattern is no longer available on this track".to_string())?;
             let steps = data.track_params.num_steps.max(1);
-            Ok::<_, String>(data.track_params.timebase.step_beats(steps) * steps as f64)
+            Ok::<_, String>(data.track_params.timebase.cycle_beats(steps))
         })?;
         let end = start + duration;
         let arrangement = self.require_arrangement()?;
@@ -842,6 +843,239 @@ impl App {
         })
     }
 
+    // --- rack-lane ops (docs/arrangement-rack-lanes-spec.md §5) ---------
+    //
+    // A rack-lane clip's phase is its absolute `anchor_beat`, so a trim needs
+    // no restamp: the surviving part keeps playing what it played. A move
+    // carries the anchor with it, so the clip plays the same music elsewhere.
+
+    /// The rack lane holding `clip_id`, with a copy of the clip.
+    fn locate_rack_clip(
+        arrangement: &ProjectArrangement,
+        clip_id: ClipId,
+    ) -> Result<(u64, RackArrClip), String> {
+        arrangement
+            .find_rack_clip(clip_id)
+            .map(|(group_id, clip)| (group_id, *clip))
+            .ok_or_else(|| format!("Rack-lane clip id {} does not exist", clip_id.0))
+    }
+
+    /// Remove `clip_id` from rack `group_id`'s lane, returning it (taken out
+    /// first so an occlusion cannot truncate the clip being edited).
+    fn take_rack_clip(
+        arrangement: &mut ProjectArrangement,
+        group_id: u64,
+        clip_id: ClipId,
+    ) -> RackArrClip {
+        let lane = arrangement
+            .rack_lanes
+            .get_mut(&group_id)
+            .expect("caller located the clip first");
+        let index = lane
+            .iter()
+            .position(|clip| clip.id == clip_id)
+            .expect("caller located the clip first");
+        lane.remove(index)
+    }
+
+    /// Put `clip` on rack `group_id`'s lane, truncating whatever it lands
+    /// on, and extend the song to its end.
+    fn place_rack_clip(
+        arrangement: &mut ProjectArrangement,
+        group_id: u64,
+        clip: RackArrClip,
+    ) -> Result<(), String> {
+        occlude_rack_span(arrangement, group_id, clip.start_beat, clip.end_beat)?;
+        arrangement.end_beat = arrangement.end_beat.max(clip.end_beat);
+        insert_rack_clip_sorted(arrangement, group_id, clip);
+        Ok(())
+    }
+
+    /// Place one loop of rack `group_id`'s clip `rack_clip` at `start_beat`
+    /// (its longest member's cycle, a bar when every member is empty),
+    /// anchored at its own start and truncating whatever it lands on.
+    /// Returns the new rack-lane clip's id.
+    pub fn arr_rack_clip_place(
+        &mut self,
+        group_id: u64,
+        rack_clip: RackClipId,
+        start_beat: f64,
+    ) -> Result<ClipId, String> {
+        let start_beat = finite_beat("Clip start beat", start_beat)?;
+        if start_beat < 0.0 {
+            return Err(format!("Clip start beat {start_beat} is before the song"));
+        }
+        let mut placed = None;
+        self.edit_arrangement("Place rack clip", |arrangement, scenes| {
+            let bank = scenes
+                .rack_bank(group_id)
+                .ok_or_else(|| "The rack has no clip bank".to_string())?;
+            let clip = bank
+                .clip(rack_clip)
+                .ok_or_else(|| format!("The rack has no clip {rack_clip}"))?;
+            let length = bank
+                .members
+                .iter()
+                .zip(&clip.cells)
+                .filter_map(|(track, cell)| {
+                    let data = scenes.track_pools.get(*track)?.get((*cell)?)?;
+                    let steps = data.track_params.num_steps.max(1);
+                    Some(data.track_params.timebase.cycle_beats(steps))
+                })
+                .fold(0.0f64, f64::max);
+            let length = if length > 0.0 { length } else { 4.0 };
+            let id = arrangement.allocate_clip_id()?;
+            Self::place_rack_clip(
+                arrangement,
+                group_id,
+                RackArrClip {
+                    id,
+                    start_beat,
+                    end_beat: start_beat + length,
+                    rack_clip,
+                    anchor_beat: start_beat,
+                },
+            )?;
+            placed = Some(id);
+            Ok(())
+        })?;
+        placed.ok_or_else(|| "Placing made no change".to_string())
+    }
+
+    /// Delete a rack-lane clip: its members go silent over the span.
+    pub fn arr_rack_clip_delete(&mut self, clip_id: ClipId) -> Result<(), String> {
+        self.edit_arrangement("Delete rack clip", |arrangement, _scenes| {
+            let (group_id, _) = Self::locate_rack_clip(arrangement, clip_id)?;
+            Self::take_rack_clip(arrangement, group_id, clip_id);
+            Ok(())
+        })
+    }
+
+    /// Move a rack-lane clip rigidly to `new_start_beat`, anchor included.
+    pub fn arr_rack_clip_move(
+        &mut self,
+        clip_id: ClipId,
+        new_start_beat: f64,
+    ) -> Result<(), String> {
+        let new_start_beat = finite_beat("Clip start beat", new_start_beat)?;
+        if new_start_beat < 0.0 {
+            return Err(format!("Clip start beat {new_start_beat} is before the song"));
+        }
+        self.edit_arrangement("Move rack clip", move |arrangement, _scenes| {
+            let (group_id, clip) = Self::locate_rack_clip(arrangement, clip_id)?;
+            let delta = new_start_beat - clip.start_beat;
+            if delta == 0.0 {
+                return Ok(());
+            }
+            let mut moved = Self::take_rack_clip(arrangement, group_id, clip_id);
+            moved.start_beat += delta;
+            moved.end_beat += delta;
+            moved.anchor_beat += delta;
+            Self::place_rack_clip(arrangement, group_id, moved)
+        })
+    }
+
+    /// Resize a rack-lane clip to `[new_start_beat, new_end_beat)`, keeping
+    /// its anchor, so either edge trims or extends the same music.
+    pub fn arr_rack_clip_resize(
+        &mut self,
+        clip_id: ClipId,
+        new_start_beat: f64,
+        new_end_beat: f64,
+    ) -> Result<(), String> {
+        let new_start_beat = finite_beat("Clip start beat", new_start_beat)?;
+        let new_end_beat = finite_beat("Clip end beat", new_end_beat)?;
+        if new_start_beat < 0.0 || new_end_beat <= new_start_beat {
+            return Err(format!(
+                "A clip must have a positive span from beat 0 (got [{new_start_beat}, \
+                 {new_end_beat}))"
+            ));
+        }
+        self.edit_arrangement("Resize rack clip", move |arrangement, _scenes| {
+            let (group_id, _) = Self::locate_rack_clip(arrangement, clip_id)?;
+            let mut resized = Self::take_rack_clip(arrangement, group_id, clip_id);
+            resized.start_beat = new_start_beat;
+            resized.end_beat = new_end_beat;
+            Self::place_rack_clip(arrangement, group_id, resized)
+        })
+    }
+
+    /// Split a rack-lane clip at `beat`: the right half gets a fresh id and
+    /// the same anchor, so the two play the same uninterrupted music.
+    pub fn arr_rack_clip_split(&mut self, clip_id: ClipId, beat: f64) -> Result<ClipId, String> {
+        let beat = finite_beat("Split beat", beat)?;
+        let mut right_id = None;
+        self.edit_arrangement("Split rack clip", |arrangement, _scenes| {
+            let (group_id, clip) = Self::locate_rack_clip(arrangement, clip_id)?;
+            if !clip.contains(beat) || beat == clip.start_beat {
+                return Err(format!(
+                    "Cannot split rack clip {} at beat {beat}: the beat must fall strictly \
+                     inside its span [{}, {})",
+                    clip_id.0, clip.start_beat, clip.end_beat
+                ));
+            }
+            let id = arrangement.allocate_clip_id()?;
+            let mut left = Self::take_rack_clip(arrangement, group_id, clip_id);
+            let right = RackArrClip {
+                id,
+                start_beat: beat,
+                ..left
+            };
+            left.end_beat = beat;
+            insert_rack_clip_sorted(arrangement, group_id, left);
+            insert_rack_clip_sorted(arrangement, group_id, right);
+            right_id = Some(id);
+            Ok(())
+        })?;
+        right_id.ok_or_else(|| "Split made no change".to_string())
+    }
+
+    /// Duplicate a rack-lane clip right after itself (truncating what it
+    /// lands on), continuing its phase, as Ableton's Duplicate does.
+    /// Returns the copy's id.
+    pub fn arr_rack_clip_duplicate(&mut self, clip_id: ClipId) -> Result<ClipId, String> {
+        let mut copy_id = None;
+        self.edit_arrangement("Duplicate rack clip", |arrangement, _scenes| {
+            let (group_id, clip) = Self::locate_rack_clip(arrangement, clip_id)?;
+            let span = clip.end_beat - clip.start_beat;
+            let id = arrangement.allocate_clip_id()?;
+            let copy = RackArrClip {
+                id,
+                start_beat: clip.end_beat,
+                end_beat: clip.end_beat + span,
+                anchor_beat: clip.anchor_beat + span,
+                ..clip
+            };
+            Self::place_rack_clip(arrangement, group_id, copy)?;
+            copy_id = Some(id);
+            Ok(())
+        })?;
+        copy_id.ok_or_else(|| "Duplicate made no change".to_string())
+    }
+
+    /// Change the rack clip a rack-lane clip plays, keeping its span and
+    /// anchor (members share one clock, so the phase carries over).
+    pub fn arr_rack_clip_set(
+        &mut self,
+        clip_id: ClipId,
+        rack_clip: RackClipId,
+    ) -> Result<(), String> {
+        self.edit_arrangement("Change rack clip", move |arrangement, scenes| {
+            let (group_id, clip) = arrangement
+                .find_rack_clip_mut(clip_id)
+                .ok_or_else(|| format!("Rack-lane clip id {} does not exist", clip_id.0))?;
+            if scenes
+                .rack_bank(group_id)
+                .and_then(|bank| bank.clip(rack_clip))
+                .is_none()
+            {
+                return Err(format!("The rack has no clip {rack_clip}"));
+            }
+            clip.rack_clip = rack_clip;
+            Ok(())
+        })
+    }
+
     // --- scene-lane ops (spec 8) ----------------------------------------
 
     /// The state span governed by a scene marker, used only by explicit
@@ -995,6 +1229,7 @@ impl App {
             .iter()
             .flatten()
             .map(|clip| clip.end_beat)
+            .chain(arrangement.rack_lanes.values().flatten().map(|clip| clip.end_beat))
             .fold(0.0f64, f64::max);
         if end_beat < last_clip_end {
             return Err(format!(

@@ -366,6 +366,11 @@ impl Timebase {
         }
     }
 
+    /// One cycle of a `num_steps`-step pattern on this timebase, in beats.
+    pub fn cycle_beats(&self, num_steps: usize) -> f64 {
+        self.step_beats(num_steps) * num_steps as f64
+    }
+
     pub fn step_beats(&self, num_steps: usize) -> f64 {
         match self {
             Timebase::Whole => 4.0,

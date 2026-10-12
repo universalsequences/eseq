@@ -952,12 +952,7 @@ impl App {
 
 /// Every clip-bearing rack's pointer in scene `scene`, by group id.
 fn scene_rack_pointers(scenes: &ProjectScenes, scene: usize) -> Vec<(u64, Option<RackClipId>)> {
-    scenes
-        .rack_banks()
-        .iter()
-        .filter(|bank| !bank.clips.is_empty())
-        .map(|bank| (bank.group_id, scenes.scene_rack_clip(scene, bank.group_id)))
-        .collect()
+    crate::sequencer::SongCompileContext::song_scene_rack_clips(scenes, scene)
 }
 
 /// Write one rack's captured clips onto its rack lane over `[T, Q)`, where

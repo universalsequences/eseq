@@ -34,7 +34,7 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 (import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of rgb-part))
-(import eseq.kinds :refer (track tracks scenes song transport selection select-region!
+(import eseq.kinds :refer (track tracks groups scenes song transport selection select-region!
                            clear-region!))
 
 (export arr-view
@@ -60,6 +60,10 @@
         track-items
         lane-selection
         region-other-track
+        region-other-row
+        track-row-key
+        rack-row-key
+        rack-lane-region
         scene-action
         lane-region-rect
         lane-ghost
@@ -104,9 +108,9 @@
           (clips '())
           (lane -1)
           (clip -1)
-          ;; The selected rack member item's string id (rack-member-select),
-          ;; or nil: the widget's :selected-id is numeric, so these light
-          ;; through the item's own :selected.
+          ;; The selected rack member item's string id (rack-member-select,
+          ;; then song.bound-rack-item), or nil: the widget's :selected-id is
+          ;; numeric, so these light through the item's own :selected.
           (rack-item :any :default nil)))
 
 ;; The host's song selection as the lanes draw it (the lane sync below): the
@@ -144,6 +148,42 @@
           (region-b 0)
           (lane-a -1)
           (lane-b -1)))
+
+;; The rack rows' own gesture state (docs/arrangement-rack-lanes-spec.md
+;; §5): the selected rack-lane clip, the lane that owns it and the live drag.
+;; A rack lane's :lane-key is (rack-lane-key g), below every track index, so
+;; the track lanes' shared selection and ghosts never draw here.
+(def-kind arr-rack
+  :key ()
+  :state ((lane 0)
+          (selected -1)
+          (drag :any :default nil)))
+
+;; One rack lane's drawn ghost and region highlight, keyed by group id: its
+;; own clip drags (ghost 1-3, `clip` at `time`), a region sweep or move over
+;; its row (ghost 4/5 over `ghost-a`..`ghost-b`, shifted by `time`), and the
+;; committed region when it covers the row (`region-on`, `region-a`..`b`).
+(def-kind arr-rack-lane
+  :key (gid)
+  :state ((ghost 0)
+          (clip -1)
+          (time -1)
+          (ghost-a 0)
+          (ghost-b 0)
+          (region-on false)
+          (region-a 0)
+          (region-b 0)))
+
+;; A rack row's context menu: its rack, the rack-lane clip under the pointer
+;; (nil: empty lane) and the beats it opened at (raw and bar-snapped).
+(def-kind arr-rack-menu
+  :key ()
+  :state ((open false)
+          (at :point :default nil)
+          (group group :default nil)
+          (clip :any :default nil)
+          (time 0)
+          (snapped 0)))
 
 ;; Pattern placement is a sticky mode: it stays active across clicks until
 ;; Place (or Command-P) toggles it off, Escape cancels it, or the track list
@@ -245,6 +285,7 @@
 (def deselect-clips! ()
   (set! arr-select.clips '())
   (set! arr-select.rack-item nil)
+  (set! arr-rack.selected -1)
   (select-lane-clip! -1 -1))
 
 (def clear-ghost! ()
@@ -261,23 +302,47 @@
 
 (def clear-region-ghost! ()
   (set! arr-drag.region nil)
-  (clear-ghost!))
+  (clear-ghost!)
+  (each (clip-racks) |g|
+    (let ((h (rack-lane-state g)))
+      (when (>= h.ghost 4) (set! h.ghost 0)))))
 
 ;; The region the pointer sweeps (nil: none), drawn as a ghost rect over the
 ;; lanes it spans: 4 for a marquee sweep, 5 for a region move, whose `delta`
-;; shifts the region and the clips it covers.
+;; shifts the region and the clips it covers. Its ends are row keys
+;; (`:row-a`, `:row-b`), so it can start or end on a rack row; the track
+;; lanes draw the tracks between them and each rack lane in between mirrors
+;; the same ghost.
 (def ghost-region! (region kind delta)
   (if (= region nil)
     (clear-region-ghost!)
     (let ((start (get region :start))
-          (end (get region :end)))
+          (end (get region :end))
+          (top (min (get region :row-a) (get region :row-b)))
+          (bottom (max (get region :row-a) (get region :row-b))))
       (set! arr-drag.region (merge region :start (+ start delta) :end (+ end delta)))
-      (set! arr-drag.lane-a (get region :track-a))
-      (set! arr-drag.lane-b (get region :track-b))
+      ;; A rack row sits above its first member's row, so a region ending on
+      ;; one stops at the track before it. A region on rack rows alone covers
+      ;; no track: -1/-1 (as region-lane-a/-b), which no track lane owns.
+      (let ((lane-a (row-key-track top))
+            (lane-b (- (row-key-track bottom) (if (row-key-rack? bottom) 1 0)))
+            (tracks? (<= lane-a lane-b)))
+        (set! arr-drag.lane-a (if tracks? lane-a -1))
+        (set! arr-drag.lane-b (if tracks? lane-b -1)))
       (set! arr-drag.region-a start)
       (set! arr-drag.region-b end)
       (set! arr-drag.time delta)
-      (set! arr-drag.ghost kind))))
+      (set! arr-drag.ghost kind)
+      (each (clip-racks) |g|
+        (let ((h (rack-lane-state g))
+              (k (rack-row-key g)))
+          (if (and (<= top k) (<= k bottom))
+            (do
+              (set! h.ghost-a start)
+              (set! h.ghost-b end)
+              (set! h.time delta)
+              (set! h.ghost kind))
+            (when (>= h.ghost 4) (set! h.ghost 0))))))))
 
 ;; ── Shared time axis (spec 5.1) ────────────────────────────────────────────
 
@@ -448,9 +513,15 @@
 (def fold-clips (f init)
   (reduce |acc t| (reduce f acc t.clips) init (tracks)))
 
-;; The furthest beat any stored clip runs to (0 when the lanes are empty).
+;; f folded over every committed rack-lane clip's start and end, from init.
+(def fold-rack-spans (f init)
+  (reduce |acc g| (reduce |acc c| (f acc (get c :start) (get c :end)) acc g.arr-clips)
+    init (clip-racks)))
+
+;; The furthest beat any stored clip, track or rack lane, runs to (0 when the
+;; lanes are empty).
 (def last-clip-end ()
-  (fold-clips |acc c| (max acc c.end) 0))
+  (fold-rack-spans |acc start end| (max acc end) (fold-clips |acc c| (max acc c.end) 0)))
 
 ;; App::arr_set_end rejects an end AT or before the last scene change, and an
 ;; end before the last clip's end (spec 9.3). The clamp has to stay strictly
@@ -792,34 +863,57 @@
 ;; VERTICAL TRAVEL (`:row-delta`, cells, signed and unclamped) and the host
 ;; reconstructs the track span from it (spec 4.2).
 
-;; The far end of a region drag that started in track `i`: convert the
-;; vertical travel to a count of track rows, step that many places through the
-;; visible order, and map back to a model index. Collapsed tracks are simply
-;; absent from that order, so a region drag always spans visible tracks, and
-;; one that runs off the top or bottom selects out to the edge.
-(def region-other-track (i row-delta)
-  (let ((visible (arr-visible-track-indices))
-        (ordinal (index-of visible i)))
-    (if (< ordinal 0)
-      i
-      (let ((rows (round (/ (or row-delta 0) track-row-pitch))))
-        (nth visible (max 0 (min (- (len visible) 1) (+ ordinal rows))))))))
+;; A region's ends are ROWS of the track list, each one number in top-to-
+;; bottom order (docs/arrangement-rack-lanes-spec.md §5): 2i+1 for track i's
+;; row, 2m for the rack row drawn above its rack's first member m.
+(def track-row-key (i) (+ (* 2 i) 1))
+(def rack-row-key (g) (* 2 (rack-first-member g)))
+(def row-key-track (k) (floor (/ k 2)))
+(def row-key-rack? (k) (= k (* 2 (row-key-track k))))
 
-(def region-from-event (i event)
+;; The visible rows' keys, top to bottom.
+(def arr-row-keys ()
+  (map |item|
+      (let ((g (get item :rack)))
+        (if (= g nil) (track-row-key (get item :track)) (rack-row-key g)))
+    (arr-row-items)))
+
+;; The far end of a region drag that started on row `key`: convert the
+;; vertical travel to a count of rows, step that many places through the
+;; visible rows, and return that row's key. Collapsed tracks are simply
+;; absent from that order, so a region drag always spans visible rows, and
+;; one that runs off the top or bottom selects out to the edge.
+(def region-other-row (key row-delta)
+  (let ((rows (arr-row-keys))
+        (ordinal (index-of rows key)))
+    (if (< ordinal 0)
+      key
+      (let ((steps (round (/ (or row-delta 0) track-row-pitch))))
+        (nth rows (max 0 (min (- (len rows) 1) (+ ordinal steps))))))))
+
+;; region-other-row from track i's row, as the track it lands on (a rack
+;; row answers its first member).
+(def region-other-track (i row-delta)
+  (row-key-track (region-other-row (track-row-key i) row-delta)))
+
+(def region-from-row (key event)
   (dict
-    :track-a i
-    :track-b (region-other-track i (get event :row-delta))
+    :row-a key
+    :row-b (region-other-row key (get event :row-delta))
     :start (get event :time-a)
     :end (get event :time-b)))
 
-;; The region from `start` to `end` over every visible track (nil when none
-;; is visible).
+(def region-from-event (i event)
+  (region-from-row (track-row-key i) event))
+
+;; The region from `start` to `end` over every visible row (nil when none is
+;; visible).
 (def visible-region (start end scene-lane)
-  (let ((visible (arr-visible-track-indices)))
-    (unless (empty? visible)
+  (let ((rows (arr-row-keys)))
+    (unless (empty? rows)
       (dict
-        :track-a (first visible)
-        :track-b (nth visible (- (len visible) 1))
+        :row-a (first rows)
+        :row-b (nth rows (- (len rows) 1))
         :start start
         :end end
         :scene-lane scene-lane))))
@@ -830,21 +924,35 @@
 (def region-all-tracks (event)
   (visible-region (get event :time-a) (get event :time-b) true))
 
-;; The committed region's first and last lanes (track positions).
-(def region-lane-a (r) (let ((t (first r.tracks))) t.index))
-(def region-lane-b (r) (let ((t (nth r.tracks (- (len r.tracks) 1)))) t.index))
+;; The committed region's first and last lanes (track positions); -1 when it
+;; spans only rack rows.
+(def region-lane-a (r) (if (empty? r.tracks) -1 (let ((t (first r.tracks))) t.index)))
+(def region-lane-b (r)
+  (if (empty? r.tracks) -1 (let ((t (nth r.tracks (- (len r.tracks) 1)))) t.index)))
+
+;; The committed region's rows, as a ghost-region! region over `start`..`end`.
+(def committed-region-rows (r)
+  (let ((keys (append (map |t| (track-row-key t.index) r.tracks)
+                (map |g| (rack-row-key g) r.racks))))
+    (dict :row-a (reduce |acc k| (min acc k) (first keys) keys)
+      :row-b (reduce |acc k| (max acc k) (first keys) keys)
+      :start r.start :end r.end :scene-lane r.scene-lane)))
 
 ;; The scene-lane bit (lane spec 8): a marquee swept in the scene lane
 ;; copies/pastes/deletes the scene EVENTS inside it as well as the clips,
 ;; which a track-lane marquee covering the same rectangle never does.
 (def region-commit (region)
   (clear-region-ghost!)
-  (let ((a (when region (track (get region :track-a))))
-        (b (when region (track (get region :track-b)))))
+  (let ((row-a (when region (get region :row-a)))
+        (row-b (when region (get region :row-b)))
+        (a (when region (track (row-key-track row-a))))
+        (b (when region (track (row-key-track row-b)))))
     (if (or (= a nil) (= b nil))
       (clear-region!)
       (select-region! a b (get region :start) (get region :end)
-        :scene-lane (= (get region :scene-lane) true)))))
+        :scene-lane (= (get region :scene-lane) true)
+        :rack-a (row-key-rack? row-a)
+        :rack-b (row-key-rack? row-b)))))
 
 ;; Clicking a clip's title bar is BOTH gestures: it binds the track's sound to
 ;; the clip AND selects the clip's span as a one-track region, so the body
@@ -863,10 +971,13 @@
 ;; is a track-lane sweep, not a scene-lane one: scene events are not clips.
 ;; Returns nil when the song holds no clips so the caller can say so.
 (def clip-span-all-tracks ()
-  (let ((hi (fold-clips |acc c| (max acc c.end) -1)))
+  (let ((hi (fold-rack-spans |acc start end| (max acc end)
+              (fold-clips |acc c| (max acc c.end) -1))))
     (unless (< hi 0)
       ;; Seeded with `hi`, so the min is a real clip start, never the seed.
-      (dict :start (max 0 (fold-clips |acc c| (min acc c.start) hi)) :end hi))))
+      (dict :start (max 0 (fold-rack-spans |acc start end| (min acc start)
+                            (fold-clips |acc c| (min acc c.start) hi)))
+        :end hi))))
 
 (def select-all-clips ()
   (let ((span (clip-span-all-tracks))
@@ -1137,13 +1248,16 @@
 ;; the published delta, clamped so the rectangle can never run before beat 0
 ;; (the primitive rejects that rather than truncating the leading clips).
 (def region-move-ghost (i c event)
+  (let ((delta (ghost-region-move! c.start (get event :start))))
+    (set! arr-drag.track (dict :kind :region-move :track i :delta delta))))
+
+;; Ghost the committed region moved by a clip dragged from `from` to `to`
+;; (never before beat 0), returning the move's delta.
+(def ghost-region-move! (from to)
   (let ((r song.region)
-        (delta (max (- 0 r.start) (- (get event :start) c.start))))
-    (set! arr-drag.track (dict :kind :region-move :track i :delta delta))
-    (ghost-region!
-      (dict :track-a (region-lane-a r) :track-b (region-lane-b r)
-        :start r.start :end r.end :scene-lane r.scene-lane)
-      5 delta)))
+        (delta (max (- 0 r.start) (- to from))))
+    (ghost-region! (committed-region-rows r) 5 delta)
+    delta))
 
 ;; Live title-bar drag: ghost only, never a primitive (spec 9.1). Vertical
 ;; travel is ignored — cross-track moves are invalid for the same per-track
@@ -1198,15 +1312,19 @@
           (clip-edit i c (dict :type :clip-move :start (get drag :start))))))))
 
 (def track-delete (i ids)
-  (deselect-clips!)
-  ;; Deleting the clip deletes what the selection pointed at: the region
-  ;; goes with it, or the highlight would stay lit over empty lane (region
-  ;; spec 4.1 — a clip selection IS its region).
-  (release-selection!)
-  (each ids |clip-id|
-    (let ((c (find-track-clip i clip-id)))
-      (unless (= c nil)
-        (clip-edit i c (dict :type :clip-delete))))))
+  (let ((member (selected-rack-member i)))
+    (if (and member (empty? (real-clip-ids i ids)))
+      (rack-member-delete i member)
+      (do
+        (deselect-clips!)
+        ;; Deleting the clip deletes what the selection pointed at: the
+        ;; region goes with it, or the highlight would stay lit over empty
+        ;; lane (region spec 4.1 — a clip selection IS its region).
+        (release-selection!)
+        (each ids |clip-id|
+          (let ((c (find-track-clip i clip-id)))
+            (unless (= c nil)
+              (clip-edit i c (dict :type :clip-delete)))))))))
 
 ;; The single-click select body, shared with :double-click-item (clip-edit
 ;; target spec 4.2: a double-click is "bind + ensure the editor is open", so
@@ -1226,6 +1344,7 @@
     (clear-region-ghost!)
     (set! arr-select.clips ids)
     (set! arr-select.rack-item nil)
+    (set! arr-rack.selected -1)
     (select-lane-clip! i (if (= c nil) -1 c.cid))
     ;; Selecting a clip is the explicit sound-binding gesture (takes spec
     ;; 16.2/16.6): it re-binds this track's device panel, monitor sound and
@@ -1332,7 +1451,8 @@
     :finish-resize-items nil
     :move-items-absolute nil
     :finish-move-items nil
-    :delete-items nil
+    :delete-items
+    (rack-member-delete i item)
     _
     (track-lane-action i event)))
 
@@ -1579,7 +1699,15 @@
                 (do
                   (set! arr-pattern-menu.open false)
                   (when (listed? t (tracks))
-                    (make-own-clip t.index item))))))
+                    (make-own-clip t.index item))))
+            ;; The item is the rack-lane clip's span: deleting it deletes
+            ;; that clip for every pad.
+            (menu-item "Delete Rack Clip" :key "arr-rack-member-delete"
+              :on-select |event|
+                (do
+                  (set! arr-pattern-menu.open false)
+                  (when (listed? t (tracks))
+                    (rack-member-delete t.index item))))))
       (if (not (= c nil))
         (list
           (menu-item "Change Pattern" :key "arr-change-pattern"
@@ -1724,6 +1852,7 @@
     :double-click-items true
     :item-label-font-size clip-label-font-size
     :item-label-color clip-label-color
+    :item-content-color clip-label-color
     :item-corner-radius clip-corner-radius
     :sidebar-width 0
     :header-height 0
@@ -1816,10 +1945,19 @@
   (let ((g (when t t.group)))
     (when (clip-rack? g) g)))
 
-;; Whether track t is the lowest-positioned member of its clip-bearing rack:
-;; the rack row is drawn just above it.
+;; The lowest-positioned member of clip-bearing rack g: the rack row is drawn
+;; just above it.
+(def rack-first-member (g)
+  (reduce |acc m| (min acc m.index) (let ((m (first g.tracks))) m.index) g.tracks))
+
 (def first-rack-member? (t g)
-  (= t.index (reduce |acc m| (min acc m.index) t.index g.tracks)))
+  (= t.index (rack-first-member g)))
+
+;; The clip-bearing racks with members: the racks with a rack row.
+(def clip-racks ()
+  (filter |g| (and (clip-rack? g) (not (empty? g.tracks))) (groups)))
+
+(def rack-lane-state (g) (arr-rack-lane g.gid))
 
 ;; The arrangement's visible tracks: the collapse-aware order, less the
 ;; members of a collapsed clip-bearing rack (its rack row stands for them).
@@ -1876,9 +2014,10 @@
 
 ;; A rack row's items: one per rack-lane clip, labelled with its rack clip
 ;; and drawn as a ring summary (one ring per member, a tick per hit) rather
-;; than notes. The clip owns no pattern data of its own. Provisional clips of
-;; a running capture follow; they carry no :cid, so no :id (inert, like
-;; every pending item).
+;; than notes. The clip owns no pattern data of its own. Committed clips are
+;; addressed by :cid (rack-lane-action); provisional clips of a running
+;; capture follow and carry no :cid, so no :id (inert, like every pending
+;; item).
 (def rack-lane-items (g)
   (map |span|
       (let ((c (get span :clip)))
@@ -1974,6 +2113,19 @@
   (set-cursor (get item :start) i)
   item)
 
+;; Lane i's selected rack member item, or nil.
+(def selected-rack-member (i)
+  (let ((id arr-select.rack-item))
+    (unless (= id nil)
+      (first (filter |item| (= (get item :id) id) (committed-rack-member-items i))))))
+
+;; Deleting a rack member item deletes the rack-lane clip it shows: the item
+;; is that clip's span seen from one pad, and the rack row owns the span.
+(def rack-member-delete (i item)
+  (deselect-clips!)
+  (release-selection!)
+  (rack-edit (dict :type :rack-clip-delete :clip-id (get item :rack-cid))))
+
 ;; Copy a rack member item onto the member's own lane as a pattern clip at
 ;; the same phase: an override (spec §2.1) that wins over the rack lane
 ;; there and edits like any track clip.
@@ -1981,34 +2133,274 @@
   (seq-arrangement-clip-create i (get item :start) (get item :end)
     (get item :pid) (get item :offset-steps)))
 
+;; ── Rack-row gestures (spec §5) ────────────────────────────────────────────
+;; One rack-lane clip at a time: a click selects it, a title-bar drag moves
+;; it (anchor and all, so it plays the same music elsewhere), an edge drag
+;; trims or extends it (the anchor stays, so the surviving part keeps its
+;; phase), Backspace deletes it, and the context menu changes its rack clip,
+;; splits, duplicates or deletes it, or inserts a rack clip on empty lane.
+
+(def rack-lane-key (g) (- -2 g.gid))
+
+;; Rack g's committed rack-lane clip with cid `cid`, or nil.
+(def find-rack-clip (g cid)
+  (first (filter |c| (= (get c :cid) cid) g.arr-clips)))
+
+(def rack-clip-at (g beat)
+  (first (filter |c| (and (<= (get c :start) beat) (> (get c :end) beat)) g.arr-clips)))
+
+(def rack-edit (payload)
+  (edit-finish payload))
+
+;; Rack g's row alone over `start`..`end`, as a region.
+(def rack-row-region (g start end)
+  (let ((k (rack-row-key g)))
+    (dict :row-a k :row-b k :start start :end end)))
+
+;; A selected rack-lane clip is also a one-clip region on the rack row (like
+;; a track clip, region spec 4.1), so copy, paste, duplicate and region
+;; moves have a target; a click on empty lane drops the region.
+(def rack-select (g event)
+  (let ((c (first (filter |c| (not (= c nil))
+                    (map |id| (find-rack-clip g id) (or (get event :ids) '()))))))
+    (set! arr-select.scenes '())
+    (set! arr-select.rect nil)
+    (clear-region-ghost!)
+    (deselect-clips!)
+    (if (= c nil)
+      (release-selection!)
+      (do
+        (set! song.bound-clip nil)
+        (region-commit (rack-row-region g (get c :start) (get c :end)))))
+    (set! arr-rack.lane (rack-lane-key g))
+    (set! arr-rack.selected (if (= c nil) -1 (get c :cid)))
+    (set-cursor (if (= c nil) (get event :time) (get c :start)) -1)))
+
+(def rack-ghost! (g kind cid time)
+  (let ((h (rack-lane-state g)))
+    (set! h.clip cid)
+    (set! h.time time)
+    (set! h.ghost kind)))
+
+(def rack-clear-ghost! ()
+  (set! arr-rack.drag nil)
+  (each (clip-racks) |g|
+    (let ((h (rack-lane-state g)))
+      (unless (= h.ghost 0) (set! h.ghost 0)))))
+
+;; Does the committed region cover rack g's row and reach beyond clip c —
+;; another row, or more time? Then a title-bar drag of c moves the region.
+(def rack-drags-region? (g c)
+  (let ((r song.region))
+    (and (not (= r nil))
+      (listed? g r.racks)
+      (> (get c :end) r.start)
+      (< (get c :start) r.end)
+      (or (not (empty? r.tracks))
+        (> (len r.racks) 1)
+        (< r.start (get c :start))
+        (> r.end (get c :end))))))
+
+(def rack-move-ghost (g event)
+  (let ((c (find-rack-clip g (get event :anchor-id)))
+        (start (max 0 (get event :start))))
+    (cond
+      ((= c nil)
+       (rack-clear-ghost!))
+      ((rack-drags-region? g c)
+       (let ((delta (ghost-region-move! (get c :start) start)))
+         (set! arr-rack.drag (dict :gid g.gid :kind :region-move :delta delta))))
+      (else
+       (set! arr-rack.drag (dict :gid g.gid :kind :move :cid (get c :cid) :start start))
+       (rack-ghost! g 1 (get c :cid) start)))))
+
+(def rack-resize-ghost (g event)
+  (let ((c (find-rack-clip g (get event :id)))
+        (edge (if (= (get event :edge) :start) :start :end)))
+    (if (= c nil)
+      (rack-clear-ghost!)
+      (do
+        (set! arr-rack.drag
+          (dict :gid g.gid :kind :resize :cid (get c :cid) :edge edge :time (get event :time)))
+        (rack-ghost! g (if (= edge :start) 2 3) (get c :cid) (get event :time))))))
+
+;; The selected rack clip's one-clip region, moved to its new span after an
+;; edit (the host keeps the region where it was).
+(def rack-region-follow! (g cid start end)
+  (when (= arr-rack.selected cid)
+    (region-commit (rack-row-region g start end))))
+
+;; Release: commit the live drag when it is this rack's, then drop the ghost.
+(def rack-drag-finish (g)
+  (let ((drag arr-rack.drag)
+        (mine (and drag (= (get drag :gid) g.gid)))
+        (c (when (and mine (not (= (get drag :kind) :region-move)))
+             (find-rack-clip g (get drag :cid)))))
+    (rack-clear-ghost!)
+    (when (and mine (= (get drag :kind) :region-move))
+      (clear-region-ghost!)
+      (unless (= (get drag :delta) 0)
+        (edit-finish (dict :type :region-move :delta (get drag :delta)))))
+    (unless (= c nil)
+      (let ((cid (get c :cid))
+            (start (get c :start))
+            (end (get c :end)))
+        (if (= (get drag :kind) :move)
+          (let ((new-start (get drag :start)))
+            (unless (= new-start start)
+              (rack-edit (dict :type :rack-clip-move :clip-id cid :start new-start))
+              (rack-region-follow! g cid new-start (+ new-start (- end start)))))
+          (let ((time (get drag :time))
+                (new-start (if (= (get drag :edge) :start) (max 0 time) start))
+                (new-end (if (= (get drag :edge) :start) end (max 0 time))))
+            (unless (and (= new-start start) (= new-end end))
+              (if (>= new-start new-end)
+                (rack-delete g (list cid))
+                (do
+                  (rack-edit (dict :type :rack-clip-resize :clip-id cid
+                               :start new-start :end new-end))
+                  (rack-region-follow! g cid new-start new-end))))))))))
+
+(def rack-delete (g ids)
+  ;; The region was the deleted clip's footprint (region spec 4.1).
+  (when (listed? arr-rack.selected ids) (drop-region!))
+  (set! arr-rack.selected -1)
+  (each ids |id|
+    (unless (= (find-rack-clip g id) nil)
+      (rack-edit (dict :type :rack-clip-delete :clip-id id)))))
+
+(def rack-lane-action (g event)
+  (if (view-action? event)
+    (view-action event)
+    (match event.type
+      :select (rack-select g event)
+      :clear-selection (rack-select g (dict :ids '() :time (get event :time)))
+      :move-items-absolute (rack-move-ghost g event)
+      :finish-move-items (rack-drag-finish g)
+      :resize-item-absolute (rack-resize-ghost g event)
+      :finish-resize-items (rack-drag-finish g)
+      :delete-items (rack-delete g (or (get event :ids) '()))
+      ;; Region sweep and clipboard (region spec 4.2/5.3): the same region
+      ;; primitives as the track lanes, from this rack's row.
+      :marquee-select (ghost-region! (region-from-row (rack-row-key g) event) 4 0)
+      :finish-marquee-select (region-commit (region-from-row (rack-row-key g) event))
+      :copy-items (seq-song-region-copy)
+      :paste-items (seq-song-region-paste (get event :time))
+      _ nil)))
+
+(def open-rack-menu (g event)
+  (set! arr-scene-menu.open false)
+  (set! arr-pattern-menu.open false)
+  (let ((at (pointer-time event)))
+    (set! arr-rack-menu.group g)
+    (set! arr-rack-menu.clip (rack-clip-at g at))
+    (set! arr-rack-menu.time at)
+    (set! arr-rack-menu.snapped (drop-time event))
+    (open-menu! arr-rack-menu event)))
+
+(def rack-menu-do (payload)
+  (set! arr-rack-menu.open false)
+  (rack-edit payload))
+
+;; The beat a split from the menu cuts at: the bar under the pointer, else
+;; the pointer itself when that bar line is the clip's own start.
+(def rack-split-beat (c)
+  (let ((snapped arr-rack-menu.snapped))
+    (if (> snapped (get c :start)) snapped arr-rack-menu.time)))
+
+(def rack-context-menu ()
+  (let ((g arr-rack-menu.group)
+        (c arr-rack-menu.clip)
+        (bank (if (= g nil) '() g.clips)))
+    (apply menu-of arr-rack-menu
+      (if (= c nil)
+        (list
+          (menu-item "Insert Clip Here" :key "arr-rack-insert" :disabled (empty? bank)
+            (each bank |rc|
+              (menu-item rc.name :key (str "arr-rack-insert-" rc.cid)
+                :on-select |event|
+                  (rack-menu-do (dict :type :rack-clip-place :group g.gid
+                                  :rack-clip rc.cid :start arr-rack-menu.snapped))))))
+        (let ((cid (get c :cid)))
+          (list
+            (menu-item "Change Clip" :key "arr-rack-change"
+              (each bank |rc|
+                (menu-item rc.name :key (str "arr-rack-change-" rc.cid)
+                  :checked (= rc.cid (get c :rack-clip))
+                  :on-select |event|
+                    (rack-menu-do (dict :type :rack-clip-set :clip-id cid :rack-clip rc.cid)))))
+            (menu-item "Split Here" :key "arr-rack-split"
+              :disabled (let ((beat (rack-split-beat c)))
+                          (not (and (< (get c :start) beat) (< beat (get c :end)))))
+              :on-select |event|
+                (rack-menu-do (dict :type :rack-clip-split :clip-id cid
+                                :beat (rack-split-beat c))))
+            (menu-item "Duplicate" :key "arr-rack-duplicate"
+              :on-select |event| (rack-menu-do (dict :type :rack-clip-duplicate :clip-id cid)))
+            (menu-item "Delete" :key "arr-rack-delete"
+              :on-select |event|
+                (do
+                  (set! arr-rack-menu.open false)
+                  (rack-delete g (list cid))))))))))
+
 (def rack-lane (g top?)
-  (timeline
-    :key (str "rack-lane-" g.gid)
-    :border-top-color (if top? lane-border-top-color :transparent)
-    :border-bottom-color lane-border-bottom-color
-    :border-width lane-border-width
-    :width 0 :flex 1
-    :height track-lane-height
-    :scroll-passthrough :vertical
-    :background-color timeline-background-color
-    :title-bar-height clip-title-bar-height
-    :item-label-font-size clip-label-font-size
-    :item-label-color clip-label-color
-    :item-corner-radius clip-corner-radius
-    :sidebar-width 0
-    :header-height 0
-    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
-    :grid-density grid-density
-    :playhead-time #'song.position
-    :items (rack-lane-items g)
-    :view-start #'arr-view.start
-    :view-duration #'arr-view.duration
-    :zoom-min-duration min-view-duration
-    :zoom-max-duration max-view-duration
-    :content-length #'arr-view.content-length
-    :lane-scroll 0
-    :scroll-mode :smooth
-    :on-action |event| (when (view-action? event) (view-action event))))
+  (let ((h (rack-lane-state g)))
+    (timeline
+      :key (str "rack-lane-" g.gid)
+      :border-top-color (if top? lane-border-top-color :transparent)
+      :border-bottom-color lane-border-bottom-color
+      :border-width lane-border-width
+      :width 0 :flex 1
+      :height track-lane-height
+      :scroll-passthrough :vertical
+      :background-color timeline-background-color
+      :title-bar-height clip-title-bar-height
+      :item-label-font-size clip-label-font-size
+      :item-label-color clip-label-color
+      :item-content-color clip-label-color
+      :item-corner-radius clip-corner-radius
+      :sidebar-width 0
+      :header-height 0
+      :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+      :grid-density grid-density
+      :focusable true
+      :playhead-time #'song.position
+      :lane-key (rack-lane-key g)
+      :items (rack-lane-items g)
+      :selected-id #'arr-rack.selected
+      :selected-lane #'arr-rack.lane
+      ;; This lane's own ghost and region highlight (arr-rack-lane), so the
+      ;; lane-range props name just this lane.
+      :ghost-kind #'h.ghost
+      :ghost-id #'h.clip
+      :ghost-time #'h.time
+      :ghost-region-a #'h.ghost-a
+      :ghost-region-b #'h.ghost-b
+      :ghost-lane-a (rack-lane-key g)
+      :ghost-lane-b (rack-lane-key g)
+      :region-a #'h.region-a
+      :region-b #'h.region-b
+      :region-on #'h.region-on
+      :region-lane-a (rack-lane-key g)
+      :region-lane-b (rack-lane-key g)
+      :selection-rect-style :region
+      :on-right-click |event| (open-rack-menu g event)
+      :view-start #'arr-view.start
+      :view-duration #'arr-view.duration
+      :zoom-min-duration min-view-duration
+      :zoom-max-duration max-view-duration
+      :content-length #'arr-view.content-length
+      :lane-scroll 0
+      ;; Snapping as on the track lanes.
+      :snap snap
+      :min-duration 1
+      :resize-snap :grid
+      :marquee-snap :grid
+      :snap-mode :floor
+      :move-snap-mode :alignment-helper
+      :resize-snap-mode :alignment-helper
+      :scroll-mode :smooth
+      :on-action |event| (rack-lane-action g event))))
 
 (def rack-header (g)
   (let ((c g.color))
@@ -2117,12 +2509,32 @@
         (region-on (and (not (= r nil)) (not (empty? r.tracks)))))
     (set! arr-lanes.bound-lane (if (= c nil) -1 c.track.index))
     (set! arr-lanes.bound-clip (if (= c nil) -1 c.cid))
+    ;; The host's bound rack member: a selection the host drops (undo, a
+    ;; deleted rack clip, a project load) unlights its item too.
+    (let ((item song.bound-rack-item))
+      (set! arr-select.rack-item (if (= item "") nil item)))
     (when region-on
       (set! arr-lanes.region-lane-a (region-lane-a r))
       (set! arr-lanes.region-lane-b (region-lane-b r))
       (set! arr-lanes.region-a r.start)
       (set! arr-lanes.region-b r.end))
-    (set! arr-lanes.region-on region-on)))
+    (set! arr-lanes.region-on region-on)
+    (each (clip-racks) |g|
+      (let ((h (rack-lane-state g))
+            (on (and (not (= r nil)) (listed? g r.racks))))
+        (when on
+          (set! h.region-a r.start)
+          (set! h.region-b r.end))
+        (set! h.region-on on)))))
+
+;; Test/introspection surface: the region rect rack g's lane currently
+;; renders (the in-flight ghost wins over the committed region), or nil.
+(def rack-lane-region (g)
+  (let ((h (rack-lane-state g)))
+    (if (>= h.ghost 4)
+      (dict :time-a (+ h.ghost-a (if (>= h.ghost 5) h.time 0))
+        :time-b (+ h.ghost-b (if (>= h.ghost 5) h.time 0)))
+      (when h.region-on (dict :time-a h.region-a :time-b h.region-b)))))
 
 (def new-track-drop-zone ()
   ;; Keep a useful minimum drop target; the adjacent grid absorbs the rest
@@ -2168,6 +2580,8 @@
       (scene-context-menu))
     (subtree :key "arr-placement-context-menu"
       (pattern-context-menu))
+    (subtree :key "arr-rack-context-menu"
+      (rack-context-menu))
     (subtree :key "arr-error-banner"
       (error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the

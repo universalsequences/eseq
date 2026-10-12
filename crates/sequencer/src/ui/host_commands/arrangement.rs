@@ -34,7 +34,7 @@ use super::track_settings::{command_track, value_id, SetValue};
 use crate::*;
 use sequencer::app::arr_edit::ArrangementDragTargets;
 use sequencer::app::history::MergeKey;
-use sequencer::app::song_region::SongRegionSelection;
+use sequencer::app::song_region::{RegionRow, SongRegionSelection};
 use sequencer::sequencer::{ArrClip, ClipId, LaneSource, PatternId, TrackId};
 use std::collections::HashMap;
 
@@ -281,7 +281,13 @@ fn set_region(app: &mut app::App, payload: &Value) -> Result<(), String> {
     let end = SetValue::of(map, "end", "region end").from(0.0)?;
     // Optional: nil (or absent) is false.
     let scene_lane = SetValue::of(map, "scene-lane", "scene-lane").flag_or(false)?;
-    let region = SongRegionSelection::new_in_lane(tracks[0], tracks[1], start, end, scene_lane);
+    // Either end can be the rack row drawn above that track (its rack's
+    // first member) instead of the track's own row.
+    let rack_a = SetValue::of(map, "rack-a", "rack-a").flag_or(false)?;
+    let rack_b = SetValue::of(map, "rack-b", "rack-b").flag_or(false)?;
+    let row = |track, rack| RegionRow { track, rack };
+    let (a, b) = (row(tracks[0], rack_a), row(tracks[1], rack_b));
+    let region = SongRegionSelection::new_rows(a, b, start, end, scene_lane);
     app.set_song_region(region);
     Ok(())
 }

@@ -130,7 +130,7 @@ pub struct ProjectSongRow {
     /// explicitly silent rack. A clip-bearing rack absent here composes through
     /// the row scene's own pointer, the way a scene launch does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rack_clips: Vec<(u64, Option<u64>)>,
+    pub rack_clips: Vec<(u64, Option<RackClipId>)>,
 }
 
 /// The committed song: rows ordered by `start_beat`, an explicit end
@@ -369,7 +369,12 @@ impl ProjectSong {
             }
         }
         for (idx, pair) in self.rows.windows(2).enumerate() {
-            if pair[0].scene == pair[1].scene && pair[0].overrides == pair[1].overrides {
+            // The same rule `normalize` folds by: rows that differ only in
+            // their rack clips are distinct states.
+            if pair[0].scene == pair[1].scene
+                && pair[0].overrides == pair[1].overrides
+                && pair[0].rack_clips == pair[1].rack_clips
+            {
                 return Err(format!(
                     "Song rows {} and {} contain identical launch states; \
                      normalization removes the redundant later row",
@@ -847,6 +852,19 @@ mod tests {
         song.rows[1].overrides = vec![over(1, 2)];
         let err = song.validate(&ctx()).unwrap_err();
         assert!(err.contains("identical launch states"), "{err}");
+    }
+
+    #[test]
+    fn rows_that_differ_only_in_rack_clips_are_distinct() {
+        let mut song = valid_song();
+        song.rows[1].scene = Some(0);
+        song.rows[1].overrides = vec![over(1, 2)];
+        song.rows[0].rack_clips = vec![(7, Some(1))];
+        song.rows[1].rack_clips = vec![(7, None)];
+        song.validate(&ctx()).expect("a rack clip change is a launch state change");
+        let rows = song.rows.len();
+        song.normalize();
+        assert_eq!(song.rows.len(), rows, "normalize keeps both too");
     }
 
     #[test]

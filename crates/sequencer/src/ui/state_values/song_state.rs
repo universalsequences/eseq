@@ -5,7 +5,7 @@
 
 use super::*;
 
-use sequencer::sequencer::{ArrClip, ProjectScenes, StepParam};
+use sequencer::sequencer::{ArrClip, ProjectScenes, RackClipId, StepParam};
 
 /// Display grain of the record head (spec 3.3): the head advances every
 /// frame, so it is floored to this grid before it can force a publish. A
@@ -90,7 +90,7 @@ pub(crate) struct PendingContent {
     pub(crate) track_events: Vec<PendingTrackEventContent>,
     /// (start beat, group id, rack clip) per rack lane a captured scene
     /// launch claimed (`PendingCapture::rack_events`).
-    pub(crate) rack_events: Vec<(f64, u64, Option<u64>)>,
+    pub(crate) rack_events: Vec<(f64, u64, Option<RackClipId>)>,
 }
 
 /// The record head while a capture take exists, floored to
@@ -302,7 +302,7 @@ pub(crate) fn arrangement_pattern_preview(
         pattern_id: id.0,
         take_id: None,
         num_steps,
-        length_beats: data.track_params.timebase.step_beats(num_steps) * num_steps as f64,
+        length_beats: data.track_params.timebase.cycle_beats(num_steps),
         events,
     })
 }

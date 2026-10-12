@@ -1,6 +1,6 @@
 # Arrangement Rack Lanes
 
-Rev 3 — 2026-10-11. Status: phases 1, 2 and 4 (§2–4, §6) BUILT, plus live capture and member rows (§6); phase 3 (§5 editing) open. Epic: eseq-qkv0.
+Rev 5 — 2026-10-11. Status: phases 1–4 BUILT (§2–6), region ops over rack lanes BUILT (eseq-qkv0.7). Epic: eseq-qkv0.
 
 Answers the open question in `docs/rack-clips-and-break-kits-spec.md` §10
 ("Do rack clips want their own arrangement lane?"). Rev 1 of that spec said
@@ -169,6 +169,43 @@ Revisit with `eseq-d398` (rack clip follow-ups).
 - Rack-lane clips get the region ops track clips have: move, trim, split,
   delete, duplicate, and "change clip" (a menu listing the rack's bank, like
   Change Scene).
+- **Built (rev 4, eseq-qkv0.3):**
+  - **Place Scene Patterns:** `stamp_scene_clips` stamps one rack-lane clip per scene span from the
+    scene's pointer (`SongCompileContext::song_scene_rack_clips`), anchored
+    at 0. It clears the members' own lanes over the span and never stamps
+    them, since a member clip would override the rack lane.
+  - **Edit ops:** move (the anchor moves with the clip), resize (the anchor
+    stays), split, duplicate (the copy continues the phase), change clip,
+    delete, and place (one loop, anchored at its start) are `App::arr_rack_clip_*`, lowered from
+    `:rack-clip-*` arrangement actions.
+  - **Rack row gestures:** the rack row has its own selection and ghost
+    state (`arr-rack`, lane key `-2 - gid`), a title-bar drag, edge drags,
+    Backspace, and a context menu (Change Clip, Split Here, Duplicate,
+    Delete; Insert Clip Here on empty lane).
+  - **Song end:** `arr_set_end` counts rack-lane clip ends.
+- **Built (rev 5, eseq-qkv0.7): region ops.**
+  - **Rows:** a region's ends are rows, and a rack row sits just above its
+    rack's first member. `SongRegionSelection` stores this as `rack_a` and
+    `rack_b`: the end is the rack row above `track_a`/`track_b`
+    (`RegionRow`). The view keys rows as one number: `2i+1` for track `i`,
+    `2m` for the rack row above first member `m`. A marquee steps through
+    track rows and rack rows alike. `select-region!` takes `:rack-a` and
+    `:rack-b`, and `song.region.racks` lists the racks whose rows it covers.
+  - **Ops:** copy, paste, move, delete and duplicate carry the rack lane of
+    every covered rack row (`RackClipboardSpan`). The anchor is copied
+    relative to the region start, so pasted, moved and duplicated music
+    keeps its phase. A paste skips a rack whose bank is gone, and rack clips
+    deleted since the copy.
+  - **Collapsed rack:** its row stands for its hidden members. They are in
+    the region exactly when the row is.
+  - **Selection:** clicking a rack-lane clip selects it as a one-clip region
+    on its rack row. Dragging it inside a larger region moves the region.
+    Cmd+A spans every row over all track and rack clips, and Backspace then
+    clears both.
+  - **Member items:** Backspace on a rack member item, or "Delete Rack Clip"
+    in its menu, deletes the rack-lane clip it shows.
+  - **Lane state:** each rack lane draws its own ghost and region highlight
+    from `arr-rack-lane` (keyed by group id).
 - `append_scene_stamped_track_lane` (new track) is unaffected. A rack that
   gains a clip bank (first clip created) gets an empty rack lane, and a rack
   that is deleted drops its lane (recorded, undoable).

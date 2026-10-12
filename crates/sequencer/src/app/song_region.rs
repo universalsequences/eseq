@@ -11,13 +11,41 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::sequencer::{
-    insert_clip_sorted, occlude_span, restamped_clip, ArrClip, ClipId, LaneSource,
-    ProjectArrangement, ProjectScenes, TakeId, TrackPatternData,
+    insert_clip_sorted, insert_rack_clip_sorted, occlude_rack_span, occlude_span, restamped_clip,
+    ArrClip, ClipId, LaneSource, ProjectArrangement, ProjectScenes, RackArrClip, RackClipId,
+    TakeId, TrackPatternData,
 };
 
 use super::edit::finish_active_gesture;
 use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 use super::App;
+
+/// One end of a region's row span: a track's row, or the rack row drawn
+/// just above a clip-bearing rack's first member
+/// (docs/arrangement-rack-lanes-spec.md §5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegionRow {
+    pub track: usize,
+    /// The rack row above `track` rather than `track`'s own row.
+    pub rack: bool,
+}
+
+impl RegionRow {
+    pub fn track(track: usize) -> Self {
+        Self { track, rack: false }
+    }
+
+    /// The rack row of the rack whose first member is `first_member`.
+    pub fn rack(first_member: usize) -> Self {
+        Self { track: first_member, rack: true }
+    }
+
+    /// Top-to-bottom row order: a rack row sorts just before its first
+    /// member's row.
+    fn order(self) -> (usize, bool) {
+        (self.track, !self.rack)
+    }
+}
 
 /// A committed region selection. Track indices are MODEL indices and both
 /// ends are inclusive; the beat span is half-open `[start_beat, end_beat)`,
@@ -35,6 +63,12 @@ pub struct SongRegionSelection {
     /// scene EVENTS as well as the clips. A track-lane marquee, even one that
     /// happens to cover every track, never touches the scene lane.
     pub scene_lane: bool,
+    /// The top end is the rack row above `track_a` (`RegionRow::rack`), not
+    /// `track_a`'s own row.
+    pub rack_a: bool,
+    /// The bottom end is the rack row above `track_b`, so `track_b`'s own
+    /// row is NOT in the region.
+    pub rack_b: bool,
 }
 
 impl SongRegionSelection {
@@ -52,12 +86,28 @@ impl SongRegionSelection {
         end_beat: f64,
         scene_lane: bool,
     ) -> Self {
+        let (a, b) = (RegionRow::track(track_a), RegionRow::track(track_b));
+        Self::new_rows(a, b, start_beat, end_beat, scene_lane)
+    }
+
+    /// The region between rows `a` and `b` (either order), so either end can
+    /// be a rack row.
+    pub fn new_rows(
+        a: RegionRow,
+        b: RegionRow,
+        start_beat: f64,
+        end_beat: f64,
+        scene_lane: bool,
+    ) -> Self {
+        let (top, bottom) = if a.order() <= b.order() { (a, b) } else { (b, a) };
         Self {
-            track_a: track_a.min(track_b),
-            track_b: track_a.max(track_b),
+            track_a: top.track,
+            track_b: bottom.track,
             start_beat: start_beat.min(end_beat).max(0.0),
             end_beat: start_beat.max(end_beat).max(0.0),
             scene_lane,
+            rack_a: top.rack,
+            rack_b: bottom.rack,
         }
     }
 
@@ -67,9 +117,49 @@ impl SongRegionSelection {
         self.end_beat <= self.start_beat
     }
 
-    pub fn contains_track(&self, track: usize) -> bool {
-        track >= self.track_a && track <= self.track_b
+    fn covers_row(&self, row: RegionRow) -> bool {
+        let top = RegionRow { track: self.track_a, rack: self.rack_a };
+        let bottom = RegionRow { track: self.track_b, rack: self.rack_b };
+        top.order() <= row.order() && row.order() <= bottom.order()
     }
+
+    pub fn contains_track(&self, track: usize) -> bool {
+        self.covers_row(RegionRow::track(track))
+    }
+
+    /// Whether the rack row above `first_member` is in the region.
+    pub fn contains_rack_row(&self, first_member: usize) -> bool {
+        self.covers_row(RegionRow::rack(first_member))
+    }
+}
+
+/// A clip-bearing rack as the region ops see it: its rack row sits above
+/// its first member, and a collapsed one's row stands for its hidden members.
+struct RackRow {
+    group_id: u64,
+    members: Vec<usize>,
+    collapsed: bool,
+}
+
+impl RackRow {
+    fn covered_by(&self, region: &SongRegionSelection) -> bool {
+        self.members
+            .iter()
+            .min()
+            .is_some_and(|first| region.contains_rack_row(*first))
+    }
+}
+
+/// One copied rack-lane clip span (docs/arrangement-rack-lanes-spec.md §5),
+/// relative to the copied region's start like [`ClipboardSpan`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RackClipboardSpan {
+    pub rel_start: f64,
+    pub rel_end: f64,
+    pub rack_clip: RackClipId,
+    /// The clip's phase anchor relative to the region's start (negative when
+    /// it was anchored before it), so the pasted span plays the same music.
+    pub rel_anchor: f64,
 }
 
 /// One copied clip span, in beats RELATIVE to the copied region's start
@@ -113,16 +203,26 @@ pub struct ArrangementClipboard {
     /// what the scene lane sounded like, not just its change points.
     pub scene_lane: bool,
     pub scene_events: Vec<(f64, usize)>,
+    /// Rack group id → its rack-lane spans, for every rack row the region
+    /// covered. A rack lane silent throughout still appears, so paste
+    /// silences it.
+    pub racks: Vec<(u64, Vec<RackClipboardSpan>)>,
 }
 
 impl ArrangementClipboard {
     pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty() || !(self.len_beats > 0.0)
+        (self.tracks.is_empty() && self.racks.is_empty()) || !(self.len_beats > 0.0)
     }
 
     /// Number of sounding spans, for the status line.
     pub fn span_count(&self) -> usize {
-        self.tracks.iter().map(|(_, spans)| spans.len()).sum()
+        let tracks: usize = self.tracks.iter().map(|(_, spans)| spans.len()).sum();
+        tracks + self.racks.iter().map(|(_, spans)| spans.len()).sum::<usize>()
+    }
+
+    /// Number of lanes it pastes onto (tracks and rack lanes).
+    pub fn lane_count(&self) -> usize {
+        self.tracks.len() + self.racks.len()
     }
 
     /// Floor a paste destination onto the grid the copied rectangle sat on,
@@ -165,6 +265,58 @@ fn region_snap_beats(start_beat: f64, len_beats: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Rack `group_id`'s lane clips clipped to `[start_beat, end_beat)`. The
+/// anchor is an absolute beat, so a cut fragment keeps its phase untouched.
+fn rack_clips_in(
+    arrangement: &ProjectArrangement,
+    group_id: u64,
+    start_beat: f64,
+    end_beat: f64,
+) -> impl Iterator<Item = RackArrClip> + '_ {
+    arrangement
+        .rack_lanes
+        .get(&group_id)
+        .into_iter()
+        .flatten()
+        .filter_map(move |clip| {
+            let start = clip.start_beat.max(start_beat);
+            let end = clip.end_beat.min(end_beat);
+            (end - start > 1e-9).then_some(RackArrClip { start_beat: start, end_beat: end, ..*clip })
+        })
+}
+
+/// [`App::ripple_lane_right`] for a rack lane: split the clip straddling
+/// `insert_beat`, then slide everything at or after it right by `len_beats`,
+/// anchor included, so the moved music plays as before.
+fn ripple_rack_lane_right(
+    arrangement: &mut ProjectArrangement,
+    group_id: u64,
+    insert_beat: f64,
+    len_beats: f64,
+) -> Result<(), String> {
+    let Some(lane) = arrangement.rack_lanes.get(&group_id) else {
+        return Ok(());
+    };
+    if let Some(index) = lane
+        .iter()
+        .position(|clip| clip.start_beat < insert_beat && clip.end_beat > insert_beat)
+    {
+        let id = arrangement.allocate_clip_id()?;
+        let lane = arrangement.rack_lanes.get_mut(&group_id).expect("lane checked above");
+        let tail = RackArrClip { id, start_beat: insert_beat, ..lane[index] };
+        lane[index].end_beat = insert_beat;
+        lane.insert(index + 1, tail);
+    }
+    for clip in arrangement.rack_lanes.get_mut(&group_id).into_iter().flatten() {
+        if clip.start_beat >= insert_beat {
+            clip.start_beat += len_beats;
+            clip.end_beat += len_beats;
+            clip.anchor_beat += len_beats;
+        }
+    }
+    Ok(())
+}
+
 impl App {
     /// The model tracks a region actually edits: the lanes inside the
     /// rectangle that are DRAWN.
@@ -176,9 +328,55 @@ impl App {
     /// rectangle the user saw. Editing it would trim, lift or ripple clips
     /// with no visual feedback at all, so every region op iterates this
     /// instead of `track_a..=track_b`.
+    ///
+    /// A collapsed clip-bearing rack hides its members behind its rack row,
+    /// which stands for them: they are in the region exactly when that row
+    /// is (docs/arrangement-rack-lanes-spec.md §5).
     fn region_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
-        (region.track_a..=region.track_b)
+        let racks = self.rack_rows();
+        let hidden_rack = |track: usize| {
+            racks
+                .iter()
+                .find(|rack| rack.collapsed && rack.members.contains(&track))
+        };
+        let mut tracks: Vec<usize> = (region.track_a..=region.track_b)
+            .filter(|track| region.contains_track(*track) && hidden_rack(*track).is_none())
             .filter(|track| !self.track_collapsed.get(*track).copied().unwrap_or(false))
+            .collect();
+        for rack in racks.iter().filter(|rack| rack.collapsed && rack.covered_by(region)) {
+            tracks.extend(&rack.members);
+        }
+        tracks.sort_unstable();
+        tracks.dedup();
+        tracks
+    }
+
+    /// Every clip-bearing rack: the racks the arrangement draws a rack row
+    /// for.
+    fn rack_rows(&self) -> Vec<RackRow> {
+        self.state.with_project_scenes(|scenes| {
+            scenes
+                .rack_banks()
+                .iter()
+                .filter(|bank| !bank.clips.is_empty() && !bank.members.is_empty())
+                .map(|bank| RackRow {
+                    group_id: bank.group_id,
+                    members: bank.members.clone(),
+                    collapsed: self
+                        .groups
+                        .iter()
+                        .any(|group| group.id == bank.group_id && group.collapsed),
+                })
+                .collect()
+        })
+    }
+
+    /// The racks whose rack row `region` covers, by group id.
+    pub fn region_racks(&self, region: &SongRegionSelection) -> Vec<u64> {
+        self.rack_rows()
+            .into_iter()
+            .filter(|rack| rack.covered_by(region))
+            .map(|rack| rack.group_id)
             .collect()
     }
 
@@ -276,7 +474,22 @@ impl App {
                 .collect();
             tracks.push((track, spans));
         }
-        if tracks.is_empty() {
+        let racks: Vec<(u64, Vec<RackClipboardSpan>)> = self
+            .region_racks(&region)
+            .into_iter()
+            .map(|group_id| {
+                let spans = rack_clips_in(&arrangement, group_id, start_beat, end_beat)
+                    .map(|clip| RackClipboardSpan {
+                        rel_start: clip.start_beat - start_beat,
+                        rel_end: clip.end_beat - start_beat,
+                        rack_clip: clip.rack_clip,
+                        rel_anchor: clip.anchor_beat - start_beat,
+                    })
+                    .collect();
+                (group_id, spans)
+            })
+            .collect();
+        if tracks.is_empty() && racks.is_empty() {
             return Err("The selected region covers no existing track".to_string());
         }
         let len_beats = end_beat - start_beat;
@@ -305,6 +518,7 @@ impl App {
             tracks,
             scene_lane: region.scene_lane,
             scene_events,
+            racks,
         })
     }
 
@@ -358,11 +572,11 @@ impl App {
         self.commit_region_edit("Paste region", arrangement_before, build, scenes_before)?;
 
         let span_count = clipboard.span_count();
-        let track_count = clipboard.tracks.len();
+        let lane_count = clipboard.lane_count();
         Ok(format!(
-            "Pasted {span_count} clip{} across {track_count} track{} at beat {dest_beat}",
+            "Pasted {span_count} clip{} across {lane_count} lane{} at beat {dest_beat}",
             if span_count == 1 { "" } else { "s" },
-            if track_count == 1 { "" } else { "s" },
+            if lane_count == 1 { "" } else { "s" },
         ))
     }
 
@@ -404,7 +618,8 @@ impl App {
         // A scene-lane sweep is by definition a whole-timeline gesture: it
         // carries the scene lane, so the ripple has to move it too.
         let covers_every_track = region.scene_lane
-            || (region.track_a == 0 && region.track_b + 1 >= self.tracks.len().max(1));
+            || (region.contains_track(0)
+                && region.contains_track(self.tracks.len().max(1) - 1));
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
         let scenes = self.state.capture_project_scenes();
@@ -423,6 +638,9 @@ impl App {
                     continue;
                 }
                 Self::ripple_lane_right(&mut arrangement, &scenes, track, insert_beat, len_beats)?;
+            }
+            for (group_id, _) in &clipboard.racks {
+                ripple_rack_lane_right(&mut arrangement, *group_id, insert_beat, len_beats)?;
             }
             if covers_every_track {
                 for event in &mut arrangement.scene_lane {
@@ -447,13 +665,11 @@ impl App {
         // The highlight follows the copy, so Cmd-D again duplicates THAT.
         // It names no single clip any more, so it goes through the marquee
         // door (spec 4.1) and hands the sound binding back.
-        self.set_song_region(SongRegionSelection::new_in_lane(
-            region.track_a,
-            region.track_b,
-            insert_beat,
-            insert_beat + len_beats,
-            region.scene_lane,
-        ));
+        self.set_song_region(SongRegionSelection {
+            start_beat: insert_beat,
+            end_beat: insert_beat + len_beats,
+            ..region
+        });
         let scope = if covers_every_track {
             "pushing the song right"
         } else {
@@ -534,6 +750,9 @@ impl App {
                 }
                 occlude_span(&mut arrangement, &scenes, *track, source_start, source_end)?;
             }
+            for (group_id, _) in &clipboard.racks {
+                occlude_rack_span(&mut arrangement, *group_id, source_start, source_end)?;
+            }
             // A scene-lane region moves its scene events too, restoring what
             // governed the vacated span's end so nothing after it changes.
             if clipboard.scene_lane {
@@ -550,13 +769,11 @@ impl App {
 
         // The highlight follows the move, so a repeated drag (or a Cmd-C right
         // after one) addresses where the music now is.
-        self.set_song_region(SongRegionSelection::new_in_lane(
-            region.track_a,
-            region.track_b,
-            dest_beat,
-            dest_end,
-            region.scene_lane,
-        ));
+        self.set_song_region(SongRegionSelection {
+            start_beat: dest_beat,
+            end_beat: dest_end,
+            ..region
+        });
         Ok(format!(
             "Moved beats {source_start}-{source_end} to {dest_beat}"
         ))
@@ -686,6 +903,24 @@ impl App {
                 }
                 clip.offset_steps = span.offset_steps;
                 insert_clip_sorted(arrangement, *track, clip);
+            }
+        }
+        for (group_id, spans) in &clipboard.racks {
+            // A rack whose clip bank is gone no longer has a lane to paste
+            // onto; a rack clip deleted since the copy pastes as silence.
+            let Some(bank) = scenes.rack_bank(*group_id) else {
+                continue;
+            };
+            occlude_rack_span(arrangement, *group_id, dest_beat, dest_end)?;
+            for span in spans.iter().filter(|span| bank.clip(span.rack_clip).is_some()) {
+                let clip = RackArrClip {
+                    id: arrangement.allocate_clip_id()?,
+                    start_beat: dest_beat + span.rel_start,
+                    end_beat: dest_beat + span.rel_end,
+                    rack_clip: span.rack_clip,
+                    anchor_beat: dest_beat + span.rel_anchor,
+                };
+                insert_rack_clip_sorted(arrangement, *group_id, clip);
             }
         }
         if clipboard.scene_lane {
@@ -899,6 +1134,10 @@ impl App {
             occlude_span(&mut arrangement, &scenes, track, start_beat, end_beat)?;
             cleared += 1;
         }
+        for group_id in self.region_racks(&region) {
+            occlude_rack_span(&mut arrangement, group_id, start_beat, end_beat)?;
+            cleared += 1;
+        }
         if cleared == 0 {
             return Err("The selected region covers no existing track".to_string());
         }
@@ -914,7 +1153,7 @@ impl App {
         }
         self.commit_arrangement_edit("Delete region", before, Some(arrangement))?;
         Ok(format!(
-            "Deleted beats {start_beat}-{end_beat} on {cleared} track{}",
+            "Deleted beats {start_beat}-{end_beat} on {cleared} lane{}",
             if cleared == 1 { "" } else { "s" }
         ))
     }
@@ -1020,8 +1259,8 @@ mod tests {
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, project_lanes, ClipId, PatternId, PatternSnapshot,
-        SequencerState, StepParam,
+        default_empty_effect_chain, project_lanes, ClipId, LaneSpan, PatternId,
+        PatternSnapshot, SequencerState, StepParam,
     };
 
     /// `tracks` tracks, three scenes; per-track pool ids are 1..=3 with scene
@@ -1819,6 +2058,23 @@ mod tests {
         assert!(region.contains_track(3));
         assert!(!region.contains_track(6));
         assert!(!region.is_empty());
+    }
+
+    #[test]
+    fn a_rack_row_sorts_just_above_its_first_member() {
+        let region =
+            SongRegionSelection::new_rows(RegionRow::track(3), RegionRow::rack(1), 0.0, 4.0, false);
+        assert_eq!(
+            (region.track_a, region.rack_a, region.track_b, region.rack_b),
+            (1, true, 3, false)
+        );
+        assert!(region.contains_rack_row(1) && region.contains_track(1));
+        assert!(region.contains_track(3) && !region.contains_track(0));
+        assert!(!region.contains_rack_row(4));
+        let rack_only =
+            SongRegionSelection::new_rows(RegionRow::rack(2), RegionRow::rack(2), 0.0, 4.0, false);
+        assert!(rack_only.contains_rack_row(2));
+        assert!(!rack_only.contains_track(2) && !rack_only.contains_track(1));
     }
 
     #[test]

@@ -859,6 +859,7 @@ pub(crate) mod f {
     pub(crate) const SONG_CAPTURE_ERROR: FieldKey = (SONG, "capture-error");
     pub(crate) const SONG_REGION: FieldKey = (SONG, "region");
     pub(crate) const SONG_BOUND_CLIP: FieldKey = (SONG, "bound-clip");
+    pub(crate) const SONG_BOUND_RACK_ITEM: FieldKey = (SONG, "bound-rack-item");
     pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
     pub(crate) const SONG_PENDING: FieldKey = (SONG, "pending");
     pub(crate) const SONG_PENDING_ORIGIN: FieldKey = (SONG, "pending-origin");
@@ -885,6 +886,7 @@ pub(crate) mod f {
     pub(crate) const PENDING_LAUNCH_EVENTS: FieldKey = (PENDING_LAUNCH, "events");
 
     pub(crate) const REGION_TRACKS: FieldKey = (REGION, "tracks");
+    pub(crate) const REGION_RACKS: FieldKey = (REGION, "racks");
     pub(crate) const REGION_START: FieldKey = (REGION, "start");
     pub(crate) const REGION_END: FieldKey = (REGION, "end");
     pub(crate) const REGION_SCENE_LANE: FieldKey = (REGION, "scene-lane");
@@ -1433,6 +1435,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SONG_CAPTURE_ERROR, ":string", Model),
     (f::SONG_REGION, "region", Model),
     (f::SONG_BOUND_CLIP, "clip", Model),
+    (f::SONG_BOUND_RACK_ITEM, ":string", Model),
     (f::SONG_SPANS, "(list-of scene-span)", Model),
     // The provisional capture surface (`pending`): rebuilt with the pending
     // content key, the lanes' ends with the quantized record head.
@@ -1464,6 +1467,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
         Model,
     ),
     (f::REGION_TRACKS, "(list-of track)", Model),
+    (f::REGION_RACKS, "(list-of group)", Model),
     (f::REGION_START, ":number", Model),
     (f::REGION_END, ":number", Model),
     (f::REGION_SCENE_LANE, ":bool", Model),

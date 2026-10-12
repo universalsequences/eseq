@@ -324,7 +324,7 @@ struct SongPushed {
     capture: Option<(bool, Option<String>)>,
     /// The region, under the structure generation (its tracks are track
     /// positions).
-    region: Option<(Option<SongRegionSelection>, u64)>,
+    region: Option<(Option<SongRegionSelection>, u64, u64)>,
 }
 
 /// What the rack lanes derive from: the committed song (the lanes), the
@@ -856,26 +856,35 @@ impl HostKinds {
             pusher.push(song, f::SONG_CAPTURE_ERROR, message);
             pushed.capture = Some((failed, app.song_capture_error.clone()));
         }
-        let region = (app.song_region_selection, self.song.generation);
+        // Under the groups generation too: which rack rows it covers moves
+        // with rack membership.
+        let region = (
+            app.song_region_selection,
+            self.song.generation,
+            self.groups_generation,
+        );
         if pushed.region != Some(region) {
             if let Some(id) = region_id {
                 // Cleared, the singleton reads as no tracks over 0..0.
-                let (tracks, start, end, scene_lane) = match region.0 {
+                let (tracks, racks, start, end, scene_lane) = match region.0 {
                     Some(region) => {
-                        let (first, last) = (region.track_a, region.track_b);
-                        let tracks = first.min(last)..=first.max(last);
-                        let tracks = tracks.filter_map(|track| self.track_ids.get(track).copied());
-                        let tracks = instance_list(tracks.flatten());
+                        let tracks = (region.track_a..=region.track_b)
+                            .filter(|track| region.contains_track(*track))
+                            .filter_map(|track| self.track_ids.get(track).copied());
+                        let racks = app.region_racks(&region).into_iter();
+                        let racks = racks.filter_map(|gid| self.groups.get(&gid).copied());
                         (
-                            tracks,
+                            instance_list(tracks.flatten()),
+                            instance_list(racks),
                             region.start_beat,
                             region.end_beat,
                             region.scene_lane,
                         )
                     }
-                    None => (instance_list(Vec::new()), 0.0, 0.0, false),
+                    None => (instance_list(Vec::new()), instance_list(Vec::new()), 0.0, 0.0, false),
                 };
                 pusher.push(id, f::REGION_TRACKS, tracks);
+                pusher.push(id, f::REGION_RACKS, racks);
                 pusher.push(id, f::REGION_START, number(start));
                 pusher.push(id, f::REGION_END, number(end));
                 pusher.push(id, f::REGION_SCENE_LANE, Value::Bool(scene_lane));
@@ -892,6 +901,21 @@ impl HostKinds {
                 .keyed_instance(CLIP, &[track, selection.clip_id.0])
         });
         pusher.push(song, f::SONG_BOUND_CLIP, instance_or_nil(bound));
+        // A rack member's pattern bound from its rack lane
+        // (`select_rack_member_pattern`) names a rack-lane clip, which no
+        // `clip` instance stands for: published as the member item's id.
+        let rack_item = app
+            .song_clip_selection
+            .filter(|_| bound.is_none())
+            .filter(|selection| {
+                app.state.with_committed_arrangement(|arrangement| {
+                    arrangement.is_some_and(|arrangement| {
+                        arrangement.find_rack_clip(selection.clip_id).is_some()
+                    })
+                })
+            })
+            .map(|selection| format!("rack-{}-{}", selection.clip_id.0, selection.track));
+        pusher.push(song, f::SONG_BOUND_RACK_ITEM, text(rack_item.as_deref().unwrap_or_default()));
     }
 
     /// Every group's `arr-clips` (docs/arrangement-rack-lanes-spec.md §6): its

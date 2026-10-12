@@ -1215,6 +1215,8 @@
          (region region :doc "The selected region, or nil; (select-region! t1 t2 start end [:scene-lane true]), (clear-region!)")
          (bound-clip clip :set set-song-bound-clip
                      :doc "The selected clip (its track's sound binds to it), or nil")
+         (bound-rack-item :string
+                     :doc "When a rack member's pattern is bound from its arrangement rack lane instead: that member item id (rack-CID-TRACK); empty otherwise")
          (spans (list-of scene-span) :doc "The scene lane, in time order")
          ;; The provisional capture surface, while an arrangement capture
          ;; runs (all empty / false otherwise).
@@ -1261,6 +1263,7 @@
 (def-kind region
   :key ()
   :host ((tracks (list-of track) :doc "The tracks it spans, in order")
+         (racks  (list-of group) :doc "The clip-bearing racks whose arrangement rack row it spans")
          (start  :number :doc "First beat")
          (end    :number :doc "End beat (exclusive)")
          (scene-lane :bool :doc "Swept in the scene lane: copy, paste and delete carry the scene changes in it too")))
@@ -1975,10 +1978,13 @@
 ;; Select the region from track t1 to track t2 (either order) between beats
 ;; start and end (song.region); a degenerate one clears it. :scene-lane true
 ;; also sweeps the scene lane, so copy, paste and delete carry its scene
-;; changes.
-(def select-region! (t1 t2 start end &key (scene-lane false))
+;; changes. :rack-a / :rack-b true make that end the arrangement rack row
+;; drawn above t1 / t2 (its rack's first member) instead of the track's own
+;; row, so the region carries that rack's rack lane.
+(def select-region! (t1 t2 start end &key (scene-lane false) (rack-a false) (rack-b false))
   (host-command "set-song-region"
-    (dict :track-ids (list t1.tid t2.tid) :start start :end end :scene-lane scene-lane)))
+    (dict :track-ids (list t1.tid t2.tid) :start start :end end :scene-lane scene-lane
+      :rack-a rack-a :rack-b rack-b)))
 (def clear-region! () (host-command "set-song-region" nil))
 
 ;; step.lock-kind values.

@@ -24,6 +24,13 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-pattern-place",
     "arrangement-empty-take-create",
     "arrangement-rack-member-bind",
+    "arrangement-rack-clip-place",
+    "arrangement-rack-clip-move",
+    "arrangement-rack-clip-resize",
+    "arrangement-rack-clip-split",
+    "arrangement-rack-clip-set",
+    "arrangement-rack-clip-delete",
+    "arrangement-rack-clip-duplicate",
     "arrangement-clip-delete",
     "arrangement-clip-move",
     "arrangement-clip-resize",
@@ -296,11 +303,16 @@ fn parse_source(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<LaneSource,
 /// clip ids (lane spec 12), so every gesture names the object it edits —
 /// there is no positional fallback to be stale about.
 fn resolve_clip(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<ClipId, String> {
-    let clip_id = require_number(map, "clip-id")?;
-    if !clip_id.is_finite() || clip_id < 0.0 || clip_id.fract() != 0.0 {
-        return Err("clip-id must be a non-negative integer".to_string());
+    require_whole(map, "clip-id").map(ClipId)
+}
+
+/// A non-negative integer field (an id).
+fn require_whole(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Result<u64, String> {
+    let value = require_number(map, key)?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return Err(format!("{key} must be a non-negative integer"));
     }
-    Ok(ClipId(clip_id as u64))
+    Ok(value as u64)
 }
 
 fn parse_overrides(
@@ -444,6 +456,61 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 .track_binding_label(track)
                 .map(|label| format!("Bound: {label}"))
                 .unwrap_or_default())
+        }
+        "arrangement-rack-clip-move" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            app.arr_rack_clip_move(clip_id, start_beat)?;
+            Ok(format!("Moved rack clip {} to beat {start_beat}", clip_id.0))
+        }
+        "arrangement-rack-clip-resize" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            app.arr_rack_clip_resize(clip_id, start_beat, end_beat)?;
+            Ok(format!(
+                "Resized rack clip {} to beats {start_beat}-{end_beat}",
+                clip_id.0
+            ))
+        }
+        "arrangement-rack-clip-split" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let beat = require_number(map, "beat")?;
+            let right = app.arr_rack_clip_split(clip_id, beat)?;
+            Ok(format!(
+                "Split rack clip {} at beat {beat} (right half {})",
+                clip_id.0, right.0
+            ))
+        }
+        "arrangement-rack-clip-place" => {
+            let map = payload_map(payload)?;
+            let group_id = require_whole(map, "group")?;
+            let rack_clip = require_whole(map, "rack-clip")?;
+            let start_beat = require_number(map, "start-beat")?;
+            let id = app.arr_rack_clip_place(group_id, rack_clip, start_beat)?;
+            Ok(format!("Placed rack clip {} at beat {start_beat}", id.0))
+        }
+        "arrangement-rack-clip-set" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let rack_clip = require_whole(map, "rack-clip")?;
+            app.arr_rack_clip_set(clip_id, rack_clip)?;
+            Ok(format!("Rack clip {} now plays clip {rack_clip}", clip_id.0))
+        }
+        "arrangement-rack-clip-delete" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            app.arr_rack_clip_delete(clip_id)?;
+            Ok(format!("Deleted rack clip {}", clip_id.0))
+        }
+        "arrangement-rack-clip-duplicate" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map)?;
+            let copy = app.arr_rack_clip_duplicate(clip_id)?;
+            Ok(format!("Duplicated rack clip {} as {}", clip_id.0, copy.0))
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;
@@ -873,12 +940,12 @@ fn run_region_clipboard(
         "song-region-copy" => {
             let copied = app.song_region_copy()?;
             let spans = copied.span_count();
-            let tracks = copied.tracks.len();
+            let lanes = copied.lane_count();
             *clipboard.lock().unwrap() = Some(copied);
             Ok(Some(format!(
-                "Copied {spans} clip{} across {tracks} track{}",
+                "Copied {spans} clip{} across {lanes} lane{}",
                 if spans == 1 { "" } else { "s" },
-                if tracks == 1 { "" } else { "s" },
+                if lanes == 1 { "" } else { "s" },
             )))
         }
         "song-region-paste" => {

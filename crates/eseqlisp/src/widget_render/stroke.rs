@@ -360,12 +360,23 @@ impl ShadedMesh {
         color: Color,
         viewport: WidgetViewport,
     ) {
-        if radius <= 0.0 || color.a <= 0.0 {
+        self.push_disc_px(center, super::ui_design_px(radius), color, viewport);
+    }
+
+    /// [`Self::push_disc`] with the radius already in device pixels, for
+    /// callers whose geometry is derived from the cell size.
+    pub fn push_disc_px(
+        &mut self,
+        center: [f32; 2],
+        radius_px: f32,
+        color: Color,
+        viewport: WidgetViewport,
+    ) {
+        if radius_px <= 0.0 || color.a <= 0.0 {
             return;
         }
         let cell_w = viewport.cell_w.max(1.0);
         let cell_h = viewport.cell_h.max(1.0);
-        let radius_px = super::ui_design_px(radius);
         let center_px = [center[0] * cell_w, center[1] * cell_h];
         let fringe_px = super::ui_design_px(FRINGE_PX).max(0.5);
         let inner = (radius_px - fringe_px * 0.5).max(radius_px * 0.35);
@@ -380,6 +391,75 @@ impl ShadedMesh {
             inner + fringe_px,
             color,
         );
+    }
+}
+
+impl ShadedMesh {
+    /// Anti-aliased circle outline (an SVG `<circle>` stroke): `stroke_px`
+    /// device pixels wide, centred on `radius_px`. Each edge fades over the
+    /// fringe straddling it, so ink coverage matches the nominal width; a
+    /// stroke thinner than the fringe keeps the fringe's footprint and drops
+    /// its peak alpha instead, the way a hairline's coverage would.
+    pub fn push_ring_px(
+        &mut self,
+        center: [f32; 2],
+        radius_px: f32,
+        stroke_px: f32,
+        color: Color,
+        viewport: WidgetViewport,
+    ) {
+        if radius_px <= 0.0 || stroke_px <= 0.0 || color.a <= 0.0 {
+            return;
+        }
+        let cell_w = viewport.cell_w.max(1.0);
+        let cell_h = viewport.cell_h.max(1.0);
+        let center_px = [center[0] * cell_w, center[1] * cell_h];
+        let fringe_px = super::ui_design_px(FRINGE_PX).max(0.5);
+        let half = stroke_px * 0.5;
+        let core = (half - fringe_px * 0.5).max(0.0);
+        let reach = (half + fringe_px * 0.5).max(fringe_px);
+        let peak = color.with_alpha((stroke_px / fringe_px).min(1.0));
+        let fade = transparent(color);
+        // Facets about 3px of arc: the fringe hides the faceting at that
+        // length, and the vertex count stays modest for a per-frame glyph.
+        let steps = ((TAU * radius_px / 3.0).ceil() as usize).clamp(24, 128);
+        let radii = [
+            (radius_px - reach).max(0.0),
+            (radius_px - core).max(0.0),
+            radius_px + core,
+            radius_px + reach,
+        ];
+        let colors = [fade, peak, peak, fade];
+        // One (cos, sin) per facet edge, shared by both facets meeting there
+        // and by all four radii.
+        let spoke = |step: usize| {
+            let angle = TAU * step as f32 / steps as f32;
+            let (sin, cos) = angle.sin_cos();
+            radii.map(|r| {
+                [
+                    (center_px[0] + cos * r) / cell_w,
+                    (center_px[1] + sin * r) / cell_h,
+                ]
+            })
+        };
+        let mut previous = spoke(0);
+        for step in 1..=steps {
+            let next = spoke(step);
+            for band in 0..3 {
+                if radii[band + 1] <= radii[band] {
+                    continue;
+                }
+                let (inner_color, outer_color) = (colors[band], colors[band + 1]);
+                self.quad(
+                    previous[band],
+                    previous[band + 1],
+                    next[band + 1],
+                    next[band],
+                    [inner_color, outer_color, outer_color, inner_color],
+                );
+            }
+            previous = next;
+        }
     }
 }
 
@@ -569,5 +649,50 @@ mod tests {
         assert_eq!(batched.vertices.len() % 3, 0);
         // A 16-segment disc is 3 triangles per segment.
         assert_eq!(batched.vertices.len(), 2 * 18 + DISC_SEGMENTS * 9);
+    }
+
+    #[test]
+    fn a_ring_stays_in_its_stroke_band_and_fades_on_both_edges() {
+        let center = [10.0, 5.0];
+        let fringe = super::super::ui_design_px(FRINGE_PX).max(0.5);
+        let mut mesh = ShadedMesh::new();
+        mesh.push_ring_px(
+            center,
+            20.0,
+            2.0,
+            Color::rgba(1.0, 1.0, 1.0, 1.0),
+            viewport(),
+        );
+        let reach = 1.0 + fringe * 0.5;
+        let mut saw_fade = false;
+        let mut saw_peak = false;
+        for vertex in mesh.vertices() {
+            let dx = (vertex.point[0] - center[0]) * CELL_W;
+            let dy = (vertex.point[1] - center[1]) * CELL_H;
+            let distance = dx.hypot(dy);
+            assert!(
+                (distance - 20.0).abs() <= reach + 1.0e-3,
+                "vertex {distance}px from the centre leaves the stroke band"
+            );
+            saw_fade |= vertex.color.a == 0.0;
+            saw_peak |= vertex.color.a == 1.0;
+        }
+        assert!(saw_fade && saw_peak);
+
+        // A hairline thinner than the fringe dims instead of vanishing.
+        let mut hairline = ShadedMesh::new();
+        hairline.push_ring_px(
+            center,
+            20.0,
+            fringe * 0.5,
+            Color::rgba(1.0, 1.0, 1.0, 1.0),
+            viewport(),
+        );
+        let peak = hairline
+            .vertices()
+            .iter()
+            .map(|v| v.color.a)
+            .fold(0.0, f32::max);
+        assert!((peak - 0.5).abs() < 1.0e-4, "hairline peak alpha {peak}");
     }
 }

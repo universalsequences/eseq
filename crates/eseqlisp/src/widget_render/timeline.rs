@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPrimitive,
+    CellBuffer, EventOutput, GpuPrimitive,
     GpuProportionalTextPrimitive, GpuQuadPrimitive,
     GpuRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
     WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
@@ -245,6 +245,9 @@ struct TimelineView {
     item_color: crate::backend::Color,
     item_label_font_size: f32,
     item_label_color: crate::backend::Color,
+    /// The ink drawn over an item body: note dots and ring-glyph ticks at
+    /// full strength, ring guides faint.
+    item_content_color: crate::backend::Color,
     loop_color: crate::backend::Color,
     loop_visible: bool,
     border_top_color: crate::backend::Color,
@@ -512,6 +515,7 @@ impl WidgetDefinition for TimelineWidget {
             "border-width",
             "item-label-font-size",
             "item-label-color",
+            "item-content-color",
             // Shared arrangement time axis: scroll/zoom repaint every lane
             // without rerunning any effect (UI_PERFORMANCE_TUNING.md).
             "view-start",
@@ -1705,7 +1709,6 @@ fn build_primitives(
             content_rect,
             title_bar,
             loops_segmented,
-            body_color,
             viewport,
         );
         item_rects.push((
@@ -2170,7 +2173,6 @@ fn push_item_content_primitives(
     rect: (f32, f32, f32, f32),
     title_bar: Option<(f32, f32)>,
     loop_segments_enabled: bool,
-    body_color: crate::backend::Color,
     viewport: super::WidgetViewport,
 ) {
     let (x, y, width, height) = rect;
@@ -2230,12 +2232,7 @@ fn push_item_content_primitives(
             let dot_width = (3.0 / viewport.cell_w).min(width);
             let dot_height = (3.0 / viewport.cell_h).min(height);
             let inner_height = (height - dot_height).max(0.0);
-            let dot_color = crate::backend::Color {
-                r: 0.02,
-                g: 0.025,
-                b: 0.03,
-                a: 0.78,
-            };
+            let dot_color = view.item_content_color.with_alpha(0.78);
             // One partial source cycle can straddle the left edge, hence the
             // extra iteration beyond the number of complete visible cycles.
             // Non-wrapping content (takes) never repeats: one pass only, so
@@ -2286,7 +2283,7 @@ fn push_item_content_primitives(
             }
         }
         Some(TimelineItemContent::Rings { rings, .. }) => {
-            push_ring_glyphs(primitives, view, item, rect, rings, body_color, viewport);
+            push_ring_glyphs(primitives, view, item, rect, rings, viewport);
         }
         // Peaks rendering lands with the audio-track asset pipeline
         // (docs/arrangement-timeline-ui-spec.md 3, Slice D).
@@ -2294,25 +2291,33 @@ fn push_item_content_primitives(
     }
 }
 
-/// Rings at most per glyph: past this the rings are thinner than a pixel.
-const RING_GLYPH_MAX_RINGS: usize = 8;
+/// Rings at most per glyph: past this the rings crowd into a fingerprint
+/// and stop reading as separate pads.
+const RING_GLYPH_MAX_RINGS: usize = 5;
 
 /// The ring summary of a rack-lane clip (`TimelineItemContent::Rings`): one
 /// glyph at the item's left edge and at every later cycle start with room
 /// for it, each a stack of concentric guide rings (outermost = first ring)
-/// with a tick per hit, clockwise from twelve o'clock. Filled discs only:
-/// each ring is a darker disc with a disc of the body color inside it.
+/// with a tick per hit, clockwise from twelve o'clock. Only pads that hit get
+/// a ring: a silent pad's empty circle says nothing and crowds the rest. Drawn as one
+/// anti-aliased mesh (hairline outlines plus tick discs), so the thin rings
+/// stay as crisp as an SVG at any size.
 fn push_ring_glyphs(
     primitives: &mut Vec<GpuPrimitive>,
     view: &TimelineView,
     item: &TimelineItem,
     (x, y, width, height): (f32, f32, f32, f32),
     rings: &[Vec<f64>],
-    body_color: crate::backend::Color,
     viewport: super::WidgetViewport,
 ) {
-    let rings = &rings[..rings.len().min(RING_GLYPH_MAX_RINGS)];
-    if rings.is_empty() {
+    let hitting = || {
+        rings
+            .iter()
+            .filter(|hits| !hits.is_empty())
+            .take(RING_GLYPH_MAX_RINGS)
+    };
+    let count = hitting().count();
+    if count == 0 {
         return;
     }
     let (cell_w, cell_h) = (viewport.cell_w, viewport.cell_h);
@@ -2327,10 +2332,9 @@ fn push_ring_glyphs(
     anchors.extend(item_cycle_separator_xs(view, item, viewport));
     let right = x + width;
     let row = y + height * 0.5;
-    let guide = crate::backend::Color { r: 0.02, g: 0.025, b: 0.03, a: 0.30 };
-    let tick = crate::backend::Color { r: 0.02, g: 0.025, b: 0.03, a: 0.85 };
-    let count = rings.len();
-    let inner_fraction = 0.28_f32;
+    let guide = view.item_content_color.with_alpha(0.35);
+    let tick = view.item_content_color.with_alpha(0.85);
+    let inner_fraction = 0.34_f32;
     let ring_radius = |index: usize| {
         if count == 1 {
             radius_px * 0.8
@@ -2343,8 +2347,10 @@ fn push_ring_glyphs(
     } else {
         radius_px * (1.0 - inner_fraction) / (count - 1) as f32
     };
-    let guide_px = (spacing * 0.18).clamp(0.6, 1.2);
-    let tick_px = (spacing * 0.36).clamp(1.0, 2.6);
+    // Guides a design pixel and a half, thinner only when the rings crowd.
+    let guide_px = super::ui_design_px(1.5).min(spacing * 0.45);
+    let tick_px = (spacing * 0.4).clamp(1.5, 3.0);
+    let mut mesh = super::stroke::ShadedMesh::new();
     for (index, anchor) in anchors.iter().enumerate() {
         let left = anchor + pad_cols;
         let next = anchors.get(index + 1).copied().unwrap_or(right);
@@ -2355,34 +2361,23 @@ fn push_ring_glyphs(
         }
         let center = [left + diameter_cols * 0.5, row];
         for ring in 0..count {
-            let radius = ring_radius(ring);
-            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                center,
-                radius_px: radius + guide_px,
-                color: guide,
-                visible_half: GpuCircleVisibleHalf::Full,
-            }));
-            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                center,
-                radius_px: (radius - guide_px).max(0.0),
-                color: body_color,
-                visible_half: GpuCircleVisibleHalf::Full,
-            }));
+            mesh.push_ring_px(center, ring_radius(ring), guide_px, guide, viewport);
         }
-        for (ring, hits) in rings.iter().enumerate() {
+        for (ring, hits) in hitting().enumerate() {
             let radius = ring_radius(ring);
-            for offset in hits {
+            for offset in hits.iter() {
                 let angle = std::f64::consts::TAU * offset.rem_euclid(1.0);
                 let (dx, dy) = (angle.sin() as f32 * radius, -(angle.cos() as f32) * radius);
-                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                    center: [center[0] + dx / cell_w, center[1] + dy / cell_h],
-                    radius_px: tick_px,
-                    color: tick,
-                    visible_half: GpuCircleVisibleHalf::Full,
-                }));
+                mesh.push_disc_px(
+                    [center[0] + dx / cell_w, center[1] + dy / cell_h],
+                    tick_px,
+                    tick,
+                    viewport,
+                );
             }
         }
     }
+    mesh.push_into(primitives);
 }
 
 impl TimelineView {
@@ -2486,6 +2481,11 @@ impl TimelineView {
             item_color: resolve_named_color(props, "item-color", theme::BLUE()),
             item_label_font_size: get_num(props, "item-label-font-size", 10.5).max(1.0) as f32,
             item_label_color: resolve_named_color(props, "item-label-color", theme::BLACK()),
+            item_content_color: resolve_named_color(
+                props,
+                "item-content-color",
+                crate::backend::Color { r: 0.02, g: 0.025, b: 0.03, a: 1.0 },
+            ),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
             loop_visible: props.get("loop-visible").and_then(as_bool).unwrap_or(true),
             border_top_color: resolve_named_color(props, "border-top-color",

@@ -284,6 +284,130 @@ fn a_capture_in_flight_draws_provisional_items() {
     );
 }
 
+/// docs/arrangement-rack-lanes-spec.md §5: the rack row edits its
+/// rack-lane clips: a drag moves one (anchor and all), an edge drag trims
+/// it (anchor kept), and the menu's split, duplicate, change-clip, insert
+/// and delete each land as one arrangement edit.
+/// A clip-bearing rack with one pad and a rack lane holding one clip of its
+/// scene's rack clip over beats 0..8: (group, that rack clip, the lane clip).
+fn rack_lane_fixture(h: &mut Harness) -> (u64, u64, ClipId) {
+    let (group, _) = h.app.create_drum_rack_recorded(None).expect("rack");
+    h.app.assign_rack_pad_track_recorded(group, 36, 0).expect("kick pad");
+    h.app.convert_rack_to_clips_recorded(group).expect("clips");
+    let verse = h.app.current_rack_clip(group).expect("the scene's clip");
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.end_beat = arrangement.end_beat.max(64.0);
+    arrangement.rack_lanes.insert(
+        group,
+        vec![sequencer::sequencer::RackArrClip {
+            id,
+            start_beat: 0.0,
+            end_beat: 8.0,
+            rack_clip: verse,
+            anchor_beat: 0.0,
+        }],
+    );
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.share_buses_and_groups();
+    h.settle();
+    (group, verse, id)
+}
+
+/// Rack `group`'s lane as (start, end, rack clip, anchor) per clip.
+fn rack_lane_of(h: &Harness, group: u64) -> Vec<(f64, f64, u64, f64)> {
+    h.app
+        .state
+        .committed_arrangement()
+        .expect("arrangement")
+        .rack_lanes
+        .get(&group)
+        .map(|lane| {
+            lane.iter()
+                .map(|clip| (clip.start_beat, clip.end_beat, clip.rack_clip, clip.anchor_beat))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_rack_row_edits_its_rack_lane_clips() {
+    let mut h = distro();
+    let (group, verse, id) = rack_lane_fixture(&mut h);
+    let lane = |h: &Harness| rack_lane_of(h, group);
+    let act = |h: &mut Harness, event: String| {
+        h.eval(&format!(
+            "(eseq.arrangement/rack-lane-action (first (eseq.kinds/groups)) {event})"
+        ));
+        h.settle();
+    };
+    let edit = |h: &mut Harness, payload: String| {
+        h.eval(&format!("(eseq.arrangement/rack-edit {payload})"));
+        h.settle();
+    };
+
+    // Title-bar drag: the clip and its anchor move together.
+    act(&mut h, format!("(dict :type :move-items-absolute :anchor-id {} :start 4)", id.0));
+    act(&mut h, "(dict :type :finish-move-items)".into());
+    assert_eq!(lane(&h), vec![(4.0, 12.0, verse, 4.0)]);
+    // Start-edge drag: the span trims, the anchor stays.
+    act(
+        &mut h,
+        format!("(dict :type :resize-item-absolute :id {} :edge :start :time 6)", id.0),
+    );
+    act(&mut h, "(dict :type :finish-resize-items)".into());
+    assert_eq!(lane(&h), vec![(6.0, 12.0, verse, 4.0)]);
+    // Split, then duplicate the right half after itself.
+    edit(&mut h, format!("(dict :type :rack-clip-split :clip-id {} :beat 8)", id.0));
+    assert_eq!(lane(&h), vec![(6.0, 8.0, verse, 4.0), (8.0, 12.0, verse, 4.0)]);
+    let right = h.app.state.committed_arrangement().unwrap().rack_lanes[&group][1].id;
+    edit(&mut h, format!("(dict :type :rack-clip-duplicate :clip-id {})", right.0));
+    assert_eq!(lane(&h)[2], (12.0, 16.0, verse, 8.0));
+    // Change clip: a second rack clip, swapped in place.
+    let chorus = h.app.save_rack_clip_as_recorded(group, "Chorus").expect("chorus");
+    edit(
+        &mut h,
+        format!("(dict :type :rack-clip-set :clip-id {} :rack-clip {chorus})", right.0),
+    );
+    assert_eq!(lane(&h)[1].2, chorus);
+    // Insert on empty lane: one loop of the clip, anchored at its start.
+    edit(
+        &mut h,
+        format!("(dict :type :rack-clip-place :group {group} :rack-clip {verse} :start 32)"),
+    );
+    assert_eq!(lane(&h).last().map(|clip| (clip.0, clip.3)), Some((32.0, 32.0)));
+    // Backspace deletes the selected clip.
+    act(&mut h, format!("(dict :type :delete-items :ids (list {}))", id.0));
+    assert_eq!(lane(&h).len(), 3, "the first half is gone");
+    assert_eq!(lane(&h)[0].0, 8.0);
+
+    // The context menu: over a clip it offers the clip verbs, over empty
+    // lane the rack's clips to insert.
+    let menu_keys = |h: &mut Harness, beat: f64| {
+        h.eval(&format!(
+            "(let ((g (first (eseq.kinds/groups))) (m eseq.arrangement/arr-rack-menu)) \
+               (eseq.arrangement/open-rack-menu g (dict :sx -1)) \
+               (set! m.clip (eseq.arrangement/rack-clip-at g {beat})))"
+        ));
+        h.settle();
+        let mut nodes = Vec::new();
+        widgets_with_prop(&h.buffer_tree("*arrangement*").0, "key", &mut nodes);
+        nodes
+            .into_iter()
+            .filter_map(|node| match node.get("key") {
+                Some(Value::String(key)) if key.starts_with("arr-rack-") => Some(key.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let over_clip = menu_keys(&mut h, 9.0);
+    for key in ["arr-rack-change", "arr-rack-split", "arr-rack-duplicate", "arr-rack-delete"] {
+        assert!(over_clip.iter().any(|k| k == key), "{key} in {over_clip:?}");
+    }
+    let empty = menu_keys(&mut h, 20.0);
+    assert!(empty.iter().any(|k| k == "arr-rack-insert"), "{empty:?}");
+}
+
 /// docs/arrangement-rack-lanes-spec.md §6: while a capture runs, a
 /// clip-bearing rack's row grows with the rack clips the captured scene
 /// launches played, and its members' rows with their patterns, inert until
@@ -475,8 +599,9 @@ fn a_clip_bearing_rack_draws_a_rack_row_of_ring_summaries() {
         widgets_with_prop(&h.buffer_tree("*arrangement*").0, "lane-key", &mut lanes);
         lanes
             .into_iter()
+            // Track lanes only: a rack lane's key is negative.
             .filter_map(|lane| match lane.get("lane-key") {
-                Some(Value::Number(n)) => Some(*n as usize),
+                Some(Value::Number(n)) if *n >= 0.0 => Some(*n as usize),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -489,4 +614,128 @@ fn a_clip_bearing_rack_draws_a_rack_row_of_ring_summaries() {
     let shown = lane_keys(&h);
     assert!(!shown.contains(&0) && !shown.contains(&1), "members hidden: {shown:?}");
     assert!(rack_lane(&h).is_some(), "the rack row stays");
+}
+
+#[test]
+fn region_ops_carry_the_rack_lanes_of_the_rack_rows_they_cover() {
+    let mut h = distro();
+    let (group, verse, id) = rack_lane_fixture(&mut h);
+    let lane = |h: &Harness| rack_lane_of(h, group);
+    let act = |h: &mut Harness, event: &str| {
+        h.eval(&format!(
+            "(eseq.arrangement/rack-lane-action (first (eseq.kinds/groups)) {event})"
+        ));
+        h.settle();
+    };
+    let lit = |h: &mut Harness| {
+        h.eval("(eseq.arrangement/rack-lane-region (first (eseq.kinds/groups)))")
+    };
+
+    // Clicking a rack-lane clip selects its span on the rack row alone.
+    act(&mut h, &format!("(dict :type :select :ids (list {}) :time 1)", id.0));
+    let region = h.app.song_region_selection.expect("a one-clip region");
+    assert!(region.rack_a && region.rack_b, "{region:?}");
+    assert_eq!((region.start_beat, region.end_beat), (0.0, 8.0));
+    assert_eq!(h.app.region_racks(&region), vec![group]);
+    assert_ne!(lit(&mut h), Value::Nil, "the rack lane lights the region");
+    assert_eq!(
+        h.eval("(let ((s eseq.kinds/song) (r s.region)) (len r.tracks))"),
+        Value::Number(0.0),
+        "no track row is in it"
+    );
+
+    // Copy and paste: the pasted clip keeps its phase relative to its span.
+    let clipboard = h.app.song_region_copy().expect("copy");
+    assert_eq!(clipboard.racks.len(), 1);
+    h.app.song_region_paste(&clipboard, 16.0).expect("paste");
+    assert_eq!(lane(&h), vec![(0.0, 8.0, verse, 0.0), (16.0, 24.0, verse, 16.0)]);
+
+    // A region move drags the anchor along; the region follows.
+    h.app.song_region_move(4.0).expect("move");
+    assert_eq!(lane(&h)[0], (4.0, 12.0, verse, 4.0));
+    let region = h.app.song_region_selection.expect("region");
+    assert_eq!((region.start_beat, region.end_beat), (4.0, 12.0));
+
+    // Delete silences the rack row's span.
+    h.app.song_region_delete().expect("delete");
+    assert_eq!(lane(&h), vec![(16.0, 24.0, verse, 16.0)]);
+
+    // A sweep over the rack row only lights that lane and no track lane.
+    act(&mut h, "(dict :type :marquee-select :time-a 16 :time-b 24 :row-delta 0)");
+    assert_ne!(lit(&mut h), Value::Nil, "the rack lane draws the sweep");
+    assert_eq!(
+        h.eval("(eseq.arrangement/lane-region-rect 0)"),
+        Value::Nil,
+        "its first member's lane does not"
+    );
+
+    // That sweep, then duplicate: the copy lands right after with its phase
+    // continued, and what followed ripples right.
+    act(
+        &mut h,
+        "(dict :type :finish-marquee-select :time-a 16 :time-b 24 :row-delta 0)",
+    );
+    h.app.song_region_duplicate().expect("duplicate");
+    assert_eq!(
+        lane(&h),
+        vec![(16.0, 24.0, verse, 16.0), (24.0, 32.0, verse, 24.0)]
+    );
+
+    // A sweep from the rack row down one row covers the rack and its first
+    // member; one back up from the member covers the same two rows.
+    let member = h.app.state.with_project_scenes(|scenes| {
+        scenes.rack_bank(group).map(|bank| bank.members[0]).expect("member")
+    });
+    act(
+        &mut h,
+        "(dict :type :finish-marquee-select :time-a 0 :time-b 4 \
+           :row-delta eseq.arrangement/track-row-pitch)",
+    );
+    let down = h.app.song_region_selection.expect("region");
+    assert_eq!(
+        (down.track_a, down.rack_a, down.track_b, down.rack_b),
+        (member, true, member, false)
+    );
+    h.eval(&format!(
+        "(eseq.arrangement/track-action {member} (dict :type :finish-marquee-select \
+           :time-a 0 :time-b 4 :row-delta (- 0 eseq.arrangement/track-row-pitch)))"
+    ));
+    h.settle();
+    assert_eq!(h.app.song_region_selection, Some(down));
+
+    // Backspace on a member row's item deletes the rack-lane clip it shows.
+    let cid = h.app.state.committed_arrangement().unwrap().rack_lanes[&group][0].id;
+    h.eval(&format!(
+        "(eseq.arrangement/track-action {member} \
+           (dict :type :select :ids (list \"rack-{}-{member}\") :time 17))",
+        cid.0
+    ));
+    h.settle();
+    h.eval(&format!(
+        "(eseq.arrangement/track-action {member} (dict :type :delete-items :ids (list)))"
+    ));
+    h.settle();
+    assert_eq!(lane(&h), vec![(24.0, 32.0, verse, 24.0)]);
+}
+
+#[test]
+fn select_all_then_delete_empties_the_track_and_rack_lanes() {
+    let mut h = distro();
+    let (group, _, _) = rack_lane_fixture(&mut h);
+    // A track clip after the rack lane's, so the span reaches past it.
+    h.app
+        .arr_clip_create(0, 8.0, 16.0, LaneSource::Pattern(PatternId(1)), 0.0)
+        .expect("track clip");
+    h.settle();
+
+    // Cmd+A, then Backspace (which lowers to song-region-delete).
+    assert_eq!(h.eval("(eseq.arrangement/select-all-clips)"), Value::Bool(true));
+    h.settle();
+    let region = h.app.song_region_selection.expect("a region");
+    assert_eq!((region.start_beat, region.end_beat), (0.0, 16.0));
+    assert_eq!(h.app.region_racks(&region), vec![group]);
+    h.app.song_region_delete().expect("delete");
+    let arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    assert!(arrangement.rack_lanes.values().all(Vec::is_empty), "rack lanes cleared");
+    assert!(arrangement.track_lanes.iter().all(Vec::is_empty), "track lanes cleared");
 }

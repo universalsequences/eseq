@@ -38,8 +38,8 @@ pub(crate) struct ProjectCapture {
     num_tracks: usize,
     current_pattern: usize,
     current_track: usize,
-    bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
     default_bus_snapshot: Vec<BusPatternSnapshot>,
+    /// Bus patterns ride the scenes (`Scene::bus_patterns`).
     scenes: crate::sequencer::ProjectScenes,
     tracks: Vec<ProjectTrack>,
     custom_effects: Vec<Vec<Option<String>>>,
@@ -2898,9 +2898,6 @@ impl App {
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
         self.state
             .ensure_bus_pattern_repository_len(self.state.stored_scene_len(), &default_bus_snapshot);
-        let bus_pattern_bank = self
-            .state
-            .export_bus_pattern_repository(&default_bus_snapshot);
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
         let mut identities = self.device_registry.clone();
@@ -2913,7 +2910,6 @@ impl App {
             num_tracks,
             current_pattern: self.state.current_scene_index(),
             current_track: self.ui.cursor_track.min(num_tracks.saturating_sub(1)),
-            bus_pattern_bank,
             default_bus_snapshot,
             scenes,
             tracks,
@@ -2987,7 +2983,6 @@ impl ProjectCapture {
         let num_tracks = self.num_tracks;
         let current_pattern = self.current_pattern;
         let current_track = self.current_track;
-        let bus_pattern_bank = &self.bus_pattern_bank;
         let scenes_for_takes = &self.scenes;
         let bank = scenes_for_takes.snapshots();
         let patterns = bank
@@ -3006,9 +3001,10 @@ impl ProjectCapture {
                     snapshot,
                     sample_paths,
                     sample_names,
-                    bus_pattern_bank
+                    scenes_for_takes
+                        .scenes
                         .get(pattern_idx)
-                        .map(Vec::as_slice)
+                        .map(|scene| scene.bus_patterns.as_slice())
                         .unwrap_or(&self.default_bus_snapshot)
                         .iter()
                         .map(project_bus_pattern_snapshot_from_ui)
@@ -4883,13 +4879,9 @@ impl App {
         };
         // A file with no arrangement (any version) loads the empty one:
         // the arrangement always exists (empty-arrangement spec 7).
-        let mut arrangement = arrangement.unwrap_or_else(|| self.empty_arrangement());
-        // Rack lanes validate against the rack clip banks, which install
-        // further down with the groups; they rejoin the arrangement there.
-        let rack_lanes = std::mem::take(&mut arrangement.rack_lanes);
-        self.state
-            .set_committed_arrangement(Some(arrangement))
-            .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
+        // Its rack lanes validate against the rack clip banks, which install
+        // further down with the groups: it is committed after them.
+        let arrangement = arrangement.unwrap_or_else(|| self.empty_arrangement());
         self.state
             .transport
             .pattern_epoch
@@ -4983,16 +4975,9 @@ impl App {
             pending.fallback_samples += fallback;
             result?;
         }
-        if !rack_lanes.is_empty() {
-            let mut arrangement = self
-                .state
-                .committed_arrangement()
-                .unwrap_or_else(|| self.empty_arrangement());
-            arrangement.rack_lanes = rack_lanes;
-            self.state
-                .set_committed_arrangement(Some(arrangement))
-                .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
-        }
+        self.state
+            .set_committed_arrangement(Some(arrangement))
+            .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any
         // pre-fix grouping) can have members still pointing at Mix in some/all

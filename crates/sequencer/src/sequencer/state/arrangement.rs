@@ -105,11 +105,6 @@ impl ArrClip {
             (None, None) => LaneSource::Empty,
         }
     }
-
-    /// `true` when `beat` falls inside the clip's half-open span.
-    pub fn contains(&self, beat: f64) -> bool {
-        beat >= self.start_beat && beat < self.end_beat
-    }
 }
 
 /// One clip on a rack lane (docs/arrangement-rack-lanes-spec.md §2): over
@@ -131,12 +126,45 @@ pub struct RackArrClip {
     pub anchor_beat: f64,
 }
 
-impl RackArrClip {
+/// What track lanes and rack lanes share: each is a sorted list of
+/// non-overlapping half-open spans with ids from one allocator, so the span
+/// mechanics (insertion, occlusion, validation) are written once.
+pub trait LaneSpan: Copy {
+    fn id(&self) -> ClipId;
+    fn set_id(&mut self, id: ClipId);
+    fn start_beat(&self) -> f64;
+    fn end_beat(&self) -> f64;
+    fn set_end_beat(&mut self, end: f64);
+
     /// `true` when `beat` falls inside the clip's half-open span.
-    pub fn contains(&self, beat: f64) -> bool {
-        beat >= self.start_beat && beat < self.end_beat
+    fn contains(&self, beat: f64) -> bool {
+        beat >= self.start_beat() && beat < self.end_beat()
     }
 }
+
+macro_rules! lane_span {
+    ($clip:ty) => {
+        impl LaneSpan for $clip {
+            fn id(&self) -> ClipId {
+                self.id
+            }
+            fn set_id(&mut self, id: ClipId) {
+                self.id = id;
+            }
+            fn start_beat(&self) -> f64 {
+                self.start_beat
+            }
+            fn end_beat(&self) -> f64 {
+                self.end_beat
+            }
+            fn set_end_beat(&mut self, end: f64) {
+                self.end_beat = end;
+            }
+        }
+    };
+}
+lane_span!(ArrClip);
+lane_span!(RackArrClip);
 
 /// The stored arrangement: a scene lane, one clip lane per track, the song
 /// end, the loop flag, and the monotonic clip-id allocator.
@@ -255,6 +283,25 @@ impl ProjectArrangement {
             })
     }
 
+    /// Find a rack-lane clip by id, returning its rack's group id alongside
+    /// it.
+    pub fn find_rack_clip(&self, id: ClipId) -> Option<(u64, &RackArrClip)> {
+        self.rack_lanes.iter().find_map(|(group, lane)| {
+            lane.iter()
+                .find(|clip| clip.id == id)
+                .map(|clip| (*group, clip))
+        })
+    }
+
+    /// [`Self::find_rack_clip`], mutably.
+    pub fn find_rack_clip_mut(&mut self, id: ClipId) -> Option<(u64, &mut RackArrClip)> {
+        self.rack_lanes.iter_mut().find_map(|(group, lane)| {
+            lane.iter_mut()
+                .find(|clip| clip.id == id)
+                .map(|clip| (*group, clip))
+        })
+    }
+
     /// Check every rule of spec 6.1 against `ctx`. Errors are actionable and
     /// never clamp, reorder, or drop invalid data (the `ProjectSong::validate`
     /// philosophy).
@@ -325,25 +372,8 @@ impl ProjectArrangement {
         // --- clips ------------------------------------------------------
         let mut seen_ids = HashSet::new();
         for (track, lane) in self.track_lanes.iter().enumerate() {
+            self.validate_lane_spans(lane, &format!("Track {}", track + 1), &mut seen_ids)?;
             for (idx, clip) in lane.iter().enumerate() {
-                if !clip.start_beat.is_finite() || clip.start_beat < 0.0 {
-                    return Err(format!(
-                        "Track {} clip {} start beat {} must be finite and non-negative",
-                        track + 1,
-                        idx + 1,
-                        clip.start_beat
-                    ));
-                }
-                if !clip.end_beat.is_finite() || clip.end_beat <= clip.start_beat {
-                    return Err(format!(
-                        "Track {} clip {} ends at beat {} which is not after its start beat {}; \
-                         clips must have positive length",
-                        track + 1,
-                        idx + 1,
-                        clip.end_beat,
-                        clip.start_beat
-                    ));
-                }
                 if !clip.offset_steps.is_finite() || clip.offset_steps < 0.0 {
                     return Err(format!(
                         "Track {} clip {} offset {} must be a finite, non-negative step count",
@@ -406,59 +436,6 @@ impl ProjectArrangement {
                         ));
                     }
                 }
-                if clip.end_beat > self.end_beat {
-                    return Err(format!(
-                        "Track {} clip {} ends at beat {} which is past the arrangement end \
-                         beat {}; extend the arrangement or trim the clip",
-                        track + 1,
-                        idx + 1,
-                        clip.end_beat,
-                        self.end_beat
-                    ));
-                }
-                if !seen_ids.insert(clip.id) {
-                    return Err(format!(
-                        "Track {} clip {} reuses clip id {}; clip ids must be unique",
-                        track + 1,
-                        idx + 1,
-                        clip.id.0
-                    ));
-                }
-                if clip.id.0 >= self.next_clip_id {
-                    return Err(format!(
-                        "Track {} clip {} has id {} but next_clip_id is {}; \
-                         ids must be less than the allocator",
-                        track + 1,
-                        idx + 1,
-                        clip.id.0,
-                        self.next_clip_id
-                    ));
-                }
-            }
-            for (idx, pair) in lane.windows(2).enumerate() {
-                if pair[1].start_beat < pair[0].start_beat {
-                    return Err(format!(
-                        "Track {} clips {} and {} are not sorted by start beat ({} then {})",
-                        track + 1,
-                        idx + 1,
-                        idx + 2,
-                        pair[0].start_beat,
-                        pair[1].start_beat
-                    ));
-                }
-                if pair[1].start_beat < pair[0].end_beat {
-                    return Err(format!(
-                        "Track {} clips {} and {} overlap: clip {} ends at beat {} but clip {} \
-                         starts at beat {}",
-                        track + 1,
-                        idx + 1,
-                        idx + 2,
-                        idx + 1,
-                        pair[0].end_beat,
-                        idx + 2,
-                        pair[1].start_beat
-                    ));
-                }
             }
         }
 
@@ -468,68 +445,84 @@ impl ProjectArrangement {
         // it), so the span plays silence until undo brings the clip back.
         // Save drops such references (`arrangement_for_serialization`).
         for (group_id, lane) in &self.rack_lanes {
+            self.validate_lane_spans(lane, &format!("Rack {group_id} lane"), &mut seen_ids)?;
             for (idx, clip) in lane.iter().enumerate() {
-                let at = || format!("Rack {group_id} lane clip {}", idx + 1);
-                if !clip.start_beat.is_finite() || clip.start_beat < 0.0 {
-                    return Err(format!(
-                        "{} start beat {} must be finite and non-negative",
-                        at(),
-                        clip.start_beat
-                    ));
-                }
-                if !clip.end_beat.is_finite() || clip.end_beat <= clip.start_beat {
-                    return Err(format!(
-                        "{} ends at beat {} which is not after its start beat {}; clips must \
-                         have positive length",
-                        at(),
-                        clip.end_beat,
-                        clip.start_beat
-                    ));
-                }
                 if !clip.anchor_beat.is_finite() {
-                    return Err(format!("{} anchor beat {} must be finite", at(), clip.anchor_beat));
-                }
-                if clip.end_beat > self.end_beat {
                     return Err(format!(
-                        "{} ends at beat {} which is past the arrangement end beat {}; extend \
-                         the arrangement or trim the clip",
-                        at(),
-                        clip.end_beat,
-                        self.end_beat
-                    ));
-                }
-                if !seen_ids.insert(clip.id) {
-                    return Err(format!(
-                        "{} reuses clip id {}; clip ids must be unique",
-                        at(),
-                        clip.id.0
-                    ));
-                }
-                if clip.id.0 >= self.next_clip_id {
-                    return Err(format!(
-                        "{} has id {} but next_clip_id is {}; ids must be less than the allocator",
-                        at(),
-                        clip.id.0,
-                        self.next_clip_id
-                    ));
-                }
-            }
-            for (idx, pair) in lane.windows(2).enumerate() {
-                if pair[1].start_beat < pair[0].end_beat {
-                    return Err(format!(
-                        "Rack {group_id} lane clips {} and {} are unsorted or overlap: clip {} \
-                         ends at beat {} but clip {} starts at beat {}",
+                        "Rack {group_id} lane clip {} anchor beat {} must be finite",
                         idx + 1,
-                        idx + 2,
-                        idx + 1,
-                        pair[0].end_beat,
-                        idx + 2,
-                        pair[1].start_beat
+                        clip.anchor_beat
                     ));
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// The span rules every lane shares: each clip starts at a finite,
+    /// non-negative beat, has positive length and ends inside the song, and
+    /// has a unique id under the allocator; the lane is sorted and
+    /// non-overlapping. `lane_name` ("Track 2", "Rack 7 lane") prefixes
+    /// every message.
+    fn validate_lane_spans<C: LaneSpan>(
+        &self,
+        lane: &[C],
+        lane_name: &str,
+        seen_ids: &mut HashSet<ClipId>,
+    ) -> Result<(), String> {
+        for (idx, clip) in lane.iter().enumerate() {
+            let at = || format!("{lane_name} clip {}", idx + 1);
+            let (start, end, id) = (clip.start_beat(), clip.end_beat(), clip.id());
+            if !start.is_finite() || start < 0.0 {
+                return Err(format!("{} start beat {start} must be finite and non-negative", at()));
+            }
+            if !end.is_finite() || end <= start {
+                return Err(format!(
+                    "{} ends at beat {end} which is not after its start beat {start}; clips \
+                     must have positive length",
+                    at()
+                ));
+            }
+            if end > self.end_beat {
+                return Err(format!(
+                    "{} ends at beat {end} which is past the arrangement end beat {}; extend \
+                     the arrangement or trim the clip",
+                    at(),
+                    self.end_beat
+                ));
+            }
+            if !seen_ids.insert(id) {
+                return Err(format!("{} reuses clip id {}; clip ids must be unique", at(), id.0));
+            }
+            if id.0 >= self.next_clip_id {
+                return Err(format!(
+                    "{} has id {} but next_clip_id is {}; ids must be less than the allocator",
+                    at(),
+                    id.0,
+                    self.next_clip_id
+                ));
+            }
+        }
+        for (idx, pair) in lane.windows(2).enumerate() {
+            let (first, second) = (idx + 1, idx + 2);
+            if pair[1].start_beat() < pair[0].start_beat() {
+                return Err(format!(
+                    "{lane_name} clips {first} and {second} are not sorted by start beat ({} \
+                     then {})",
+                    pair[0].start_beat(),
+                    pair[1].start_beat()
+                ));
+            }
+            if pair[1].start_beat() < pair[0].end_beat() {
+                return Err(format!(
+                    "{lane_name} clips {first} and {second} overlap: clip {first} ends at beat \
+                     {} but clip {second} starts at beat {}",
+                    pair[0].end_beat(),
+                    pair[1].start_beat()
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -575,6 +568,12 @@ pub trait SongCompileContext {
         None
     }
 
+    /// Every clip-bearing rack's clip pointer in `scene` (None: the scene
+    /// leaves the rack silent), as `(group_id, rack clip)`.
+    fn song_scene_rack_clips(&self, _scene: usize) -> Vec<(u64, Option<RackClipId>)> {
+        Vec::new()
+    }
+
     /// The pattern rack clip `clip` of rack `group_id` holds for member
     /// `position`, as a raw pool id. `None` when that member is silent in
     /// the clip.
@@ -612,6 +611,14 @@ impl SongCompileContext for ProjectScenes {
 
     fn song_rack_member(&self, track: usize) -> Option<(u64, usize)> {
         self.rack_member_slot(track)
+    }
+
+    fn song_scene_rack_clips(&self, scene: usize) -> Vec<(u64, Option<RackClipId>)> {
+        self.rack_banks()
+            .iter()
+            .filter(|bank| !bank.clips.is_empty())
+            .map(|bank| (bank.group_id, self.scene_rack_clip(scene, bank.group_id)))
+            .collect()
     }
 
     fn song_rack_clip_cell(&self, group_id: u64, clip: RackClipId, position: usize) -> Option<u64> {
@@ -788,63 +795,80 @@ pub fn occlude_span(
         return Err(format!("Track {} has no arrangement lane", track + 1));
     }
     let lane = std::mem::take(&mut arr.track_lanes[track]);
-    let mut kept: Vec<ArrClip> = Vec::with_capacity(lane.len() + 1);
-    let mut split_tails: Vec<ArrClip> = Vec::new();
+    // A left trim or split tail re-stamps; a tail with nothing left to play
+    // (a take past its end) is dropped, not stored as an empty clip.
+    let kept = occlude_lane(
+        lane,
+        start,
+        end,
+        |clip, beat| restamped_clip(ctx, track, clip, beat),
+        || arr.allocate_clip_id(),
+    );
+    arr.track_lanes[track] = kept?;
+    Ok(())
+}
+
+/// The truncation both lane kinds share (cases 1-4 of [`occlude_span`]):
+/// `lane` with `[start, end)` cleared. `tail_at(clip, end)` is the part of
+/// `clip` from `end` on (`None` drops it); a split's right fragment takes a
+/// fresh id from `allocate`.
+fn occlude_lane<C: LaneSpan>(
+    lane: Vec<C>,
+    start: f64,
+    end: f64,
+    mut tail_at: impl FnMut(&C, f64) -> Option<C>,
+    mut allocate: impl FnMut() -> Result<ClipId, String>,
+) -> Result<Vec<C>, String> {
+    let mut kept: Vec<C> = Vec::with_capacity(lane.len() + 1);
+    let mut split_tails: Vec<C> = Vec::new();
     for clip in lane {
-        // 1. Disjoint.
-        if clip.end_beat <= start || clip.start_beat >= end {
+        let (clip_start, clip_end) = (clip.start_beat(), clip.end_beat());
+        if clip_end <= start || clip_start >= end {
+            // 1. Disjoint.
             kept.push(clip);
-            continue;
-        }
-        // 2. Fully covered.
-        if clip.start_beat >= start && clip.end_beat <= end {
-            continue;
-        }
-        // 4. The incoming span lands strictly inside.
-        if clip.start_beat < start && clip.end_beat > end {
+        } else if clip_start >= start && clip_end <= end {
+            // 2. Fully covered: removed.
+        } else if clip_start < start && clip_end > end {
+            // 4. The incoming span lands strictly inside.
             let mut left = clip;
-            left.end_beat = start;
+            left.set_end_beat(start);
             kept.push(left);
-            // A tail with nothing left to play (a take past its end) is
-            // dropped, not stored as an empty clip.
-            if let Some(mut right) = restamped_clip(ctx, track, &clip, end) {
-                right.id = ClipId(0); // reassigned below, after the borrow ends
-                split_tails.push(right);
-            }
-            continue;
-        }
-        // 3a. Right trim: the clip starts before the span and ends inside it.
-        if clip.start_beat < start {
+            split_tails.extend(tail_at(&clip, end));
+        } else if clip_start < start {
+            // 3a. Right trim: only shortens the span.
             let mut trimmed = clip;
-            trimmed.end_beat = start;
+            trimmed.set_end_beat(start);
             kept.push(trimmed);
-            continue;
+        } else {
+            // 3b. Left trim.
+            kept.extend(tail_at(&clip, end));
         }
-        // 3b. Left trim: the clip starts inside the span and ends after it.
-        kept.extend(restamped_clip(ctx, track, &clip, end));
     }
     for mut tail in split_tails {
-        tail.id = arr.allocate_clip_id()?;
+        tail.set_id(allocate()?);
         kept.push(tail);
     }
     kept.sort_by(|a, b| {
-        a.start_beat
-            .partial_cmp(&b.start_beat)
+        a.start_beat()
+            .partial_cmp(&b.start_beat())
             .expect("validated clip beats are finite")
     });
-    arr.track_lanes[track] = kept;
-    Ok(())
+    Ok(kept)
+}
+
+/// Insert `clip` into `lane` keeping it sorted by start beat.
+fn insert_sorted<C: LaneSpan>(lane: &mut Vec<C>, clip: C) {
+    let position = lane
+        .iter()
+        .position(|existing| existing.start_beat() > clip.start_beat())
+        .unwrap_or(lane.len());
+    lane.insert(position, clip);
 }
 
 /// Insert `clip` into `track`'s lane keeping the lane sorted by start beat.
 /// The caller is responsible for having made room (`occlude_span`).
 pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrClip) {
-    let lane = &mut arr.track_lanes[track];
-    let position = lane
-        .iter()
-        .position(|existing| existing.start_beat > clip.start_beat)
-        .unwrap_or(lane.len());
-    lane.insert(position, clip);
+    insert_sorted(&mut arr.track_lanes[track], clip);
 }
 
 /// [`occlude_span`] for rack `group_id`'s lane (docs/arrangement-rack-lanes-spec.md
@@ -859,44 +883,21 @@ pub fn occlude_rack_span(
     end: f64,
 ) -> Result<(), String> {
     let lane = std::mem::take(arr.rack_lanes.entry(group_id).or_default());
-    let mut kept: Vec<RackArrClip> = Vec::with_capacity(lane.len() + 1);
-    let mut split_tails: Vec<RackArrClip> = Vec::new();
-    for clip in lane {
-        if clip.end_beat <= start || clip.start_beat >= end {
-            kept.push(clip);
-        } else if clip.start_beat >= start && clip.end_beat <= end {
-            // Fully covered: removed.
-        } else if clip.start_beat < start && clip.end_beat > end {
-            kept.push(RackArrClip { end_beat: start, ..clip });
-            split_tails.push(RackArrClip { start_beat: end, ..clip });
-        } else if clip.start_beat < start {
-            kept.push(RackArrClip { end_beat: start, ..clip });
-        } else {
-            kept.push(RackArrClip { start_beat: end, ..clip });
-        }
-    }
-    for mut tail in split_tails {
-        tail.id = arr.allocate_clip_id()?;
-        kept.push(tail);
-    }
-    kept.sort_by(|a, b| {
-        a.start_beat
-            .partial_cmp(&b.start_beat)
-            .expect("validated clip beats are finite")
-    });
-    arr.rack_lanes.insert(group_id, kept);
+    let kept = occlude_lane(
+        lane,
+        start,
+        end,
+        |clip, beat| Some(RackArrClip { start_beat: beat, ..*clip }),
+        || arr.allocate_clip_id(),
+    );
+    arr.rack_lanes.insert(group_id, kept?);
     Ok(())
 }
 
 /// Insert `clip` into rack `group_id`'s lane keeping it sorted by start beat.
 /// The caller is responsible for having made room (`occlude_rack_span`).
 pub fn insert_rack_clip_sorted(arr: &mut ProjectArrangement, group_id: u64, clip: RackArrClip) {
-    let lane = arr.rack_lanes.entry(group_id).or_default();
-    let position = lane
-        .iter()
-        .position(|existing| existing.start_beat > clip.start_beat)
-        .unwrap_or(lane.len());
-    lane.insert(position, clip);
+    insert_sorted(arr.rack_lanes.entry(group_id).or_default(), clip);
 }
 
 /// Stamp the scene lane's cells as real clips over `[from_beat, to_beat)`
@@ -923,6 +924,12 @@ pub fn insert_rack_clip_sorted(arr: &mut ProjectArrangement, group_id: u64, clip
 /// a beat that is not a whole number of pattern cycles shifted every
 /// downstream hit off the grid. It also disagreed with capture, which has
 /// always stamped performed launches free-run; this is one rule for both.
+///
+/// A clip-bearing rack gets one rack-lane clip per span instead
+/// (docs/arrangement-rack-lanes-spec.md §5): the scene's pointer for it,
+/// anchored at beat 0 by the same free-run rule. Its members' own lanes are
+/// cleared over the span and never stamped: a clip there would override the
+/// rack lane.
 pub fn stamp_scene_clips(
     arr: &mut ProjectArrangement,
     ctx: &dyn SongCompileContext,
@@ -942,6 +949,11 @@ pub fn stamp_scene_clips(
         }
         for track in 0..track_count {
             occlude_span(arr, ctx, track, start, end)?;
+            // A clip-bearing rack's member plays from the rack lane below;
+            // a stamped clip here would override it (spec §2.1).
+            if ctx.song_rack_member(track).is_some() {
+                continue;
+            }
             let Some(pattern_id) = ctx.song_scene_cell(span.scene, track) else {
                 // No cell: the scene says nothing for this track, so the span
                 // stays an honest silent gap.
@@ -961,6 +973,24 @@ pub fn stamp_scene_clips(
                     pattern_id: Some(pattern_id),
                     take_id: None,
                     offset_steps,
+                },
+            );
+        }
+        for (group_id, rack_clip) in ctx.song_scene_rack_clips(span.scene) {
+            occlude_rack_span(arr, group_id, start, end)?;
+            let Some(rack_clip) = rack_clip else {
+                continue;
+            };
+            let id = arr.allocate_clip_id()?;
+            insert_rack_clip_sorted(
+                arr,
+                group_id,
+                RackArrClip {
+                    id,
+                    start_beat: start,
+                    end_beat: end,
+                    rack_clip,
+                    anchor_beat: 0.0,
                 },
             );
         }
@@ -1717,6 +1747,34 @@ mod tests {
             rack_clip,
             anchor_beat: anchor,
         }
+    }
+
+    /// docs/arrangement-rack-lanes-spec.md §5: Place Scene Patterns stamps
+    /// one rack-lane clip per scene span from the scene's pointer, anchored
+    /// at beat 0, clears the members' own lanes there (they have no scene
+    /// cells), and leaves a span whose scene silences the rack empty.
+    #[test]
+    fn stamp_scene_clips_stamps_rack_lanes_from_the_scene_pointers() {
+        let (mut scenes, a, b) = rack_scenes();
+        assert!(scenes.set_scene_rack_clip(0, RACK, Some(a)));
+        assert!(scenes.set_scene_rack_clip(1, RACK, Some(b)));
+        assert!(scenes.set_scene_rack_clip(2, RACK, None));
+        let mut arr = ProjectArrangement::empty(4);
+        arr.end_beat = 48.0;
+        arr.scene_lane = vec![ev(0.0, 0), ev(16.0, 1), ev(32.0, 2)];
+        arr.track_lanes[1] = vec![clip(0, 0.0, 48.0, 1)];
+        arr.next_clip_id = 1;
+        stamp_scene_clips(&mut arr, &scenes, 0.0, 48.0).expect("stamp");
+        let lane: Vec<(f64, f64, RackClipId, f64)> = arr.rack_lanes[&RACK]
+            .iter()
+            .map(|clip| (clip.start_beat, clip.end_beat, clip.rack_clip, clip.anchor_beat))
+            .collect();
+        assert_eq!(lane, vec![(0.0, 16.0, a, 0.0), (16.0, 32.0, b, 0.0)]);
+        assert!(arr.track_lanes[1].is_empty(), "the member's own clip is replaced");
+        arr.validate(&scenes).expect("stamped arrangement is valid");
+        let song = compile_ok(&arr, &scenes);
+        let over = override_for(row_at(&song, 16.0), 2).expect("member override");
+        assert_eq!(over.pattern_id, Some(3), "clip B's member plays");
     }
 
     /// docs/arrangement-rack-lanes-spec.md §2.1/§3: a rack-lane clip

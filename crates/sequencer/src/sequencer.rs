@@ -37,7 +37,7 @@ pub use state::{
     arrangement_for_serialization, arrangement_scene_spans,
     compile_arrangement, insert_clip_sorted, legacy_backdrop_spans, migrate_legacy_backdrops,
     insert_rack_clip_sorted, lower_rows_to_arrangement, occlude_rack_span, occlude_span,
-    pattern_play_step, restamped_clip, stamp_scene_clips, RackArrClip,
+    pattern_play_step, restamped_clip, stamp_scene_clips, LaneSpan, RackArrClip,
     stamped_clip_override, ArrClip, LegacyBackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
     DEFAULT_ARRANGEMENT_END,

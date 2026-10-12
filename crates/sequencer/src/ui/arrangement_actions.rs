@@ -280,6 +280,80 @@ pub(crate) fn arrangement_action_song_commands(
                 ]),
             )])
         }
+        // Rack-row gestures (docs/arrangement-rack-lanes-spec.md §5): one
+        // primitive each, naming the rack-lane clip by id (ids are unique
+        // across every lane, so no rack needs naming).
+        "rack-clip-move" => {
+            let clip_id = require_id(map, "clip-id")?;
+            let start_beat = require_beat(map, "start")?;
+            Ok(vec![(
+                "arrangement-rack-clip-move",
+                payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                ]),
+            )])
+        }
+        "rack-clip-resize" => {
+            let clip_id = require_id(map, "clip-id")?;
+            let start_beat = require_beat(map, "start")?;
+            let end_beat = require_beat(map, "end")?;
+            Ok(vec![(
+                "arrangement-rack-clip-resize",
+                payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
+                ]),
+            )])
+        }
+        "rack-clip-split" => {
+            let clip_id = require_id(map, "clip-id")?;
+            let beat = require_beat(map, "beat")?;
+            Ok(vec![(
+                "arrangement-rack-clip-split",
+                payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("beat", Value::Number(beat)),
+                ]),
+            )])
+        }
+        "rack-clip-place" => {
+            let group_id = require_id(map, "group")?;
+            let rack_clip = require_id(map, "rack-clip")?;
+            let start_beat = require_beat(map, "start")?;
+            Ok(vec![(
+                "arrangement-rack-clip-place",
+                payload(vec![
+                    ("group", Value::Number(group_id as f64)),
+                    ("rack-clip", Value::Number(rack_clip as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                ]),
+            )])
+        }
+        "rack-clip-set" => {
+            let clip_id = require_id(map, "clip-id")?;
+            let rack_clip = require_id(map, "rack-clip")?;
+            Ok(vec![(
+                "arrangement-rack-clip-set",
+                payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("rack-clip", Value::Number(rack_clip as f64)),
+                ]),
+            )])
+        }
+        "rack-clip-delete" | "rack-clip-duplicate" => {
+            let clip_id = require_id(map, "clip-id")?;
+            let command = if kind == "rack-clip-delete" {
+                "arrangement-rack-clip-delete"
+            } else {
+                "arrangement-rack-clip-duplicate"
+            };
+            Ok(vec![(
+                command,
+                payload(vec![("clip-id", Value::Number(clip_id as f64))]),
+            )])
+        }
         // Content-length handle release: one song-set-end (spec 9.3).
         "finish-resize-content-length" => {
             let end_beat = require_beat(map, "length")?;

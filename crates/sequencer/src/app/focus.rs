@@ -143,7 +143,9 @@ impl App {
         let pos = self.state.song_position_beats()?;
         // Borrowed, never cloned: this runs once per rendered frame while the
         // song plays, and `committed_arrangement` deep-clones every lane.
-        let (clip_start_beat, clip_end_beat, clip_offset_steps) =
+        // The clip's span, and the beat at which the source stood at
+        // `phase_offset` steps.
+        let (clip_start_beat, clip_end_beat, phase_beat, clip_offset_steps) =
             self.state.with_committed_arrangement(|arrangement| {
                 let arrangement = arrangement?;
                 // Prefer the selected clip (the pinned intent); otherwise any
@@ -155,24 +157,49 @@ impl App {
                     EditFocus::Take { take, .. } => clip.take_id == Some(take.0),
                     EditFocus::Live { .. } => false,
                 };
-                let selected = self
+                let selection = self
                     .song_clip_selection
-                    .filter(|selection| selection.track == track)
+                    .filter(|selection| selection.track == track);
+                let selected = selection
                     .and_then(|selection| arrangement.find_clip(selection.clip_id))
                     .map(|(_, clip)| clip)
                     .filter(|clip| matches_focus(clip));
-                let clip = match selected {
-                    Some(clip) => clip,
-                    None => lane.iter().find(|clip| {
+                let clip = selected.or_else(|| {
+                    lane.iter().find(|clip| {
                         matches_focus(clip) && pos >= clip.start_beat && pos < clip.end_beat
-                    })?,
+                    })
+                });
+                if let Some(clip) = clip {
+                    return Some((clip.start_beat, clip.end_beat, clip.start_beat, clip.offset_steps));
+                }
+                // A rack member's pattern bound from its rack lane
+                // (`select_rack_member_pattern`): that rack-lane clip, phased
+                // from its anchor.
+                // Cheap checks first: this runs every frame, and only a
+                // selection naming a rack-lane clip pays for the scenes lock.
+                let EditFocus::Pattern { pattern, .. } = focus else {
+                    return None;
                 };
-                Some((clip.start_beat, clip.end_beat, clip.offset_steps))
+                let (lane_group, rack) = arrangement.find_rack_clip(selection?.clip_id)?;
+                // The rack clip must bind the focused pattern on this member.
+                let binds_focus = self.state.with_project_scenes(|scenes| {
+                    let (group_id, member) = scenes.rack_member_slot(track)?;
+                    let cell = *scenes
+                        .rack_bank(group_id)?
+                        .clip(rack.rack_clip)?
+                        .cells
+                        .get(member)?;
+                    Some(group_id == lane_group && cell == Some(pattern))
+                });
+                if binds_focus != Some(true) {
+                    return None;
+                }
+                Some((rack.start_beat, rack.end_beat, rack.anchor_beat, 0.0))
             })?;
         if pos < clip_start_beat || pos >= clip_end_beat {
             return None;
         }
-        let delta_beats = pos - clip_start_beat;
+        let delta_beats = pos - phase_beat;
         self.state.with_project_scenes(|scenes| {
             use crate::sequencer::SongCompileContext;
             match focus {
