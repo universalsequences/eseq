@@ -854,26 +854,42 @@ impl ProjectFile {
     /// discards every saved marker on load. Runs on both capture and
     /// deserialize, so projects written before the mirror existed are repaired
     /// rather than losing their edits once more.
+    ///
+    /// The layout path belongs to the *live* slot's sample, so it is only
+    /// mirrored onto a pattern slot that names that same sample: a scene or
+    /// clip holding a different sample in that slot must not inherit it, or
+    /// the load plays the live sample in every scene.
     fn mirror_rack_slot_sample_paths(&mut self) {
-        let track_slot_paths: Vec<Vec<Option<String>>> = self
+        let track_slot_sources: Vec<Vec<(Option<String>, Option<String>)>> = self
             .tracks
             .iter()
             .map(|track| match &track.kind {
-                ProjectTrackKind::Rack { slots, .. } => {
-                    slots.iter().map(|slot| slot.sample_path.clone()).collect()
-                }
-                ProjectTrackKind::Sampler { sample_path } => vec![sample_path.clone()],
+                ProjectTrackKind::Rack { slots, .. } => slots
+                    .iter()
+                    .map(|slot| (slot.sample_path.clone(), slot.sample_name.clone()))
+                    .collect(),
+                ProjectTrackKind::Sampler { sample_path } => vec![(sample_path.clone(), None)],
                 ProjectTrackKind::Empty | ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
             })
             .collect();
         for pattern in &mut self.patterns {
             for (track, rack) in pattern.rack_tracks.iter_mut().enumerate() {
-                let (Some(rack), Some(paths)) = (rack.as_mut(), track_slot_paths.get(track)) else {
+                let (Some(rack), Some(sources)) = (rack.as_mut(), track_slot_sources.get(track)) else {
                     continue;
                 };
                 for (slot_index, slot) in rack.slots.iter_mut().enumerate() {
-                    if slot.sample_path.is_none() {
-                        slot.sample_path = paths.get(slot_index).cloned().flatten();
+                    if slot.sample_path.is_some() {
+                        continue;
+                    }
+                    let Some((path, layout_name)) = sources.get(slot_index) else {
+                        continue;
+                    };
+                    let same_sample = match (&slot.sample_name, layout_name) {
+                        (Some(name), Some(layout_name)) => name == layout_name,
+                        _ => true,
+                    };
+                    if same_sample {
+                        slot.sample_path = path.clone();
                     }
                 }
             }

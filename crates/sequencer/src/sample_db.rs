@@ -1283,6 +1283,35 @@ pub fn display_title_for_sample_path(path: &Path) -> Option<String> {
     db.title_for_hash(hash).ok().flatten()
 }
 
+/// The stored sample whose display title is exactly `title`, when exactly one
+/// is: a title shared by several samples names none of them.
+pub fn unique_sample_path_for_title(title: &str) -> Option<std::path::PathBuf> {
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let paths = crate::app_paths::app_paths();
+    let db_path = paths.sample_db_path();
+    if !db_path.is_file() {
+        return None;
+    }
+    let db = SampleDb::open_read_only(&db_path).ok()?;
+    let mut statement = db
+        .conn
+        .prepare("SELECT hash FROM samples WHERE title = ? LIMIT 2")
+        .ok()?;
+    let hashes: Vec<String> = statement
+        .query_map(params![title], |row| row.get(0))
+        .ok()?
+        .filter_map(|hash| hash.ok())
+        .collect();
+    let [hash] = hashes.as_slice() else {
+        return None;
+    };
+    let path = paths.samples_dir().join(format!("{hash}.wav"));
+    path.is_file().then_some(path)
+}
+
 fn sqlite_like_contains_pattern(text: &str) -> String {
     let mut pattern = String::with_capacity(text.len() + 2);
     pattern.push('%');

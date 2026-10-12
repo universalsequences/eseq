@@ -1875,6 +1875,117 @@
     }
 
     #[test]
+    fn a_kit_pad_sample_dropped_in_scene_two_stays_out_of_scene_one() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let other = std::fs::read_dir("../../content/impulses/king-tubby")
+            .expect("king-tubby impulses")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("a second wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.with_scenes_mut(|scenes| { scenes.new_scene(); });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(scene, app.tracks.len(), &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        };
+        relaunch(&app, 0);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        relaunch(&app, 1);
+        app.state.toggle_step_and_clear_plocks(kick, 3);
+        relaunch(&app, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let name = format!("kit-pad-scene-sample-{}", std::process::id());
+        let (path, _) = app.save_rack_as_kit(group_id, &name, true, &[0, 1]).expect("save kit");
+
+        let engine2 = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app2 = App::new(engine2.state, engine2.lg_ptr, engine2.sample_rate,
+            engine2.buses, engine2.master_recorder, engine2.keyboard_tx);
+        let (gid2, _) = app2.load_kit_as_rack(&path).expect("load kit");
+        let _ = std::fs::remove_file(&path);
+        let pad = app2.groups.iter().find(|g| g.id == gid2).unwrap().members[0];
+        let clips: Vec<crate::sequencer::RackClipId> = app2.state.with_scenes(|scenes| {
+            scenes.rack_bank(gid2).unwrap().clips.iter().map(|clip| clip.id).collect()
+        });
+        app2.state.with_scenes_mut(|scenes| {
+            while scenes.scene_count() < 2 { scenes.new_scene(); }
+            scenes.set_scene_rack_clip(0, gid2, Some(clips[0]));
+            scenes.set_scene_rack_clip(1, gid2, Some(clips[1]));
+        });
+        let pool_sample = |app: &App, clip: crate::sequencer::RackClipId| -> String {
+            app.state.with_scenes(|scenes| {
+                let bank = scenes.rack_bank(gid2).unwrap();
+                let id = bank.clip(clip).unwrap().cells[0].unwrap();
+                let data = scenes.track_pools[pad].get(id).unwrap();
+                data.rack_track.as_ref().unwrap().slots[0].sample_id.as_ref().unwrap().1.clone()
+            })
+        };
+        let live_sample = |app: &App| -> String {
+            app.state.live_rack_track_snapshot(pad).unwrap().slots[0]
+                .sample_id.as_ref().unwrap().1.clone()
+        };
+        relaunch(&app2, 0);
+        let original = live_sample(&app2);
+        relaunch(&app2, 1);
+        assert_eq!(live_sample(&app2), original);
+
+        // Scene 2: drop a different sample on the pad.
+        app2.apply_recorded_rack_slot_source_replacement(pad, 0, "Replace rack sample", |app| {
+            app.graph_controller().replace_rack_slot_with_sampler(pad, 0, &other)
+        })
+        .expect("replace scene two's sample");
+        let replaced = live_sample(&app2);
+        assert_ne!(replaced, original);
+        assert_eq!(pool_sample(&app2, clips[0]), original, "pool: scene one untouched after drop");
+
+        // Back to scene 1, then round-trip once more.
+        relaunch(&app2, 0);
+        assert_eq!(live_sample(&app2), original, "live: scene one plays its own sample");
+        assert_eq!(pool_sample(&app2, clips[1]), replaced, "pool: scene two kept the drop");
+        relaunch(&app2, 1);
+        assert_eq!(live_sample(&app2), replaced);
+        relaunch(&app2, 0);
+        assert_eq!(live_sample(&app2), original, "live: scene one after a round trip");
+        assert_eq!(pool_sample(&app2, clips[0]), original);
+
+        // Save with scene 2 live, so the track layout records the dropped
+        // sample, then reload: each clip must come back with its own sample,
+        // not the one that was live at save time.
+        relaunch(&app2, 1);
+        let project_name = format!("__test-rack-slot-scene-samples-{}", std::process::id());
+        let captured = app2.capture_project(&project_name).expect("capture");
+        let project_path = crate::project::save_project(&project_name, &captured).expect("save");
+        let _cleanup = TestProjectFile(project_path.clone());
+        let engine3 = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app3 = App::new(engine3.state, engine3.lg_ptr, engine3.sample_rate,
+            engine3.buses, engine3.master_recorder, engine3.keyboard_tx);
+        app3.queue_project_load_from_path(&project_name, &project_path).expect("queue load");
+        while app3.has_pending_project_load() {
+            app3.advance_pending_project_load().expect("advance load");
+        }
+        let reloaded = |scene: usize| -> (i32, String) {
+            app3.state.with_scenes(|scenes| {
+                let id = scenes.composed_scene_cell(scene, pad).expect("clip cell");
+                let data = scenes.track_pools[pad].get(id).unwrap();
+                let (buffer, name, _) =
+                    data.rack_track.as_ref().unwrap().slots[0].sample_id.clone().unwrap();
+                (buffer, name)
+            })
+        };
+        let (scene_one_buffer, scene_one_name) = reloaded(0);
+        let (scene_two_buffer, scene_two_name) = reloaded(1);
+        assert_eq!(scene_one_name, original, "reload: scene one keeps its sample");
+        assert_eq!(scene_two_name, replaced, "reload: scene two keeps the drop");
+        assert_ne!(scene_one_buffer, scene_two_buffer, "reload: each scene plays its own buffer");
+    }
+
+    #[test]
     fn dropping_a_sample_on_an_empty_pad_while_the_rack_is_silent_mints_a_clip() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
         let lg = engine.lg_ptr;

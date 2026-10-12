@@ -101,6 +101,38 @@ impl SampleSourcePaths {
         let name = if path.is_some() { name } else { String::new() };
         Ok((path, name))
     }
+
+    /// Give every rack sampler slot of `pattern` the source path of the
+    /// sample *that pattern's* slot holds. The track layout only records the
+    /// live slot's path, and scenes and rack clips routinely hold different
+    /// samples per slot; without a path of its own a slot can only be
+    /// reloaded by name, which is ambiguous. Best effort: a slot whose sample
+    /// resolves nowhere keeps its name alone, as before.
+    fn fill_rack_slot_paths(&self, snapshot: &PatternSnapshot, pattern: &mut ProjectPattern) {
+        for (lane, rack) in snapshot.rack_tracks.iter().enumerate() {
+            let (Some(rack), Some(Some(saved))) = (rack, pattern.rack_tracks.get_mut(lane)) else {
+                continue;
+            };
+            for (slot, saved_slot) in rack.slots.iter().zip(&mut saved.slots) {
+                let Some((buffer, name, _)) = slot.sample_id.as_ref() else {
+                    continue;
+                };
+                if slot.instrument_type != InstrumentType::Sampler || saved_slot.sample_path.is_some() {
+                    continue;
+                }
+                saved_slot.sample_path = resolve_sampler_source_path(
+                    &self.blank_buffers,
+                    &self.by_buffer,
+                    &self.by_name,
+                    *buffer,
+                    name,
+                )
+                .ok()
+                .flatten()
+                .map(|path| path.to_string_lossy().to_string());
+            }
+        }
+    }
 }
 
 /// Shared body of [`App::capture_sampler_source_path`] and
@@ -2970,7 +3002,7 @@ impl ProjectCapture {
                     sample_names.push(sample_name);
                     sample_paths.push(sample_path);
                 }
-                Ok(ProjectPattern::from_snapshot(
+                let mut pattern = ProjectPattern::from_snapshot(
                     snapshot,
                     sample_paths,
                     sample_names,
@@ -2981,7 +3013,9 @@ impl ProjectCapture {
                         .iter()
                         .map(project_bus_pattern_snapshot_from_ui)
                         .collect(),
-                ))
+                );
+                self.sample_paths.fill_rack_slot_paths(snapshot, &mut pattern);
+                Ok(pattern)
             })
             .collect::<Result<Vec<_>, String>>()?;
 
@@ -3297,6 +3331,7 @@ impl ProjectCapture {
             .unzip();
         let mut pattern =
             ProjectPattern::from_snapshot(&snapshot, sample_paths, sample_names, Vec::new());
+        self.sample_paths.fill_rack_slot_paths(&snapshot, &mut pattern);
         pattern.lane_tracks = lane_tracks;
         Ok(pattern)
     }
@@ -5188,9 +5223,104 @@ impl App {
         Ok(())
     }
 
+    /// The sample each rack sampler slot of one saved pattern holds, loaded,
+    /// positional over `[track][slot]`. `None` means "the slot holds the live
+    /// graph's sample": a slot naming the live slot's sample needs no load,
+    /// and a slot whose sample resolves nowhere falls back to it (counted).
+    ///
+    /// Scenes and rack clips each keep their own sample per slot, so binding
+    /// every pattern to the live slot's buffer would play the scene that was
+    /// current at save time everywhere — and the next save writes it back.
+    fn load_project_rack_slot_samples(
+        &mut self,
+        rack_tracks: &[Option<crate::project::ProjectRackTrackPattern>],
+        num_tracks: usize,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        fallback_count: &mut usize,
+    ) -> Result<Vec<Vec<Option<(i32, String, u32)>>>, String> {
+        let mut samples = Vec::with_capacity(num_tracks);
+        for track_idx in 0..num_tracks {
+            let live_slots = (self.graph.track_instrument_types.get(track_idx)
+                == Some(&InstrumentType::Rack))
+                .then(|| self.state.live_rack_track_snapshot(track_idx))
+                .flatten()
+                .map(|rack| rack.slots)
+                .unwrap_or_default();
+            let saved_slots = rack_tracks
+                .get(track_idx)
+                .and_then(Option::as_ref)
+                .map(|rack| rack.slots.as_slice())
+                .unwrap_or_default();
+            let mut track_samples = Vec::with_capacity(live_slots.len());
+            for (slot_idx, live_slot) in live_slots.iter().enumerate() {
+                let saved = saved_slots.get(slot_idx).filter(|saved| {
+                    live_slot.instrument_type == InstrumentType::Sampler
+                        && matches!(saved.instrument_type, crate::project::ProjectInstrumentType::Sampler)
+                });
+                let Some(saved) = saved else {
+                    track_samples.push(None);
+                    continue;
+                };
+                let saved_name = saved
+                    .sample_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty());
+                let saved_path = saved
+                    .sample_path
+                    .as_deref()
+                    .map(|path| crate::app_paths::resolve_sample_ref(Path::new(path)));
+                let live_name = live_slot.sample_id.as_ref().map(|(_, name, _)| name.as_str());
+                if saved_path.is_none() && (saved_name.is_none() || saved_name == live_name) {
+                    track_samples.push(None);
+                    continue;
+                }
+                let resolved = saved_path.filter(|path| path.is_file()).or_else(|| {
+                    let name = saved_name?;
+                    self.sample_path_registry
+                        .get(name)
+                        .cloned()
+                        .or_else(|| crate::sample_db::unique_sample_path_for_title(name))
+                        .or_else(|| self.resolve_sample_path_by_name(name))
+                });
+                let Some(path) = resolved else {
+                    eprintln!(
+                        "project-load: couldn't resolve rack sample '{}' for track {} slot {}; \
+                         keeping the live slot's sample",
+                        saved_name.unwrap_or_default(),
+                        track_idx + 1,
+                        slot_idx + 1,
+                    );
+                    *fallback_count += 1;
+                    track_samples.push(None);
+                    continue;
+                };
+                let asset = self
+                    .load_project_sample_asset(sample_assets, &path)
+                    .map_err(|error| {
+                        format!(
+                            "Failed to load rack sample '{}' for track {} slot {}: {error}",
+                            path.display(),
+                            track_idx + 1,
+                            slot_idx + 1,
+                        )
+                    })?;
+                let name = saved_name
+                    .map(str::to_string)
+                    .or_else(|| crate::sample_db::display_title_for_sample_path(&path))
+                    .unwrap_or_else(|| asset.decoded_name.clone());
+                self.register_loaded_sample_path(&name, asset.buffer_id, path);
+                track_samples.push(Some((asset.buffer_id, name, asset.sample_rate)));
+            }
+            samples.push(track_samples);
+        }
+        Ok(samples)
+    }
+
     fn rebind_project_rack_tracks_to_graph(
         &self,
         rack_tracks: Vec<Option<crate::project::ProjectRackTrackPattern>>,
+        slot_samples: &[Vec<Option<(i32, String, u32)>>],
         num_tracks: usize,
     ) -> Vec<Option<RackTrackSnapshot>> {
         let live_rack_tracks = self.state.pattern.rack_tracks.lock().unwrap();
@@ -5215,7 +5345,12 @@ impl App {
                         .unwrap_or_else(|| graph_slot.clone());
                     slot.instrument_type = graph_slot.instrument_type;
                     slot.track_sound_state.engine_id = graph_slot.track_sound_state.engine_id;
-                    slot.sample_id = graph_slot.sample_id.clone();
+                    slot.sample_id = slot_samples
+                        .get(track_idx)
+                        .and_then(|slots| slots.get(slot_idx))
+                        .cloned()
+                        .flatten()
+                        .or_else(|| graph_slot.sample_id.clone());
                     match graph_slot.instrument_type {
                         InstrumentType::Sampler => {
                             let desc = EffectDescriptor::builtin_sampler();
@@ -5778,7 +5913,15 @@ impl App {
             neural_networks,
             graph_overrides,
             scene_slots: crate::sequencer::SceneSlotStore::from_values(scene_slots)?,
-            rack_tracks: self.rebind_project_rack_tracks_to_graph(rack_tracks, num_tracks),
+            rack_tracks: {
+                let slot_samples = self.load_project_rack_slot_samples(
+                    &rack_tracks,
+                    num_tracks,
+                    sample_assets,
+                    &mut fallback_count,
+                )?;
+                self.rebind_project_rack_tracks_to_graph(rack_tracks, &slot_samples, num_tracks)
+            },
             process_chains,
             project_process_lane_overrides,
             project_process_chain,
