@@ -3352,15 +3352,26 @@ pub fn list_project_entries() -> std::io::Result<Vec<ProjectListEntry>> {
 pub fn save_project(name: &str, project: &ProjectFile) -> std::io::Result<PathBuf> {
     ensure_projects_dir()?;
     let file_name = sanitize_project_name(name);
-    let path = projects_dir().join(format!("{file_name}.json"));
-    let json = serde_json::to_string(project).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to serialize project '{}': {error}", path.display()),
-        )
-    })?;
-    std::fs::write(&path, json)?;
-    Ok(path)
+    let dir = projects_dir();
+    let path = dir.join(format!("{file_name}.json"));
+    // Write beside the target and rename over it, so a crash or quit
+    // mid-write leaves the previous save intact instead of a truncated file.
+    let partial = dir.join(format!(".{file_name}.json.partial"));
+    let written = (|| {
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&partial)?);
+        serde_json::to_writer(&mut writer, project).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to serialize project '{}': {error}", path.display()),
+            )
+        })?;
+        writer.into_inner().map_err(|error| error.into_error())?.sync_all()?;
+        std::fs::rename(&partial, &path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written.map(|()| path)
 }
 
 pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {

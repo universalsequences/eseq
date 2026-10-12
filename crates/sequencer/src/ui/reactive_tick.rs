@@ -890,7 +890,11 @@ pub(crate) fn reactive_tick_and_render(
         }
     }
 
+    host_commands::report_finished_project_saves(app, editor);
     if editor.should_quit() {
+        // Quit only once any in-flight save is on disk, and judge unsaved
+        // changes against what it actually wrote.
+        host_commands::wait_and_report_project_saves(app, editor);
         if !host_commands::intercept_unsaved_quit(app, editor, ctx) {
             return Ok(TickFlow::Quit);
         }

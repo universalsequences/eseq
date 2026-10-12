@@ -28,13 +28,136 @@ use super::{
     App, BusChannelState, InputMode, ProjectSampleAsset, Region, SidebarMode, SidebarTab,
 };
 
-struct ProjectCapture {
-    bank: Vec<PatternSnapshot>,
+/// Everything a save reads from the app, taken on the main thread by
+/// [`App::prepare_project_capture`]. The live pattern state is `Arc`-shared,
+/// so taking this is cheap; flattening it into a [`ProjectFile`]
+/// ([`ProjectCapture::build`]) is the expensive part and needs no `App`, so a
+/// save runs it on a worker thread.
+pub(crate) struct ProjectCapture {
+    project_name: String,
+    num_tracks: usize,
+    current_pattern: usize,
+    current_track: usize,
     bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
-    scenes_for_takes: crate::sequencer::ProjectScenes,
+    default_bus_snapshot: Vec<BusPatternSnapshot>,
+    scenes: crate::sequencer::ProjectScenes,
     tracks: Vec<ProjectTrack>,
     custom_effects: Vec<Vec<Option<String>>>,
     device_instances: crate::project::ProjectDeviceInstances,
+    sample_paths: SampleSourcePaths,
+    groups: Vec<crate::project::ProjectTrackGroup>,
+    arrangement: crate::sequencer::ProjectArrangement,
+    bpm: u32,
+    master_volume: f32,
+    reverb: ProjectReverbState,
+    buses: Vec<ProjectBusChannel>,
+    scratch: ProjectScratchState,
+    macros: Vec<ProjectMacro>,
+    next_macro_id: u32,
+    record_armed: Vec<bool>,
+    instances: crate::project::ProjectInstances,
+    grooves: Vec<crate::project::ProjectGroove>,
+    track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
+}
+
+/// The sample-source registries [`App::capture_sampler_source_path`]
+/// resolves through, copied so a worker thread can resolve the same paths.
+pub(crate) struct SampleSourcePaths {
+    blank_buffers: std::collections::HashSet<i32>,
+    by_buffer: std::collections::HashMap<i32, PathBuf>,
+    by_name: std::collections::HashMap<String, PathBuf>,
+}
+
+impl SampleSourcePaths {
+    /// The source path and name a sampler lane serializes with: both empty
+    /// for a non-sampler lane, and the name blank when no path resolves.
+    fn sampler_source(
+        &self,
+        snapshot: &PatternSnapshot,
+        track: usize,
+    ) -> Result<(Option<String>, String), String> {
+        if snapshot
+            .instrument_types
+            .get(track)
+            .copied()
+            .unwrap_or(InstrumentType::Sampler)
+            != InstrumentType::Sampler
+        {
+            return Ok((None, String::new()));
+        }
+        let (buffer, name) = snapshot
+            .sample_ids
+            .get(track)
+            .map(|(buffer, name, _)| (*buffer, name.clone()))
+            .unwrap_or((-1, String::new()));
+        let path = resolve_sampler_source_path(
+            &self.blank_buffers,
+            &self.by_buffer,
+            &self.by_name,
+            buffer,
+            &name,
+        )?
+        .map(|path| path.to_string_lossy().to_string());
+        let name = if path.is_some() { name } else { String::new() };
+        Ok((path, name))
+    }
+}
+
+/// Shared body of [`App::capture_sampler_source_path`] and
+/// [`SampleSourcePaths::resolve`].
+pub(super) fn resolve_sampler_source_path(
+    blank_buffers: &std::collections::HashSet<i32>,
+    by_buffer: &std::collections::HashMap<i32, PathBuf>,
+    by_name: &std::collections::HashMap<String, PathBuf>,
+    buffer: i32,
+    name: &str,
+) -> Result<Option<PathBuf>, String> {
+    if blank_buffers.contains(&buffer) || (buffer < 0 && name.is_empty()) {
+        return Ok(None);
+    }
+    lookup_sample_path(blank_buffers, by_buffer, by_name, buffer, name)
+        .or_else(|| find_sample_by_stem(name))
+        .map(Some)
+        .ok_or_else(|| format!("Sample buffer {buffer} ('{name}') has no source reference"))
+}
+
+/// Registry lookup behind [`App::sample_path_for_buffer`]: the buffer's
+/// registered path, else the path registered under its sample name.
+pub(super) fn lookup_sample_path(
+    blank_buffers: &std::collections::HashSet<i32>,
+    by_buffer: &std::collections::HashMap<i32, PathBuf>,
+    by_name: &std::collections::HashMap<String, PathBuf>,
+    buffer: i32,
+    name: &str,
+) -> Option<PathBuf> {
+    if blank_buffers.contains(&buffer) {
+        return None;
+    }
+    by_buffer.get(&buffer).or_else(|| by_name.get(name)).cloned()
+}
+
+/// Find a sample under the user's `samples/` directory by file stem.
+fn find_sample_by_stem(sample_name: &str) -> Option<PathBuf> {
+    fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk(&path, sample_name) {
+                    return Some(found);
+                }
+                continue;
+            }
+            let stem = path.file_stem().and_then(|stem| stem.to_str())?;
+            if stem == sample_name {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    walk(&crate::app_paths::app_paths().samples_dir(), sample_name)
 }
 
 pub(super) fn resolve_live_macro_target(
@@ -1258,32 +1381,10 @@ impl App {
     /// lose either; every other departure from the saved revision counts.
     pub fn has_unsaved_changes(&self) -> bool {
         let history = &self.history;
-        if history.is_at_saved_revision() {
+        if history.is_at_saved_revision() || self.current_state_is_being_saved() {
             return false;
         }
         !(history.saved_revision().is_none() && history.current_revision() == 0)
-    }
-
-    pub fn save_project_with_name(
-        &mut self,
-        requested_name: Option<&str>,
-    ) -> Result<String, String> {
-        let requested_name = requested_name
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .or_else(|| self.current_project_name.clone())
-            .ok_or_else(|| "Project name must contain letters or numbers".to_string())?;
-
-        let save_name = project::sanitize_project_name(&requested_name);
-        if save_name.is_empty() {
-            return Err("Project name must contain letters or numbers".to_string());
-        }
-
-        self.save_project_named(&save_name)?;
-        self.current_project_name = Some(save_name.clone());
-        if let Err(error) = crate::recent_projects::record(&save_name) { eprintln!("Could not update recent projects: {error}"); }
-        Ok(save_name)
     }
 
     pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
@@ -1451,14 +1552,6 @@ impl App {
             .filter(|item| item.to_lowercase().contains(&filter))
             .cloned()
             .collect()
-    }
-
-    pub(super) fn save_project_named(&mut self, project_name: &str) -> Result<(), String> {
-        super::edit::finish_active_gesture(self);
-        let project = self.capture_project(project_name)?;
-        project::save_project(project_name, &project).map_err(|error| error.to_string())?;
-        self.history.mark_saved();
-        Ok(())
     }
 
     pub(super) fn capture_track_as_container_preset(
@@ -2743,6 +2836,15 @@ impl App {
     }
 
     pub(crate) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
+        self.prepare_project_capture(project_name)?.build()
+    }
+
+    /// The main-thread half of [`Self::capture_project`]: settle live state
+    /// into the scene pools and take what [`ProjectCapture::build`] reads.
+    pub(crate) fn prepare_project_capture(
+        &mut self,
+        project_name: &str,
+    ) -> Result<ProjectCapture, String> {
         let num_tracks = self.tracks.len();
         self.state.save_current_pattern_snapshot(
             num_tracks,
@@ -2758,10 +2860,9 @@ impl App {
             })?;
         self.save_current_bus_pattern();
 
-        let bank = self.state.export_pattern_repository();
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
         self.state
-            .ensure_bus_pattern_repository_len(bank.len(), &default_bus_snapshot);
+            .ensure_bus_pattern_repository_len(self.state.stored_scene_len(), &default_bus_snapshot);
         let bus_pattern_bank = self
             .state
             .export_bus_pattern_repository(&default_bus_snapshot);
@@ -2771,21 +2872,89 @@ impl App {
         let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
         self.device_registry = identities;
         self.state.prune_unreferenced_sounds();
-        let scenes_for_takes = self.state.capture_project_scenes();
-        self.serialize_project_snapshot(project_name, ProjectCapture {
-            bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
+        let scenes = self.state.capture_project_scenes();
+        Ok(ProjectCapture {
+            project_name: project_name.to_string(),
+            num_tracks,
+            current_pattern: self.state.current_scene_index(),
+            current_track: self.ui.cursor_track.min(num_tracks.saturating_sub(1)),
+            bus_pattern_bank,
+            default_bus_snapshot,
+            scenes,
+            tracks,
+            custom_effects,
+            device_instances,
+            sample_paths: SampleSourcePaths {
+                blank_buffers: self.blank_sample_buffers.clone(),
+                by_buffer: self.sample_buffer_path_registry.clone(),
+                by_name: self.sample_path_registry.clone(),
+            },
+            // Live groups never carry clips: `build` writes them from the bank.
+            groups: self.groups.clone(),
+            arrangement: self
+                .state
+                .committed_arrangement()
+                .unwrap_or_else(|| self.empty_arrangement()),
+            bpm: self.state.transport.bpm.load(Ordering::Relaxed),
+            master_volume: f32::from_bits(
+                self.state.transport.master_volume.load(Ordering::Relaxed),
+            ),
+            reverb: ProjectReverbState {
+                size: self.ui.reverb_size,
+                brightness: self.ui.reverb_brightness,
+                replace: self.ui.reverb_replace,
+            },
+            buses: self
+                .buses
+                .iter()
+                .cloned()
+                .map(ProjectBusChannel::from)
+                .collect(),
+            scratch: ProjectScratchState {
+                buffer: self.editor.scratch_buffer.clone(),
+                evaluated_buffer: Some(self.state.scratch_source()),
+                cursor_row: self.editor.scratch_cursor.0,
+                cursor_col: self.editor.scratch_cursor.1,
+            },
+            macros: self
+                .macro_engine
+                .macros()
+                .iter()
+                .map(ProjectMacro::from)
+                .collect(),
+            next_macro_id: self.macro_engine.next_id(),
+            record_armed: if self.graph.record_armed.iter().any(|armed| *armed) {
+                self.graph.record_armed.clone()
+            } else {
+                Vec::new()
+            },
+            instances: self.instances.clone(),
+            grooves: self.grooves.clone(),
+            // Scene-independent per-track process slot rosters (eseq-53y7).
+            track_lane_rosters: {
+                let rosters = (0..self.tracks.len())
+                    .map(|track| self.state.track_lane_roster(track).unwrap_or_default())
+                    .collect::<Vec<_>>();
+                if rosters.iter().all(|roster| roster.is_empty()) {
+                    Vec::new()
+                } else {
+                    rosters
+                }
+            },
         })
     }
+}
 
-    fn serialize_project_snapshot(&self, project_name: &str, capture: ProjectCapture) -> Result<ProjectFile, String> {
-        let ProjectCapture { bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances } = capture;
-        let num_tracks = self.tracks.len();
-        let current_pattern = self.state.current_scene_index();
-        let current_track = if num_tracks == 0 {
-            0
-        } else {
-            self.ui.cursor_track.min(num_tracks - 1)
-        };
+impl ProjectCapture {
+    /// Flatten the capture into a [`ProjectFile`]. Needs no `App`, so a save
+    /// runs it off the main thread.
+    pub(crate) fn build(self) -> Result<ProjectFile, String> {
+        let num_tracks = self.num_tracks;
+        let current_pattern = self.current_pattern;
+        let current_track = self.current_track;
+        let bus_pattern_bank = &self.bus_pattern_bank;
+        let scenes_for_takes = &self.scenes;
+        let bank = scenes_for_takes.snapshots();
         let patterns = bank
             .iter()
             .enumerate()
@@ -2793,24 +2962,9 @@ impl App {
                 let mut sample_paths = Vec::with_capacity(num_tracks);
                 let mut sample_names = Vec::with_capacity(num_tracks);
                 for track_idx in 0..num_tracks {
-                    let (sample_buffer_id, sample_name) = snapshot
-                        .sample_ids
-                        .get(track_idx)
-                        .map(|(buffer_id, name, _)| (*buffer_id, name.clone()))
-                        .unwrap_or((-1, String::new()));
-                    let sample_path = if snapshot
-                        .instrument_types
-                        .get(track_idx)
-                        .copied()
-                        .unwrap_or(InstrumentType::Sampler)
-                        == InstrumentType::Sampler
-                    {
-                        self.capture_sampler_source_path(sample_buffer_id, &sample_name)?
-                        .map(|path| path.to_string_lossy().to_string())
-                    } else {
-                        None
-                    };
-                    sample_names.push(if sample_path.is_some() { sample_name } else { String::new() });
+                    let (sample_path, sample_name) =
+                        self.sample_paths.sampler_source(snapshot, track_idx)?;
+                    sample_names.push(sample_name);
                     sample_paths.push(sample_path);
                 }
                 Ok(ProjectPattern::from_snapshot(
@@ -2819,8 +2973,8 @@ impl App {
                     sample_names,
                     bus_pattern_bank
                         .get(pattern_idx)
-                        .cloned()
-                        .unwrap_or_else(|| self.capture_bus_pattern_snapshot())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&self.default_bus_snapshot)
                         .iter()
                         .map(project_bus_pattern_snapshot_from_ui)
                         .collect(),
@@ -2879,19 +3033,8 @@ impl App {
                     snapshot.set_track_pattern_data(track, data);
                     let mut sample_paths = vec![None; num_tracks];
                     let mut sample_names = vec![String::new(); num_tracks];
-                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
-                    if snapshot
-                        .instrument_types
-                        .get(track)
-                        .copied()
-                        .unwrap_or(InstrumentType::Sampler)
-                        == InstrumentType::Sampler
-                    {
-                        sample_paths[track] = self
-                            .capture_sampler_source_path(buffer_id, &sample_name)?
-                            .map(|path| path.to_string_lossy().to_string());
-                    }
-                    sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
+                    (sample_paths[track], sample_names[track]) =
+                        self.sample_paths.sampler_source(&snapshot, track)?;
                     chunks.push(ProjectPattern::from_snapshot(
                         &snapshot,
                         sample_paths,
@@ -3020,19 +3163,8 @@ impl App {
                 snapshot.set_track_pattern_data(track, data);
                 let mut sample_paths = vec![None; num_tracks];
                 let mut sample_names = vec![String::new(); num_tracks];
-                let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
-                if snapshot
-                    .instrument_types
-                    .get(track)
-                    .copied()
-                    .unwrap_or(InstrumentType::Sampler)
-                    == InstrumentType::Sampler
-                {
-                    sample_paths[track] = self
-                        .capture_sampler_source_path(buffer_id, &sample_name)?
-                        .map(|path| path.to_string_lossy().to_string());
-                }
-                sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
+                (sample_paths[track], sample_names[track]) =
+                    self.sample_paths.sampler_source(&snapshot, track)?;
                 orphan_sounds.push(crate::project::ProjectOrphanSound {
                     patch: refs.patch,
                     mix: refs.mix,
@@ -3101,102 +3233,140 @@ impl App {
         // Rack clips (rack-clips spec 3). The bank lives in `ProjectScenes`;
         // it serializes onto each rack's config, and the per-scene pointers
         // onto the file.
-        let (rack_clip_banks, scene_rack_clips) =
-            self.capture_rack_clips(&scenes_for_takes, num_tracks)?;
-        let mut groups = self.groups.clone();
+        let (mut rack_clip_banks, scene_rack_clips) =
+            self.capture_rack_clips(scenes_for_takes, num_tracks)?;
+        // The arrangement always exists (empty-arrangement spec 7): every
+        // save writes one, the empty arrangement included. Serialization maps
+        // live pattern-pool ids into the deterministic ids the loader rebuilds
+        // from scene cells; a clip referencing an unpersistable pattern fails
+        // the save naming the clip and its track instead of silently dropping
+        // the reference (docs/arrangement-lane-model-spec.md 10).
+        let arrangement = crate::sequencer::arrangement_for_serialization(
+            &self.arrangement,
+            scenes_for_takes,
+        )?;
+        let mut groups = self.groups;
         for group in &mut groups {
             let Some(rack) = group.rack.as_mut() else {
                 continue;
             };
             if let Some((_, clips, next_clip_id)) =
-                rack_clip_banks.iter().find(|(gid, _, _)| *gid == group.id)
+                rack_clip_banks.iter_mut().find(|(gid, _, _)| *gid == group.id)
             {
-                rack.clips = clips.clone();
+                rack.clips = std::mem::take(clips);
                 rack.next_clip_id = *next_clip_id;
             }
         }
 
         Ok(ProjectFile {
             version: project_file_version(),
-            name: project_name.to_string(),
-            bpm: self.state.transport.bpm.load(Ordering::Relaxed),
-            master_volume: f32::from_bits(
-                self.state.transport.master_volume.load(Ordering::Relaxed),
-            ),
+            name: self.project_name,
+            bpm: self.bpm,
+            master_volume: self.master_volume,
             current_pattern,
             current_track: Some(current_track),
-            reverb: ProjectReverbState {
-                size: self.ui.reverb_size,
-                brightness: self.ui.reverb_brightness,
-                replace: self.ui.reverb_replace,
-            },
-            buses: self
-                .buses
-                .iter()
-                .cloned()
-                .map(ProjectBusChannel::from)
-                .collect(),
-            tracks,
-            custom_effects,
-            device_instances,
-            scratch: ProjectScratchState {
-                buffer: self.editor.scratch_buffer.clone(),
-                evaluated_buffer: Some(self.state.scratch_source()),
-                cursor_row: self.editor.scratch_cursor.0,
-                cursor_col: self.editor.scratch_cursor.1,
-            },
+            reverb: self.reverb,
+            buses: self.buses,
+            tracks: self.tracks,
+            custom_effects: self.custom_effects,
+            device_instances: self.device_instances,
+            scratch: self.scratch,
             patterns,
             groups,
             scene_banks,
-            // The arrangement always exists (empty-arrangement spec 7):
-            // every save writes one, the empty arrangement included.
-            // Serialization maps live pattern-pool ids into the
-            // deterministic ids the loader rebuilds from scene cells; a
-            // clip referencing an unpersistable pattern fails the save
-            // naming the clip and its track instead of silently dropping
-            // the reference (docs/arrangement-lane-model-spec.md 10).
-            arrangement: Some(crate::sequencer::arrangement_for_serialization(
-                &self
-                    .state
-                    .committed_arrangement()
-                    .unwrap_or_else(|| self.empty_arrangement()),
-                &scenes_for_takes,
-            )?),
-            macros: self
-                .macro_engine
-                .macros()
-                .iter()
-                .map(ProjectMacro::from)
-                .collect(),
-            next_macro_id: self.macro_engine.next_id(),
+            arrangement: Some(arrangement),
+            macros: self.macros,
+            next_macro_id: self.next_macro_id,
             // Vestigial since docs/unified-transport-spec.md 7: kept on the
             // wire for parse tolerance, never read back.
             use_arrangement: true,
-            record_armed: if self.graph.record_armed.iter().any(|armed| *armed) {
-                self.graph.record_armed.clone()
-            } else {
-                Vec::new()
-            },
+            record_armed: self.record_armed,
             scene_cell_presence,
             scene_rack_clips,
-            instances: self.instances.clone(),
-            grooves: self.grooves.clone(),
+            instances: self.instances,
+            grooves: self.grooves,
             take_pools,
             track_sounds,
-            // Scene-independent per-track process slot rosters (eseq-53y7).
-            track_lane_rosters: {
-                let rosters = (0..self.tracks.len())
-                    .map(|track| self.state.track_lane_roster(track).unwrap_or_default())
-                    .collect::<Vec<_>>();
-                if rosters.iter().all(|roster| roster.is_empty()) {
-                    Vec::new()
-                } else {
-                    rosters
-                }
-            },
+            track_lane_rosters: self.track_lane_rosters,
         })
     }
 
+    /// Serialize every rack's clip bank (rack-clips spec 3). A clip's member
+    /// lanes ride in ONE full-width `ProjectPattern` in which only the rack's
+    /// member tracks are meaningful — the same wire form take chunks use, so
+    /// clip content reuses the scene pattern conversion and sample resolution
+    /// unchanged. Returns the per-rack banks and the per-scene pointers.
+    #[allow(clippy::type_complexity)]
+    fn capture_rack_clips(
+        &self,
+        scenes: &crate::sequencer::ProjectScenes,
+        num_tracks: usize,
+    ) -> Result<
+        (
+            Vec<(u64, Vec<crate::project::ProjectRackClip>, u64)>,
+            Vec<Vec<(u64, crate::project::RackClipId)>>,
+        ),
+        String,
+    > {
+        let mut banks = Vec::new();
+        for bank in scenes.rack_banks() {
+            let mut clips = Vec::with_capacity(bank.clips.len());
+            for clip in &bank.clips {
+                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                let mut sample_paths = vec![None; num_tracks];
+                let mut sample_names = vec![String::new(); num_tracks];
+                let mut members = Vec::with_capacity(clip.cells.len());
+                for (position, cell) in clip.cells.iter().enumerate() {
+                    let track = bank.members.get(position).copied();
+                    let data = cell.zip(track).and_then(|(id, track)| {
+                        scenes.track_pools.get(track).and_then(|pool| pool.get(id))
+                    });
+                    members.push(data.is_some());
+                    let (Some(track), Some(data)) = (track, data) else {
+                        continue;
+                    };
+                    if track >= num_tracks {
+                        continue;
+                    }
+                    snapshot.set_track_pattern_data(track, data);
+                    (sample_paths[track], sample_names[track]) =
+                        self.sample_paths.sampler_source(&snapshot, track)?;
+                }
+                clips.push(crate::project::ProjectRackClip {
+                    id: clip.id,
+                    name: clip.name.clone(),
+                    color: clip.color,
+                    members,
+                    pattern: ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ),
+                    graph_overrides: clip.graph_overrides.clone(),
+                    scene_slots: clip.scene_slots.values().clone(),
+                    bus_chain: None,
+                });
+            }
+            banks.push((bank.group_id, clips, bank.next_clip_id));
+        }
+        let pointers: Vec<Vec<(u64, crate::project::RackClipId)>> = scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.rack_clips.clone())
+            .collect();
+        // Skip the field entirely when no scene points at a clip, keeping
+        // pre-feature projects byte-identical.
+        let pointers = if pointers.iter().all(|scene| scene.is_empty()) {
+            Vec::new()
+        } else {
+            pointers
+        };
+        Ok((banks, pointers))
+    }
+}
+
+impl App {
     fn capture_project_tracks(&self) -> Result<Vec<ProjectTrack>, String> {
         self.tracks
             .iter()
@@ -3656,26 +3826,7 @@ impl App {
     }
 
     pub fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
-        fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
-            let entries = std::fs::read_dir(dir).ok()?;
-            for entry in entries {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(found) = walk(&path, sample_name) {
-                        return Some(found);
-                    }
-                    continue;
-                }
-                let stem = path.file_stem().and_then(|stem| stem.to_str())?;
-                if stem == sample_name {
-                    return Some(path);
-                }
-            }
-            None
-        }
-
-        walk(&crate::app_paths::app_paths().samples_dir(), sample_name)
+        find_sample_by_stem(sample_name)
     }
 
     /// Resolve a saved Convolution Reverb IR reference to an absolute path: the
@@ -4343,95 +4494,6 @@ impl App {
 
         self.editor.pending_project_load = Some(pending);
         Ok(())
-    }
-
-    /// Serialize every rack's clip bank (rack-clips spec 3). A clip's member
-    /// lanes ride in ONE full-width `ProjectPattern` in which only the rack's
-    /// member tracks are meaningful — the same wire form take chunks use, so
-    /// clip content reuses the scene pattern conversion and sample resolution
-    /// unchanged. Returns the per-rack banks and the per-scene pointers.
-    #[allow(clippy::type_complexity)]
-    fn capture_rack_clips(
-        &self,
-        scenes: &crate::sequencer::ProjectScenes,
-        num_tracks: usize,
-    ) -> Result<
-        (
-            Vec<(u64, Vec<crate::project::ProjectRackClip>, u64)>,
-            Vec<Vec<(u64, crate::project::RackClipId)>>,
-        ),
-        String,
-    > {
-        let mut banks = Vec::new();
-        for bank in scenes.rack_banks() {
-            let mut clips = Vec::with_capacity(bank.clips.len());
-            for clip in &bank.clips {
-                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
-                let mut sample_paths = vec![None; num_tracks];
-                let mut sample_names = vec![String::new(); num_tracks];
-                let mut members = Vec::with_capacity(clip.cells.len());
-                for (position, cell) in clip.cells.iter().enumerate() {
-                    let track = bank.members.get(position).copied();
-                    let data = cell.zip(track).and_then(|(id, track)| {
-                        scenes.track_pools.get(track).and_then(|pool| pool.get(id))
-                    });
-                    members.push(data.is_some());
-                    let (Some(track), Some(data)) = (track, data) else {
-                        continue;
-                    };
-                    if track >= num_tracks {
-                        continue;
-                    }
-                    snapshot.set_track_pattern_data(track, data);
-                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
-                    if snapshot
-                        .instrument_types
-                        .get(track)
-                        .copied()
-                        .unwrap_or(InstrumentType::Sampler)
-                        == InstrumentType::Sampler
-                    {
-                        sample_paths[track] = self
-                            .capture_sampler_source_path(buffer_id, &sample_name)?
-                            .map(|path| path.to_string_lossy().to_string());
-                    }
-                    sample_names[track] = if sample_paths[track].is_some() {
-                        sample_name
-                    } else {
-                        String::new()
-                    };
-                }
-                clips.push(crate::project::ProjectRackClip {
-                    id: clip.id,
-                    name: clip.name.clone(),
-                    color: clip.color,
-                    members,
-                    pattern: ProjectPattern::from_snapshot(
-                        &snapshot,
-                        sample_paths,
-                        sample_names,
-                        Vec::new(),
-                    ),
-                    graph_overrides: clip.graph_overrides.clone(),
-                    scene_slots: clip.scene_slots.values().clone(),
-                    bus_chain: None,
-                });
-            }
-            banks.push((bank.group_id, clips, bank.next_clip_id));
-        }
-        let pointers: Vec<Vec<(u64, crate::project::RackClipId)>> = scenes
-            .scenes
-            .iter()
-            .map(|scene| scene.rack_clips.clone())
-            .collect();
-        // Skip the field entirely when no scene points at a clip, keeping
-        // pre-feature projects byte-identical.
-        let pointers = if pointers.iter().all(|scene| scene.is_empty()) {
-            Vec::new()
-        } else {
-            pointers
-        };
-        Ok((banks, pointers))
     }
 
     /// Rebuild the live clip banks from the loaded rack configs, inserting each

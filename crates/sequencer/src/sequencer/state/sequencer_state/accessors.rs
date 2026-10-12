@@ -525,6 +525,12 @@ impl SequencerState {
         self.pattern.scenes.lock().unwrap().scene_count()
     }
 
+    /// Number of stored scenes, zero included (`scene_count` floors at one);
+    /// the length `export_pattern_repository` returns.
+    pub fn stored_scene_len(&self) -> usize {
+        self.pattern.scenes.lock().unwrap().scenes.len()
+    }
+
     /// Reads one scene track in place without cloning the complete pattern.
     pub fn with_scene_track_pattern<R>(
         &self,

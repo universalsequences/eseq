@@ -326,27 +326,32 @@ pub(super) fn handle(
             } else {
                 None
             };
-            match app.save_project_with_name(requested_name.as_deref()) {
-                Ok(save_name) => {
-                    let rt = editor.runtime_mut();
-                    record_preset_listings();
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Saved project '{save_name}'"
-                    )));
-                    editor.show_toast(format!("Saved {save_name}"), eseqlisp::ToastKind::Success);
-                    match then.as_deref() {
-                        Some("new-project") => handle("new-project", Value::Nil, app, editor, ctx),
-                        Some("quit") => editor.request_quit(),
-                        _ => {}
+            // A plain save writes on a worker thread and reports through
+            // `report_finished_project_saves`; a chained one must know the
+            // write landed before it continues, so it waits.
+            if then.is_none() {
+                match app.begin_project_save(requested_name.as_deref()) {
+                    Ok(save_name) => {
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Saving project '{save_name}'…"
+                        )));
                     }
+                    Err(error) => report_project_save_failure(editor, &error),
                 }
+                return;
+            }
+            let saved = match app.save_project_and_wait(requested_name.as_deref()) {
+                Ok(outcomes) => report_project_save_outcomes(editor, outcomes),
                 Err(error) => {
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Error saving project: {error}"
-                    )));
-                    editor.show_toast(format!("Save failed: {error}"), eseqlisp::ToastKind::Error);
+                    report_project_save_failure(editor, &error);
+                    false
+                }
+            };
+            if saved {
+                match then.as_deref() {
+                    Some("new-project") => handle("new-project", Value::Nil, app, editor, ctx),
+                    Some("quit") => editor.request_quit(),
+                    _ => {}
                 }
             }
         }
@@ -416,4 +421,45 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// Toast and status line for every background save that landed since the
+/// last frame (`save-project` starts them; see `app::project_save`).
+pub(crate) fn report_finished_project_saves(app: &mut app::App, editor: &mut Editor) {
+    report_project_save_outcomes(editor, app.poll_project_saves());
+}
+
+/// Block until every in-flight save has landed, then report them.
+pub(crate) fn wait_and_report_project_saves(app: &mut app::App, editor: &mut Editor) {
+    report_project_save_outcomes(editor, app.wait_for_project_saves());
+}
+
+/// Report each outcome; true when the last (newest) one succeeded.
+fn report_project_save_outcomes(editor: &mut Editor, outcomes: Vec<app::ProjectSaveOutcome>) -> bool {
+    let mut last_ok = false;
+    for outcome in outcomes {
+        last_ok = match outcome.result {
+            Ok(_) => {
+                report_project_saved(editor, &outcome.name);
+                true
+            }
+            Err(error) => {
+                report_project_save_failure(editor, &error);
+                false
+            }
+        };
+    }
+    last_ok
+}
+
+fn report_project_saved(editor: &mut Editor, save_name: &str) {
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.handle_host_event(HostEvent::Status(format!("Saved project '{save_name}'")));
+    editor.show_toast(format!("Saved {save_name}"), eseqlisp::ToastKind::Success);
+}
+
+fn report_project_save_failure(editor: &mut Editor, error: &str) {
+    editor.handle_host_event(HostEvent::Status(format!("Error saving project: {error}")));
+    editor.show_toast(format!("Save failed: {error}"), eseqlisp::ToastKind::Error);
 }

@@ -1226,6 +1226,13 @@ pub enum HistoryReplay<E> {
     Failed(E),
 }
 
+/// A history position a save captured; see [`UndoManager::save_mark`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveMark {
+    generation: u64,
+    revision: u64,
+}
+
 /// Session-local linear undo history.
 ///
 /// Patch replay is supplied by the edit executor. An entry changes stacks only
@@ -1237,6 +1244,9 @@ pub struct UndoManager<P> {
     current_revision: u64,
     next_revision: u64,
     saved_revision: Option<u64>,
+    /// Bumped by [`Self::reset`]: revisions restart at zero there, so a
+    /// [`SaveMark`] taken before it must not mark the new history saved.
+    generation: u64,
     retained_bytes: usize,
     budget: HistoryBudget,
     active_gesture: Option<ActiveGesture>,
@@ -1259,6 +1269,7 @@ impl<P> UndoManager<P> {
             current_revision: 0,
             next_revision: 1,
             saved_revision: None,
+            generation: 0,
             retained_bytes: 0,
             budget,
             active_gesture: None,
@@ -1351,6 +1362,37 @@ impl<P> UndoManager<P> {
 
     pub fn mark_saved(&mut self) {
         self.saved_revision = Some(self.current_revision);
+    }
+
+    /// The revision a save captured, for [`Self::mark_saved_at`] once that
+    /// save lands on disk (a background save finishes after later edits).
+    pub fn save_mark(&self) -> SaveMark {
+        SaveMark {
+            generation: self.generation,
+            revision: self.current_revision,
+        }
+    }
+
+    /// Mark the revision `mark` captured as the saved one. Returns false, and
+    /// marks nothing, when the history was reset (a project load or new
+    /// project) since: the mark belongs to a project no longer open.
+    pub fn mark_saved_at(&mut self, mark: SaveMark) -> bool {
+        let current = self.is_same_project(mark);
+        if current {
+            self.saved_revision = Some(mark.revision);
+        }
+        current
+    }
+
+    /// Whether `mark` was taken in this project (no reset since).
+    pub fn is_same_project(&self, mark: SaveMark) -> bool {
+        mark.generation == self.generation
+    }
+
+    /// Whether the history sits exactly where `mark` was taken, with no
+    /// gesture still settling.
+    pub fn is_at(&self, mark: SaveMark) -> bool {
+        self.pending_gesture.is_none() && mark == self.save_mark()
     }
 
     pub fn is_at_saved_revision(&self) -> bool {
@@ -1617,6 +1659,7 @@ impl<P> UndoManager<P> {
     /// Reset history after a successful project replacement.
     pub fn reset(&mut self) {
         self.clear_entries();
+        self.generation += 1;
         self.current_revision = 0;
         self.next_revision = 1;
         self.saved_revision = None;
@@ -1956,6 +1999,28 @@ mod tests {
         assert_eq!((history.undo_len(), history.redo_len()), (2, 0));
         assert_eq!(history.retained_bytes(), 40);
         assert_eq!(history.redo(|_| Ok::<_, ()>(())), HistoryReplay::Unavailable);
+    }
+
+    /// A background save marks the revision it captured once it lands: an
+    /// edit made meanwhile stays unsaved, and a mark from before a project
+    /// replacement (revisions restart at zero) is ignored.
+    #[test]
+    fn save_mark_lands_on_its_own_revision_and_generation() {
+        let mut history = manager(8, 1024);
+        history.commit("one", None, 1, 10);
+        let mark = history.save_mark();
+        history.commit("two", None, 2, 20);
+        history.mark_saved_at(mark);
+        assert!(!history.is_at_saved_revision());
+        assert!(matches!(history.undo(|_| Ok::<_, ()>(())), HistoryReplay::Applied(_)));
+        assert!(history.is_at_saved_revision());
+
+        let stale = history.save_mark();
+        history.reset();
+        history.mark_saved_at(stale);
+        assert_eq!(history.saved_revision(), None);
+        history.mark_saved_at(history.save_mark());
+        assert!(history.is_at_saved_revision());
     }
 
     /// eseq-0l17.72: an entry inserted below a newer one undoes after it

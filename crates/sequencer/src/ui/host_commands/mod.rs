@@ -27,6 +27,7 @@ pub(crate) mod packages;
 mod panel;
 mod process_edit;
 mod project;
+pub(crate) use project::{report_finished_project_saves, wait_and_report_project_saves};
 mod rack;
 pub(crate) mod rack_kinds;
 pub(crate) mod rack_grooves;

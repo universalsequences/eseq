@@ -51,6 +51,8 @@ pub use instances::{
 pub mod mixer_controls;
 mod params;
 mod projects;
+mod project_save;
+pub use project_save::ProjectSaveOutcome;
 mod break_kits;
 mod rack_clips;
 pub mod rack_grooves;
@@ -1023,6 +1025,7 @@ pub struct App {
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     blank_sample_buffers: HashSet<i32>,
     pub current_project_name: Option<String>,
+    project_saves: project_save::ProjectSaves,
     pub ui: UiState,
     pub editor: EditorState,
     pub browser: BrowserState,
@@ -2824,6 +2827,7 @@ impl App {
             sample_buffer_path_registry: HashMap::new(),
             blank_sample_buffers: HashSet::new(),
             current_project_name: None,
+            project_saves: Default::default(),
             ui: UiState {
                 cursor_step: 0,
                 cursor_track: 0,
@@ -3984,13 +3988,13 @@ impl App {
     pub(super) fn capture_sampler_source_path(
         &self, buffer: i32, name: &str,
     ) -> Result<Option<PathBuf>, String> {
-        if self.blank_sample_buffers.contains(&buffer) || (buffer < 0 && name.is_empty()) {
-            return Ok(None);
-        }
-        self.sample_path_for_buffer(buffer, name)
-            .or_else(|| self.resolve_sample_path_by_name(name))
-            .map(Some)
-            .ok_or_else(|| format!("Sample buffer {buffer} ('{name}') has no source reference"))
+        projects::resolve_sampler_source_path(
+            &self.blank_sample_buffers,
+            &self.sample_buffer_path_registry,
+            &self.sample_path_registry,
+            buffer,
+            name,
+        )
     }
 
     /// Manual slice overrides only apply to the sample they were authored
@@ -4018,13 +4022,13 @@ impl App {
     }
 
     pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {
-        if self.blank_sample_buffers.contains(&buffer_id) {
-            return None;
-        }
-        self.sample_buffer_path_registry
-            .get(&buffer_id)
-            .cloned()
-            .or_else(|| self.sample_path_registry.get(sample_name).cloned())
+        projects::lookup_sample_path(
+            &self.blank_sample_buffers,
+            &self.sample_buffer_path_registry,
+            &self.sample_path_registry,
+            buffer_id,
+            sample_name,
+        )
     }
 
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {

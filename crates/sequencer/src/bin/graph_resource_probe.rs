@@ -2,7 +2,9 @@ use std::path::Path;
 
 use sequencer::{app, audiograph, engine};
 
-const BLOCK_SIZE: usize = 512;
+#[path = "probe_support/mod.rs"]
+mod probe_support;
+use probe_support::{pump_graph, GraphGuard};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project = std::env::args()
@@ -71,27 +73,4 @@ fn dump_graph_if_requested(lg: sequencer::audiograph::LiveGraphPtr, label: &str)
         audiograph::debug_dump_graph(lg.0);
     }
     eprintln!("[graph-resource-probe] graph dump {label} end");
-}
-
-fn pump_graph(lg: sequencer::audiograph::LiveGraphPtr, blocks: usize) {
-    let mut output = vec![0.0f32; BLOCK_SIZE * 2];
-    for _ in 0..blocks {
-        unsafe {
-            lg.process_next_block(output.as_mut_ptr(), BLOCK_SIZE as i32);
-        }
-    }
-}
-
-struct GraphGuard {
-    lg: *mut audiograph::LiveGraph,
-}
-
-impl Drop for GraphGuard {
-    fn drop(&mut self) {
-        unsafe {
-            audiograph::clear_os_workgroup();
-            audiograph::engine_stop_workers();
-            audiograph::destroy_live_graph(self.lg);
-        }
-    }
 }
