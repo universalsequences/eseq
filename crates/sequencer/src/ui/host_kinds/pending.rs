@@ -27,9 +27,9 @@ use super::*;
 /// The pending surface's sync state (in `SongState`).
 #[derive(Default)]
 pub(super) struct PendingState {
-    /// (`pending_content_key`, structure generation) the content was
-    /// pushed under; `None` forces a rebuild.
-    content: Option<((u64, u64, u64), u64)>,
+    /// (`pending_content_key`, structure generation, groups generation) the
+    /// content was pushed under; `None` forces a rebuild.
+    content: Option<((u64, u64, u64), u64, u64)>,
     /// The lanes last pushed, with what their ends follow the head by.
     lanes: Vec<(InstanceId, PendingLaneSpan)>,
     /// The quantized head last pushed.
@@ -80,14 +80,20 @@ impl HostKinds {
         let Some(head) = quantized_pending_head(app) else {
             if self.song.pending.shown {
                 self.clear_song_pending(pusher, song);
+                self.push_pending_rack_lanes(pusher, app, None);
             }
             return;
         };
-        let key = (pending_content_key(app), self.song.generation());
+        let key = (
+            pending_content_key(app),
+            self.song.generation(),
+            self.groups_generation,
+        );
         let rebuilt = self.song.pending.content != Some(key);
         if rebuilt {
             let content = pending_capture_content(app).unwrap_or_default();
             self.push_pending_content(pusher, song, &content);
+            self.push_pending_rack_lanes(pusher, app, Some(&content));
             let pending = &mut self.song.pending;
             pending.content = Some(key);
             pending.shown = true;

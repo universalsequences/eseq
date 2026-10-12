@@ -4785,9 +4785,12 @@ impl App {
         };
         // A file with no arrangement (any version) loads the empty one:
         // the arrangement always exists (empty-arrangement spec 7).
-        let arrangement = Some(arrangement.unwrap_or_else(|| self.empty_arrangement()));
+        let mut arrangement = arrangement.unwrap_or_else(|| self.empty_arrangement());
+        // Rack lanes validate against the rack clip banks, which install
+        // further down with the groups; they rejoin the arrangement there.
+        let rack_lanes = std::mem::take(&mut arrangement.rack_lanes);
         self.state
-            .set_committed_arrangement(arrangement)
+            .set_committed_arrangement(Some(arrangement))
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
         self.state
             .transport
@@ -4881,6 +4884,16 @@ impl App {
             pending.sample_assets = assets;
             pending.fallback_samples += fallback;
             result?;
+        }
+        if !rack_lanes.is_empty() {
+            let mut arrangement = self
+                .state
+                .committed_arrangement()
+                .unwrap_or_else(|| self.empty_arrangement());
+            arrangement.rack_lanes = rack_lanes;
+            self.state
+                .set_committed_arrangement(Some(arrangement))
+                .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
         }
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any

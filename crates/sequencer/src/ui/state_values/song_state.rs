@@ -88,6 +88,9 @@ pub(crate) struct PendingContent {
     /// (start beat, scene position) per captured scene launch.
     pub(crate) scene_events: Vec<(f64, usize)>,
     pub(crate) track_events: Vec<PendingTrackEventContent>,
+    /// (start beat, group id, rack clip) per rack lane a captured scene
+    /// launch claimed (`PendingCapture::rack_events`).
+    pub(crate) rack_events: Vec<(f64, u64, Option<u64>)>,
 }
 
 /// The record head while a capture take exists, floored to
@@ -185,6 +188,7 @@ fn build_pending_content(
         lanes,
         scene_events: pending.scene_events,
         track_events,
+        rack_events: pending.rack_events,
     }
 }
 

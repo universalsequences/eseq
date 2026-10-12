@@ -1343,7 +1343,11 @@
          (clips     (list-of rack-clip) :doc "The rack's clip bank, in order")
          (rack-clip rack-clip :doc "The clip the current scene plays, or nil (silent, or no clips)")
          (legacy    :bool   :doc "A rack without a clip bank: its members play the project scenes (convert-rack-to-clips!)")
-         (groove    groove  :doc "The rack's own groove (what its clips follow unless they own one)")))
+         (groove    groove  :doc "The rack's own groove (what its clips follow unless they own one)")
+         (arr-clips (list-of :any)
+                    :doc "The rack's arrangement rack lane, in order: (dict :cid :start :end :rack-clip :name :color :rings :length :cycle :phase :members) each; :rings holds one list of hit offsets (0..1) per member, :members one (dict :track :pid :length :note-dots :phase :offset-steps) per member with a pattern (docs/arrangement-rack-lanes-spec.md)")
+         (pending-arr-clips (list-of :any)
+                    :doc "While an arrangement capture runs: the rack-lane clips it would write, in time order, as arr-clips less :cid, :end and :cycle (each ends at the next one's start or song.pending-head; a nil :rack-clip only ends the one before); empty otherwise")))
 
 ;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
 ;; pad to another note (a swap included) or reordering keeps the instance.

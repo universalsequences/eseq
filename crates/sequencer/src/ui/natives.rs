@@ -1182,6 +1182,25 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-arrangement-rack-member-bind",
+        "(seq-arrangement-rack-member-bind track clip-id)",
+        "Make the pattern rack member track plays under rack-lane clip \
+         clip-id the track's edit focus, as a click on a pattern clip does.",
+        move |args, ctx| {
+            let track = song_track_arg("seq-arrangement-rack-member-bind: track", args.first())?;
+            let clip_id = song_row_id_arg("seq-arrangement-rack-member-bind: clip-id", args.get(1))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-rack-member-bind".to_string(),
+                payload: song_payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("clip-id", Value::Number(clip_id as f64)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-arrangement-empty-take-create",
         "(seq-arrangement-empty-take-create track start-beat end-beat)",
         "Create a silent take-backed clip on an arrangement track, selecting \

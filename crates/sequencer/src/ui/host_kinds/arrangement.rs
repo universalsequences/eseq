@@ -44,7 +44,7 @@
 
 use super::*;
 use sequencer::app::song_region::SongRegionSelection;
-use sequencer::sequencer::{arrangement_scene_spans, ArrClip, SceneSpan};
+use sequencer::sequencer::{arrangement_scene_spans, ArrClip, ClipId, SceneSpan};
 
 /// What the arrangement half of the sync keeps across ticks.
 #[derive(Default)]
@@ -80,6 +80,8 @@ pub(super) struct SongState {
     cell_observed: ObservedList,
     pushed: SongPushed,
     governed: Option<GovernKey>,
+    /// What the groups' rack lanes (`arr-clips`) were last synced under.
+    rack_lanes_key: Option<RackLanesKey>,
     /// The provisional capture surface (`pending`).
     pub(super) pending: PendingState,
 }
@@ -112,6 +114,7 @@ impl SongState {
         self.cell_observed.reset();
         self.pushed = SongPushed::default();
         self.governed = None;
+        self.rack_lanes_key = None;
         self.pending.invalidate();
     }
 }
@@ -322,6 +325,158 @@ struct SongPushed {
     /// The region, under the structure generation (its tracks are track
     /// positions).
     region: Option<(Option<SongRegionSelection>, u64)>,
+}
+
+/// What the rack lanes derive from: the committed song (the lanes), the
+/// scenes (the banks: clip names, colors and member cells), the pattern
+/// content the rings summarize, and the group instances.
+#[derive(Clone, Copy, PartialEq)]
+struct RackLanesKey {
+    song: u64,
+    scenes: u64,
+    pattern_epoch: u64,
+    pool_content: u64,
+    groups: u64,
+}
+
+/// One rack clip as the rack row and the member rows draw it
+/// (docs/arrangement-rack-lanes-spec.md §6), independent of where a span
+/// places it.
+struct RackClipSummary {
+    name: Value,
+    color: Value,
+    /// Per member, outermost first: its hits as offsets around one cycle of
+    /// its pattern.
+    rings: Value,
+    /// The clip's loop length in beats (its longest member).
+    length: f64,
+    /// Per member with a pattern: (track, pattern id, steps, one cycle in
+    /// beats, the cycle's note dots).
+    members: Vec<(usize, u64, f64, f64, Value)>,
+}
+
+/// Where a span sits in a cycle of `length` beats, `elapsed` beats past its
+/// anchor (0 for an empty cycle).
+fn cycle_phase(elapsed: f64, length: f64) -> f64 {
+    if length > 0.0 {
+        (elapsed / length).rem_euclid(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Rack `group_id`'s clip `rack_clip` summarized (an empty summary for a
+/// missing clip: the span plays silence and draws unnamed).
+fn rack_clip_summary(
+    scenes: &sequencer::sequencer::ProjectScenes,
+    group_id: u64,
+    rack_clip: Option<u64>,
+) -> RackClipSummary {
+    let clip = rack_clip.and_then(|rack_clip| scenes.rack_bank(group_id)?.clip(rack_clip));
+    let mut summary = RackClipSummary {
+        name: text(clip.map_or("", |clip| clip.name.as_str())),
+        color: clip
+            .and_then(|clip| clip.color)
+            .map_or(Value::Nil, |[r, g, b]| list_value([number(r), number(g), number(b)])),
+        rings: list_value(Vec::<Value>::new()),
+        length: 0.0,
+        members: Vec::new(),
+    };
+    let (Some(clip), Some(bank)) = (clip, scenes.rack_bank(group_id)) else {
+        return summary;
+    };
+    let mut rings = Vec::new();
+    for (track, cell) in bank.members.iter().zip(&clip.cells) {
+        let Some(entry) =
+            cell.and_then(|pattern| arrangement_pattern_preview(scenes, *track, pattern))
+        else {
+            rings.push(list_value(Vec::<Value>::new()));
+            continue;
+        };
+        summary.length = summary.length.max(entry.length_beats);
+        let steps = (entry.num_steps as f64).max(1.0);
+        let mut hits: Vec<f64> = entry.events.iter().map(|event| event.0 / steps).collect();
+        hits.dedup();
+        rings.push(list_value(hits.into_iter().map(number)));
+        summary.members.push((
+            *track,
+            entry.pattern_id,
+            steps,
+            entry.length_beats,
+            windowed_dots(&entry.events, 0.0, steps),
+        ));
+    }
+    summary.rings = list_value(rings);
+    summary
+}
+
+/// One rack-lane span as the dict the rack row and member rows draw: a
+/// committed clip (`cid`, `end`, and its `cycle`) or a provisional one of a
+/// running capture (no `cid` or `end`: it ends at the next one's start or
+/// the record head, so its `length` stands in for the cycle the view
+/// derives). `phase` and the members' are measured from `anchor`.
+fn rack_span_value(
+    summary: &RackClipSummary,
+    cid: Option<ClipId>,
+    start: f64,
+    end: Option<f64>,
+    anchor: f64,
+    rack_clip: Option<u64>,
+) -> Value {
+    let elapsed = start - anchor;
+    let members = summary.members.iter().map(|(track, pid, steps, length, dots)| {
+        let phase = cycle_phase(elapsed, *length);
+        map_value([
+            ("track", number(*track as f64)),
+            ("pid", number(*pid as f64)),
+            ("length", number(*length)),
+            ("note-dots", dots.clone()),
+            ("phase", number(phase)),
+            ("offset-steps", number(phase * steps)),
+        ])
+    });
+    let mut fields = vec![
+        ("start", number(start)),
+        ("rack-clip", rack_clip.map_or(Value::Nil, |id| number(id as f64))),
+        ("name", summary.name.clone()),
+        ("color", summary.color.clone()),
+        ("rings", summary.rings.clone()),
+        ("length", number(summary.length)),
+        ("phase", number(cycle_phase(elapsed, summary.length))),
+        ("members", list_value(members.collect::<Vec<_>>())),
+    ];
+    if let (Some(cid), Some(end)) = (cid, end) {
+        let span = end - start;
+        let cycle = if summary.length > 0.0 && span > 0.0 {
+            summary.length / span
+        } else {
+            1.0
+        };
+        fields.extend([
+            ("cid", number(cid.0 as f64)),
+            ("end", number(end)),
+            ("cycle", number(cycle)),
+        ]);
+    }
+    map_value(fields)
+}
+
+/// Rack clip summaries, built once per (group, rack clip) however many
+/// spans play it.
+#[derive(Default)]
+struct RackSummaries(HashMap<(u64, Option<u64>), RackClipSummary>);
+
+impl RackSummaries {
+    fn get(
+        &mut self,
+        scenes: &sequencer::sequencer::ProjectScenes,
+        group_id: u64,
+        rack_clip: Option<u64>,
+    ) -> &RackClipSummary {
+        self.0
+            .entry((group_id, rack_clip))
+            .or_insert_with(|| rack_clip_summary(scenes, group_id, rack_clip))
+    }
 }
 
 /// What `song_take_lane_states` reads: song playback authority, the
@@ -737,6 +892,99 @@ impl HostKinds {
                 .keyed_instance(CLIP, &[track, selection.clip_id.0])
         });
         pusher.push(song, f::SONG_BOUND_CLIP, instance_or_nil(bound));
+    }
+
+    /// Every group's `arr-clips` (docs/arrangement-rack-lanes-spec.md §6): its
+    /// rack lane's clips as [`rack_span_value`] dicts, re-derived only when
+    /// [`RackLanesKey`] moved. Empty for a group with no lane.
+    pub(super) fn sync_rack_lanes(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let state = &app.state;
+        let key = RackLanesKey {
+            song: state.committed_song_revision(),
+            scenes: state.project_scenes_revision(),
+            pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            pool_content: state.pool_content_revision(),
+            groups: self.groups_generation,
+        };
+        if self.song.rack_lanes_key == Some(key) {
+            return;
+        }
+        let mut values: HashMap<u64, Value> = state.with_committed_arrangement(|arrangement| {
+            let Some(arrangement) = arrangement else {
+                return HashMap::new();
+            };
+            state.with_project_scenes(|scenes| {
+                let mut summaries = RackSummaries::default();
+                arrangement
+                    .rack_lanes
+                    .iter()
+                    .map(|(group_id, lane)| {
+                        let clips = lane.iter().map(|clip| {
+                            let summary = summaries.get(scenes, *group_id, Some(clip.rack_clip));
+                            rack_span_value(
+                                summary,
+                                Some(clip.id),
+                                clip.start_beat,
+                                Some(clip.end_beat),
+                                clip.anchor_beat,
+                                Some(clip.rack_clip),
+                            )
+                        });
+                        (*group_id, list_value(clips.collect::<Vec<_>>()))
+                    })
+                    .collect()
+            })
+        });
+        for group in &app.groups {
+            let Some(id) = self.groups.get(&group.id).copied() else {
+                continue;
+            };
+            let value = values
+                .remove(&group.id)
+                .unwrap_or_else(|| list_value(Vec::<Value>::new()));
+            pusher.push(id, f::GROUP_ARR_CLIPS, value);
+        }
+        self.song.rack_lanes_key = Some(key);
+    }
+
+    /// Every group's `pending-arr-clips`: the rack-lane clips the running
+    /// capture would write (`content.rack_events`), in time order, with a
+    /// launch that repeats the rack's clip merged into the one before, as
+    /// the stop-commit merges it. A launch that leaves the rack silent
+    /// stays (its `rack-clip` nil) to end the span before it; the view
+    /// draws nothing for it. Empty for every group when `content` is `None`
+    /// (no capture).
+    pub(super) fn push_pending_rack_lanes(
+        &self,
+        pusher: &mut Pusher<'_>,
+        app: &app::App,
+        content: Option<&PendingContent>,
+    ) {
+        let mut values: HashMap<u64, Vec<Value>> = HashMap::new();
+        if let Some(content) = content.filter(|content| !content.rack_events.is_empty()) {
+            app.state.with_project_scenes(|scenes| {
+                let mut summaries = RackSummaries::default();
+                let mut last: HashMap<u64, Option<u64>> = HashMap::new();
+                for (start, group_id, rack_clip) in &content.rack_events {
+                    if last.insert(*group_id, *rack_clip) == Some(*rack_clip) {
+                        continue;
+                    }
+                    let summary = summaries.get(scenes, *group_id, *rack_clip);
+                    values.entry(*group_id).or_default().push(rack_span_value(
+                        summary,
+                        None,
+                        *start,
+                        None,
+                        content.origin_beat,
+                        *rack_clip,
+                    ));
+                }
+            });
+        }
+        for (group_id, id) in &self.groups {
+            let value = values.remove(group_id).unwrap_or_default();
+            pusher.push(*id, f::GROUP_PENDING_ARR_CLIPS, list_value(value));
+        }
     }
 
     /// `track.governed` (`song_take_lane_states`), re-derived only when

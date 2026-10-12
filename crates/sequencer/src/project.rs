@@ -97,7 +97,10 @@ pub use crate::groove::{
 //       id). Both default, so older files load with an empty pool and every
 //       rack ungrooved, which plays exactly as before. (Rev-1 rack-owned
 //       groove lists never shipped and are not read.)
-const PROJECT_FILE_VERSION: u32 = 15;
+//  16 - arrangement rack lanes (docs/arrangement-rack-lanes-spec.md):
+//       `ProjectArrangement::rack_lanes`, one lane of rack-clip spans per
+//       clip-bearing rack. Older files have none and play exactly as before.
+const PROJECT_FILE_VERSION: u32 = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -5108,6 +5111,7 @@ mod tests {
                 Vec::new(),
                 vec![ArrClip::new(ClipId(0), 4.0, 8.0, Some(1))],
             ],
+            rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 33.25,
             loop_enabled: true,
             next_clip_id: 1,
@@ -5366,6 +5370,7 @@ mod tests {
                 vec![ArrClip::new(ClipId(0), 3.0, 9.0, Some(2))],
                 Vec::new(),
             ],
+            rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: false,
             next_clip_id: 1,

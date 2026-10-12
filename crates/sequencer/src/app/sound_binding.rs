@@ -921,6 +921,45 @@ impl App {
         Ok(())
     }
 
+    /// Bind a rack member's pattern under a rack-lane clip
+    /// (docs/arrangement-rack-lanes-spec.md §6): the pattern the member plays
+    /// in that clip's rack clip becomes the track's edit focus, exactly as a
+    /// click on a pattern clip would. The selection names the rack-lane
+    /// clip (same id allocator, so it cannot alias a track clip); it owns
+    /// no span on the member's lane, so the region is cleared.
+    pub fn select_rack_member_pattern(
+        &mut self,
+        track: usize,
+        clip_id: ClipId,
+    ) -> Result<(), String> {
+        let (group_id, slot) = self
+            .state
+            .with_project_scenes(|scenes| scenes.rack_member_slot(track))
+            .ok_or_else(|| format!("Track {} is not in a rack with clips", track + 1))?;
+        let rack_clip = self
+            .state
+            .with_committed_arrangement(|arrangement| {
+                arrangement?
+                    .rack_lanes
+                    .get(&group_id)?
+                    .iter()
+                    .find(|clip| clip.id == clip_id)
+                    .map(|clip| clip.rack_clip)
+            })
+            .ok_or_else(|| format!("The rack lane has no clip with id {}", clip_id.0))?;
+        let pattern = self
+            .state
+            .with_project_scenes(|scenes| scenes.rack_clip_cell(group_id, rack_clip, slot))
+            .ok_or_else(|| format!("Track {} plays nothing in that rack clip", track + 1))?;
+        self.set_song_clip_selection(Some(SongClipSelection {
+            track,
+            clip_id,
+            source: BoundSource::Pattern(pattern),
+        }));
+        self.clear_song_region();
+        Ok(())
+    }
+
     /// `select_song_clip` plus the region the clip occupies
     /// (docs/arrangement-region-editing-spec.md 4.1, amended): a title-bar
     /// click is BOTH gestures — it binds the track's sound to this clip and

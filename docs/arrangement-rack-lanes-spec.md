@@ -1,6 +1,6 @@
 # Arrangement Rack Lanes
 
-Rev 1 — 2026-10-10. Status: proposed, unbuilt. Epic: eseq-qkv0.
+Rev 3 — 2026-10-11. Status: phases 1, 2 and 4 (§2–4, §6) BUILT, plus live capture and member rows (§6); phase 3 (§5 editing) open. Epic: eseq-qkv0.
 
 Answers the open question in `docs/rack-clips-and-break-kits-spec.md` §10
 ("Do rack clips want their own arrangement lane?"). Rev 1 of that spec said
@@ -56,8 +56,7 @@ pub struct RackArrClip {
     pub id: ClipId,                 // same allocator as ArrClip
     pub start_beat: f64,
     pub end_beat: f64,
-    /// None = the rack is explicitly silent over this span.
-    pub rack_clip: Option<RackClipId>,
+    pub rack_clip: RackClipId,
     /// Beat at which every member pattern was at step 0 (the phase anchor).
     /// 0.0 = free-running against the global clock, which is what stamping
     /// does today. Capture writes the audible launch's anchor.
@@ -69,9 +68,18 @@ A rack-lane clip is the rack-scoped analogue of a scene span: over its span
 the rack plays rack clip `rack_clip` in full: every member's pattern, the
 clip's `graph_overrides`, and its `scene_slots` (instance documents).
 
-Lanes stay sorted and non-overlapping, validated like track lanes. A rack
-clip id that no longer exists in the rack's bank fails validation the same way
-a missing pattern id does.
+Lanes stay sorted and non-overlapping, validated like track lanes, and share
+the track lanes' clip-id allocator. As on a track lane, silence is the
+absence of a clip: a rack lane with no clip over a beat leaves its members
+silent there (unless their own lanes say otherwise, §2.1).
+
+A rack clip id that no longer exists in the rack's bank is **not** a
+validation error (rev 2). Deleting a rack clip does not edit the arrangement,
+and its undo step does not cover the arrangement, so the span plays silence
+until undo restores the clip. Save drops dangling references
+(`arrangement_for_serialization`), because a reload may reissue the id to an
+unrelated clip. A lane whose rack has no clip bank (deleted, or legacy) is
+ignored by compile.
 
 **Legacy racks** (empty clip bank, §4.3 of the rack-clips spec) get no rack
 lane. Their members' data still lives in project scenes, so their track lanes
@@ -106,9 +114,13 @@ the runtime row model and the scheduler stay rack-unaware for patterns.
 Rows also need the rack's sequencer state. `ProjectSongRow` gains
 
 ```rust
-/// Per clip-bearing rack: the rack clip governing this row (None = silent).
+/// Per rack lane: the rack clip governing this row (None = no clip, silent).
 pub rack_clips: Vec<(u64, Option<RackClipId>)>,
 ```
+
+A clip-bearing rack with no lane is absent from `rack_clips` and composes
+through the row scene's own pointer, the way a launch does. That also fixes
+rack-owned sequencer state for arrangements made before rack lanes existed.
 
 and `stage_runtime_song_rows` composes `graph_overrides` / `scene_slots` the
 way launch does (`ProjectScenes::composed_graph_overrides` /
@@ -127,15 +139,22 @@ Capture already observes every launch at `App::apply_pattern_launch`.
   launch actually used (record clock origin today, see
   `captured_lane_resolution`). Member track lanes are NOT written for rack
   members; the rack lane carries them.
-- **Rack clip launch**: stop modelling it as "repoint the scene, relaunch the
-  scene" for capture purposes. Capture records a `CaptureLaunchKind::RackClip
-  { group_id, clip }` event that only opens a new rack-lane clip for that rack.
-  The scene pointer side effect stays for live (non-recording) use; see D2.
+- **Rack clip launch**: needs no event kind of its own (rev 2). With D2
+  decided as "leave live behavior", a rack clip launch repoints the scene
+  and relaunches it, so capture sees a scene launch whose rack pointers,
+  read when the launch becomes audible, already name the new clip. That is
+  also faithful to what was heard: the relaunch claims every lane live.
+  A `CaptureLaunchKind::RackClip` that claims only the rack becomes
+  necessary only if `eseq-d398` changes the live launch to stop
+  relaunching the scene.
 - Consolidation (spec 10.4) treats each rack lane like a track lane: adjacent
   identical states collapse, the punch region `[P, Q)` occludes existing
-  rack-lane clips with the same trimming rule (`occlude_span`).
+  rack-lane clips with the same trimming rule (`occlude_rack_span`; no
+  restamp, since `anchor_beat` is absolute). A rack the take never claimed
+  (no scene launch) keeps its lane untouched. Built in `app/song_capture.rs`
+  (`splice_captured_rack_lane`).
 
-**Decision for the user (D2):** should a rack clip launch keep mutating the
+**D2 (decided 2026-10-11: leave live behavior):** should a rack clip launch keep mutating the
 current scene's pointer at all? It is what makes the launch audible today,
 but it silently edits the scene. Proposed for this spec: leave live behavior
 alone and capture from the launch event, so recordings are correct either way.
@@ -171,10 +190,51 @@ clip, not an editable view, and it repeats per loop cycle across a long span.
 Keep it cheap: draw it from a cached per-clip summary, not per frame. A member row shows its own override clips; when collapsed, a small
 marker on the rack row flags spans where a member override exists.
 
+**Built (rev 2, eseq-qkv0.4):** the host pushes `group.arr-clips` (one dict
+per rack-lane clip: span, rack clip name/color, `rings`, `cycle`, `phase`),
+re-derived only when the song, scenes, pattern content or groups move
+(`sync_rack_lanes`). The timeline widget gained a `:rings` item content
+(`TimelineItemContent::Rings`) drawn with filled discs: a guide disc per
+ring with the body color inside it, and a tick disc per hit, clockwise from
+twelve o'clock. A glyph sits at the item start and at each loop boundary
+with room for it. The rack row sits above the rack's first member; its
+disclosure is `g.collapsed`, and the arrangement's visible-track order
+drops a collapsed rack's members. The rack row is read-only until §5
+editing lands. Not built yet: the collapsed-row marker for member overrides
+(eseq-qkv0.5).
+
+**Member rows (rev 3):** an expanded member row draws its pattern in each
+rack-lane clip's rack clip over that clip's span, phased from the clip's
+anchor. The member's own lane clips draw over them, matching the §2.1
+precedence. A member item carries a string id, `"rack-<cid>-<track>"`, that
+names no stored clip, so it cannot be moved, resized or deleted: the rack
+row owns its span. A click binds the member's pattern as the track's edit
+focus (`App::select_rack_member_pattern`, a `SongClipSelection` naming the
+rack-lane clip). Edits then change the pool pattern, so every span playing
+that rack clip changes too. A double-click also opens the piano roll. The
+lane's context menu over one offers "Edit Pattern N" and "Make Own Clip",
+which copies the item onto the member's lane as a pattern clip at the same
+phase: an override. Each `arr-clips` dict carries
+`members`, one `(dict :track :pid :num-steps :length :events :phase)` per
+member with a pattern. Without them, an expanded rack showed empty member
+rows while the members played.
+
+**Live capture (rev 3):** while an arrangement capture runs, the rack row
+and its member rows grow under the playhead the way the track lanes'
+provisional launches do. `PendingCapture::rack_events` lists, per captured
+scene launch (and, for a whole-song capture, the starting state), each rack's
+pointer read at launch time. The host pushes them as `group.pending-arr-clips`
+(rebuilt with the rest of the pending surface), and each provisional clip
+runs to the next one's start or to `song.pending-head`. Like all
+provisional content, these items carry no id and cannot be edited.
+
 ## 7. Serialization and migration
 
-- `rack_lanes` serializes with the arrangement, skipped when empty. Bump the
-  project version. Older files load with no rack lanes.
+- `rack_lanes` serializes with the arrangement, skipped when empty. Project
+  version 16. Older files load with no rack lanes.
+- Load order: the arrangement commits before the groups and rack clip banks
+  install, so the loader holds `rack_lanes` back and recommits the
+  arrangement with them once `install_rack_clips` has run.
 - Existing arrangements are left as they are. A project that already has
   hand-placed member clips keeps them, and they win per §2.1. Nothing is
   auto-converted. A one-shot "Convert rack member clips to rack lane" command

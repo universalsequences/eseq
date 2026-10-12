@@ -314,6 +314,7 @@ mod tests {
             start_beat,
             scene: Some(scene),
             overrides: Vec::new(),
+            rack_clips: Vec::new(),
         };
         ProjectSong {
             rows: vec![row(7, 0.0, 0), row(3, 16.0, 1), row(9, 32.0, 2)],
@@ -333,6 +334,7 @@ mod tests {
                 SceneEvent { start_beat: 32.0, scene: 2 },
             ],
             track_lanes: vec![vec![ArrClip::new(ClipId(5), 4.0, 12.0, Some(2))], Vec::new()],
+            rack_lanes: Default::default(),
             end_beat: 48.0,
             loop_enabled: false,
             next_clip_id: 6,

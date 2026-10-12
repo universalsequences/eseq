@@ -7148,6 +7148,7 @@
                 .iter()
                 .map(|&(track, pattern_id)| ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
+            rack_clips: Vec::new(),
         }
     }
 

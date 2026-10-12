@@ -228,6 +228,23 @@ fn stage_runtime_song_rows(song: &ProjectSong, scenes: &ProjectScenes) -> Result
         sub_starts.push(row.start_beat);
         sub_starts.extend(splits);
 
+        // Rack-owned sequencer state composes the way a scene launch does,
+        // with the row's rack-lane clips standing in for the scene's
+        // pointers (docs/arrangement-rack-lanes-spec.md §3). A rack with no
+        // lane follows the row scene's pointer.
+        let rack_pointer = |group_id: u64| match row
+            .rack_clips
+            .iter()
+            .find(|(gid, _)| *gid == group_id)
+        {
+            Some((_, clip)) => *clip,
+            None => row
+                .scene
+                .and_then(|scene_idx| scenes.scene_rack_clip(scene_idx, group_id)),
+        };
+        let graph_overrides = scenes.composed_graph_overrides_with(row.scene, rack_pointer);
+        let scene_slots = scenes.composed_scene_slots_with(row.scene, rack_pointer);
+
         for sub_start in sub_starts {
             let delta_beats = sub_start - row.start_beat;
             let mut resolved_pattern_ids = Vec::with_capacity(track_count);
@@ -349,12 +366,8 @@ fn stage_runtime_song_rows(song: &ProjectSong, scenes: &ProjectScenes) -> Result
                 neural_networks: scene
                     .map(|scene| scene.neural_networks.clone())
                     .unwrap_or_default(),
-                graph_overrides: scene
-                    .map(|scene| scene.graph_overrides.clone())
-                    .unwrap_or_default(),
-                scene_slots: scene
-                    .map(|scene| scene.scene_slots.clone())
-                    .unwrap_or_default(),
+                graph_overrides: graph_overrides.clone(),
+                scene_slots: scene_slots.clone(),
                 project_process_chain: scene
                     .map(|scene| scene.project_process_chain.clone())
                     .unwrap_or_default(),
@@ -821,5 +834,80 @@ impl SequencerState {
     pub fn song_position_beats(&self) -> Option<f64> {
         let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
         self.song_playback.shared().position_beats(rendered)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RACK: u64 = 7;
+
+    fn rack_override(sequencer_id: u64) -> crate::graph::ProjectGraphOverrides {
+        let mut graph = crate::graph::ProjectGraphOverrides::default();
+        graph.sequencer_id = sequencer_id;
+        graph.owner_rack = Some(RACK);
+        graph
+    }
+
+    fn doc_value(store: &SceneSlotStore, name: &str) -> Option<f64> {
+        match store.get(name) {
+            Some(crate::process::ProcessLiteral::Number(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// docs/arrangement-rack-lanes-spec.md §3: arranged playback composes a
+    /// rack's sequencer state from the row's rack-lane clip, not from the
+    /// project scene, and a rack with no lane follows the scene's pointer
+    /// the way a launch does.
+    #[test]
+    fn staged_rows_compose_rack_state_from_the_rack_lane() {
+        let snapshots = vec![PatternSnapshot::new_default(4, &[]); 2];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let a = scenes.create_rack_clip_with_members(RACK, &[1, 2], "A");
+        let b = scenes.create_rack_clip(RACK, "B").expect("clip b");
+        let doc = crate::lisp_host::instance_document_slot(5, "figures");
+        scenes.instance_racks.insert(5, RACK);
+        for (clip, sequencer_id, value) in [(a, 100, 1.0), (b, 200, 2.0)] {
+            let clip = scenes.rack_bank_mut(RACK).and_then(|bank| bank.clip_mut(clip)).expect("clip");
+            clip.cells = vec![Some(PatternId(1)), Some(PatternId(1))];
+            clip.graph_overrides = vec![rack_override(sequencer_id)];
+            clip.scene_slots
+                .write_literal(&doc, crate::process::ProcessLiteral::Number(value))
+                .expect("write doc");
+        }
+        // The scene points at B; the arrangement plays A over [0, 8).
+        assert!(scenes.set_scene_rack_clip(0, RACK, Some(b)));
+        let mut arr = ProjectArrangement::new(4, 16.0);
+        arr.rack_lanes.insert(
+            RACK,
+            vec![RackArrClip {
+                id: ClipId(0),
+                start_beat: 0.0,
+                end_beat: 8.0,
+                rack_clip: a,
+                anchor_beat: 0.0,
+            }],
+        );
+        arr.next_clip_id = 1;
+        let song = compile_arrangement(&arr, &scenes).expect("compiles");
+        let staged = stage_runtime_song_rows(&song, &scenes).expect("stages");
+        let ids = |row: &RowStaging| -> Vec<u64> {
+            row.graph_overrides.iter().map(|graph| graph.sequencer_id).collect()
+        };
+        assert_eq!(staged[0].start_beat, 0.0);
+        assert_eq!(ids(&staged[0]), vec![100], "the lane's clip A, not the scene's B");
+        assert_eq!(doc_value(&staged[0].scene_slots, &doc), Some(1.0));
+        assert_eq!(staged[1].start_beat, 8.0);
+        assert!(ids(&staged[1]).is_empty(), "past the lane the rack is silent");
+        assert_eq!(doc_value(&staged[1].scene_slots, &doc), None);
+
+        // Without a lane the rack follows scene 0's pointer (clip B).
+        arr.rack_lanes.clear();
+        let song = compile_arrangement(&arr, &scenes).expect("compiles");
+        let staged = stage_runtime_song_rows(&song, &scenes).expect("stages");
+        assert_eq!(ids(&staged[0]), vec![200]);
+        assert_eq!(doc_value(&staged[0].scene_slots, &doc), Some(2.0));
     }
 }

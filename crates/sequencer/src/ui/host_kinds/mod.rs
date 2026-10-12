@@ -981,6 +981,8 @@ pub(crate) mod f {
     pub(crate) const GROUP_RACK_CLIP: FieldKey = (GROUP, "rack-clip");
     pub(crate) const GROUP_LEGACY: FieldKey = (GROUP, "legacy");
     pub(crate) const GROUP_GROOVE: FieldKey = (GROUP, "groove");
+    pub(crate) const GROUP_ARR_CLIPS: FieldKey = (GROUP, "arr-clips");
+    pub(crate) const GROUP_PENDING_ARR_CLIPS: FieldKey = (GROUP, "pending-arr-clips");
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
     pub(crate) const DEVICE_BUS: FieldKey = (DEVICE, "bus");
@@ -1795,6 +1797,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GROUP_RACK_CLIP, "rack-clip", Model),
     (f::GROUP_LEGACY, ":bool", Model),
     (f::GROUP_GROOVE, "groove", Model),
+    (f::GROUP_ARR_CLIPS, "(list-of :any)", Model),
+    (f::GROUP_PENDING_ARR_CLIPS, "(list-of :any)", Model),
     (f::TRANSPORT_PLAYING, ":bool", Live),
     (f::TRANSPORT_RECORDING, ":bool", Live),
     (f::TRANSPORT_SCENE, "scene", Model),
@@ -2956,6 +2960,7 @@ impl HostKinds {
         sync_phase("sync-rack-model", || self.sync_rack_model(&mut pusher, app));
         sync_phase("sync-groove-library", || self.sync_groove_library(&mut pusher, app));
         sync_phase("sync-song-model", || self.sync_song_model(&mut pusher, app));
+        sync_phase("sync-rack-lanes", || self.sync_rack_lanes(&mut pusher, app));
         sync_phase("sync-song-pushed", || self.sync_song_pushed(&mut pusher, app));
         sync_phase("sync-song-pending", || self.sync_song_pending(&mut pusher, app));
         sync_phase("sync-governed", || self.sync_governed(&mut pusher, app));

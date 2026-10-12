@@ -1203,6 +1203,7 @@ fn lower_row_specs_to_arrangement<C: crate::sequencer::ArrangementContext>(
             start_beat: spec.start_beat,
             scene: Some(spec.scene),
             overrides: spec.overrides,
+            rack_clips: Vec::new(),
         })
         .collect();
     lower_rows_to_arrangement(&rows, end_beat, loop_enabled, track_count, next_clip_id, ctx)
@@ -1298,6 +1299,7 @@ mod tests {
                 scene: 0,
             }],
             track_lanes: vec![vec![ArrClip::new(ClipId(0), 4.0, 8.0, Some(2))], Vec::new()],
+            rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: true,
             next_clip_id: 1,
@@ -1402,6 +1404,7 @@ mod tests {
                 start_beat: 0.0,
                 scene: Some(0),
                 overrides: vec![ov(0, 2)],
+                rack_clips: Vec::new(),
             }],
             end_beat: 16.0,
             loop_enabled: false,
@@ -1435,6 +1438,7 @@ mod tests {
                 },
             ],
             track_lanes: vec![vec![ArrClip::new(ClipId(0), 2.0, 6.0, Some(3))], Vec::new()],
+            rack_lanes: std::collections::BTreeMap::new(),
             end_beat: 16.0,
             loop_enabled: false,
             next_clip_id: 1,
@@ -1530,6 +1534,7 @@ mod tests {
                         start_beat: spec.start_beat,
                         scene: Some(spec.scene),
                         overrides,
+                        rack_clips: Vec::new(),
                     }
                 })
                 .collect(),

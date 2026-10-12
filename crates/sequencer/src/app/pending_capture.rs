@@ -12,7 +12,7 @@
 //! is drawn and never addressed by a gesture. The view carries no ids for
 //! exactly that reason.
 
-use crate::sequencer::{PatternId, TrackPatternData};
+use crate::sequencer::{PatternId, RackClipId, TrackPatternData};
 
 use super::song_capture::CaptureLaunchKind;
 use super::App;
@@ -46,6 +46,12 @@ pub struct PendingCapture<'a> {
     /// captured scene change are what the splice will actually write, so
     /// they are what the feedback has to show.
     pub track_events: Vec<(f64, usize, PatternId)>,
+    /// What each captured scene launch put on each clip-bearing rack's lane,
+    /// as `(start-beat, group id, rack clip)`, beat-ordered: the pointer read
+    /// when the launch became audible (None: the rack is silent there).
+    /// These are the rack-lane clips the stop-commit will write
+    /// (docs/arrangement-rack-lanes-spec.md §4).
+    pub rack_events: Vec<(f64, u64, Option<RackClipId>)>,
 }
 
 impl App {
@@ -91,6 +97,7 @@ impl App {
         });
         let mut scene_events = Vec::new();
         let mut track_events = Vec::new();
+        let mut rack_events = Vec::new();
         // The state capture STARTED in. It only becomes arrangement content
         // when there is no committed song — the stop-commit then splices
         // from beat zero rather than from the first launch — so drawing it
@@ -99,6 +106,9 @@ impl App {
         if take.whole_song() {
             let initial = take.initial();
             scene_events.push((0.0, initial.scene));
+            for (group_id, rack_clip) in &initial.rack_clips {
+                rack_events.push((0.0, *group_id, *rack_clip));
+            }
             for track in 0..self.tracks.len() {
                 let pattern = initial
                     .overrides
@@ -113,8 +123,11 @@ impl App {
         }
         for event in ordered {
             match &event.kind {
-                CaptureLaunchKind::Scene { scene } => {
+                CaptureLaunchKind::Scene { scene, rack_clips } => {
                     scene_events.push((event.beat, *scene));
+                    for (group_id, rack_clip) in rack_clips {
+                        rack_events.push((event.beat, *group_id, *rack_clip));
+                    }
                     // A scene launch claims every lane, takes included
                     // (song_capture.rs `consolidate`), so the provisional
                     // overlay paints the scene over a take lane too — what
@@ -142,6 +155,7 @@ impl App {
             lanes,
             scene_events,
             track_events,
+            rack_events,
         }))
     }
 }

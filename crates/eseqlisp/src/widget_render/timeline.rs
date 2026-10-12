@@ -5,7 +5,8 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, GpuQuadPrimitive,
+    CellBuffer, EventOutput, GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPrimitive,
+    GpuProportionalTextPrimitive, GpuQuadPrimitive,
     GpuRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
     WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
@@ -118,6 +119,29 @@ enum TimelineItemContent {
         wrap: bool,
     },
     Peaks(Vec<PeakBucket>),
+    /// A rack-lane clip's ring summary (docs/arrangement-rack-lanes-spec.md
+    /// §6, after Logic's Drum Machine Designer cells): one concentric ring
+    /// per rack member, outermost first, each listing its hits as offsets
+    /// (0..1 around the ring) in one member cycle. Drawn as a glyph at the
+    /// start of each visible clip cycle; `cycle`/`phase` as for `Dots`.
+    Rings {
+        rings: Vec<Vec<f64>>,
+        cycle: f64,
+        phase: f64,
+    },
+}
+
+impl TimelineItemContent {
+    /// `(cycle, phase, wrap)` of content that repeats along its item.
+    fn cycle(&self) -> Option<(f64, f64, bool)> {
+        match self {
+            Self::Dots {
+                cycle, phase, wrap, ..
+            } => Some((*cycle, *phase, *wrap)),
+            Self::Rings { cycle, phase, .. } => Some((*cycle, *phase, true)),
+            Self::Peaks(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1681,6 +1705,7 @@ fn build_primitives(
             content_rect,
             title_bar,
             loops_segmented,
+            body_color,
             viewport,
         );
         item_rects.push((
@@ -2041,9 +2066,7 @@ fn item_cycle_separator_xs(
     item: &TimelineItem,
     viewport: super::WidgetViewport,
 ) -> Vec<f32> {
-    let Some(TimelineItemContent::Dots {
-        cycle, phase, wrap, ..
-    }) = &item.content
+    let Some((cycle, phase, wrap)) = item.content.as_ref().and_then(TimelineItemContent::cycle)
     else {
         return Vec::new();
     };
@@ -2126,9 +2149,7 @@ fn item_cycle_width_px(
     item: &TimelineItem,
     viewport: super::WidgetViewport,
 ) -> Option<f32> {
-    let Some(TimelineItemContent::Dots { cycle, .. }) = &item.content else {
-        return None;
-    };
+    let (cycle, _, _) = item.content.as_ref()?.cycle()?;
     let cycle_duration = (item.end - item.start).max(0.0) * cycle.max(f64::EPSILON);
     let content_width_px = view.content_rect().width * viewport.cell_w;
     Some((cycle_duration / view.view_duration.max(0.0001)) as f32 * content_width_px)
@@ -2149,6 +2170,7 @@ fn push_item_content_primitives(
     rect: (f32, f32, f32, f32),
     title_bar: Option<(f32, f32)>,
     loop_segments_enabled: bool,
+    body_color: crate::backend::Color,
     viewport: super::WidgetViewport,
 ) {
     let (x, y, width, height) = rect;
@@ -2263,9 +2285,103 @@ fn push_item_content_primitives(
                 }
             }
         }
+        Some(TimelineItemContent::Rings { rings, .. }) => {
+            push_ring_glyphs(primitives, view, item, rect, rings, body_color, viewport);
+        }
         // Peaks rendering lands with the audio-track asset pipeline
         // (docs/arrangement-timeline-ui-spec.md 3, Slice D).
         Some(TimelineItemContent::Peaks(_)) | None => {}
+    }
+}
+
+/// Rings at most per glyph: past this the rings are thinner than a pixel.
+const RING_GLYPH_MAX_RINGS: usize = 8;
+
+/// The ring summary of a rack-lane clip (`TimelineItemContent::Rings`): one
+/// glyph at the item's left edge and at every later cycle start with room
+/// for it, each a stack of concentric guide rings (outermost = first ring)
+/// with a tick per hit, clockwise from twelve o'clock. Filled discs only:
+/// each ring is a darker disc with a disc of the body color inside it.
+fn push_ring_glyphs(
+    primitives: &mut Vec<GpuPrimitive>,
+    view: &TimelineView,
+    item: &TimelineItem,
+    (x, y, width, height): (f32, f32, f32, f32),
+    rings: &[Vec<f64>],
+    body_color: crate::backend::Color,
+    viewport: super::WidgetViewport,
+) {
+    let rings = &rings[..rings.len().min(RING_GLYPH_MAX_RINGS)];
+    if rings.is_empty() {
+        return;
+    }
+    let (cell_w, cell_h) = (viewport.cell_w, viewport.cell_h);
+    let radius_px = height * cell_h * 0.42;
+    if radius_px < 4.0 {
+        return;
+    }
+    let diameter_cols = 2.0 * radius_px / cell_w;
+    let pad_cols = 4.0 / cell_w;
+    // Glyph anchors: the item's start, then each later cycle boundary.
+    let mut anchors = vec![view.x_for_time(item.start)];
+    anchors.extend(item_cycle_separator_xs(view, item, viewport));
+    let right = x + width;
+    let row = y + height * 0.5;
+    let guide = crate::backend::Color { r: 0.02, g: 0.025, b: 0.03, a: 0.30 };
+    let tick = crate::backend::Color { r: 0.02, g: 0.025, b: 0.03, a: 0.85 };
+    let count = rings.len();
+    let inner_fraction = 0.28_f32;
+    let ring_radius = |index: usize| {
+        if count == 1 {
+            radius_px * 0.8
+        } else {
+            radius_px * (1.0 - (1.0 - inner_fraction) * index as f32 / (count - 1) as f32)
+        }
+    };
+    let spacing = if count == 1 {
+        radius_px * 0.5
+    } else {
+        radius_px * (1.0 - inner_fraction) / (count - 1) as f32
+    };
+    let guide_px = (spacing * 0.18).clamp(0.6, 1.2);
+    let tick_px = (spacing * 0.36).clamp(1.0, 2.6);
+    for (index, anchor) in anchors.iter().enumerate() {
+        let left = anchor + pad_cols;
+        let next = anchors.get(index + 1).copied().unwrap_or(right);
+        // Skip an anchor left of the visible rect and any cycle too narrow
+        // to hold a whole glyph.
+        if left < x || left + diameter_cols + pad_cols > next.min(right) {
+            continue;
+        }
+        let center = [left + diameter_cols * 0.5, row];
+        for ring in 0..count {
+            let radius = ring_radius(ring);
+            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+                center,
+                radius_px: radius + guide_px,
+                color: guide,
+                visible_half: GpuCircleVisibleHalf::Full,
+            }));
+            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+                center,
+                radius_px: (radius - guide_px).max(0.0),
+                color: body_color,
+                visible_half: GpuCircleVisibleHalf::Full,
+            }));
+        }
+        for (ring, hits) in rings.iter().enumerate() {
+            let radius = ring_radius(ring);
+            for offset in hits {
+                let angle = std::f64::consts::TAU * offset.rem_euclid(1.0);
+                let (dx, dy) = (angle.sin() as f32 * radius, -(angle.cos() as f32) * radius);
+                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+                    center: [center[0] + dx / cell_w, center[1] + dy / cell_h],
+                    radius_px: tick_px,
+                    color: tick,
+                    visible_half: GpuCircleVisibleHalf::Full,
+                }));
+            }
+        }
     }
 }
 
@@ -4493,6 +4609,33 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
             phase,
             wrap,
         });
+    }
+    if let Some(Value::List(entries)) = map.get("rings") {
+        let rings = entries
+            .iter()
+            .filter_map(|ring| match &*ring.borrow() {
+                Value::List(hits) => Some(
+                    hits.iter()
+                        .filter_map(|hit| as_number(&hit.borrow()))
+                        .filter(|hit| hit.is_finite())
+                        .map(|hit| hit.rem_euclid(1.0))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let cycle = map
+            .get("cycle")
+            .and_then(as_number)
+            .filter(|cycle| cycle.is_finite() && *cycle > 0.0)
+            .unwrap_or(1.0);
+        let phase = map
+            .get("phase")
+            .and_then(as_number)
+            .filter(|phase| phase.is_finite())
+            .map(|phase| phase.rem_euclid(1.0))
+            .unwrap_or(0.0);
+        return Some(TimelineItemContent::Rings { rings, cycle, phase });
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -9468,5 +9611,33 @@ mod tests {
             0.0,
             "malformed degrades to a point dot"
         );
+    }
+
+    /// A rack-lane clip's ring summary (docs/arrangement-rack-lanes-spec.md
+    /// §6): one hit list per ring, offsets wrapped into 0..1, malformed
+    /// entries skipped, and it repeats along the item like dots do.
+    #[test]
+    fn rings_parse_leniently_and_repeat_like_dots() {
+        let content = map_value_raw(vec![
+            (
+                "rings",
+                list_value_raw(vec![
+                    list_value_raw(vec![number_value(0.0), number_value(1.25)]),
+                    Value::String("junk".to_string()),
+                    list_value_raw(vec![number_value(0.5), Value::String("x".to_string())]),
+                ]),
+            ),
+            ("cycle", number_value(0.25)),
+            ("phase", number_value(-0.25)),
+        ]);
+        let Some(parsed) = parse_item_content(&content) else {
+            panic!("expected rings content");
+        };
+        let TimelineItemContent::Rings { rings, cycle, phase } = &parsed else {
+            panic!("expected rings content");
+        };
+        assert_eq!(rings, &vec![vec![0.0, 0.25], vec![0.5]]);
+        assert_eq!((*cycle, *phase), (0.25, 0.75));
+        assert_eq!(parsed.cycle(), Some((0.25, 0.75, true)), "rings repeat");
     }
 }

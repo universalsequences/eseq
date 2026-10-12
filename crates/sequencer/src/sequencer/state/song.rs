@@ -125,6 +125,12 @@ pub struct ProjectSongRow {
     pub scene: Option<usize>,
     #[serde(default)]
     pub overrides: Vec<ProjectSongTrackOverride>,
+    /// Per rack with an arrangement rack lane (docs/arrangement-rack-lanes-spec.md
+    /// §3): `(group_id, clip)`, the rack clip governing this row, `None` for an
+    /// explicitly silent rack. A clip-bearing rack absent here composes through
+    /// the row scene's own pointer, the way a scene launch does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_clips: Vec<(u64, Option<u64>)>,
 }
 
 /// The committed song: rows ordered by `start_beat`, an explicit end
@@ -398,7 +404,9 @@ impl ProjectSong {
     /// immediately preceding row's. The earlier row (and its id) survives.
     pub fn normalize(&mut self) {
         self.rows.dedup_by(|later, earlier| {
-            earlier.scene == later.scene && earlier.overrides == later.overrides
+            earlier.scene == later.scene
+                && earlier.overrides == later.overrides
+                && earlier.rack_clips == later.rack_clips
         });
     }
 
@@ -623,6 +631,7 @@ mod tests {
             start_beat,
             scene: Some(scene),
             overrides,
+            rack_clips: Vec::new(),
         }
     }
 

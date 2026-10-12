@@ -24,9 +24,12 @@
 use std::collections::BTreeMap;
 
 use crate::quantized_launch::PatternLaunchTarget;
+use std::collections::BTreeSet;
+
 use crate::sequencer::{
-    insert_clip_sorted, occlude_span, stamped_clip_override, ArrClip, ClipId, PatternId,
-    ProjectArrangement, ProjectScenes, ProjectSongTrackOverride, SceneEvent,
+    insert_clip_sorted, insert_rack_clip_sorted, occlude_rack_span, occlude_span,
+    stamped_clip_override, ArrClip, ClipId, PatternId, ProjectArrangement, ProjectScenes,
+    ProjectSongTrackOverride, RackArrClip, RackClipId, SceneEvent,
 };
 
 use super::edit::finish_active_gesture;
@@ -47,6 +50,13 @@ pub struct CapturedSongState {
     /// playback, spec 9.3). All tracks when capturing from an empty song
     /// (the performer is the sole authority there).
     pub touched: std::collections::BTreeSet<usize>,
+    /// The rack clip every clip-bearing rack played from this boundary
+    /// (docs/arrangement-rack-lanes-spec.md §4), resolved when the launch
+    /// became audible, never at Stop. `None` = the rack was silent.
+    pub rack_clips: BTreeMap<u64, Option<RackClipId>>,
+    /// Racks the performer has launch authority over, as `touched` is for
+    /// tracks: a scene launch claims every rack it resolved.
+    pub touched_racks: BTreeSet<u64>,
 }
 
 /// The resolved launch identity of one captured event.
@@ -56,7 +66,15 @@ pub(crate) enum CaptureLaunchKind {
     /// claims every lane, takes included (takes spec 10, rev 5) — pressing
     /// a scene stops whatever take the arrangement was playing there and
     /// plays the scene instead, from the launch beat onward.
-    Scene { scene: usize },
+    ///
+    /// `rack_clips` is every clip-bearing rack's pointer in that scene at
+    /// the moment the launch became audible. A rack clip launch repoints
+    /// the scene and relaunches it, so it arrives here too, carrying the
+    /// clip that was actually heard.
+    Scene {
+        scene: usize,
+        rack_clips: Vec<(u64, Option<RackClipId>)>,
+    },
     /// A masked track-pattern launch: installs these per-track overrides.
     Tracks { overrides: Vec<(usize, PatternId)> },
 }
@@ -146,11 +164,19 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
             .iter()
             .rev()
             .find_map(|event| match &event.kind {
-                CaptureLaunchKind::Scene { scene } => Some(*scene),
+                CaptureLaunchKind::Scene { scene, rack_clips } => Some((*scene, rack_clips)),
                 CaptureLaunchKind::Tracks { .. } => None,
             });
         let mut touched = previous.touched.clone();
-        let (scene, mut overrides) = match last_scene {
+        let mut touched_racks = previous.touched_racks.clone();
+        let rack_clips = match last_scene {
+            Some((_, launched)) => {
+                touched_racks.extend(launched.iter().map(|(group_id, _)| *group_id));
+                launched.iter().copied().collect()
+            }
+            None => previous.rack_clips.clone(),
+        };
+        let (scene, mut overrides) = match last_scene.map(|(scene, _)| scene) {
             Some(scene) => {
                 // A scene launch claims EVERY lane (takes spec 10, rev 5),
                 // takes included: the launch stops the take and the scene
@@ -178,6 +204,8 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
             scene,
             overrides: overrides.into_iter().collect(),
             touched,
+            rack_clips,
+            touched_racks,
         };
         if boundary <= 0.0 {
             // A launch audible exactly at the capture start replaces the
@@ -200,6 +228,8 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
         earlier.scene == later.scene
             && earlier.overrides == later.overrides
             && earlier.touched == later.touched
+            && earlier.rack_clips == later.rack_clips
+            && earlier.touched_racks == later.touched_racks
     });
     rows
 }
@@ -236,6 +266,13 @@ impl App {
         } else {
             std::collections::BTreeSet::new()
         };
+        let rack_clips: BTreeMap<u64, Option<RackClipId>> =
+            scene_rack_pointers(&scenes, scenes.current_scene).into_iter().collect();
+        let touched_racks = if whole_song {
+            rack_clips.keys().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
         self.song_capture_take = Some(SongCaptureTake {
             timeline_start_beat,
             whole_song,
@@ -244,6 +281,8 @@ impl App {
                 scene: scenes.current_scene,
                 overrides,
                 touched,
+                rack_clips,
+                touched_racks,
             },
             events: Vec::new(),
         });
@@ -283,7 +322,12 @@ impl App {
         // a SceneTracks launch installs the target scene's cell patterns as
         // overrides (see `ProjectScenes::launch_scene_tracks`).
         let kind = match target {
-            PatternLaunchTarget::Scene { scene } => CaptureLaunchKind::Scene { scene: *scene },
+            PatternLaunchTarget::Scene { scene } => CaptureLaunchKind::Scene {
+                scene: *scene,
+                rack_clips: self
+                    .state
+                    .with_scenes(|scenes| scene_rack_pointers(scenes, *scene)),
+            },
             PatternLaunchTarget::SceneTracks { scene, tracks } => CaptureLaunchKind::Tracks {
                 overrides: tracks
                     .iter()
@@ -573,6 +617,19 @@ impl App {
                 record_clock_origin,
             )?;
         }
+        let racks: BTreeSet<u64> = states
+            .iter()
+            .flat_map(|state| state.touched_racks.iter().copied())
+            .collect();
+        for group_id in racks {
+            splice_captured_rack_lane(
+                &mut arrangement,
+                group_id,
+                &states,
+                punch_out,
+                record_clock_origin,
+            )?;
+        }
         Ok(arrangement)
     }
 
@@ -743,7 +800,9 @@ impl App {
     /// pattern free-runs against the RECORD CLOCK, whose zero is
     /// `record_clock_origin` on the arrangement timeline, so its position is
     /// `steps(beat - record_clock_origin) mod L`). `None` when the lane
-    /// resolved to nothing.
+    /// resolved to nothing, and for a member of a clip-bearing rack with no
+    /// explicit launch: its rack lane carries it
+    /// (docs/arrangement-rack-lanes-spec.md §4).
     fn captured_lane_resolution(
         &self,
         scenes: &ProjectScenes,
@@ -758,6 +817,7 @@ impl App {
             .find(|(over_track, _)| *over_track == track)
         {
             Some((_, pattern)) => pattern.0,
+            None if scenes.rack_member_slot(track).is_some() => return None,
             None => crate::sequencer::SongCompileContext::song_scene_cell(
                 scenes,
                 state.scene,
@@ -890,6 +950,77 @@ impl App {
     }
 }
 
+/// Every clip-bearing rack's pointer in scene `scene`, by group id.
+fn scene_rack_pointers(scenes: &ProjectScenes, scene: usize) -> Vec<(u64, Option<RackClipId>)> {
+    scenes
+        .rack_banks()
+        .iter()
+        .filter(|bank| !bank.clips.is_empty())
+        .map(|bank| (bank.group_id, scenes.scene_rack_clip(scene, bank.group_id)))
+        .collect()
+}
+
+/// Write one rack's captured clips onto its rack lane over `[T, Q)`, where
+/// `T` is the first boundary the performer had authority over the rack
+/// (docs/arrangement-rack-lanes-spec.md §4). The rack lane's analogue of
+/// `splice_captured_lane`: each change of the rack's clip opens a rack-lane
+/// clip anchored on the record clock's zero, the same free-run every
+/// captured pattern lane is stamped against, and a silent rack opens none.
+/// The lane is created when the rack has none, which hands its members to
+/// it wherever their own lanes are empty.
+fn splice_captured_rack_lane(
+    arrangement: &mut ProjectArrangement,
+    group_id: u64,
+    states: &[CapturedSongState],
+    punch_out: f64,
+    record_clock_origin: f64,
+) -> Result<(), String> {
+    let Some(first) = states
+        .iter()
+        .position(|state| state.touched_racks.contains(&group_id))
+    else {
+        return Ok(());
+    };
+    let touched_beat = states[first].start_beat;
+    if touched_beat >= punch_out {
+        return Ok(());
+    }
+    occlude_rack_span(arrangement, group_id, touched_beat, punch_out)?;
+    let mut clips: Vec<RackArrClip> = Vec::new();
+    let mut open: Option<RackArrClip> = None;
+    for state in &states[first..] {
+        let beat = state.start_beat;
+        if beat >= punch_out {
+            break;
+        }
+        let desired = state.rack_clips.get(&group_id).copied().flatten();
+        if open.is_some() && open.map(|clip| clip.rack_clip) == desired {
+            // The open clip already plays this rack clip, at the same anchor.
+            continue;
+        }
+        if let Some(mut clip) = open.take() {
+            clip.end_beat = beat;
+            clips.push(clip);
+        }
+        open = desired.map(|rack_clip| RackArrClip {
+            id: ClipId(0), // assigned on insert
+            start_beat: beat,
+            end_beat: punch_out,
+            rack_clip,
+            anchor_beat: record_clock_origin,
+        });
+    }
+    clips.extend(open);
+    for mut clip in clips {
+        if clip.end_beat <= clip.start_beat {
+            continue;
+        }
+        clip.id = arrangement.allocate_clip_id()?;
+        insert_rack_clip_sorted(arrangement, group_id, clip);
+    }
+    Ok(())
+}
+
 /// Two lane resolutions (source pool id + phase in steps) are the same launch
 /// when they name the same pattern at the same phase. Offsets are compared
 /// with the stamping epsilon: the free-run and scene-anchored derivations of
@@ -926,6 +1057,8 @@ mod tests {
             scene,
             overrides,
             touched: std::collections::BTreeSet::new(),
+            rack_clips: BTreeMap::new(),
+            touched_racks: BTreeSet::new(),
         }
     }
 
@@ -944,7 +1077,10 @@ mod tests {
     fn scene_event(beat: f64, scene: usize) -> CaptureLaunchEvent {
         CaptureLaunchEvent {
             beat,
-            kind: CaptureLaunchKind::Scene { scene },
+            kind: CaptureLaunchKind::Scene {
+                scene,
+                rack_clips: Vec::new(),
+            },
         }
     }
 

@@ -7602,6 +7602,62 @@ mod tests {
     /// the rack's; the per-scene tables the scheduler switches on launch
     /// agree with the current one; "Apply to All Clips" makes the clip's
     /// groove the rack's for every clip; and each step undoes.
+    /// docs/arrangement-rack-lanes-spec.md §4: recording scene launches on a
+    /// clip-bearing rack writes its rack lane with the rack clip each launch
+    /// actually played, resolved at launch time, not at Stop. A rack clip
+    /// launch (repoint + scene relaunch) mid-take therefore lands as its own
+    /// span, and the member track lanes stay empty for the rack lane to fill.
+    #[test]
+    fn capture_writes_the_rack_clip_each_scene_launch_played() {
+        use crate::quantized_launch::PatternLaunchTarget;
+
+        let graph = TestLiveGraph::new("drum-rack-capture-lane-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        app.convert_rack_to_clips_recorded(group_id).expect("clips");
+        let verse = app.current_rack_clip(group_id).expect("the scene's clip");
+        let chorus = app.save_rack_clip_as_recorded(group_id, "Chorus").expect("second clip");
+        app.set_current_rack_clip_recorded(group_id, Some(verse)).expect("play the verse");
+        let scene = app.state.current_scene_index();
+
+        app.begin_song_capture_take(0.0);
+        app.record_song_capture_launch(&PatternLaunchTarget::Scene { scene }, 0.0);
+        app.set_current_rack_clip_recorded(group_id, Some(chorus)).expect("launch the chorus");
+        app.record_song_capture_launch(&PatternLaunchTarget::Scene { scene }, 8.0);
+        app.finish_song_capture_take(16.0).expect("commit");
+
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let lane: Vec<(f64, f64, u64, f64)> = arrangement.rack_lanes[&group_id]
+            .iter()
+            .map(|clip| (clip.start_beat, clip.end_beat, clip.rack_clip, clip.anchor_beat))
+            .collect();
+        assert_eq!(lane, vec![(0.0, 8.0, verse, 0.0), (8.0, 16.0, chorus, 0.0)]);
+        assert!(
+            arrangement.track_lanes[hat].is_empty(),
+            "the rack lane carries its members: {:?}",
+            arrangement.track_lanes[hat]
+        );
+        let song = app.state.committed_song().expect("song");
+        let row = |beat: f64| {
+            crate::sequencer::state_at_beat(&song, beat).expect("row").clone()
+        };
+        assert_eq!(row(0.0).rack_clips, vec![(group_id, Some(verse))]);
+        assert_eq!(row(8.0).rack_clips, vec![(group_id, Some(chorus))]);
+        let hat_pattern = |beat: f64| {
+            row(beat)
+                .overrides
+                .iter()
+                .find(|over| over.track == hat)
+                .and_then(|over| over.pattern_id)
+        };
+        assert!(hat_pattern(0.0).is_some(), "the verse plays the hat");
+        assert!(hat_pattern(8.0).is_some(), "the chorus plays the hat");
+        assert_ne!(hat_pattern(0.0), hat_pattern(8.0), "each clip plays its own lane");
+        app.state.preflight_runtime_song().expect("the recording plays");
+    }
+
     #[test]
     fn rack_clips_play_their_own_groove_or_the_racks() {
         use crate::groove::mpc_swing_groove;

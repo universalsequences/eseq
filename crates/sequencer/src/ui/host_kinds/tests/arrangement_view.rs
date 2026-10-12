@@ -284,6 +284,52 @@ fn a_capture_in_flight_draws_provisional_items() {
     );
 }
 
+/// docs/arrangement-rack-lanes-spec.md §6: while a capture runs, a
+/// clip-bearing rack's row grows with the rack clips the captured scene
+/// launches played, and its members' rows with their patterns, inert until
+/// the capture ends.
+#[test]
+fn a_capture_in_flight_grows_the_rack_row() {
+    let mut h = distro();
+    let (group, _) = h.app.create_drum_rack_recorded(None).expect("rack");
+    h.app.assign_rack_pad_track_recorded(group, 36, 0).expect("kick pad");
+    h.app.convert_rack_to_clips_recorded(group).expect("clips");
+    let verse = h.app.current_rack_clip(group).expect("the scene's clip");
+    h.share_buses_and_groups();
+    h.app.set_arrangement_view_visible(true);
+    h.app.song_transport_play(true).expect("capture starts");
+    // Anchor the record clock 4 s (8 beats at 120 BPM) in the past, so the
+    // record head has passed the starting scene's launch.
+    let now = Instant::now();
+    let anchor = now - Duration::from_secs(4);
+    h.app.state.transport.record_clock.publish(0.0, anchor);
+    h.settle();
+    let head = quantized_pending_head(&h.app).expect("a record head");
+    assert!(head > 0.0, "the record head moved: {head}");
+    let pending = items(&h.eval("(let ((g (first (eseq.kinds/groups)))) g.pending-arr-clips)"));
+    assert_eq!(pending.len(), 1, "the starting scene's rack clip");
+    assert_eq!(get(&pending[0], "rack-clip"), Value::Number(verse as f64));
+    assert_eq!(get(&pending[0], "start"), Value::Number(0.0));
+
+    let rack_items =
+        items(&h.eval("(eseq.arrangement/rack-lane-items (first (eseq.kinds/groups)))"));
+    assert_eq!(rack_items.len(), 1, "the provisional rack-lane clip draws");
+    assert_eq!(get(&rack_items[0], "id"), Value::Nil, "inert");
+    // The pushed head trails the wall clock read above by up to a frame.
+    let Value::Number(end) = get(&rack_items[0], "end") else { panic!("end") };
+    assert!(end > 0.0 && end <= head + 1.0, "to the record head: {end} vs {head}");
+    let member_items = items(&h.eval("(eseq.arrangement/track-items 0)"));
+    assert!(
+        member_items.iter().any(|item| get(item, "end") == Value::Number(end)),
+        "the member's row grows too"
+    );
+
+    h.app.song_capture_cancel().expect("cancel");
+    h.settle();
+    let pending = items(&h.eval("(let ((g (first (eseq.kinds/groups)))) g.pending-arr-clips)"));
+    assert!(pending.is_empty(), "the provisional clips go with the capture");
+}
+
 /// A rejected arrangement edit shows in the banner (`song.edit-error`) until
 /// the next successful one.
 #[test]
@@ -324,4 +370,123 @@ fn the_edit_error_banner_follows_the_song() {
         "a successful edit clears the error"
     );
     assert_eq!(banner(&h), None);
+}
+
+/// docs/arrangement-rack-lanes-spec.md §6: a clip-bearing rack gets a rack
+/// row above its first member, drawing its rack lane's clips as ring
+/// summaries (one ring per member) labelled with the rack clip; collapsing
+/// the rack hides the member rows and keeps the rack row.
+#[test]
+fn a_clip_bearing_rack_draws_a_rack_row_of_ring_summaries() {
+    let mut h = distro();
+    let (group, _) = h.app.create_drum_rack_recorded(None).expect("rack");
+    h.app.assign_rack_pad_track_recorded(group, 36, 0).expect("kick pad");
+    h.app.assign_rack_pad_track_recorded(group, 38, 1).expect("snare pad");
+    h.app.convert_rack_to_clips_recorded(group).expect("clips");
+    let verse = h.app.current_rack_clip(group).expect("the scene's clip");
+    let mut arrangement = h.app.state.committed_arrangement().expect("arrangement");
+    let id = arrangement.allocate_clip_id().expect("id");
+    arrangement.rack_lanes.insert(
+        group,
+        vec![sequencer::sequencer::RackArrClip {
+            id,
+            start_beat: 0.0,
+            end_beat: 8.0,
+            rack_clip: verse,
+            anchor_beat: 0.0,
+        }],
+    );
+    h.app.state.set_committed_arrangement(Some(arrangement)).expect("commit");
+    h.share_buses_and_groups();
+    h.settle();
+
+    let rack_lane = |h: &Harness| {
+        let mut lanes = Vec::new();
+        widgets_with_prop(&h.buffer_tree("*arrangement*").0, "items", &mut lanes);
+        lanes
+            .into_iter()
+            .find(|lane| lane.get("key") == Some(&s(&format!("rack-lane-{group}"))))
+    };
+    let lane = rack_lane(&h).expect("the rack row's lane");
+    let lane_items = items(lane.get("items").unwrap_or(&Value::Nil));
+    assert_eq!(lane_items.len(), 1, "one rack-lane clip");
+    let Value::Map(item) = &lane_items[0] else { panic!("item map") };
+    let field = |name: &str| item.get(name).map(|value| value.borrow().clone());
+    assert_eq!(field("end"), Some(Value::Number(8.0)));
+    let name = h.app.state.with_scenes(|scenes| {
+        scenes.rack_bank(group).and_then(|bank| bank.clip(verse)).map(|clip| clip.name.clone())
+    });
+    assert_eq!(field("label"), Some(s(&name.expect("clip name"))));
+    let Some(Value::Map(content)) = field("content") else { panic!("ring content") };
+    let rings = items(&content.get("rings").expect("rings").borrow());
+    assert_eq!(rings.len(), 2, "one ring per member");
+
+    // Each member's row draws its pattern in the rack clip over the span,
+    // under a string id no stored clip has: the rack lane owns the span.
+    let verse_cells = h.app.state.with_scenes(|scenes| {
+        scenes.rack_bank(group).and_then(|bank| bank.clip(verse)).map(|clip| clip.cells.clone())
+    });
+    let verse_cells = verse_cells.expect("verse cells");
+    for member in 0..2 {
+        let member_items = items(&h.eval(&format!("(eseq.arrangement/track-items {member})")));
+        assert_eq!(member_items.len(), 1, "member {member} draws the rack clip's pattern");
+        let item = &member_items[0];
+        assert_eq!(get(item, "start"), Value::Number(0.0));
+        assert_eq!(get(item, "end"), Value::Number(8.0));
+        let pid = verse_cells[member].expect("a member pattern").0;
+        assert_eq!(get(item, "label"), s(&format!("Pattern {pid}")));
+        assert_eq!(get(item, "id"), s(&format!("rack-{}-{member}", id.0)));
+    }
+
+    // A click on one binds the member's pattern in that rack clip as the
+    // track's edit focus, and lights the item.
+    h.eval(&format!(
+        "(eseq.arrangement/track-action 1 (dict :type :select :ids (list \"rack-{}-1\") :time 0))",
+        id.0
+    ));
+    h.settle();
+    let snare = verse_cells[1].expect("snare pattern");
+    assert_eq!(
+        h.app.song_clip_selection,
+        Some(sequencer::app::sound_binding::SongClipSelection {
+            track: 1,
+            clip_id: id,
+            source: sequencer::app::sound_binding::BoundSource::Pattern(snare),
+        })
+    );
+    let member_items = items(&h.eval("(eseq.arrangement/track-items 1)"));
+    assert_eq!(get(&member_items[0], "selected"), Value::Bool(true));
+
+    // Make Own Clip copies it onto the member's lane as a pattern clip, an
+    // override that wins over the rack lane there.
+    h.eval(
+        "(eseq.arrangement/make-own-clip 1 (first (eseq.arrangement/rack-member-items 1)))",
+    );
+    h.settle();
+    let own = h.app.state.committed_arrangement().expect("arrangement").track_lanes[1].clone();
+    assert_eq!(own.len(), 1, "one own clip");
+    assert_eq!(own[0].pattern_id, Some(snare.0));
+    assert_eq!((own[0].start_beat, own[0].end_beat), (0.0, 8.0));
+
+    // The members' rows stay below the rack row; collapsing the rack hides
+    // them and keeps the rack row.
+    let lane_keys = |h: &Harness| {
+        let mut lanes = Vec::new();
+        widgets_with_prop(&h.buffer_tree("*arrangement*").0, "lane-key", &mut lanes);
+        lanes
+            .into_iter()
+            .filter_map(|lane| match lane.get("lane-key") {
+                Some(Value::Number(n)) => Some(*n as usize),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(lane_keys(&h).contains(&0) && lane_keys(&h).contains(&1));
+    h.eval("(let ((g (first (eseq.kinds/groups)))) (toggle! g.collapsed))");
+    // Group collapse lands in the shared groups the app's tick pulls from.
+    h.app.groups = h.shared.track_groups.lock().unwrap().clone();
+    h.settle();
+    let shown = lane_keys(&h);
+    assert!(!shown.contains(&0) && !shown.contains(&1), "members hidden: {shown:?}");
+    assert!(rack_lane(&h).is_some(), "the rack row stays");
 }

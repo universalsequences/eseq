@@ -10,6 +10,8 @@
 //! (`set_committed_arrangement`); the editing primitives live in
 //! `app/arr_edit.rs`.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 /// Stable logical identity for a clip, mirroring `SongRowId`/`SceneId`:
@@ -110,6 +112,32 @@ impl ArrClip {
     }
 }
 
+/// One clip on a rack lane (docs/arrangement-rack-lanes-spec.md §2): over
+/// `[start_beat, end_beat)` the rack plays rack clip `rack_clip` in full —
+/// every member's cell, the clip's graph overrides and its instance
+/// documents. Like a track clip, silence is the absence of a clip.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RackArrClip {
+    /// Drawn from the same allocator as `ArrClip::id`.
+    pub id: ClipId,
+    pub start_beat: f64,
+    /// Exclusive; must be `> start_beat`.
+    pub end_beat: f64,
+    pub rack_clip: RackClipId,
+    /// The beat at which every member pattern was at step 0. Absolute, so a
+    /// left trim keeps the phase without restamping. `0.0` free-runs against
+    /// the global clock, which is what scene stamping does.
+    #[serde(default, skip_serializing_if = "arr_offset_steps_is_zero")]
+    pub anchor_beat: f64,
+}
+
+impl RackArrClip {
+    /// `true` when `beat` falls inside the clip's half-open span.
+    pub fn contains(&self, beat: f64) -> bool {
+        beat >= self.start_beat && beat < self.end_beat
+    }
+}
+
 /// The stored arrangement: a scene lane, one clip lane per track, the song
 /// end, the loop flag, and the monotonic clip-id allocator.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,6 +149,12 @@ pub struct ProjectArrangement {
     /// Outer index is the track; each lane is sorted and non-overlapping.
     #[serde(default)]
     pub track_lanes: Vec<Vec<ArrClip>>,
+    /// One lane per clip-bearing rack, keyed by stable group id
+    /// (docs/arrangement-rack-lanes-spec.md §2). Each lane is sorted and
+    /// non-overlapping. A rack with a lane resolves its members from it
+    /// wherever their own track lanes are empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rack_lanes: BTreeMap<u64, Vec<RackArrClip>>,
     pub end_beat: f64,
     #[serde(default)]
     pub loop_enabled: bool,
@@ -142,6 +176,7 @@ impl ProjectArrangement {
                 scene: 0,
             }],
             track_lanes: vec![Vec::new(); track_count],
+            rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
             next_clip_id: 0,
@@ -155,6 +190,7 @@ impl ProjectArrangement {
         Self {
             scene_lane: Vec::new(),
             track_lanes: vec![Vec::new(); track_count],
+            rack_lanes: BTreeMap::new(),
             end_beat: DEFAULT_ARRANGEMENT_END,
             loop_enabled: false,
             next_clip_id: 0,
@@ -164,7 +200,9 @@ impl ProjectArrangement {
     /// `true` when nothing is authored: no scene events and no clips. The
     /// length and loop flag are canvas state, not content.
     pub fn is_empty(&self) -> bool {
-        self.scene_lane.is_empty() && self.track_lanes.iter().all(|lane| lane.is_empty())
+        self.scene_lane.is_empty()
+            && self.track_lanes.iter().all(|lane| lane.is_empty())
+            && self.rack_lanes.values().all(|lane| lane.is_empty())
     }
 
     /// Allocate a fresh `ClipId`. Ids are monotonic and never reused within a
@@ -424,6 +462,74 @@ impl ProjectArrangement {
             }
         }
 
+        // --- rack lanes (docs/arrangement-rack-lanes-spec.md §2) ----------
+        // A rack clip that no longer exists is NOT an error: deleting a rack
+        // clip does not edit the arrangement (its undo step does not cover
+        // it), so the span plays silence until undo brings the clip back.
+        // Save drops such references (`arrangement_for_serialization`).
+        for (group_id, lane) in &self.rack_lanes {
+            for (idx, clip) in lane.iter().enumerate() {
+                let at = || format!("Rack {group_id} lane clip {}", idx + 1);
+                if !clip.start_beat.is_finite() || clip.start_beat < 0.0 {
+                    return Err(format!(
+                        "{} start beat {} must be finite and non-negative",
+                        at(),
+                        clip.start_beat
+                    ));
+                }
+                if !clip.end_beat.is_finite() || clip.end_beat <= clip.start_beat {
+                    return Err(format!(
+                        "{} ends at beat {} which is not after its start beat {}; clips must \
+                         have positive length",
+                        at(),
+                        clip.end_beat,
+                        clip.start_beat
+                    ));
+                }
+                if !clip.anchor_beat.is_finite() {
+                    return Err(format!("{} anchor beat {} must be finite", at(), clip.anchor_beat));
+                }
+                if clip.end_beat > self.end_beat {
+                    return Err(format!(
+                        "{} ends at beat {} which is past the arrangement end beat {}; extend \
+                         the arrangement or trim the clip",
+                        at(),
+                        clip.end_beat,
+                        self.end_beat
+                    ));
+                }
+                if !seen_ids.insert(clip.id) {
+                    return Err(format!(
+                        "{} reuses clip id {}; clip ids must be unique",
+                        at(),
+                        clip.id.0
+                    ));
+                }
+                if clip.id.0 >= self.next_clip_id {
+                    return Err(format!(
+                        "{} has id {} but next_clip_id is {}; ids must be less than the allocator",
+                        at(),
+                        clip.id.0,
+                        self.next_clip_id
+                    ));
+                }
+            }
+            for (idx, pair) in lane.windows(2).enumerate() {
+                if pair[1].start_beat < pair[0].end_beat {
+                    return Err(format!(
+                        "Rack {group_id} lane clips {} and {} are unsorted or overlap: clip {} \
+                         ends at beat {} but clip {} starts at beat {}",
+                        idx + 1,
+                        idx + 2,
+                        idx + 1,
+                        pair[0].end_beat,
+                        idx + 2,
+                        pair[1].start_beat
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -462,6 +568,19 @@ pub trait SongCompileContext {
     fn song_track_take_step_mapping(&self, _track: usize, _take_id: u64) -> Option<(f64, f64)> {
         None
     }
+
+    /// `(group_id, member_position)` when `track` is a member of a
+    /// clip-bearing rack (docs/arrangement-rack-lanes-spec.md §2.1).
+    fn song_rack_member(&self, _track: usize) -> Option<(u64, usize)> {
+        None
+    }
+
+    /// The pattern rack clip `clip` of rack `group_id` holds for member
+    /// `position`, as a raw pool id. `None` when that member is silent in
+    /// the clip.
+    fn song_rack_clip_cell(&self, _group_id: u64, _clip: RackClipId, _position: usize) -> Option<u64> {
+        None
+    }
 }
 
 impl SongCompileContext for ProjectScenes {
@@ -489,6 +608,14 @@ impl SongCompileContext for ProjectScenes {
         let first_chunk = self.track_pools.get(track)?.get(*take.chunks.first()?)?;
         let step_beats = first_chunk.track_params.timebase.step_beats(MAX_STEPS);
         (step_beats > 0.0).then(|| (1.0 / step_beats, take.total_len_steps as f64))
+    }
+
+    fn song_rack_member(&self, track: usize) -> Option<(u64, usize)> {
+        self.rack_member_slot(track)
+    }
+
+    fn song_rack_clip_cell(&self, group_id: u64, clip: RackClipId, position: usize) -> Option<u64> {
+        self.rack_clip_cell(group_id, clip, position).map(|pattern| pattern.0)
     }
 }
 
@@ -713,6 +840,58 @@ pub fn occlude_span(
 /// The caller is responsible for having made room (`occlude_span`).
 pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrClip) {
     let lane = &mut arr.track_lanes[track];
+    let position = lane
+        .iter()
+        .position(|existing| existing.start_beat > clip.start_beat)
+        .unwrap_or(lane.len());
+    lane.insert(position, clip);
+}
+
+/// [`occlude_span`] for rack `group_id`'s lane (docs/arrangement-rack-lanes-spec.md
+/// §4): clear `[start, end)` so an incoming rack-lane clip can own it. A
+/// rack-lane clip's phase anchor is an absolute beat, so trims never
+/// restamp; a split's right fragment gets a fresh `ClipId`. Creates the lane
+/// when the rack has none.
+pub fn occlude_rack_span(
+    arr: &mut ProjectArrangement,
+    group_id: u64,
+    start: f64,
+    end: f64,
+) -> Result<(), String> {
+    let lane = std::mem::take(arr.rack_lanes.entry(group_id).or_default());
+    let mut kept: Vec<RackArrClip> = Vec::with_capacity(lane.len() + 1);
+    let mut split_tails: Vec<RackArrClip> = Vec::new();
+    for clip in lane {
+        if clip.end_beat <= start || clip.start_beat >= end {
+            kept.push(clip);
+        } else if clip.start_beat >= start && clip.end_beat <= end {
+            // Fully covered: removed.
+        } else if clip.start_beat < start && clip.end_beat > end {
+            kept.push(RackArrClip { end_beat: start, ..clip });
+            split_tails.push(RackArrClip { start_beat: end, ..clip });
+        } else if clip.start_beat < start {
+            kept.push(RackArrClip { end_beat: start, ..clip });
+        } else {
+            kept.push(RackArrClip { start_beat: end, ..clip });
+        }
+    }
+    for mut tail in split_tails {
+        tail.id = arr.allocate_clip_id()?;
+        kept.push(tail);
+    }
+    kept.sort_by(|a, b| {
+        a.start_beat
+            .partial_cmp(&b.start_beat)
+            .expect("validated clip beats are finite")
+    });
+    arr.rack_lanes.insert(group_id, kept);
+    Ok(())
+}
+
+/// Insert `clip` into rack `group_id`'s lane keeping it sorted by start beat.
+/// The caller is responsible for having made room (`occlude_rack_span`).
+pub fn insert_rack_clip_sorted(arr: &mut ProjectArrangement, group_id: u64, clip: RackArrClip) {
+    let lane = arr.rack_lanes.entry(group_id).or_default();
     let position = lane
         .iter()
         .position(|existing| existing.start_beat > clip.start_beat)
@@ -1037,13 +1216,19 @@ pub fn compile_arrangement<C: ArrangementContext>(
             boundaries.push(event.start_beat);
         }
     }
-    for lane in &arr.track_lanes {
-        for clip in lane {
-            for edge in [clip.start_beat, clip.end_beat] {
-                if edge < arr.end_beat {
-                    boundaries.push(edge);
-                }
-            }
+    let track_edges = arr
+        .track_lanes
+        .iter()
+        .flatten()
+        .map(|clip| [clip.start_beat, clip.end_beat]);
+    let rack_edges = arr
+        .rack_lanes
+        .values()
+        .flatten()
+        .map(|clip| [clip.start_beat, clip.end_beat]);
+    for edge in track_edges.chain(rack_edges).flatten() {
+        if edge < arr.end_beat {
+            boundaries.push(edge);
         }
     }
     boundaries.sort_by(|a, b| a.partial_cmp(b).expect("validated beats are finite"));
@@ -1054,10 +1239,23 @@ pub fn compile_arrangement<C: ArrangementContext>(
     // rescanning: compile stays linear in (boundaries + clips).
     let mut rows: Vec<ProjectSongRow> = Vec::with_capacity(boundaries.len());
     let mut cursors = vec![0usize; arr.track_lanes.len()];
+    let mut rack_cursors = vec![0usize; arr.rack_lanes.len()];
     for beat in boundaries {
         // No governing event means the boundary is unscened, not an error
         // (empty-arrangement spec 4.2).
         let scene = arr.scene_event_at_beat(beat).map(|event| event.scene);
+        // The rack-lane clip covering `beat`, per rack lane.
+        let rack_cover: Vec<(u64, Option<&RackArrClip>)> = arr
+            .rack_lanes
+            .iter()
+            .zip(rack_cursors.iter_mut())
+            .map(|((group_id, lane), cursor)| {
+                while lane.get(*cursor).is_some_and(|clip| clip.end_beat <= beat) {
+                    *cursor += 1;
+                }
+                (*group_id, lane.get(*cursor).filter(|clip| clip.contains(beat)))
+            })
+            .collect();
         let mut overrides = Vec::new();
         for (track, lane) in arr.track_lanes.iter().enumerate() {
             let cursor = &mut cursors[track];
@@ -1065,11 +1263,14 @@ pub fn compile_arrangement<C: ArrangementContext>(
                 *cursor += 1;
             }
             match lane.get(*cursor).filter(|clip| clip.contains(beat)) {
+                // The member's own clip wins over its rack's lane (rack lanes
+                // spec §2.1): a take or a hand-placed pattern overrides.
                 Some(clip) => overrides.push(stamped_clip_override(ctx, track, clip, beat)),
-                // No clip covers the beat: the lane is SILENT. An absent
-                // override would resolve to the row's scene cell, so silence
-                // has to be stated explicitly.
-                None => overrides.push(ProjectSongTrackOverride::new(track, None)),
+                // No clip covers the beat: the rack lane supplies a member,
+                // anything else is SILENT. An absent override would resolve
+                // to the row's scene cell, so silence has to be stated
+                // explicitly.
+                None => overrides.push(rack_member_override(ctx, &rack_cover, track, beat)),
             }
         }
         rows.push(ProjectSongRow {
@@ -1079,6 +1280,10 @@ pub fn compile_arrangement<C: ArrangementContext>(
             start_beat: beat,
             scene,
             overrides,
+            rack_clips: rack_cover
+                .iter()
+                .map(|(group_id, clip)| (*group_id, clip.map(|clip| clip.rack_clip)))
+                .collect(),
         });
     }
 
@@ -1103,6 +1308,38 @@ pub fn compile_arrangement<C: ArrangementContext>(
             .map_err(|err| format!("compiled arrangement is invalid: {err}"))?;
     }
     Ok(song)
+}
+
+/// The override a rack-lane clip contributes for member `track` at `beat`
+/// (docs/arrangement-rack-lanes-spec.md §3): the rack clip's cell for that
+/// member, phased from the clip's `anchor_beat`. Explicit silence when the
+/// track is no rack member, its rack has no lane, no rack-lane clip covers
+/// `beat`, or the member is silent in that rack clip.
+fn rack_member_override(
+    ctx: &dyn SongCompileContext,
+    rack_cover: &[(u64, Option<&RackArrClip>)],
+    track: usize,
+    beat: f64,
+) -> ProjectSongTrackOverride {
+    // No rack lanes (the common case): skip the member lookup.
+    if rack_cover.is_empty() {
+        return ProjectSongTrackOverride::new(track, None);
+    }
+    let cell = ctx.song_rack_member(track).and_then(|(group_id, position)| {
+        let (_, clip) = rack_cover.iter().find(|(gid, _)| *gid == group_id)?;
+        let clip = (*clip)?;
+        let pattern_id = ctx.song_rack_clip_cell(group_id, clip.rack_clip, position)?;
+        Some((pattern_id, clip.anchor_beat))
+    });
+    match cell {
+        Some((pattern_id, anchor_beat)) => ProjectSongTrackOverride {
+            track,
+            pattern_id: Some(pattern_id),
+            take_id: None,
+            offset_steps: advanced_pattern_offset(ctx, track, pattern_id, 0.0, beat - anchor_beat),
+        },
+        None => ProjectSongTrackOverride::new(track, None),
+    }
 }
 
 /// The inverse of `compile_arrangement`: derive lanes from a row list (spec 8).
@@ -1161,6 +1398,7 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
     let mut arrangement = ProjectArrangement {
         scene_lane: Vec::new(),
         track_lanes: vec![Vec::new(); track_count],
+        rack_lanes: BTreeMap::new(),
         end_beat,
         loop_enabled,
         next_clip_id,
@@ -1297,6 +1535,16 @@ pub fn arrangement_for_serialization(
             clip.pattern_id = Some(scene_idx as u64 + 1);
         }
     }
+    // Rack clip ids are stable across save/load, but a reload may reissue a
+    // deleted clip's id, so a dangling reference would come back pointing at
+    // an unrelated clip. Drop it, and any lane whose rack has no clip bank.
+    serialized.rack_lanes.retain(|group_id, lane| {
+        let Some(bank) = scenes.rack_bank(*group_id).filter(|bank| !bank.clips.is_empty()) else {
+            return false;
+        };
+        lane.retain(|clip| bank.clip(clip.rack_clip).is_some());
+        true
+    });
     Ok(serialized)
 }
 
@@ -1366,6 +1614,7 @@ mod tests {
             start_beat,
             scene: Some(scene),
             overrides,
+            rack_clips: Vec::new(),
         }
     }
 
@@ -1418,6 +1667,7 @@ mod tests {
         ProjectArrangement {
             scene_lane,
             track_lanes: lanes,
+            rack_lanes: BTreeMap::new(),
             end_beat,
             loop_enabled: false,
             next_clip_id,
@@ -1442,6 +1692,160 @@ mod tests {
     }
 
     // --- fixture sanity -------------------------------------------------
+
+    const RACK: u64 = 7;
+
+    /// Four tracks, three scenes; tracks 1 and 2 are rack 7's members. Clip
+    /// A plays pattern 1 on member 0 and leaves member 1 silent; clip B
+    /// plays patterns 2 and 3.
+    fn rack_scenes() -> (ProjectScenes, RackClipId, RackClipId) {
+        let snapshots = vec![PatternSnapshot::new_default(4, &[]); 3];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let a = scenes.create_rack_clip_with_members(RACK, &[1, 2], "A");
+        let b = scenes.create_rack_clip(RACK, "B").expect("clip b");
+        let bank = scenes.rack_bank_mut(RACK).expect("bank");
+        bank.clip_mut(a).expect("a").cells = vec![Some(PatternId(1)), None];
+        bank.clip_mut(b).expect("b").cells = vec![Some(PatternId(2)), Some(PatternId(3))];
+        (scenes, a, b)
+    }
+
+    fn rack_clip(id: u64, start: f64, end: f64, rack_clip: RackClipId, anchor: f64) -> RackArrClip {
+        RackArrClip {
+            id: ClipId(id),
+            start_beat: start,
+            end_beat: end,
+            rack_clip,
+            anchor_beat: anchor,
+        }
+    }
+
+    /// docs/arrangement-rack-lanes-spec.md §2.1/§3: a rack-lane clip
+    /// supplies every member's cell from its rack clip, phased from the
+    /// clip's anchor; a member's own clip wins; past the lane the members
+    /// are silent; and every row names the governing rack clip.
+    #[test]
+    fn compile_resolves_rack_members_from_the_rack_lane() {
+        let (scenes, a, b) = rack_scenes();
+        let mut arr = ProjectArrangement::empty(4);
+        arr.end_beat = 32.0;
+        arr.rack_lanes
+            .insert(RACK, vec![rack_clip(0, 0.0, 8.0, a, 0.0), rack_clip(1, 8.0, 16.0, b, 6.0)]);
+        arr.track_lanes[2] = vec![clip(2, 12.0, 16.0, 1)];
+        arr.next_clip_id = 3;
+        let song = compile_ok(&arr, &scenes);
+        let starts: Vec<f64> = song.rows.iter().map(|row| row.start_beat).collect();
+        assert_eq!(starts, vec![0.0, 8.0, 12.0, 16.0]);
+
+        let at = |beat: f64, track: usize| {
+            let over = override_for(row_at(&song, beat), track).expect("explicit override");
+            (over.pattern_id, over.offset_steps)
+        };
+        // Clip A: member 0 plays pattern 1, member 1 is silent in A.
+        assert_eq!(at(0.0, 1), (Some(1), 0.0));
+        assert_eq!(at(0.0, 2), (None, 0.0));
+        // Clip B anchored at beat 6: two beats in at beat 8 is step 8.
+        assert_eq!(at(8.0, 1), (Some(2), 8.0));
+        assert_eq!(at(8.0, 2), (Some(3), 8.0));
+        // The member clip on track 2 wins from beat 12; track 1 stays on B.
+        assert_eq!(at(12.0, 2), (Some(1), 0.0));
+        assert_eq!(at(12.0, 1).0, Some(2));
+        // Past the lane: silent members. Non-members are silent throughout.
+        assert_eq!(at(16.0, 1), (None, 0.0));
+        assert_eq!(at(16.0, 2), (None, 0.0));
+        assert_eq!(at(8.0, 0), (None, 0.0));
+
+        let rack_at = |beat: f64| row_at(&song, beat).rack_clips.clone();
+        assert_eq!(rack_at(0.0), vec![(RACK, Some(a))]);
+        assert_eq!(rack_at(12.0), vec![(RACK, Some(b))]);
+        assert_eq!(rack_at(16.0), vec![(RACK, None)]);
+    }
+
+    /// Two adjacent spans of the same rack clip at the same anchor compile
+    /// to one row, so normalization still collapses what changes nothing.
+    #[test]
+    fn compile_collapses_adjacent_identical_rack_spans() {
+        let (scenes, a, _) = rack_scenes();
+        let mut arr = ProjectArrangement::empty(4);
+        arr.end_beat = 16.0;
+        arr.rack_lanes
+            .insert(RACK, vec![rack_clip(0, 0.0, 4.0, a, 0.0), rack_clip(1, 4.0, 16.0, a, 0.0)]);
+        arr.next_clip_id = 2;
+        let song = compile_ok(&arr, &scenes);
+        assert_eq!(song.rows.len(), 1, "{:?}", song.rows);
+    }
+
+    /// A rack clip deleted after the arrangement pointed at it is silence,
+    /// not an invalid arrangement (undo of the delete brings it back), and
+    /// save drops the dangling reference so a reissued id cannot adopt it.
+    #[test]
+    fn a_deleted_rack_clip_plays_silence_and_is_dropped_on_save() {
+        let (mut scenes, a, b) = rack_scenes();
+        let mut arr = ProjectArrangement::empty(4);
+        arr.end_beat = 16.0;
+        arr.rack_lanes
+            .insert(RACK, vec![rack_clip(0, 0.0, 8.0, a, 0.0), rack_clip(1, 8.0, 16.0, b, 0.0)]);
+        arr.next_clip_id = 2;
+        assert!(scenes.delete_rack_clip(RACK, a));
+        let song = compile_ok(&arr, &scenes);
+        let first = row_at(&song, 0.0);
+        assert_eq!(override_for(first, 1).and_then(|over| over.pattern_id), None);
+        let saved = arrangement_for_serialization(&arr, &scenes).expect("save");
+        assert_eq!(saved.rack_lanes[&RACK], vec![rack_clip(1, 8.0, 16.0, b, 0.0)]);
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_and_out_of_range_rack_clips() {
+        let (scenes, a, b) = rack_scenes();
+        let mut arr = ProjectArrangement::empty(4);
+        arr.end_beat = 16.0;
+        arr.next_clip_id = 2;
+        arr.rack_lanes
+            .insert(RACK, vec![rack_clip(0, 0.0, 8.0, a, 0.0), rack_clip(1, 4.0, 12.0, b, 0.0)]);
+        assert!(arr.validate(&scenes).unwrap_err().contains("overlap"));
+        arr.rack_lanes
+            .insert(RACK, vec![rack_clip(0, 0.0, 8.0, a, 0.0), rack_clip(0, 8.0, 12.0, b, 0.0)]);
+        assert!(arr.validate(&scenes).unwrap_err().contains("reuses clip id"));
+        arr.rack_lanes.insert(RACK, vec![rack_clip(0, 8.0, 20.0, a, 0.0)]);
+        assert!(arr.validate(&scenes).unwrap_err().contains("past the arrangement end"));
+        arr.track_lanes[0] = vec![clip(0, 0.0, 4.0, 1)];
+        arr.rack_lanes.insert(RACK, vec![rack_clip(0, 4.0, 8.0, a, 0.0)]);
+        assert!(arr.validate(&scenes).unwrap_err().contains("reuses clip id"));
+    }
+
+    #[test]
+    fn occlude_rack_span_trims_splits_and_keeps_absolute_anchors() {
+        let mut arr = ProjectArrangement::empty(1);
+        arr.rack_lanes.insert(
+            RACK,
+            vec![rack_clip(0, 0.0, 8.0, 1, 0.0), rack_clip(1, 8.0, 12.0, 2, 8.0), rack_clip(2, 12.0, 24.0, 3, 4.0)],
+        );
+        arr.next_clip_id = 3;
+        occlude_rack_span(&mut arr, RACK, 4.0, 10.0).expect("occlude");
+        occlude_rack_span(&mut arr, RACK, 14.0, 16.0).expect("occlude");
+        assert_eq!(
+            arr.rack_lanes[&RACK],
+            vec![
+                rack_clip(0, 0.0, 4.0, 1, 0.0),
+                rack_clip(1, 10.0, 12.0, 2, 8.0),
+                rack_clip(2, 12.0, 14.0, 3, 4.0),
+                rack_clip(3, 16.0, 24.0, 3, 4.0),
+            ]
+        );
+        occlude_rack_span(&mut arr, 9, 0.0, 4.0).expect("a missing lane is created");
+        assert!(arr.rack_lanes[&9].is_empty());
+    }
+
+    #[test]
+    fn rack_lanes_serde_round_trip_and_stay_off_the_wire_when_empty() {
+        let mut arr = ProjectArrangement::empty(2);
+        let json = serde_json::to_string(&arr).expect("serialize");
+        assert!(!json.contains("\"rack_lanes\""), "{json}");
+        arr.rack_lanes.insert(RACK, vec![rack_clip(0, 0.0, 4.0, 3, 2.0)]);
+        arr.next_clip_id = 1;
+        let json = serde_json::to_string(&arr).expect("serialize");
+        let back: ProjectArrangement = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, arr);
+    }
 
     #[test]
     fn test_patterns_are_four_steps_per_beat() {

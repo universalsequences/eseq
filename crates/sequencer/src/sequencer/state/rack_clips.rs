@@ -365,12 +365,23 @@ impl ProjectScenes {
         let Some(clip_id) = self.scene_rack_clip(scene_idx, group_id) else {
             return Some(None);
         };
-        let cell = self
-            .rack_bank(group_id)
-            .and_then(|bank| bank.clip(clip_id))
-            .and_then(|clip| clip.cells.get(position).copied())
-            .flatten();
-        Some(cell)
+        Some(self.rack_clip_cell(group_id, clip_id, position))
+    }
+
+    /// The pattern member slot `position` plays in rack `group_id`'s clip
+    /// `clip` (None: silent there, or no such rack clip).
+    pub fn rack_clip_cell(
+        &self,
+        group_id: u64,
+        clip: RackClipId,
+        position: usize,
+    ) -> Option<PatternId> {
+        self.rack_bank(group_id)?
+            .clip(clip)?
+            .cells
+            .get(position)
+            .copied()
+            .flatten()
     }
 
     /// The pattern scene `scene_idx` plays on `track`, rack composition
@@ -403,19 +414,33 @@ impl ProjectScenes {
     /// `None` pointer leaves them at their defaults), everything else from
     /// the scene.
     pub fn composed_scene_slots(&self, scene_idx: usize) -> super::SceneSlotStore {
-        let Some(scene) = self.scenes.get(scene_idx) else {
+        if scene_idx >= self.scenes.len() {
             return super::SceneSlotStore::default();
-        };
-        let mut composed = scene.scene_slots.clone();
+        }
+        self.composed_scene_slots_with(Some(scene_idx), |group_id| {
+            self.scene_rack_clip(scene_idx, group_id)
+        })
+    }
+
+    /// [`Self::composed_scene_slots`] with the rack pointers supplied by the
+    /// caller: a scene launch passes the scene's own, arranged playback the
+    /// row's rack-lane clips (docs/arrangement-rack-lanes-spec.md §3). A
+    /// `None` scene contributes no slots of its own.
+    pub fn composed_scene_slots_with(
+        &self,
+        scene_idx: Option<usize>,
+        pointer: impl Fn(u64) -> Option<RackClipId>,
+    ) -> super::SceneSlotStore {
+        let mut composed = scene_idx
+            .and_then(|scene_idx| self.scenes.get(scene_idx))
+            .map(|scene| scene.scene_slots.clone())
+            .unwrap_or_default();
         composed.retain_names(|name| self.document_slot_rack(name).is_none());
         for bank in &self.rack_banks {
             if bank.clips.is_empty() {
                 continue;
             }
-            let Some(clip) = self
-                .scene_rack_clip(scene_idx, bank.group_id)
-                .and_then(|clip_id| bank.clip(clip_id))
-            else {
+            let Some(clip) = pointer(bank.group_id).and_then(|clip_id| bank.clip(clip_id)) else {
                 continue;
             };
             composed.overlay(&clip.scene_slots);
@@ -454,27 +479,43 @@ impl ProjectScenes {
     /// a rack with a bank contributes only through its pointed clip, so a
     /// `None` pointer registers nothing and its sequencers do not fire.
     pub fn composed_graph_overrides(&self, scene_idx: usize) -> Vec<ProjectGraphOverrides> {
-        let Some(scene) = self.scenes.get(scene_idx) else {
+        if scene_idx >= self.scenes.len() {
             return Vec::new();
-        };
+        }
+        self.composed_graph_overrides_with(Some(scene_idx), |group_id| {
+            self.scene_rack_clip(scene_idx, group_id)
+        })
+    }
+
+    /// [`Self::composed_graph_overrides`] with the rack pointers supplied by
+    /// the caller, so a scene launch and arranged playback share one rule
+    /// (docs/arrangement-rack-lanes-spec.md §3). A `None` scene contributes
+    /// no overrides of its own.
+    pub fn composed_graph_overrides_with(
+        &self,
+        scene_idx: Option<usize>,
+        pointer: impl Fn(u64) -> Option<RackClipId>,
+    ) -> Vec<ProjectGraphOverrides> {
         let banked = |group_id: u64| {
             self.rack_bank(group_id)
                 .is_some_and(|bank| !bank.clips.is_empty())
         };
-        let mut composed: Vec<ProjectGraphOverrides> = scene
-            .graph_overrides
-            .iter()
-            .filter(|graph| !graph.owner_rack.is_some_and(banked))
-            .cloned()
-            .collect();
+        let mut composed: Vec<ProjectGraphOverrides> = scene_idx
+            .and_then(|scene_idx| self.scenes.get(scene_idx))
+            .map(|scene| {
+                scene
+                    .graph_overrides
+                    .iter()
+                    .filter(|graph| !graph.owner_rack.is_some_and(banked))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         for bank in &self.rack_banks {
             if bank.clips.is_empty() {
                 continue;
             }
-            let Some(clip_id) = self.scene_rack_clip(scene_idx, bank.group_id) else {
-                continue;
-            };
-            let Some(clip) = bank.clip(clip_id) else {
+            let Some(clip) = pointer(bank.group_id).and_then(|clip_id| bank.clip(clip_id)) else {
                 continue;
             };
             composed.extend(clip.graph_overrides.iter().cloned());

@@ -103,7 +103,11 @@
           (rect :any :default nil)
           (clips '())
           (lane -1)
-          (clip -1)))
+          (clip -1)
+          ;; The selected rack member item's string id (rack-member-select),
+          ;; or nil: the widget's :selected-id is numeric, so these light
+          ;; through the item's own :selected.
+          (rack-item :any :default nil)))
 
 ;; The host's song selection as the lanes draw it (the lane sync below): the
 ;; bound clip (takes spec 16.6) and the committed region (region spec 4.4),
@@ -171,7 +175,9 @@
           (track track :default nil)
           (source :any :default nil)
           (time 0)
-          (clip clip :default nil)))
+          (clip clip :default nil)
+          ;; The rack member item under the pointer when no clip is.
+          (rack-item :any :default nil)))
 
 (def min-view-duration 4)
 (def max-view-duration 1024)
@@ -238,6 +244,7 @@
 ;; No clip is clicked on any lane.
 (def deselect-clips! ()
   (set! arr-select.clips '())
+  (set! arr-select.rack-item nil)
   (select-lane-clip! -1 -1))
 
 (def clear-ghost! ()
@@ -706,13 +713,16 @@
 ;; These are the clips the stop-commit will write, so they preview the same
 ;; way — a looping pattern tiled over its span.
 
+;; The fraction of a `span`-beat item one `length`-beat cycle covers (1 when
+;; either is empty).
+(def span-cycle (length span)
+  (if (and (> length 0) (> span 0)) (/ length span) 1))
+
 (def pending-launch-content (launch span)
   (let ((dots (pattern-dots launch.events launch.num-steps)))
     (unless (empty? dots)
       (dict :dots dots
-        :cycle (if (and (> launch.length 0) (> span 0))
-                 (/ launch.length span)
-                 1)
+        :cycle (span-cycle launch.length span)
         :phase 0))))
 
 ;; A captured launch's provisional span runs to the next one in `rows`, or to
@@ -754,11 +764,13 @@
                    :label (scene-name launch.scene)
                    :color (scene-color))))
 
-;; Committed clips first, provisional content on top (spec 3.4). Recorded
+;; A rack member's rack-lane patterns first (its own clips override them),
+;; then committed clips, provisional content on top (spec 3.4). Recorded
 ;; takes last of all: the stop-commit paints them OVER whatever the launches
 ;; put on the lane, so the preview stacks the same way.
 (def track-items (i)
-  (append (track-clip-items i)
+  (append (rack-member-items i)
+    (track-clip-items i)
     (pending-launch-items i)
     (pending-track-items i)))
 
@@ -786,7 +798,7 @@
 ;; absent from that order, so a region drag always spans visible tracks, and
 ;; one that runs off the top or bottom selects out to the edge.
 (def region-other-track (i row-delta)
-  (let ((visible (eseq.track-collapse/visible-track-indices))
+  (let ((visible (arr-visible-track-indices))
         (ordinal (index-of visible i)))
     (if (< ordinal 0)
       i
@@ -803,7 +815,7 @@
 ;; The region from `start` to `end` over every visible track (nil when none
 ;; is visible).
 (def visible-region (start end scene-lane)
-  (let ((visible (eseq.track-collapse/visible-track-indices)))
+  (let ((visible (arr-visible-track-indices)))
     (unless (empty? visible)
       (dict
         :track-a (first visible)
@@ -1213,6 +1225,7 @@
     ;; host drops the region too, this clears the in-flight ghost.
     (clear-region-ghost!)
     (set! arr-select.clips ids)
+    (set! arr-select.rack-item nil)
     (select-lane-clip! i (if (= c nil) -1 c.cid))
     ;; Selecting a clip is the explicit sound-binding gesture (takes spec
     ;; 16.2/16.6): it re-binds this track's device panel, monitor sound and
@@ -1295,6 +1308,35 @@
                 :start-beat time))))))
 
 (def track-action (i event)
+  (let ((hit (unless (view-action? event)
+               (rack-member-hit i (append (or (get event :ids) '())
+                                    (list (get event :id) (get event :anchor-id)))))))
+    (if (= hit nil)
+      (track-lane-action i event)
+      (rack-member-action i hit event))))
+
+;; A gesture on a rack member item: a click binds its pattern, a
+;; double-click also opens the piano roll; it cannot be moved or resized
+;; (the rack row owns its span).
+(def rack-member-action (i item event)
+  (match event.type
+    :select
+    (rack-member-select i item)
+    :double-click-item
+    (do
+      (rack-member-select i item)
+      (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i))
+    :clear-selection
+    (rack-member-select i item)
+    :resize-item-absolute nil
+    :finish-resize-items nil
+    :move-items-absolute nil
+    :finish-move-items nil
+    :delete-items nil
+    _
+    (track-lane-action i event)))
+
+(def track-lane-action (i event)
   (if (view-action? event)
     (view-action event)
     (match event.type
@@ -1504,6 +1546,8 @@
     (set! arr-pattern-menu.time (drop-time event))
     (set! arr-pattern-menu.clip
       (first (filter |c| (and (<= c.start at) (> c.end at)) (track-clips i))))
+    (set! arr-pattern-menu.rack-item
+      (when (= arr-pattern-menu.clip nil) (rack-member-at i at)))
     (open-menu! arr-pattern-menu event)))
 
 ;; Retarget clip c (a pattern clip of the menu's track) to the track's cell,
@@ -1520,6 +1564,22 @@
         (source arr-pattern-menu.source)
         (time arr-pattern-menu.time))
     (apply menu-of arr-pattern-menu
+      (if (and (= c nil) (not (= arr-pattern-menu.rack-item nil)))
+        (let ((item arr-pattern-menu.rack-item))
+          (list
+            (menu-item (str "Edit " (get item :label)) :key "arr-rack-member-edit"
+              :on-select |event|
+                (do
+                  (set! arr-pattern-menu.open false)
+                  (when (listed? t (tracks))
+                    (rack-member-select t.index item)
+                    (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track t.index))))
+            (menu-item "Make Own Clip" :key "arr-rack-member-own"
+              :on-select |event|
+                (do
+                  (set! arr-pattern-menu.open false)
+                  (when (listed? t (tracks))
+                    (make-own-clip t.index item))))))
       (if (not (= c nil))
         (list
           (menu-item "Change Pattern" :key "arr-change-pattern"
@@ -1539,7 +1599,7 @@
               "Insert current pattern here"
               (str "Insert " (pattern-label (placement-label (get source :pattern-id))) " here"))
             :key "arr-insert-pattern" :disabled (= source nil)
-            :on-select |event| (place-pattern source time)))))))
+            :on-select |event| (place-pattern source time))))))))
 
 (def drop-track-pattern (i event)
   (let ((payload (get event :payload))
@@ -1741,6 +1801,247 @@
     :scroll-mode :smooth
     :on-action |event| (track-action i event)))
 
+;; ── Rack rows (docs/arrangement-rack-lanes-spec.md §6) ─────────────────────
+;; A drum rack with a clip bank has a lane of its own: its rack-lane clips,
+;; each playing one rack clip whole. The row sits above the rack's first
+;; member and its disclosure collapses the members (`g.collapsed`, the
+;; sequencer's rack toggle). Read-only until rack-lane editing lands.
+
+;; Whether group g is a rack with a clip bank, i.e. has a rack lane.
+(def clip-rack? (g)
+  (and (not (= g nil)) g.rack (not g.legacy) (not (empty? g.clips))))
+
+;; The clip-bearing rack track t is a member of, or nil.
+(def track-clip-rack (t)
+  (let ((g (when t t.group)))
+    (when (clip-rack? g) g)))
+
+;; Whether track t is the lowest-positioned member of its clip-bearing rack:
+;; the rack row is drawn just above it.
+(def first-rack-member? (t g)
+  (= t.index (reduce |acc m| (min acc m.index) t.index g.tracks)))
+
+;; The arrangement's visible tracks: the collapse-aware order, less the
+;; members of a collapsed clip-bearing rack (its rack row stands for them).
+(def arr-visible-track-indices ()
+  (filter |i|
+      (let ((g (track-clip-rack (track i))))
+        (or (= g nil) (not g.collapsed)))
+    (eseq.track-collapse/visible-track-indices)))
+
+;; The rows of the track list in order: `(dict :rack g)` above a rack's first
+;; member (shown even when the rack is collapsed), `(dict :track i)` for each
+;; visible track.
+(def arr-row-items ()
+  (let ((visible (arr-visible-track-indices)))
+    (reverse
+      (reduce |acc t|
+          (let ((g (track-clip-rack t))
+                (with-rack (if (and g (first-rack-member? t g))
+                             (cons (dict :rack g) acc)
+                             acc)))
+            (if (listed? t.index visible)
+              (cons (dict :track t.index) with-rack)
+              with-rack))
+        '()
+        (tracks)))))
+
+;; A rack-lane clip's tint: its rack clip's color, else the rack's, lifted
+;; like a track clip's.
+(def rack-clip-color (g c)
+  (scale-rgb (if (= (get c :color) nil) (rgb-list g.color) (get c :color)) 1.15))
+
+;; The rack-lane spans a running capture would write, `(dict :clip c :start
+;; :end)` each: a span runs to the next one's start, or to the record head
+;; while it is the last, so the rack row grows under the playhead the way the
+;; track lanes' provisional launches do. A launch that left the rack silent
+;; (no :rack-clip) only ends the span before it.
+(def pending-rack-spans (g)
+  (filter |span| (not (= (get (get span :clip) :rack-clip) nil))
+    (pending-span-items g.pending-arr-clips
+      |c end| (dict :clip c :start (get c :start) :end end))))
+
+;; The committed rack-lane clips as spans, in pending-rack-spans' shape.
+(def rack-spans (g)
+  (map |c| (dict :clip c :start (get c :start) :end (get c :end)) g.arr-clips))
+
+;; A rack-lane span's ring glyph. A committed clip carries its :cycle; a
+;; provisional one's span is still growing, so it derives it from :length.
+(def rack-span-content (span)
+  (let ((c (get span :clip)))
+    (dict :rings (get c :rings)
+      :cycle (or (get c :cycle)
+               (span-cycle (get c :length) (- (get span :end) (get span :start))))
+      :phase (get c :phase))))
+
+;; A rack row's items: one per rack-lane clip, labelled with its rack clip
+;; and drawn as a ring summary (one ring per member, a tick per hit) rather
+;; than notes. The clip owns no pattern data of its own. Provisional clips of
+;; a running capture follow; they carry no :cid, so no :id (inert, like
+;; every pending item).
+(def rack-lane-items (g)
+  (map |span|
+      (let ((c (get span :clip)))
+        (dict
+          :id (get c :cid)
+          :lane 0
+          :start (get span :start)
+          :end (get span :end)
+          :kind :midi
+          :label (get c :name)
+          :color (rack-clip-color g c)
+          :content (rack-span-content span)))
+    (append (rack-spans g) (pending-rack-spans g))))
+
+;; What member track i plays under its rack's lane: per rack-lane span (and
+;; provisional one), the member's pattern in that rack clip, drawn like a
+;; pattern clip from the host's flattened :note-dots. The rack lane owns
+;; these spans, and a clip on the member's own lane overrides them (spec
+;; §2.1), so the lane's own clips are drawn on top. A committed one carries a
+;; string :id ("rack-<cid>-<track>"), which never names a stored clip, so
+;; move, resize and delete pass it by, while a click binds its pattern for
+;; editing (rack-member-select). A provisional one has no id, like all
+;; pending content.
+(def rack-member-item (i span member)
+  (let ((cid (get (get span :clip) :cid))
+        (id (unless (= cid nil) (str "rack-" cid "-" i)))
+        (start (get span :start))
+        (dots (get member :note-dots)))
+    (dict
+      :id id
+      :selected (and (not (= id nil)) (= id arr-select.rack-item))
+      :rack-cid cid
+      :pid (get member :pid)
+      :offset-steps (get member :offset-steps)
+      :lane 0
+      :start start
+      :end (get span :end)
+      :kind :midi
+      :label (pattern-label (get member :pid))
+      :color (clip-color i)
+      :content (unless (empty? dots)
+                 (dict :dots dots
+                   :cycle (span-cycle (get member :length) (- (get span :end) start))
+                   :phase (get member :phase))))))
+
+;; Lane i's rack member items for `spans`.
+(def rack-member-items-of (i spans)
+  (reduce |acc span|
+      (append acc
+        (map |member| (rack-member-item i span member)
+          (filter |member| (= (get member :track) i)
+            (get (get span :clip) :members))))
+    '()
+    spans))
+
+(def rack-member-items (i)
+  (let ((g (track-clip-rack (track i))))
+    (if (= g nil)
+      '()
+      (rack-member-items-of i (append (rack-spans g) (pending-rack-spans g))))))
+
+;; Lane i's committed rack member items (the addressable ones).
+(def committed-rack-member-items (i)
+  (let ((g (track-clip-rack (track i))))
+    (if (= g nil) '() (rack-member-items-of i (rack-spans g)))))
+
+;; The committed rack member item of lane i an event's ids name, or nil.
+;; Stored clips have numeric ids, so an event naming none of these strings
+;; costs nothing.
+(def rack-member-hit (i ids)
+  (let ((named (filter string? ids)))
+    (unless (empty? named)
+      (first (filter |item| (listed? (get item :id) named)
+               (committed-rack-member-items i))))))
+
+;; The committed rack member item of lane i under beat `at`, or nil.
+(def rack-member-at (i at)
+  (first (filter |item| (and (<= (get item :start) at) (> (get item :end) at))
+           (committed-rack-member-items i))))
+
+;; A click on a rack member item: select the track and bind the member's
+;; pattern in that rack clip as its edit focus, like a pattern clip click.
+;; Edits change the pattern itself, so every span playing the rack clip
+;; changes with it.
+(def rack-member-select (i item)
+  (eseq.sequencer/select-track-for-edit (track i))
+  (set! arr-select.scenes '())
+  (set! arr-select.rect nil)
+  (clear-region-ghost!)
+  (deselect-clips!)
+  (set! arr-select.rack-item (get item :id))
+  (seq-arrangement-rack-member-bind i (get item :rack-cid))
+  (set-cursor (get item :start) i)
+  item)
+
+;; Copy a rack member item onto the member's own lane as a pattern clip at
+;; the same phase: an override (spec §2.1) that wins over the rack lane
+;; there and edits like any track clip.
+(def make-own-clip (i item)
+  (seq-arrangement-clip-create i (get item :start) (get item :end)
+    (get item :pid) (get item :offset-steps)))
+
+(def rack-lane (g top?)
+  (timeline
+    :key (str "rack-lane-" g.gid)
+    :border-top-color (if top? lane-border-top-color :transparent)
+    :border-bottom-color lane-border-bottom-color
+    :border-width lane-border-width
+    :width 0 :flex 1
+    :height track-lane-height
+    :scroll-passthrough :vertical
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
+    :item-label-font-size clip-label-font-size
+    :item-label-color clip-label-color
+    :item-corner-radius clip-corner-radius
+    :sidebar-width 0
+    :header-height 0
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
+    :playhead-time #'song.position
+    :items (rack-lane-items g)
+    :view-start #'arr-view.start
+    :view-duration #'arr-view.duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
+    :content-length #'arr-view.content-length
+    :lane-scroll 0
+    :scroll-mode :smooth
+    :on-action |event| (when (view-action? event) (view-action event))))
+
+(def rack-header (g)
+  (let ((c g.color))
+    (box
+      :key (str "rack-header-" g.gid)
+      :height :fill :width header-width
+      :background-color :buffer-bg
+      :padding 0.3
+      (h-stack :width :fill :gap 0.4 :align :center
+        (box :width 0.68 :height 2.0
+          :background "seqv-track-color-badge"
+          :track-r (rgb-part c 0)
+          :track-g (rgb-part c 1)
+          :track-b (rgb-part c 2))
+        (disclosure-button
+          :key (str "rack-collapse-" g.gid)
+          :width 1.55 :height 1.4
+          :collapsed g.collapsed
+          :col 0.9
+          :surface-alpha 1.0
+          :stroke-width 0.12
+          :focusable true
+          :on-click (lambda (x y region) (toggle! g.collapsed)))
+        (label g.name :font-size 10.5 :color :fg :bg :transparent)))))
+
+(def rack-row (g top?)
+  (box :width :fill :border-color :bg :border-width 3
+    (h-stack :width :fill :align :start :gap 0
+      (rack-header g)
+      (subtree :key (str "arr-rack-lane-" g.gid)
+        (h-stack :width 0 :flex 1 :align :start :gap 0
+          (rack-lane g top?))))))
+
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
 (def track-header (i)
@@ -1770,16 +2071,22 @@
         (h-stack :width 0 :flex 1 :align :start :gap 0
           (track-lane i t top?))))))
 
-;; The visible tracks' rows, keyed by track so a reorder moves them.
+;; The visible tracks' rows, keyed by track so a reorder moves them, with a
+;; rack row above each clip-bearing rack's first member.
 (def track-rows ()
-  (let ((visible (eseq.track-collapse/visible-track-indices))
-        (top (first visible)))
-    (each visible |i|
-      (let ((t (track i)))
-        (if (= t nil)
-          (nothing)
-          (subtree :key (str "arr-track-" t.tid)
-            (track-row i t (= i top))))))))
+  (let ((items (arr-row-items))
+        (top (first items)))
+    (each items |item|
+      (let ((g (get item :rack)))
+        (if (not (= g nil))
+          (subtree :key (str "arr-rack-" g.gid)
+            (rack-row g (= item top)))
+          (let ((i (get item :track))
+                (t (track i)))
+            (if (= t nil)
+              (nothing)
+              (subtree :key (str "arr-track-" t.tid)
+                (track-row i t (= item top))))))))))
 
 ;; The step tile hides the global status line, so song-primitive rejections
 ;; (including "song editing is unavailable during arrangement capture")

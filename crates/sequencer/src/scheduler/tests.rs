@@ -12981,6 +12981,7 @@
                 .into_iter()
                 .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
+            rack_clips: Vec::new(),
         }
     }
 

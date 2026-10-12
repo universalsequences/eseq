@@ -23,6 +23,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-clip-create",
     "arrangement-pattern-place",
     "arrangement-empty-take-create",
+    "arrangement-rack-member-bind",
     "arrangement-clip-delete",
     "arrangement-clip-move",
     "arrangement-clip-resize",
@@ -433,6 +434,16 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                  {start_beat}-{end_beat}",
                 track + 1
             ))
+        }
+        "arrangement-rack-member-bind" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let clip_id = resolve_clip(map)?;
+            app.select_rack_member_pattern(track, clip_id)?;
+            Ok(app
+                .track_binding_label(track)
+                .map(|label| format!("Bound: {label}"))
+                .unwrap_or_default())
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;
