@@ -331,6 +331,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
         };
         let mut on_close = None;
         let mut on_select = None;
+        let mut icon = None;
         let mut option_index = 2;
         while option_index < parts.len() {
             let key = parts[option_index].borrow();
@@ -343,6 +344,15 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
             match keyword.as_str() {
                 "on-close" => on_close = Some(value.borrow().clone()),
                 "on-select" => on_select = Some(value.borrow().clone()),
+                "icon" => {
+                    icon = match &*value.borrow() {
+                        Value::Nil => None,
+                        Value::String(name) | Value::Symbol(name) => {
+                            Some(name.clone()).filter(|name| !name.is_empty())
+                        }
+                        _ => return Err(":tabs entry :icon expects a defwidget name".to_string()),
+                    }
+                }
                 _ => return Err(format!("unknown :tabs entry option :{keyword}")),
             }
             option_index += 2;
@@ -352,6 +362,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
             buffer_name,
             on_close,
             on_select,
+            icon,
         });
     }
     if tabs.is_empty() {

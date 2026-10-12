@@ -5830,6 +5830,7 @@ fragment float4 live_spectrogram_frag(
             }
 
             let mut tab_instances = Vec::new();
+            let mut tab_icon_glyphs = Vec::new();
             let mut tab_text_prims = Vec::new();
             enc.setScissorRect(MTLScissorRect {
                 x: 0,
@@ -5904,6 +5905,19 @@ fragment float4 live_spectrogram_frag(
                             vp_h,
                         );
                     }
+                    if let Some((widget, slot)) = &tab.icon
+                        && let Some(glyph) = crate::ui::gpu_scene::push_tile_tab_icon(
+                            &mut tab_instances,
+                            widget,
+                            *slot,
+                            tab.selected,
+                            tile.tile_id as usize,
+                            tab.index,
+                            WidgetViewport::window(cell_w, cell_h, vp_w, vp_h, self.time_seconds()),
+                        )
+                    {
+                        tab_icon_glyphs.push((widget.as_str(), glyph));
+                    }
                     let fg = if tab.selected {
                         theme::BUFFER_TAB_SELECTED_FG()
                     } else {
@@ -5964,6 +5978,18 @@ fragment float4 live_spectrogram_frag(
                     tab_pipeline,
                     tab_instances.as_slice(),
                 );
+            }
+            for (widget, glyph) in &tab_icon_glyphs {
+                if let Some(pipeline) = self.widget_pipelines.get(*widget) {
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        pipeline,
+                        std::slice::from_ref(glyph),
+                    );
+                }
             }
             if let (Some(prop_atlas), Some(prop_pipe)) =
                 (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())

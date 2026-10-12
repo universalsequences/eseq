@@ -1771,6 +1771,7 @@ impl Editor {
                             buffer_idx,
                             on_close: tab.on_close,
                             on_select: tab.on_select,
+                            icon: tab.icon,
                         });
                     }
                     if !resolved_tabs.is_empty()
@@ -5590,6 +5591,7 @@ impl Editor {
                 buffer_idx,
                 on_close: tab.on_close,
                 on_select: tab.on_select,
+                icon: tab.icon,
             });
         }
         if !resolved_tabs

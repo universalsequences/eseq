@@ -2023,6 +2023,7 @@ impl WgpuAppBackend {
 
         // ── Tile tabs ────────────────────────────────────────────────────────
         let mut tab_instances = Vec::new();
+        let mut tab_icon_glyphs = Vec::new();
         let mut tab_text_prims = Vec::new();
         for tile in &tiled.tiles {
             if tile.tabs.is_empty() {
@@ -2090,6 +2091,25 @@ impl WgpuAppBackend {
                         vp_h,
                     );
                 }
+                if let Some((widget, slot)) = &tab.icon
+                    && let Some(glyph) = gpu_scene::push_tile_tab_icon(
+                        &mut tab_instances,
+                        widget,
+                        *slot,
+                        tab.selected,
+                        tile.tile_id as usize,
+                        tab.index,
+                        widget_render::WidgetViewport::window(
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            render_time_seconds,
+                        ),
+                    )
+                {
+                    tab_icon_glyphs.push((widget.as_str(), glyph));
+                }
                 let fg = if tab.selected {
                     theme::BUFFER_TAB_SELECTED_FG()
                 } else {
@@ -2148,6 +2168,16 @@ impl WgpuAppBackend {
             };
             if let Some(key) = tab_pipeline_key {
                 Self::plan_widget_instances(&mut plan, full_scissor, key, &tab_instances);
+            }
+            for (widget, glyph) in &tab_icon_glyphs {
+                if gpu.widget_pipelines.contains_key(*widget) {
+                    Self::plan_widget_instances(
+                        &mut plan,
+                        full_scissor,
+                        widget,
+                        std::slice::from_ref(glyph),
+                    );
+                }
             }
         }
         if let Some(prop_atlas) = self.prop_atlas.as_mut() {

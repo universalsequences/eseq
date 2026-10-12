@@ -3352,6 +3352,17 @@ pub fn register_core_natives(vm: &mut VM) {
         _ => Value::Nil,
     });
 
+    // (instance-icon id) → the `:icon` defwidget name of the live instance's
+    // kind, or nil: what its step tab draws beside the label.
+    vm.register_native_with_vm("instance-icon", |args, vm| match args.first() {
+        Some(Value::Number(id)) if *id >= 0.0 && id.fract() == 0.0 => vm
+            .instance_kind(*id as InstanceId)
+            .and_then(|kind| vm.instance_kind_schema(kind))
+            .and_then(|schema| schema.icon.clone())
+            .map_or(Value::Nil, Value::String),
+        _ => Value::Nil,
+    });
+
     // (rerender-log! on) turns the re-render reason log on or off;
     // (rerender-reasons) → its lines since the last call, oldest first
     // (kind-bindings spec §10).

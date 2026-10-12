@@ -985,6 +985,25 @@
                 :width 84
                 :height 3.5))))))))
 
+;; The neural tab's icon: a small neuron graph, one node firing.
+(defwidget gvr-tab-icon
+  :width 1 :height 1
+  :state (selected)
+  :shader
+  (let ((ink (mix :buffer-tab-bar-bg :buffer-tab-fg (+ 0.7 (* 0.3 selected))))
+        (fire (mix :buffer-tab-fg :accent (+ 0.5 (* 0.5 selected))))
+        (wire (mix :buffer-tab-bar-bg :buffer-tab-fg 0.6)))
+    (sdf/layer
+      (sdf/stroke-px (sdf/line -0.55 -0.5 0.55 -0.3) 1.4 wire)
+      (sdf/stroke-px (sdf/line -0.55 -0.5 -0.4 0.55) 1.4 wire)
+      (sdf/stroke-px (sdf/line -0.55 -0.5 0.55 0.5) 1.4 wire)
+      (sdf/stroke-px (sdf/line 0.55 -0.3 0.55 0.5) 1.4 wire)
+      (sdf/stroke-px (sdf/line -0.4 0.55 0.55 0.5) 1.4 wire)
+      (sdf/fill (sdf/translate 0.55 -0.3 (sdf/circle 0.25)) ink)
+      (sdf/fill (sdf/translate -0.4 0.55 (sdf/circle 0.25)) ink)
+      (sdf/fill (sdf/translate 0.55 0.5 (sdf/circle 0.25)) ink)
+      (sdf/fill (sdf/translate -0.55 -0.5 (sdf/circle 0.3)) fire))))
+
 ;; The kind (docs/instance-kinds-spec.md §3). The host owns any number of
 ;; `neural` instances; each publishes this body under its own id with its own
 ;; overrides and renders (gvr-panel self) in its own buffer and tab. The
@@ -1049,5 +1068,6 @@
   :state ((expanded-node -1) (selected-neuron -1)
           (map-slot -1) (map-port "") (piano-depth 0.6))
   :view gvr-panel
+  :icon "gvr-tab-icon"
   :keymap eseq.sequencer-keys/sequencer-keys
   :on-create gvr-init-ring-defaults)

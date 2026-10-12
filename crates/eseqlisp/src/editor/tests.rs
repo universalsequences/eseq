@@ -10859,12 +10859,14 @@ fn selecting_a_tile_tab_resumes_the_revealed_buffers_deferred_effect() {
                     buffer_name: "*tab-a*".to_string(),
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
                 crate::runtime::LayoutTabSpec {
                     label: "B".to_string(),
                     buffer_name: "*tab-b*".to_string(),
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
             ],
         )

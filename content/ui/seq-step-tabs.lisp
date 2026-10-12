@@ -173,6 +173,7 @@
     (if (seq-instance-step-tab? tab)
       (list (seq-step-tab-label tab)
         buffer
+        :icon (instance-icon (seq-step-tab-instance-id tab))
         :on-close
         (lambda (closed-buffer tab-index)
           (seq-unregister-step-sequencer-tab closed-buffer)))
@@ -184,8 +185,22 @@
           (eseq.seq-script-picker/seq-delete-script-sequencer-by-buffer closed-buffer)))
       (list (seq-step-tab-label tab) buffer))))))
 
+;; The built-in step sequencer's tab icon: four step pads, the first lit.
+;; Instance tabs draw their kind's :icon instead (see `instance-icon`).
+(defwidget seq-tab-icon
+  :width 1 :height 1
+  :state (selected)
+  :shader
+  (let ((lit (mix :buffer-tab-fg :accent selected))
+        (dim (mix :buffer-tab-bar-bg :buffer-tab-fg 0.4)))
+    (sdf/layer
+      (sdf/fill (sdf/translate -0.42 -0.42 (sdf/rounded-rect 0.3 0.3 0.1)) lit)
+      (sdf/fill (sdf/translate 0.42 -0.42 (sdf/rounded-rect 0.3 0.3 0.1)) dim)
+      (sdf/fill (sdf/translate -0.42 0.42 (sdf/rounded-rect 0.3 0.3 0.1)) dim)
+      (sdf/fill (sdf/translate 0.42 0.42 (sdf/rounded-rect 0.3 0.3 0.1)) dim))))
+
 (def seq-main-step-tabs ()
-  (append (list (seq-with-tab-select (list "Seq" "*sequencer*")))
+  (append (list (seq-with-tab-select (list "Seq" "*sequencer*" :icon "seq-tab-icon")))
     (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)

@@ -768,6 +768,9 @@ pub struct InstanceKindSchema {
     /// The kind's optional `:keymap`: the mode name the host gives every
     /// instance's view buffer (what `set-buffer-mode-for` did by hand).
     pub keymap: Option<String>,
+    /// The kind's optional `:icon`: the `defwidget` its instances' step
+    /// tabs draw in an icon chip beside the label.
+    pub icon: Option<String>,
     /// The kind's optional `:on-create`, a function of one argument (the
     /// instance) the host calls once when the user creates a fresh instance
     /// (not on duplicate, kit load, migration or project open): the place
@@ -786,6 +789,7 @@ impl InstanceKindSchema {
             key: KindKey::Created,
             view: None,
             keymap: None,
+            icon: None,
             on_create: None,
         }
     }
@@ -817,6 +821,7 @@ impl InstanceKindSchema {
             })
             && self.key == other.key
             && self.keymap == other.keymap
+            && self.icon == other.icon
             && self.view.is_some() == other.view.is_some()
             && self.on_create.is_some() == other.on_create.is_some()
     }
@@ -833,6 +838,11 @@ impl InstanceKindSchema {
 
     pub fn with_keymap(mut self, keymap: Option<String>) -> Self {
         self.keymap = keymap;
+        self
+    }
+
+    pub fn with_icon(mut self, icon: Option<String>) -> Self {
+        self.icon = icon;
         self
     }
 
@@ -2251,6 +2261,9 @@ impl VM {
         let mut extras = Vec::new();
         if let Some(keymap) = &schema.keymap {
             extras.push(format!(":keymap {keymap}"));
+        }
+        if let Some(icon) = &schema.icon {
+            extras.push(format!(":icon {icon}"));
         }
         if schema.view.is_some() {
             extras.push(":view".to_string());

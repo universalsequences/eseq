@@ -25,8 +25,8 @@ use crate::graph::GraphManifest;
 use eseqlisp::vm::KindField;
 pub use eseqlisp::vm::{SCRATCH_KIND_PACKAGE, kind_id, kind_name_of};
 
-pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
+pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :icon widget :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode; the optional :icon names a defwidget the tab draws in a chip beside the label, its shader reading `selected`). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
 pub const DEF_KIND_KEYWORDS: &[&str] = &[
     "key",
     "host",
@@ -36,6 +36,7 @@ pub const DEF_KIND_KEYWORDS: &[&str] = &[
     "state",
     "view",
     "keymap",
+    "icon",
     "on-create",
 ];
 
@@ -374,6 +375,7 @@ pub fn parse_def_kind(
     let mut schema = eseqlisp::vm::InstanceKindSchema::new(id.clone());
     let mut view = None;
     let mut keymap = None;
+    let mut icon = None;
     let mut on_create = None;
     let mut idx = 1;
     while idx < args.len() {
@@ -468,6 +470,19 @@ pub fn parse_def_kind(
                     }
                 };
             }
+            "icon" => {
+                icon = match value {
+                    EValue::Nil => None,
+                    EValue::String(widget) | EValue::Symbol(widget) => {
+                        Some(widget.clone()).filter(|widget| !widget.is_empty())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "def-kind {name}: :icon expects a defwidget name (string)"
+                        ));
+                    }
+                };
+            }
             other => return Err(format!("def-kind {name}: unknown slot :{other}")),
         }
         idx += 2;
@@ -495,7 +510,11 @@ pub fn parse_def_kind(
     };
     Ok((
         definition,
-        schema.with_view(view).with_keymap(keymap).with_on_create(on_create),
+        schema
+            .with_view(view)
+            .with_keymap(keymap)
+            .with_icon(icon)
+            .with_on_create(on_create),
     ))
 }
 

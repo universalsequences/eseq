@@ -936,6 +936,9 @@ pub struct LayoutTabSpec {
     /// `:on-select (lambda (buffer tab-index) ...)`: fired when a click on
     /// the tab strip switches the tile to this tab's buffer.
     pub on_select: Option<Value>,
+    /// `:icon "widget-name"`: a `defwidget` drawn in a chip left of the
+    /// label. Its shader may read `selected` (1 on the shown tab).
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone)]

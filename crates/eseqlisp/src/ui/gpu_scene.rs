@@ -1776,6 +1776,93 @@ pub(crate) fn tile_chrome_instance_px(
 pub(crate) const TILE_TAB_TROUGH_LIGHT: Color = Color::rgba(1.0, 1.0, 1.0, 0.07);
 pub(crate) const TILE_TAB_TROUGH_SHADOW: Color = Color::rgba(0.0, 0.0, 0.0, 0.45);
 
+/// The chip's side as a fraction of the tab height.
+const TILE_TAB_ICON_CHIP_SCALE: f32 = 0.7;
+/// The chip's corner radius, normalized like the tab pill's.
+const TILE_TAB_ICON_CHIP_RADIUS: f32 = 0.42;
+/// How far the chip's fill darkens the tab bar toward black.
+const TILE_TAB_ICON_CHIP_DARKEN: f32 = 0.38;
+/// The glyph's inset inside the chip, as a fraction of the chip side.
+const TILE_TAB_ICON_GLYPH_INSET: f32 = 0.14;
+/// Icon glyphs are not layout widgets: their ids count down from here (one
+/// per tile tab), clear of every widget's hit/animation state.
+const TILE_TAB_ICON_WIDGET_ID_BASE: u64 = u64::MAX - 0x7ab_0000;
+
+/// Build the icon for tab `tab_index` of tile `tile_id`, whose layout
+/// reserved `slot` (see `tile::TileTabLayout::icon`): pushes the chip (a
+/// small raised `tile-tab` instance, pixel-square, right-aligned in the
+/// slot and vertically centered on the tab) onto `chips` and returns the
+/// glyph for the icon's own `defwidget` pipeline. `None`, and no chip,
+/// when `widget` is not a registered `defwidget` or the tab is too narrow
+/// to hold the chip, so the tab stays plain text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_tile_tab_icon(
+    chips: &mut Vec<WidgetInstance>,
+    widget: &str,
+    slot: crate::layout::Rect,
+    selected: bool,
+    tile_id: usize,
+    tab_index: usize,
+    viewport: widget_render::WidgetViewport,
+) -> Option<WidgetInstance> {
+    let widget_render::WidgetViewport { cell_w, cell_h, vp_w, vp_h, .. } = viewport;
+    if cell_w <= 0.0 || cell_h <= 0.0 {
+        return None;
+    }
+    let side_px = (slot.height * cell_h * TILE_TAB_ICON_CHIP_SCALE).round().max(1.0);
+    if slot.width * cell_w < side_px * 0.75 {
+        return None;
+    }
+    let right_px = ((slot.col + slot.width) * cell_w).round();
+    // Not rounded: the tab pill sits at fractional rows, and rounding the
+    // chip on its own leaves it up to half a pixel off the pill's center
+    // (the SDF chip and glyph antialias their own edges).
+    let top_px = slot.row * cell_h + (slot.height * cell_h - side_px) * 0.5;
+    let inset_px = (side_px * TILE_TAB_ICON_GLYPH_INSET).round();
+    let glyph_rect = crate::layout::Rect {
+        col: (right_px - side_px + inset_px) / cell_w,
+        row: (top_px + inset_px) / cell_h,
+        width: (side_px - inset_px * 2.0).max(1.0) / cell_w,
+        height: (side_px - inset_px * 2.0).max(1.0) / cell_h,
+    };
+    let props = HashMap::from([(
+        "selected".to_string(),
+        Value::Number(if selected { 1.0 } else { 0.0 }),
+    )]);
+    let widget_id = TILE_TAB_ICON_WIDGET_ID_BASE - ((tile_id as u64) << 8 | tab_index as u64 & 0xff);
+    let Some(widget_render::GpuPrimitive::WidgetInstance { instance: glyph, .. }) =
+        widget_render::sdf_widget::sdf_widget_background_primitives(
+            widget,
+            widget_id,
+            glyph_rect,
+            viewport,
+            &props,
+        )
+        .pop()
+    else {
+        return None;
+    };
+    let fill = theme::BUFFER_TAB_BAR_BG().mix(Color::BLACK, TILE_TAB_ICON_CHIP_DARKEN);
+    push_tile_tab_instance_cells(
+        chips,
+        (right_px - side_px) / cell_w,
+        top_px / cell_h,
+        side_px / cell_w,
+        side_px / cell_h,
+        Color { a: 1.0, ..fill },
+        theme::BUFFER_TAB_SELECTED_BORDER(),
+        theme::BUFFER_TAB_SELECTED_HIGHLIGHT(),
+        theme::BUFFER_TAB_SELECTED_SHADOW(),
+        1.0,
+        TILE_TAB_ICON_CHIP_RADIUS,
+        cell_w,
+        cell_h,
+        vp_w,
+        vp_h,
+    );
+    Some(glyph)
+}
+
 /// Light a `tile-chrome` border instance from above: the shader reads the
 /// rim strength from `uniform_a.y`, and the active tile catches more light.
 pub(crate) fn set_tile_border_rim(instance: &mut WidgetInstance, is_active: bool) {

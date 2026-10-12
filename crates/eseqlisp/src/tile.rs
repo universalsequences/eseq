@@ -48,6 +48,8 @@ pub struct TileBufferTab {
     pub buffer_idx: usize,
     pub on_close: Option<Value>,
     pub on_select: Option<Value>,
+    /// The `defwidget` drawn in the tab's icon chip, if any.
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +58,10 @@ pub struct TileTabLayout {
     pub label: String,
     pub rect: Rect,
     pub label_rect: Rect,
+    /// The icon's `defwidget` and the slot reserved for its chip, which
+    /// ends just left of the (centered) label text. The renderer draws a
+    /// pixel-square chip right-aligned in this slot.
+    pub icon: Option<(String, Rect)>,
     pub close_rect: Option<Rect>,
     pub close_visible: bool,
     pub selected: bool,
@@ -68,6 +74,9 @@ const TILE_TAB_HORIZONTAL_INSET: f32 = 0.55;
 const TILE_TAB_CLOSE_LEFT_INSET: f32 = 0.55;
 const TILE_TAB_CLOSE_WIDTH: f32 = 1.65;
 const TILE_TAB_CLOSE_RESERVED_WIDTH: f32 = 2.6;
+/// Columns the icon chip plus its gap to the label take from the label.
+const TILE_TAB_ICON_RESERVED_WIDTH: f32 = 2.6;
+const TILE_TAB_ICON_GAP: f32 = 0.6;
 
 pub struct TileLeaf {
     pub id: TileId,
@@ -404,17 +413,41 @@ pub fn tile_tab_layouts_with_hover(
             } else {
                 0.0
             };
-            let label_rect = Rect {
+            let mut label_rect = Rect {
                 row: tab_rect.row,
                 col: tab_rect.col + close_width,
                 width: (tab_rect.width - close_width).max(0.0),
                 height: tab_rect.height,
             };
+            let icon_width = if tab.icon.is_some() {
+                TILE_TAB_ICON_RESERVED_WIDTH.min(label_rect.width)
+            } else {
+                0.0
+            };
+            let label = truncate_tab_label(&tab.label, label_rect.width - icon_width);
+            // Center icon + label as one group: narrowing the label's
+            // centering box from the left by the icon slot moves the text
+            // right by half a slot, and the slot ends where the estimated
+            // text begins.
+            let icon = tab.icon.as_ref().map(|name| {
+                label_rect.col += icon_width;
+                label_rect.width = (label_rect.width - icon_width).max(0.0);
+                let text_width = estimated_tab_label_width_cells(&label).min(label_rect.width);
+                let text_left = label_rect.col + (label_rect.width - text_width) * 0.5;
+                let slot = Rect {
+                    row: tab_rect.row,
+                    col: text_left - icon_width,
+                    width: (icon_width - TILE_TAB_ICON_GAP).max(0.0),
+                    height: tab_rect.height,
+                };
+                (name.clone(), slot)
+            });
             let layout = TileTabLayout {
                 index,
-                label: truncate_tab_label(&tab.label, label_rect.width),
+                label,
                 rect: tab_rect,
                 label_rect,
+                icon,
                 close_rect,
                 close_visible: tab.on_close.is_some() && hovered_tab == Some(index),
                 selected: is_selected,
@@ -437,6 +470,10 @@ fn truncate_tab_label(label: &str, width: f32) -> String {
         out.push(ch);
     }
     out
+}
+
+fn estimated_tab_label_width_cells(label: &str) -> f32 {
+    label.chars().map(estimated_tab_char_width_cells).sum()
 }
 
 fn estimated_tab_char_width_cells(ch: char) -> f32 {
@@ -472,12 +509,14 @@ mod tests {
                     buffer_idx: 0,
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
                 TileBufferTab {
                     label: "WWW".to_string(),
                     buffer_idx: 1,
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
             ],
             Some(0),
@@ -489,6 +528,35 @@ mod tests {
         assert_eq!(layouts[1].rect.col, rect.col + rect.width * 0.5);
         assert!(layouts[1].rect.col + layouts[1].rect.width < rect.col + rect.width);
         assert_eq!(layouts[1].label, "WWW");
+    }
+
+    #[test]
+    fn icon_slot_sits_left_of_the_label_and_the_pair_stays_centered() {
+        let rect = Rect {
+            row: 10.0,
+            col: 0.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        let tab = |icon: Option<&str>| TileBufferTab {
+            label: "Seq".to_string(),
+            buffer_idx: 0,
+            on_close: None,
+            on_select: None,
+            icon: icon.map(str::to_string),
+        };
+        let plain = tile_tab_layouts(rect, &[tab(None)], Some(0));
+        let iconed = tile_tab_layouts(rect, &[tab(Some("seq-tab-icon"))], Some(0));
+        assert_eq!(plain[0].icon, None);
+        let (name, slot) = iconed[0].icon.clone().expect("icon slot");
+        assert_eq!(name, "seq-tab-icon");
+        let text = estimated_tab_label_width_cells("Seq");
+        let label = iconed[0].label_rect;
+        let text_left = label.col + (label.width - text) * 0.5;
+        assert!((slot.col + slot.width + TILE_TAB_ICON_GAP - text_left).abs() < 1e-4);
+        let group_center = (slot.col + text_left + text) * 0.5;
+        let tab_center = iconed[0].rect.col + iconed[0].rect.width * 0.5;
+        assert!((group_center - tab_center).abs() < 1e-4, "{group_center} vs {tab_center}");
     }
 
     #[test]
@@ -507,12 +575,14 @@ mod tests {
                     buffer_idx: 0,
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
                 TileBufferTab {
                     label: "Matrix".to_string(),
                     buffer_idx: 1,
                     on_close: None,
                     on_select: None,
+                    icon: None,
                 },
             ],
             Some(0),
