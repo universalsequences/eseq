@@ -472,6 +472,19 @@ pub fn render_loaded_instrument_for_test(
     lib: &LoadedDGenLib,
     options: &InstrumentRenderOptions,
 ) -> Result<InstrumentRenderReport, String> {
+    render_loaded_instrument_samples_for_test(manifest, lib, options, &[]).map(|(report, _)| report)
+}
+
+/// Like [`render_loaded_instrument_for_test`], plus extra note-on triggers at
+/// `retrigger_frames` (pitch, velocity and gate unchanged), returning the
+/// first audio output channel's samples (the one the report measures) for
+/// retrigger/click analysis.
+pub fn render_loaded_instrument_samples_for_test(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    options: &InstrumentRenderOptions,
+    retrigger_frames: &[usize],
+) -> Result<(InstrumentRenderReport, Vec<f32>), String> {
     if options.block_size == 0 {
         return Err("block_size must be greater than zero".to_string());
     }
@@ -532,9 +545,16 @@ pub fn render_loaded_instrument_for_test(
             .map(|event| event.frame)
             .unwrap_or(options.frames)
             .max(frames_done);
+        let next_event_frame = retrigger_frames
+            .iter()
+            .copied()
+            .filter(|&frame| frame > frames_done)
+            .min()
+            .map_or(next_event_frame, |frame| frame.min(next_event_frame));
         let block_limit = options.block_size.min(options.frames - frames_done);
         let block = block_limit.min((next_event_frame - frames_done).max(1));
-        let trigger_value = if frames_done == 0 { 1.0 } else { 0.0 };
+        let note_on = frames_done == 0 || retrigger_frames.contains(&frames_done);
+        let trigger_value = if note_on { 1.0 } else { 0.0 };
 
         let mut input_buffers = vec![vec![0.0f32; block]; n_inputs];
         for &(channel, output) in &input_routes {
@@ -645,7 +665,7 @@ pub fn render_loaded_instrument_for_test(
         }
     }
 
-    Ok(InstrumentRenderReport {
+    let report = InstrumentRenderReport {
         frames: rendered.len(),
         peak,
         rms,
@@ -656,11 +676,12 @@ pub fn render_loaded_instrument_for_test(
         first_non_finite_frame,
         non_finite_state_slots,
         first_non_finite_state_slot,
-        first_samples: rendered.into_iter().take(32).collect(),
+        first_samples: rendered.iter().copied().take(32).collect(),
         last_audible_frame,
         amp_off_frame,
         peak_after_amp_off,
-    })
+    };
+    Ok((report, rendered))
 }
 
 pub fn render_effect_source_for_test(

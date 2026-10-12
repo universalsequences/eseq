@@ -18,6 +18,8 @@ fn usage() {
            --param-at frame:name=value\n\
                                Apply an instrument parameter at a render frame; repeatable\n\
            --input N=value     Fill input channel N with value; repeatable\n\
+           --retrigger-at N    Fire another note-on at frame N; repeatable\n\
+           --raw PATH          Write the rendered audio as raw little-endian f32\n\
            --min-peak V        Fail if peak is below V\n\
            --min-rms V         Fail if RMS is below V\n\
            --json              Print JSON instead of text"
@@ -89,6 +91,8 @@ fn main() {
     let mut min_peak: Option<f32> = None;
     let mut min_rms: Option<f32> = None;
     let mut json = false;
+    let mut retrigger_frames = Vec::new();
+    let mut raw_path: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         let result: Result<(), String> = match arg.as_str() {
@@ -165,6 +169,12 @@ fn main() {
                     input_overrides.push((channel, value));
                     Ok(())
                 })
+            }
+            "--retrigger-at" => {
+                parse_value("--retrigger-at", args.next()).map(|v| retrigger_frames.push(v))
+            }
+            "--raw" => {
+                parse_value("--raw", args.next()).map(|v: String| raw_path = Some(PathBuf::from(v)))
             }
             "--json" => {
                 json = true;
@@ -255,10 +265,22 @@ fn main() {
         input_overrides,
     };
 
-    let report =
-        match lisp_host::render_loaded_instrument_for_test(&result.manifest, &result.lib, &options)
-        {
-            Ok(report) => report,
+    let report = match lisp_host::render_loaded_instrument_samples_for_test(
+        &result.manifest,
+        &result.lib,
+        &options,
+        &retrigger_frames,
+    ) {
+        Ok((report, samples)) => {
+            if let Some(path) = &raw_path {
+                let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                if let Err(error) = std::fs::write(path, bytes) {
+                    eprintln!("Error: failed to write '{}': {error}", path.display());
+                    std::process::exit(1);
+                }
+            }
+            report
+        }
             Err(error) => {
                 eprintln!("Error: {error}");
                 std::process::exit(1);

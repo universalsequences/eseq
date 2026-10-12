@@ -117,9 +117,11 @@
   ; Sampler-style linear attack ramp (footwork 808s: ~300 ms). Zero
   ; preserves the identified instantaneous attack exactly.
   (param attack @default 0 @min 0 @max 1000 @unit ms)
-  ; Post-everything sample-style fade-in (after the bank and tone): the
-  ; static swell of the finished sound, vs `attack` which blooms INTO the
-  ; bank drive. Zero = exact bypass.
+  ; Sample-style linear fade-in of the finished voice. Release 2: like
+  ; `attack` it runs per voice AFTER the bank (release 1 put attack before
+  ; the bank's drive, which flattened it, and fade on a shared post chain
+  ; whose retrigger duck let the new onset through), so the two stack.
+  ; Zero = exact bypass.
   (param fade @default 0 @min 0 @max 1000 @unit ms)
   ; Crossfade time used only when a new trigger overlaps a playing hit. The
   ; first isolated trigger stays instantaneous (identified attack).
@@ -176,13 +178,14 @@
   ; the gain contribution continuous at the retrigger boundary.
   (gswitch (gt first_hit 0.5) target previous_gain))
 
-(defmacro trigger-core (trigger_in retrig_fade attack_ms)
+(defmacro trigger-core (trigger_in retrig_fade attack_ms fade_ms)
   ; A long `attack` leaves nothing to mask the retrigger choke, and a 5 ms
   ; fade truncates a ~50 Hz cycle mid-wave (spectral splatter, heard as a
-  ; tiny click). Stretch the choke with the attack — max(XFD, attack/10),
-  ; capped at 40 ms — so instant attacks keep the exact learned 5 ms
-  ; (masked by the transient) and slow swells choke over a full cycle.
-  (def fade_eff (clip (max retrig_fade (* attack_ms 0.1)) 0.1 40))
+  ; tiny click). Stretch the choke with the slower of attack and fade —
+  ; max(XFD, max(attack, fade)/10), capped at 40 ms — so instant onsets
+  ; keep the exact learned 5 ms (masked by the transient) and slow swells
+  ; choke over a full cycle.
+  (def fade_eff (clip (max retrig_fade (* (max attack_ms fade_ms) 0.1)) 0.1 40))
   (def trigger_gate (gt trigger_in 0.5))
   (make-history trigger_h)
   (def previous_trigger (read-history trigger_h))
@@ -211,6 +214,13 @@
 ; ======================================================================
 ; glide: shared one-pole pitch slide toward the played pitch; exact
 ; pass-through when glide time ~0 (voices then latch per hit as learned).
+; Linear 0 -> 1 amplitude ramp over ms from t = 0 (click-free by
+; construction); exact bypass below 0.5 ms.
+(defmacro linear-ramp (t ms)
+  (gswitch (lt ms 0.5)
+           1.0
+           (clip (/ t (* (max ms 0.5) 0.001)) 0.0 1.0)))
+
 ; ======================================================================
 
 (defmacro glide-pitch (target glide_ms)
@@ -342,11 +352,17 @@
   ; trigger (click-free by construction) to full scale at `attack` ms —
   ; the footwork-808 swell, unlike the old T60 exponential which leapt
   ; toward full scale immediately. Exact bypass at 0.
-  (def attack_envelope
-    (gswitch (lt attack_v 0.5)
-             1.0
-             (clip (/ t (* (max attack_v 0.5) 0.001)) 0.0 1.0)))
-  (* learned_voice attack_envelope hit_velocity active))
+  (def attack_envelope (linear-ramp t attack_v))
+  ; Release 2: each voice owns its bank (the outgoing tail keeps its own
+  ; resonance state and choke) and the attack/fade amplitude ramps run
+  ; AFTER it, so the bank's drive and thump can no longer flatten or
+  ; leak the onset — attack and fade start from exact silence on every
+  ; hit, overlapping or not.
+  (def bank_in (* learned_voice hit_velocity active))
+  (def voice_banked (bank-stage bank_in voice_trigger bank_s bank_env_s bank_freq_s bank_res_s input_pitch))
+  ; Sample-style linear fade-in of the finished voice; exact bypass at 0.
+  (def fade_envelope (linear-ramp t fade_v))
+  (* voice_banked attack_envelope fade_envelope))
 
 ; ======================================================================
 ; voice mix + post chain
@@ -368,55 +384,6 @@
   (def lp_blend (clip (* (- 17500.0 lpf_hz) 0.000667) 0 1))
   (def lp_out (mix hp_out lp_filtered lp_blend))
   (* lp_out (clip lvl 0 1.5)))
-
-; Post-everything linear fade-in, using the builtin Sampler's retrigger
-; recipe (instruments/sampler.rs) adapted to a shared mono chain: a new
-; trigger while the output is AUDIBLE first carries the envelope on from
-; its current value through a 4 ms raised-cosine duck, then swells; a
-; trigger into silence starts the ramp at 0 immediately (their
-; last_env_amp test, approximated with a fast output-level follower, so
-; the envelope only ever jumps when there is no signal to click).
-(defmacro fade-stage (x triggered fade_ms)
-  ; fast-attack / slow-release level follower of the input
-  (make-history fd_folh)
-  (def fd_mag (abs x))
-  (def fd_fprev (read-history fd_folh))
-  (def fd_fol (+ fd_fprev (* (gswitch (gt fd_mag fd_fprev) 0.05 0.0005)
-                             (- fd_mag fd_fprev))))
-  (write-history fd_folh fd_fol)
-
-  ; seconds since trigger
-  (make-history fd_th)
-  (def fd_t (gswitch (gt triggered 0.5) 0.0 (read-history fd_th)))
-  (write-history fd_th (+ fd_t (/ 1.0 samplerate)))
-
-  ; duck start level: the envelope's value at the trigger. With a long
-  ; `attack` the new voice starts from silence pre-bank, so a full-height
-  ; duck cannot leak its transient — carry the envelope over with perfect
-  ; continuity (no gain jump at all, the click-free path). Only for
-  ; near-instant attacks is the duck gated by how loud the output
-  ; actually was (silent -> 0, clean ramp; the 200x slope keeps any
-  ; residual envelope jump far below audibility relative to the signal).
-  (make-history fd_envh)
-  (make-history fd_duckh)
-  (def fd_prev_env (read-history fd_envh))
-  (def fd_gate
-    (clip (+ (* 200.0 fd_fol) (gswitch (gt attack_v 20.0) 1.0 0.0)) 0 1))
-  (def fd_duck0
-    (gswitch (gt triggered 0.5)
-             (* fd_prev_env fd_gate)
-             (read-history fd_duckh)))
-  (write-history fd_duckh fd_duck0)
-
-  ; raised-cosine 1 -> 0 over 24 ms (the sampler's retrigger_tail_gain
-  ; shape, lengthened to cover a full cycle down to ~42 Hz: a duck faster
-  ; than the content's period splatters spectrally and reads as a click,
-  ; and unlike the sampler there is no instant new attack to mask it)
-  (def fd_cg (* 0.5 (+ 1.0 (cos (* pi (clip (/ fd_t 0.024) 0 1))))))
-  (def fd_ramp (clip (/ fd_t (* (max fade_ms 0.5) 0.001)) 0 1))
-  (def fd_env (max fd_ramp (* fd_duck0 fd_cg)))
-  (write-history fd_envh fd_env)
-  (gswitch (lt fade_ms 0.5) x (* x fd_env)))
 
 ; ======================================================================
 ; BANK: the sc-filterbank core (Sherman FB2, content/effects/sc-filterbank)
@@ -451,12 +418,9 @@
          (mix lp2 l2 tick2) (mix bp2 b2 tick2) x2
          lp1 (+ (* 0.98 bp2) (* 0.02 hp2))))
 
-(defmacro bank-stage (sig triggered wet_a env_a freq_a res_a note_in)
-  ; Defaults are the exact settings the gesture was discovered with:
-  ; freq 0.34 -> 0.03 (floor 0.03 + env 0.31), res 0.75, mode1 0.00,
-  ; mode2 0.51, harm 5, crunch 0.00, ser 1.00, blend 0.50, drive 0.81.
-  ; bank_freq (FLR) and bank_res (RES) are top-level @mod params, passed
-  ; in as freq_a / res_a.
+; Bank character controls. Declared once here and passed as section
+; outputs because bank-stage now expands once per voice (release 2).
+(defmacro bank-params ()
   (param bank_time @default 260 @min 20 @max 2000 @unit ms)
   (param bank_harm @default 5 @min 0 @max 7)
   (param bank_crunch @default 0 @min 0 @max 1)
@@ -474,18 +438,26 @@
   ; so it eats the staircase aliasing wherever the sweep sits. 0 = raw
   ; hardware grit, 1 = fully reconstructed (default).
   (param bank_recon @default 1 @min 0 @max 1)
+  (tuple bank_time bank_harm bank_crunch bank_drive bank_track bank_recon))
+
+(defmacro bank-stage (sig triggered wet_a env_a freq_a res_a note_in)
+  ; Defaults are the exact settings the gesture was discovered with:
+  ; freq 0.34 -> 0.03 (floor 0.03 + env 0.31), res 0.75, mode1 0.00,
+  ; mode2 0.51, harm 5, crunch 0.00, ser 1.00, blend 0.50, drive 0.81.
+  ; bank_freq (FLR) and bank_res (RES) are top-level @mod params, passed
+  ; in as freq_a / res_a.
 
   (def wet_amt (clip wet_a 0 1))
   (def bk_hitp (max (latch (max note_in 1.0) triggered) 1.0))
   (def bk_note (* (gswitch (gt glide_v 0.1) (max glided 1.0) bk_hitp) tune_ratio_s))
-  (def bk_key_off (* (clip bank_track 0 1) (/ (log (/ bk_note 92.99951)) 5.586)))
+  (def bk_key_off (* (clip bank_track_v 0 1) (/ (log (/ bk_note 92.99951)) 5.586)))
   ; input drive: the builtin Filterbank's drive circuit
   ; (effects/filterbank.rs §2) — dynamic-bias coupling-cap sag, +6 dB
   ; pre-emphasis @ 3 kHz, 0.55·tube + 0.45·diode asymmetric shaper (roar
   ; transfer bank), matched de-emphasis, 10 Hz DC blocker. The builtin's
   ; 4x oversampling is deliberately omitted: this bank aliases by design,
   ; and bank_recon is the cleanup control.
-  (def gained (* sig (+ 1 (* bank_drive 24))))
+  (def gained (* sig (+ 1 (* bank_drive_v 24))))
 
   ; dynamic bias — a 2 ms / 80 ms follower
   ; of the driven signal shifts the operating point into the asymmetric
@@ -532,9 +504,28 @@
   (make-history bk_envh)
   (def bk_env (+ (read-history bk_envh) (* 0.003 (- (abs x) (read-history bk_envh)))))
   (write-history bk_envh bk_env)
+  ; Release 2: source-life follower of the bank's INPUT (instant attack,
+  ; ~50 ms release). The bank may only speak while its source does: it
+  ; keys the sweep thump below (a cutoff move on a silent voice used to
+  ; inject a DC step and ping the resonators back to life) and gates the
+  ; wet output (a self-oscillating scream used to outlive the release
+  ; forever). The gate is relative to this hit's own source peak: open
+  ; until the source has fallen 60 dB (its T60, "release done" at any
+  ; velocity), then closing cubically (-60 dB of gating 20 dB later), so a
+  ; slow noise floor cannot hold a full-level scream open.
+  (make-history bk_lifeh)
+  (def bk_life (max (abs sig)
+                    (* (read-history bk_lifeh)
+                       (exp (/ -1.0 (* 0.05 samplerate))))))
+  (write-history bk_lifeh bk_life)
+  (make-history bk_peakh)
+  (def bk_peak (max (abs sig) (gswitch (gt triggered 0.5) 0.0 (read-history bk_peakh))))
+  (write-history bk_peakh bk_peak)
+  (def bk_open (clip (/ (* bk_life 1000) (max bk_peak 1.0e-12)) 0 1))
+  (def bk_alive (* bk_open bk_open bk_open))
 
   ; cutoff position: floor + per-trigger decay sweep (replaces the LFO)
-  (def sweep_env (id-env triggered bank_time))
+  (def sweep_env (id-env triggered bank_time_v))
   (def fpos_target (clip (+ (clip freq_a 0 1) bk_key_off (* (clip env_a 0 1) sweep_env)) 0 1))
   ; VCO slew: the expo converter lags, asymmetrically (up faster than down)
   (make-history bk_fposh)
@@ -545,7 +536,7 @@
   (def fc (min (* 30 (exp (* 5.586 fpos))) (* 0.45 samplerate)))
 
   ; switched-cap clock: crunch morphs ratio 100:1 -> 25:1 (log)
-  (def ratio (* 100 (exp (* bank_crunch (log 0.25)))))
+  (def ratio (* 100 (exp (* bank_crunch_v (log 0.25)))))
   (def kbase (- (* 2.08 (- 1 (clip res_a 0 1))) 0.22))
 
   ; clock jitter, depth keyed to crunch
@@ -560,7 +551,7 @@
   (def bank_rate (* 4 samplerate))
   (def clock_limit (* 0.99 bank_rate))
   (def requested_clock (* fc ratio))
-  (def clock_jitter (+ 1 (* (* 0.012 (+ 0.3 bank_crunch)) bk_nz)))
+  (def clock_jitter (+ 1 (* (* 0.012 (+ 0.3 bank_crunch_v)) bk_nz)))
   (def fclk (clip (* requested_clock clock_jitter) 200 clock_limit))
   (def represented_ratio (/ fclk (* fc clock_jitter)))
   (def gcoef (* 2 (sin (/ pi represented_ratio))))
@@ -570,14 +561,16 @@
   ; (selector is 1-based; floor needs dgenlisp >= v0.1.6). The knob moves
   ; in 0.5 steps: halves land midway between adjacent tap ratios, which
   ; the subtract-N accumulator divides as happily as the named taps.
-  (def harm_q (/ (round (* (clip bank_harm 0 7) 2)) 2))
+  (def harm_q (/ (round (* (clip bank_harm_v 0 7) 2)) 2))
   (def harm_i (floor harm_q))
   (def harm_f (- harm_q harm_i))
   (def div_a (selector (+ 1 harm_i) 1 1.2 1.5 2 3 4 5 7))
   (def div_b (selector (+ 1 (clip (+ harm_i 1) 0 7)) 1 1.2 1.5 2 3 4 5 7))
   (def divisor (mix div_a div_b harm_f))
   ; sweep thump: charge injection puts a moving DC offset into the loop
-  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0))))
+  ; gated by the source-life gate (release 2): full strength while the hit
+  ; sounds, nothing once its source is done
+  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0)) bk_alive))
   (def xin (+ x thump))
 
   ; Clock, held inputs and both filter states persist across host samples.
@@ -614,7 +607,7 @@
   ; floor is removed — an instrument must go silent between hits, so the
   ; bleed is keyed entirely to the input envelope (1.9 keeps the same
   ; peak level the effect has at full program).
-  (def bleed (* (* (* (* bank_crunch bank_crunch)
+  (def bleed (* (* (* (* bank_crunch_v bank_crunch_v)
                       (* 0.02 (clip (- 1 (/ fclk 6000)) 0 1)))
                    (* 1.9 bk_env))
                 (- (* 2 (< ph1 0.5)) 1)))
@@ -640,13 +633,14 @@
   (make-history bk_rch2)
   (def rc_2 (+ (* (- 1.0 rc_coef) rc_1) (* rc_coef (read-history bk_rch2))))
   (write-history bk_rch2 rc_2)
-  (def wet_recon (mix wet rc_2 (clip bank_recon 0 1)))
-  (mix sig wet_recon wet_amt))
+  (def wet_recon (mix wet rc_2 (clip bank_recon_v 0 1)))
+  (mix sig (* wet_recon bk_alive) wet_amt))
 
 ; ======================================================================
 ; top level: section nodes only
 ; ======================================================================
 
+(def (bank_time_v bank_harm_v bank_crunch_v bank_drive_v bank_track_v bank_recon_v) (bank-params))
 (def (sweep_v sustain_v glide_v attack_v fade_v retrig_fade_v)
      (sweep-tail-params smoothing))
 (def (body_amp_v body_asym_v click_freq_v click_decay_v
@@ -669,7 +663,7 @@
 (def bank_res_s (onepole-param (mod bank_res) smoothing))
 
 (def (triggered trig_a trig_b gain_a gain_b)
-     (trigger-core trigger retrig_fade_v attack_v))
+     (trigger-core trigger retrig_fade_v attack_v fade_v))
 
 (def glided (glide-pitch pitch glide_v))
 
@@ -678,16 +672,12 @@
 
 (def mixed_voices (voice-mix voice_a gain_a voice_b gain_b))
 
-(def banked (bank-stage mixed_voices triggered bank_s bank_env_s bank_freq_s bank_res_s pitch))
+(def toned (tone-stage mixed_voices lpf_s hpf_s level_s))
 
-(def toned (tone-stage banked lpf_s hpf_s level_s))
-
-(def faded (fade-stage toned triggered fade_v))
-
-(out faded 1 @name audio)
+(out toned 1 @name audio)
 ;; A drum may never see note-off (gate-off tracks), so the amp flag must not
 ;; depend on the gate: the voice is done once its output has fallen below
 ;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
 ;; flag takes the next channel, 2 (output channels must not leave a gap).
 (use-defmacro voice-amp)
-(out (voice-amp 0 faded faded) 2 @name amp @amp true)
+(out (voice-amp 0 toned toned) 2 @name amp @amp true)

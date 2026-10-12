@@ -561,6 +561,25 @@
   (make-history bk_envh)
   (def bk_env (+ (read-history bk_envh) (* 0.003 (- (abs x) (read-history bk_envh)))))
   (write-history bk_envh bk_env)
+  ; Release 2: source-life follower of the bank's INPUT (instant attack,
+  ; ~50 ms release). The bank may only speak while its source does: it
+  ; keys the sweep thump below (a cutoff move on a silent voice used to
+  ; inject a DC step and ping the resonators back to life) and gates the
+  ; wet output (a self-oscillating scream used to outlive the release
+  ; forever). The gate is relative to this hit's own source peak: open
+  ; until the source has fallen 60 dB (its T60, "release done" at any
+  ; velocity), then closing cubically (-60 dB of gating 20 dB later), so a
+  ; slow noise floor cannot hold a full-level scream open.
+  (make-history bk_lifeh)
+  (def bk_life (max (abs sig)
+                    (* (read-history bk_lifeh)
+                       (exp (/ -1.0 (* 0.05 samplerate))))))
+  (write-history bk_lifeh bk_life)
+  (make-history bk_peakh)
+  (def bk_peak (max (abs sig) (gswitch (gt triggered 0.5) 0.0 (read-history bk_peakh))))
+  (write-history bk_peakh bk_peak)
+  (def bk_open (clip (/ (* bk_life 1000) (max bk_peak 1.0e-12)) 0 1))
+  (def bk_alive (* bk_open bk_open bk_open))
 
   ; cutoff position: floor + per-trigger decay sweep (replaces the LFO)
   (def sweep_env (id-env triggered bank_time))
@@ -606,7 +625,9 @@
   (def div_b (selector (+ 1 (clip (+ harm_i 1) 0 7)) 1 1.2 1.5 2 3 4 5 7))
   (def divisor (mix div_a div_b harm_f))
   ; sweep thump: charge injection puts a moving DC offset into the loop
-  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0))))
+  ; gated by the source-life gate (release 2): full strength while the hit
+  ; sounds, nothing once its source is done
+  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0)) bk_alive))
   (def xin (+ x thump))
 
   ; Clock, held inputs and both filter states persist across host samples.
@@ -670,7 +691,7 @@
   (def rc_2 (+ (* (- 1.0 rc_coef) rc_1) (* rc_coef (read-history bk_rch2))))
   (write-history bk_rch2 rc_2)
   (def wet_recon (mix wet rc_2 (clip bank_recon 0 1)))
-  (mix sig wet_recon wet_amt))
+  (mix sig (* wet_recon bk_alive) wet_amt))
 
 ; Final HP/LP tone pair, AFTER the bank so its screams, bleed and
 ; aliasing can be tamed. The filters always run (state stays warm) and are

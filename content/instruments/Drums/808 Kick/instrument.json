@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "run_mode": "instrument",
+  "current": 2,
+  "releases": {
+    "1": { "path": "versions/1", "name": "Drums/808 Kick" },
+    "2": { "path": ".", "name": "Drums/808 Kick" }
+  }
+}

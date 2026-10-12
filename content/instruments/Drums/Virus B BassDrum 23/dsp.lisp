@@ -170,13 +170,9 @@
      (+ (* (read-history bp_h) (- 1 (+ lpw hpw)))
         (* hp hpw))))
 
-(defmacro bank-stage (sig triggered wet_a env_a freq_a res_a note_in)
-  ; Defaults are the exact settings the id808/id909 gesture was
-  ; discovered with:
-  ; freq 0.34 -> 0.03 (floor 0.03 + env 0.31), res 0.75, mode1 0.00,
-  ; mode2 0.51, harm 5, crunch 0.00, ser 1.00, blend 0.50, drive 0.81.
-  ; bank_freq (FLR) and bank_res (RES) are top-level @mod params, passed
-  ; in as freq_a / res_a.
+; Bank character controls. Declared once here and passed as section
+; outputs because bank-stage now expands once per voice (release 2).
+(defmacro bank-params ()
   (param bank_time @default 260 @min 20 @max 2000 @unit ms)
   (param bank_harm @default 5 @min 0 @max 7)
   (param bank_crunch @default 0 @min 0 @max 1)
@@ -194,20 +190,29 @@
   ; image bands, so it eats the staircase aliasing wherever the sweep
   ; sits. 0 = raw hardware grit, 1 = fully reconstructed (default).
   (param bank_recon @default 1 @min 0 @max 1)
+  (tuple bank_time bank_harm bank_crunch bank_drive bank_track bank_recon))
+
+(defmacro bank-stage (sig triggered wet_a env_a freq_a res_a note_in voice_t voice_attack_s)
+  ; Defaults are the exact settings the id808/id909 gesture was
+  ; discovered with:
+  ; freq 0.34 -> 0.03 (floor 0.03 + env 0.31), res 0.75, mode1 0.00,
+  ; mode2 0.51, harm 5, crunch 0.00, ser 1.00, blend 0.50, drive 0.81.
+  ; bank_freq (FLR) and bank_res (RES) are top-level @mod params, passed
+  ; in as freq_a / res_a.
 
   (def wet_amt (clip wet_a 0 1))
   (def bk_hitp (max (latch (max note_in 1.0) triggered) 1.0))
   ; No glide on this voice: the note is latched at the trigger, tune rides
   ; continuously (so a tune LFO sweeps the bank with the body).
   (def bk_note (* bk_hitp tune_ratio_s))
-  (def bk_key_off (* (clip bank_track 0 1) (/ (log (/ bk_note 48.326)) 5.586)))
+  (def bk_key_off (* (clip bank_track_v 0 1) (/ (log (/ bk_note 48.326)) 5.586)))
   ; input drive: the builtin Filterbank's drive circuit
   ; (effects/filterbank.rs §2) — dynamic-bias coupling-cap sag, +6 dB
   ; pre-emphasis @ 3 kHz, 0.55·tube + 0.45·diode asymmetric shaper (roar
   ; transfer bank), matched de-emphasis, 10 Hz DC blocker. The builtin's
   ; 4x oversampling is deliberately omitted: this bank aliases by design,
   ; and bank_recon is the cleanup control.
-  (def gained (* sig (+ 1 (* bank_drive 24))))
+  (def gained (* sig (+ 1 (* bank_drive_v 24))))
 
   ; dynamic bias — a 2 ms / 80 ms follower
   ; of the driven signal shifts the operating point into the asymmetric
@@ -254,9 +259,28 @@
   (make-history bk_envh)
   (def bk_env (+ (read-history bk_envh) (* 0.003 (- (abs x) (read-history bk_envh)))))
   (write-history bk_envh bk_env)
+  ; Release 2: source-life follower of the bank's INPUT (instant attack,
+  ; ~50 ms release). The bank may only speak while its source does: it
+  ; keys the sweep thump below (a cutoff move on a silent voice used to
+  ; inject a DC step and ping the resonators back to life) and gates the
+  ; wet output (a self-oscillating scream used to outlive the release
+  ; forever). The gate is relative to this hit's own source peak: open
+  ; until the source has fallen 60 dB (its T60, "release done" at any
+  ; velocity), then closing cubically (-60 dB of gating 20 dB later), so a
+  ; slow noise floor cannot hold a full-level scream open.
+  (make-history bk_lifeh)
+  (def bk_life (max (abs sig)
+                    (* (read-history bk_lifeh)
+                       (exp (/ -1.0 (* 0.05 samplerate))))))
+  (write-history bk_lifeh bk_life)
+  (make-history bk_peakh)
+  (def bk_peak (max (abs sig) (gswitch (gt triggered 0.5) 0.0 (read-history bk_peakh))))
+  (write-history bk_peakh bk_peak)
+  (def bk_open (clip (/ (* bk_life 1000) (max bk_peak 1.0e-12)) 0 1))
+  (def bk_alive (* bk_open bk_open bk_open))
 
   ; cutoff position: floor + per-trigger decay sweep (replaces the LFO)
-  (def sweep_env (id-env triggered bank_time))
+  (def sweep_env (id-env triggered bank_time_v))
   (def fpos_target (clip (+ (clip freq_a 0 1) bk_key_off (* (clip env_a 0 1) sweep_env)) 0 1))
   ; VCO slew: the expo converter lags, asymmetrically (up faster than down)
   (make-history bk_fposh)
@@ -267,7 +291,7 @@
   (def fc (* 30 (exp (* 5.586 fpos))))
 
   ; switched-cap clock: crunch morphs ratio 100:1 -> 25:1 (log)
-  (def ratio (* 100 (exp (* bank_crunch (log 0.25)))))
+  (def ratio (* 100 (exp (* bank_crunch_v (log 0.25)))))
   (def gcoef (* 2 (sin (/ pi ratio))))
   (def kbase (- (* 2.08 (- 1 (clip res_a 0 1))) 0.22))
 
@@ -275,7 +299,7 @@
   (make-history bk_nzh)
   (def bk_nz (+ (read-history bk_nzh) (* 0.05 (- (noise) (read-history bk_nzh)))))
   (write-history bk_nzh bk_nz)
-  (def fclk (clip (* (* fc ratio) (+ 1 (* (* 0.012 (+ 0.3 bank_crunch)) bk_nz)))
+  (def fclk (clip (* (* fc ratio) (+ 1 (* (* 0.012 (+ 0.3 bank_crunch_v)) bk_nz)))
                   200 (* samplerate 0.99)))
   (def ph1 (phasor fclk))
   ; explicit wrap detector: ramp2trig misses wraps near the host rate
@@ -287,7 +311,7 @@
   ; (selector is 1-based; floor needs dgenlisp >= v0.1.6). The knob moves
   ; in 0.5 steps: halves land midway between adjacent tap ratios, which
   ; the subtract-N accumulator divides as happily as the named taps.
-  (def harm_q (/ (round (* (clip bank_harm 0 7) 2)) 2))
+  (def harm_q (/ (round (* (clip bank_harm_v 0 7) 2)) 2))
   (def harm_i (floor harm_q))
   (def harm_f (- harm_q harm_i))
   (def div_a (selector (+ 1 harm_i) 1 1.2 1.5 2 3 4 5 7))
@@ -300,7 +324,9 @@
   (def tick2 (* tick1 fire2))
 
   ; sweep thump: charge injection puts a moving DC offset into the loop
-  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0))))
+  ; gated by the source-life gate (release 2): full strength while the hit
+  ; sounds, nothing once its source is done
+  (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0)) bk_alive))
   (def xin (+ x thump))
 
   (def f1 (bank-svf xin tick1 0.0 gcoef kbase))
@@ -313,7 +339,7 @@
   ; floor is removed — an instrument must go silent between hits, so the
   ; bleed is keyed entirely to the input envelope (1.9 keeps the same
   ; peak level the effect has at full program).
-  (def bleed (* (* (* (* bank_crunch bank_crunch)
+  (def bleed (* (* (* (* bank_crunch_v bank_crunch_v)
                       (* 0.02 (clip (- 1 (/ fclk 6000)) 0 1)))
                    (* 1.9 bk_env))
                 (- (* 2 (< ph1 0.5)) 1)))
@@ -339,128 +365,219 @@
   (make-history bk_rch2)
   (def rc_2 (+ (* (- 1.0 rc_coef) rc_1) (* rc_coef (read-history bk_rch2))))
   (write-history bk_rch2 rc_2)
-  (def wet_recon (mix wet rc_2 (clip bank_recon 0 1)))
-  (mix sig wet_recon wet_amt))
+  (def wet_recon (mix wet rc_2 (clip bank_recon_v 0 1)))
+  ; Release 2: the wet bank also rides a linear ramp over however much
+  ; `attack` exceeds the identified 83.86 ms rise. Its drive (up to x25)
+  ; would otherwise lift the un-enveloped click, noise and hiss and the
+  ; sweep thump into an onset no attack setting could soften. At or below
+  ; the identified attack it is an exact pass-through.
+  (def wet_ramp_s (max (- voice_attack_s 0.0838566) 0.0))
+  (def wet_ramp (gswitch (lt wet_ramp_s 0.0005) 1.0
+                         (clip (/ voice_t (max wet_ramp_s 0.0005)) 0 1)))
+  (mix sig (* wet_recon bk_alive wet_ramp) wet_amt))
 
-; Exact seconds-since-trigger clock: t=0 on the trigger sample, then n/sr.
-(make-history time-h)
-(def previous-time (read-history time-h))
-(def t (gswitch (gt trigger 0.5) 0.0 previous-time))
-(write-history time-h (+ t (/ 1.0 samplerate)))
+; ======================================================================
+; Release 2: two retrigger slots, as factory id808/id909 have. Release 1
+; ran one voice whose clock, envelope and bank all reset on every
+; trigger, so a hit landing on a ringing tail cut it dead. Each slot now
+; owns its clock, envelope, noise and bank; an overlapping trigger
+; crossfades the outgoing slot out while the incoming one starts from
+; its own attack.
+; ======================================================================
 
-; The fit was rendered with the host pitch at C4 (261.63 Hz); this ratio
-; keeps that render exact while making the complete voice playable.
-(def pitch-ratio (* (/ pitch 261.63) (semi (mod tune))))
+; Exponential crossfade gain (from factory id808). first_hit bypasses the
+; fade so an isolated initial hit keeps the exact identified attack.
+(defmacro retrigger-gain (target first_hit coefficient)
+  (make-history gain_h)
+  (def previous_gain (read-history gain_h))
+  (def filtered_gain (+ target (* coefficient (- previous_gain target))))
+  (def next_gain (gswitch (gt first_hit 0.5) target filtered_gain))
+  (write-history gain_h next_gain)
+  (gswitch (gt first_hit 0.5) target previous_gain))
+
+; Edge detect + slot alternation + crossfade weights (from factory id808).
+; The choke is 5 ms under an instant attack (masked by the new transient)
+; and stretches to attack/10, capped at 40 ms, under a slow swell that
+; leaves nothing to mask it.
+(defmacro trigger-core (trigger_in attack_ms)
+  (def fade_eff (min (max 5.0 (* attack_ms 0.1)) 40))
+  ; one choke coefficient shared by both slots' crossfade gains
+  (def fade_coef (exp (/ -6.9077553 (* samplerate fade_eff 0.001))))
+  (def trigger_gate (gt trigger_in 0.5))
+  (make-history trigger_h)
+  (def previous_trigger (read-history trigger_h))
+  (def triggered (max 0.0 (- trigger_gate previous_trigger)))
+  (write-history trigger_h trigger_gate)
+
+  (make-history selector_h)
+  (def previous_selector (read-history selector_h))
+  (def slot
+    (gswitch (gt triggered 0.5) (- 1.0 previous_selector) previous_selector))
+  (write-history selector_h slot)
+
+  (make-history ever_triggered_h)
+  (def was_triggered (read-history ever_triggered_h))
+  (def first_hit (* triggered (lt was_triggered 0.5)))
+  (write-history ever_triggered_h (gswitch (gt triggered 0.5) 1.0 was_triggered))
+
+  (def trig_a (* triggered (lt slot 0.5)))
+  (def trig_b (* triggered (gte slot 0.5)))
+  (def target_a (gswitch (lt slot 0.5) 1.0 0.0))
+  (def target_b (- 1.0 target_a))
+  (def gain_a (retrigger-gain target_a first_hit fade_coef))
+  (def gain_b (retrigger-gain target_b first_hit fade_coef))
+  (tuple triggered trig_a trig_b gain_a gain_b))
+
+; One harmonic of the additive bank. harm scales every partial above the
+; fundamental; bright tilts them (bright^(k-1)), both exact no-ops at 1.
+(defmacro partial (k level rate tilt-k t phase-frac)
+  (* level tilt-k (exp (* rate t)) (sin (* 2.0 pi k phase-frac))))
+
+(defmacro virus-voice (voice_trigger)
+  ; Exact seconds-since-trigger clock: t=0 on the trigger sample, then n/sr.
+  (make-history time-h)
+  (def previous-time (read-history time-h))
+  (def t (gswitch (gt voice_trigger 0.5) 0.0 previous-time))
+  (write-history time-h (+ t (/ 1.0 samplerate)))
+
+  ; Pitch and velocity belong to this hit for its whole lifetime, so an
+  ; outgoing tail never retunes or jumps level under the next event. Tune
+  ; still rides continuously (it is the modulation surface).
+  (make-history pitch-h)
+  (def hit-pitch (gswitch (gt voice_trigger 0.5) (max pitch 1.0) (read-history pitch-h)))
+  (write-history pitch-h hit-pitch)
+  (make-history velocity-h)
+  (def hit-velocity
+    (gswitch (gt voice_trigger 0.5) (clip velocity 0 1) (read-history velocity-h)))
+  (write-history velocity-h hit-velocity)
+
+  ; The fit was rendered with the host pitch at C4 (261.63 Hz); this ratio
+  ; keeps that render exact while making the complete voice playable.
+  (def pitch-ratio (* (/ hit-pitch 261.63) tune-ratio))
+  (def sweep-phase
+    (* pitch-ratio
+       (+ (* f_end t)
+          (* (/ sweep_a1 r1) (- (exp (* r1 t)) 1.0))
+          (* (/ sweep_a2 r2) (- (exp (* r2 t)) 1.0)))))
+  (def phase-frac (- sweep-phase (floor sweep-phase)))
+
+  ; ---- amp envelope: the identified curve, driven as a classic ADSR ----
+  ; ONE gate-following envelope IS the identified body envelope. The fit's
+  ; decay is log-quadratic rather than a plain exponential, so it runs as
+  ; its per-sample ratio
+  ;
+  ;   env(t)/env(t-dt) = exp(dt * (amp_decay + amp_curve*(2t - dt)))
+  ;
+  ; `decay` is that curve's T60 in ms (396.5 ms = the fit) and `release`
+  ; scales the same instantaneous rate by decay/release, so at the defaults
+  ; (sustain 0, release == decay) the gate cannot change the identified
+  ; one-shot. Sustain up + a short release is gated bass, no mode switch.
+  ; Only the body is enveloped; click, noise burst and hiss carry their own
+  ; identified decays, exactly as in id808.
+  (def dt (/ 1.0 samplerate))
+  (def attack-env
+    (/ (- 1.0 (exp (/ (- t) attack-seconds))) attack-norm))
+  (def env-rate (+ amp_decay (* amp_curve (- (* 2.0 t) dt))))
+  (def coef-d (exp (* dt (* decay-scale env-rate))))
+  (def coef-r (exp (* dt (* release-scale env-rate))))
+  (make-history env-h)
+  (def env-prev (read-history env-h))
+  (def dsr-env
+    (gswitch (gt voice_trigger 0.5)
+             1.0
+             (gswitch (gt gate 0.5)
+                      (+ sus (* (- env-prev sus) coef-d))
+                      (* env-prev coef-r))))
+  (write-history env-h dsr-env)
+  (def body-env (* attack-env dsr-env))
+
+  (def harmonics
+    (+ (sin (* 2.0 pi phase-frac))
+       (* harm-scale
+          (+ (partial 2 h2 d2 tilt-2 t phase-frac)
+             (partial 3 h3 d3 tilt-3 t phase-frac)
+             (partial 4 h4 d4 tilt-4 t phase-frac)
+             (partial 5 h5 d5 tilt-5 t phase-frac)
+             (partial 6 h6 d6 tilt-6 t phase-frac)
+             (partial 7 h7 d7 tilt-7 t phase-frac)
+             (partial 8 h8 d8 tilt-8 t phase-frac)
+             (partial 9 h9 d9 tilt-9 t phase-frac)
+             (partial 10 h10 d10 tilt-10 t phase-frac)))))
+  (def body (* harmonics body-env body_amp))
+
+  (def click-voice
+    (* (sin (* 2.0 pi click_freq pitch-ratio t))
+       (exp (* click_decay t)) click_amp))
+  (def bipolar-noise (- (* (noise) 2.0) 1.0))
+  (def filtered-noise
+    (biquad bipolar-noise (bq-hz noise_cutoff) 0.707 1.0 0))
+  (def noise-voice
+    (* filtered-noise (exp (* noise_decay t)) noise_amp
+       (clip (mod noise) 0 4)))
+
+  ; Recording / machine hiss: high-passed noise with its own slow decay,
+  ; through the Virus B's fixed 16.25 kHz output band (two 16 kHz lowpasses).
+  (def hiss-hp (biquad bipolar-noise (bq-hz hiss_cutoff) 0.707 1.0 1))
+  (def hiss-band
+    (biquad (biquad hiss-hp (bq-hz 16000.0) 0.707 1.0 0) (bq-hz 16000.0) 0.707 1.0 0))
+  (def hiss-voice
+    (* hiss-band (exp (* hiss_decay t)) hiss_amp (clip (mod hiss) 0 4)))
+
+  (def mixed (+ body click-voice noise-voice hiss-voice))
+
+  ; Gain-normalised saturator: out_drive / drive set the shape only.
+  (def shaped
+    (* (/ (tanh (* mixed drive-amount)) drive-amount) out_gain))
+
+  ; The bank's keytrack reference note: the sounding sweep endpoint at
+  ; this hit's pitch, before tune (which rides continuously).
+  (def bank-note-in (* f_end (/ hit-pitch 261.63)))
+  (def banked
+    (bank-stage shaped voice_trigger bank_s bank_env_s bank_freq_s bank_res_s
+                bank-note-in t attack-seconds))
+  (* banked hit-velocity))
+
+; ======================================================================
+; top level
+; ======================================================================
+
+; Voice-independent controls, computed once per sample for both slots.
+(def tune-ratio (semi (mod tune)))
 (def sweep-scale (/ 1.0 (clip (mod sweep) 0.25 4)))
 (def r1 (* sweep_r1 sweep-scale))
 (def r2 (* sweep_r2 sweep-scale))
-(def sweep-phase
-  (* pitch-ratio
-     (+ (* f_end t)
-        (* (/ sweep_a1 r1) (- (exp (* r1 t)) 1.0))
-        (* (/ sweep_a2 r2) (- (exp (* r2 t)) 1.0)))))
-(def phase-frac (- sweep-phase (floor sweep-phase)))
-
-; ---- amp envelope: the identified curve, driven as a classic ADSR ----------
-; Built the way factory/id808 and factory/id909 build theirs: ONE
-; gate-following envelope IS the identified body envelope, rather than a
-; second VCA bolted on after it. The fit's decay is log-quadratic rather than
-; a plain exponential, so it is expressed as its per-sample ratio and run
-; recursively -- which reproduces the fit exactly and leaves room for a
-; sustain floor and a release segment:
-;
-;   env(t)/env(t-dt) = exp(dt * (amp_decay + amp_curve*(2t - dt)))
-;
-; `decay` is that curve's T60 in ms (396.5 ms = the fit, decay-scale 1) and
-; `release` scales the same instantaneous rate by decay/release, so at the
-; defaults (sustain 0, release == decay) the release coefficient IS the decay
-; coefficient: the gate cannot change the identified one-shot at all, whatever
-; its length, and lengthening release stretches the whole tail. Sustain up +
-; a short release is gated bass, no mode switch.
-;
-; Only the body is enveloped. The click, noise burst and hiss carry their own
-; identified decays and stay outside it, exactly as in id808.
-(def dt (/ 1.0 samplerate))
 (def attack-seconds (max (* (mod attack) 0.001) 0.0001))
-(def attack-env
-  (/ (- 1.0 (exp (/ (- t) attack-seconds)))
-     (- 1.0 (exp (/ -0.05 attack-seconds)))))
 (def decay-scale (/ 396.5 (clip (mod decay) 40 8000)))
 (def release-scale (/ 396.5 (clip (mod release) 40 8000)))
-(def env-rate (+ amp_decay (* amp_curve (- (* 2.0 t) dt))))
-(def coef-d (exp (* dt (* decay-scale env-rate))))
-(def coef-r (exp (* dt (* release-scale env-rate))))
 (def sus (clip (mod sustain) 0 1))
-(make-history env-h)
-(def env-prev (read-history env-h))
-(def dsr-env
-  (gswitch (gt trigger 0.5)
-           1.0
-           (gswitch (gt gate 0.5)
-                    (+ sus (* (- env-prev sus) coef-d))
-                    (* env-prev coef-r))))
-(write-history env-h dsr-env)
-(def body-env (* attack-env dsr-env))
-
-; Harmonic bank. harm scales every partial above the fundamental; bright
-; tilts them (bright^(k-1)), both exact no-ops at 1.
 (def harm-scale (clip (mod harm) 0 4))
 (def tilt (clip (mod bright) 0.5 1.5))
-(defmacro partial (k level rate)
-  (* level (pow tilt (- k 1)) (exp (* rate t)) (sin (* 2.0 pi k phase-frac))))
-(def bank
-  (+ (sin (* 2.0 pi phase-frac))
-     (* harm-scale
-        (+ (partial 2 h2 d2)
-           (partial 3 h3 d3)
-           (partial 4 h4 d4)
-           (partial 5 h5 d5)
-           (partial 6 h6 d6)
-           (partial 7 h7 d7)
-           (partial 8 h8 d8)
-           (partial 9 h9 d9)
-           (partial 10 h10 d10)))))
-(def body (* bank body-env body_amp))
-
-(def click-voice
-  (* (sin (* 2.0 pi click_freq pitch-ratio t))
-     (exp (* click_decay t)) click_amp))
-(def bipolar-noise (- (* (noise) 2.0) 1.0))
-(def filtered-noise
-  (biquad bipolar-noise (bq-hz noise_cutoff) 0.707 1.0 0))
-(def noise-voice
-  (* filtered-noise (exp (* noise_decay t)) noise_amp
-     (clip (mod noise) 0 4)))
-
-; Recording / machine hiss: high-passed noise with its own slow decay,
-; through the Virus B's fixed 16.25 kHz output band (two 16 kHz lowpasses).
-(def hiss-hp (biquad bipolar-noise (bq-hz hiss_cutoff) 0.707 1.0 1))
-(def hiss-band
-  (biquad (biquad hiss-hp (bq-hz 16000.0) 0.707 1.0 0) (bq-hz 16000.0) 0.707 1.0 0))
-(def hiss-voice
-  (* hiss-band (exp (* hiss_decay t)) hiss_amp (clip (mod hiss) 0 4)))
-
-(def mixed (+ body click-voice noise-voice hiss-voice))
-
-; Gain-normalised saturator: out_drive / drive set the shape only.
 (def drive-amount (* out_drive (clip (mod drive) 0.25 4)))
-(def shaped
-  (* (/ (tanh (* mixed drive-amount)) drive-amount) out_gain))
+(def attack-norm (- 1.0 (exp (/ -0.05 attack-seconds))))
+(def tilt-2 (pow tilt 1))
+(def tilt-3 (pow tilt 2))
+(def tilt-4 (pow tilt 3))
+(def tilt-5 (pow tilt 4))
+(def tilt-6 (pow tilt 5))
+(def tilt-7 (pow tilt 6))
+(def tilt-8 (pow tilt 7))
+(def tilt-9 (pow tilt 8))
+(def tilt-10 (pow tilt 9))
 
-; ---- the bank ---------------------------------------------------------------
-; Smoothed bank controls + the keytrack reference note (the sounding sweep
-; endpoint at this pitch, before tune, which rides continuously).
-(def tune_ratio_s (onepole-param (semi (mod tune)) smoothing))
+; Smoothed bank controls, shared by both slots.
+(def tune_ratio_s (onepole-param tune-ratio smoothing))
 (def bank_s (onepole-param (mod bank) smoothing))
 (def bank_env_s (onepole-param (mod bank_env) smoothing))
 (def bank_freq_s (onepole-param (mod bank_freq) smoothing))
 (def bank_res_s (onepole-param (mod bank_res) smoothing))
-(def bank-note-in (* f_end (/ pitch 261.63)))
+(def (bank_time_v bank_harm_v bank_crunch_v bank_drive_v bank_track_v bank_recon_v) (bank-params))
 
-(def banked
-  (bank-stage shaped trigger bank_s bank_env_s bank_freq_s bank_res_s bank-note-in))
+(def (triggered trig_a trig_b gain_a gain_b) (trigger-core trigger (mod attack)))
+(def voice_a (virus-voice trig_a))
+(def voice_b (virus-voice trig_b))
 
-(def voice_out (* banked (clip velocity 0 1) (clip (mod level) 0 1.5)))
+(def voice_out
+  (* (+ (* voice_a gain_a) (* voice_b gain_b)) (clip (mod level) 0 1.5)))
 (out voice_out 1 @name audio)
 ;; A drum may never see note-off (gate-off tracks), so the amp flag must not
 ;; depend on the gate: the voice is done once its output has fallen below
