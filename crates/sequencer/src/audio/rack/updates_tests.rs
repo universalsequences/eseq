@@ -35,7 +35,7 @@ fn mapped_rack() -> RackTrackSnapshot {
         // Stale identity: the macro must not turn an invalid stored lock
         // into a different default, nor dispatch the lock to a new node.
         slot.effect_slots[0].set_plock(5, 1, 0.2);
-        slot.effect_slots[0].plock_param_ids[5][1] = None;
+        slot.effect_slots[0].plock_param_ids.set(5, 1, None);
     }
     rack
 }

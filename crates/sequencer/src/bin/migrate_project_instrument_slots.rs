@@ -117,13 +117,13 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
     }
     apply_output_safety_defaults(&mut defaults, desc);
 
-    let plocks = vec![vec![None; new_param_count]; MAX_STEPS];
+    let plocks = Default::default();
 
     let mut migrated = ProjectEffectSlot {
         num_params: new_param_count as u32,
         defaults,
         plocks,
-        plock_param_ids: vec![vec![None; new_param_count]; MAX_STEPS],
+        plock_param_ids: Default::default(),
         key_locks: std::collections::BTreeMap::new(),
         key_lock_param_ids: std::collections::BTreeMap::new(),
         tensor_params: Vec::new(),
@@ -204,12 +204,7 @@ fn recompute_modulation_active_params(slot: &mut ProjectEffectSlot, desc: &Effec
         slot.defaults[active_idx] = if default_active { 1.0 } else { 0.0 };
 
         for step in 0..MAX_STEPS {
-            let Some(step_plocks) = slot.plocks.get_mut(step) else {
-                continue;
-            };
-            if active_idx >= step_plocks.len() {
-                continue;
-            }
+            let step_plocks = slot.plocks.get(step).map_or(&[][..], Vec::as_slice);
 
             let has_depth_plock = group.iter().any(|target| {
                 step_plocks
@@ -233,9 +228,9 @@ fn recompute_modulation_active_params(slot: &mut ProjectEffectSlot, desc: &Effec
                         .abs()
                         > f32::EPSILON
                 });
-                step_plocks[active_idx] = Some(if active { 1.0 } else { 0.0 });
+                slot.plocks.set(step, active_idx, Some(if active { 1.0 } else { 0.0 }));
             } else {
-                step_plocks[active_idx] = None;
+                slot.plocks.set(step, active_idx, None);
             }
         }
     }

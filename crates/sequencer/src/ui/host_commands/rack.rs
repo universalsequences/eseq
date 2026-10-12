@@ -2509,7 +2509,7 @@ mod tests {
         let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
         assert_eq!(slot.effect_slots[0].defaults, before.effect_slots[0].defaults);
         for step in [STEP, STEP + 1] {
-            assert_eq!(&slot.effect_slots[0].plocks[step][3..6],
+            assert_eq!(&[3, 4, 5].map(|param| slot.effect_slots[0].plocks.cell(step, param).copied()),
                 &[Some(800.0), Some(6.0), Some(1.5)]);
         }
         assert!(matches!(app::edit::undo(&mut h.app), app::history::HistoryReplay::Applied(_)));
@@ -2545,7 +2545,7 @@ mod tests {
         }
         assert!(tick_step_print(&mut h.app, &h.shared).printed);
         let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
-        assert_eq!(&slot.effect_slots[0].plocks[STEP][3..6],
+        assert_eq!(&[3, 4, 5].map(|param| slot.effect_slots[0].plocks.cell(STEP, param).copied()),
             &[Some(800.0), Some(6.0), Some(1.5)]);
         assert_eq!(slot.effect_slots[0].defaults, before.effect_slots[0].defaults);
         assert_eq!(h.app.history.undo_len(), 0, "printing belongs to the recording take");

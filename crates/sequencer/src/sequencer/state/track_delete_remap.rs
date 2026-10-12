@@ -319,16 +319,13 @@ pub(super) fn remap_snapshot_sidechain_references_after_track_delete(
                     let selection = slot.plocks.get(step)
                         .and_then(|params| params.get(param_idx))
                         .and_then(|value| *value);
-                    if let (Some(selection), Some(value)) = (
-                        selection,
-                        slot.plocks.get_mut(step).and_then(|params| params.get_mut(param_idx)),
-                    ) {
-                        *value = Some(remap_sidechain_selection_after_track_delete(
+                    if let Some(selection) = selection {
+                        slot.plocks.set(step, param_idx, Some(remap_sidechain_selection_after_track_delete(
                             owner_track,
                             selection.round().max(0.0) as usize,
                             deleted_track,
                             old_track_count,
-                        ) as f32);
+                        ) as f32));
                     }
                 }
             }

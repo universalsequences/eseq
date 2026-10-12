@@ -366,9 +366,9 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
     let before = h.app.history.undo_len();
     h.eval_all("(lock-param! start (list (nth t2.steps 2) (nth t2.steps 5)) 25)");
     h.drain();
-    let locked = h.rack_slot().instrument_slot.plocks[2][START];
+    let locked = h.rack_slot().instrument_slot.plocks.cell(2, START).copied();
     assert_eq!(locked, Some(0.25));
-    assert_eq!(h.rack_slot().instrument_slot.plocks[5][START], Some(0.25));
+    assert_eq!(h.rack_slot().instrument_slot.plocks.cell(5, START).copied(), Some(0.25));
     assert_eq!(h.app.history.undo_len(), before + 1);
     h.shared.current_track.store(2, Ordering::Relaxed);
     h.shared.selected_steps.lock().unwrap().insert(2);
@@ -453,12 +453,12 @@ fn rack_slot_devices_hold_the_slot_instrument_its_voices_and_effects() {
     h.eval_all("(lock-param! rc (list (nth t2.steps 4)) 400)");
     h.drain();
     assert_eq!(
-        h.rack_slot().effect_slots[effect].plocks[4][CUTOFF],
+        h.rack_slot().effect_slots[effect].plocks.cell(4, CUTOFF).copied(),
         Some(400.0)
     );
     h.eval_all("(unlock-param! rc (list (nth t2.steps 4)))");
     h.drain();
-    assert_eq!(h.rack_slot().effect_slots[effect].plocks[4][CUTOFF], None);
+    assert_eq!(h.rack_slot().effect_slots[effect].plocks.cell(4, CUTOFF).copied(), None);
 }
 
 #[test]

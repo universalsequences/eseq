@@ -57,9 +57,7 @@ pub(super) enum EffectClipboard {
 fn without_parameter_locks(
     mut values: crate::effects::EffectSlotValuesSnapshot,
 ) -> crate::effects::EffectSlotValuesSnapshot {
-    for step in &mut values.plocks {
-        step.fill(None);
-    }
+    values.plocks.clear();
     values.key_locks.clear();
     values
 }
@@ -1525,8 +1523,8 @@ impl App {
         let source_host_before = self.fx_chain_host(FxChainLocator::Track(source_track))?;
         let target_host_before = self.fx_chain_host(FxChainLocator::Track(target_track))?;
         let mut moved = source_entries.remove(source_offset);
-        moved.snapshot.plocks.iter_mut().for_each(|step| step.fill(None));
-        moved.snapshot.plock_param_ids.iter_mut().for_each(|step| step.fill(None));
+        moved.snapshot.plocks.clear();
+        moved.snapshot.plock_param_ids.clear();
         moved.snapshot.key_locks.clear();
         moved.snapshot.key_lock_param_ids.clear();
         for tensor in &mut moved.snapshot.tensor_params {
@@ -1674,8 +1672,8 @@ impl App {
         let mut source_snapshot = EffectSlotSnapshot::capture(
             &self.state.pattern.midi_fx_slots[source_track][source_slot],
         );
-        source_snapshot.plocks.iter_mut().for_each(|step| step.fill(None));
-        source_snapshot.plock_param_ids.iter_mut().for_each(|step| step.fill(None));
+        source_snapshot.plocks.clear();
+        source_snapshot.plock_param_ids.clear();
         source_snapshot.key_locks.clear();
         source_snapshot.key_lock_param_ids.clear();
         for tensor in &mut source_snapshot.tensor_params {
@@ -4286,9 +4284,7 @@ impl App {
             .effect_slots
             .get_mut(slot_idx)
             .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
-        if step < slot.plocks.len() && param_idx < slot.plocks[step].len() {
-            slot.plocks[step][param_idx] = Some(value.clamp(param.min, param.max));
-        }
+        slot.set_plock(step, param_idx, value.clamp(param.min, param.max));
         self.sync_bus_effect_mod_active_plocks(bus_idx, step, slot_idx);
         Ok(())
     }
@@ -4404,13 +4400,8 @@ impl App {
         else {
             return;
         };
-        if step >= slot.plocks.len() {
-            return;
-        }
         for (active_param_idx, active) in updates {
-            if active_param_idx < slot.plocks[step].len() {
-                slot.plocks[step][active_param_idx] = Some(if active { 1.0 } else { 0.0 });
-            }
+            slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
         }
     }
 

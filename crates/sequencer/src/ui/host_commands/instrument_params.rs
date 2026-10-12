@@ -1117,7 +1117,7 @@ mod tests {
         assert_eq!(
             state.latest_scheduler_snapshot().tracks[TRACK]
                 .instrument_slot
-                .plocks[PRINT_STEP][PARAM],
+                .plocks.cell(PRINT_STEP, PARAM).copied(),
             Some(0.74),
             "printed instrument p-lock reaches the published scheduler snapshot",
         );
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(
             state.latest_scheduler_snapshot().tracks[TRACK].effect_slots
                 [EFFECT_SLOT]
-                .plocks[PRINT_STEP][2],
+                .plocks.cell(PRINT_STEP, 2).copied(),
             Some(1_800.0),
             "printed effect p-lock reaches the published scheduler snapshot",
         );
@@ -1283,7 +1283,7 @@ mod tests {
         );
         assert_eq!(
             state.latest_scheduler_snapshot().tracks[TRACK].midi_fx_slots[0]
-                .plocks[PRINT_STEP][0],
+                .plocks.cell(PRINT_STEP, 0).copied(),
             Some(6.0),
             "printed MIDI-FX p-lock reaches the published scheduler snapshot",
         );
@@ -1340,7 +1340,7 @@ mod tests {
         );
         assert!(tick_step_print(&mut app, &shared).printed);
         assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
-        assert_eq!(app.buses[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_600.0));
+        assert_eq!(app.buses[0].effect_slots[0].plocks.cell(PRINT_STEP, 2).copied(), Some(1_600.0));
         let racks = state.pattern.rack_tracks.lock().unwrap();
         let rack = racks[TRACK].as_ref().unwrap();
         assert_eq!(rack.slots[0].gain, rack_before.slots[0].gain);
@@ -1355,14 +1355,14 @@ mod tests {
             rack_before.slots[0].instrument_slot.defaults,
         );
         assert_eq!(
-            rack.slots[0].instrument_slot.plocks[PRINT_STEP][8],
+            rack.slots[0].instrument_slot.plocks.cell(PRINT_STEP, 8).copied(),
             Some(22_050.0),
         );
         assert_eq!(
             rack.slots[0].effect_slots[0].defaults,
             rack_before.slots[0].effect_slots[0].defaults,
         );
-        assert_eq!(rack.slots[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_200.0));
+        assert_eq!(rack.slots[0].effect_slots[0].plocks.cell(PRINT_STEP, 2).copied(), Some(1_200.0));
         assert_eq!(rack.macros[0].value, rack_before.macros[0].value);
         assert_eq!(rack.macros[0].plocks[PRINT_STEP], Some(0.65));
         drop(racks);

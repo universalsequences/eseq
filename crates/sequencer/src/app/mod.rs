@@ -55,6 +55,8 @@ mod project_save;
 pub use project_save::ProjectSaveOutcome;
 mod break_kits;
 mod rack_clips;
+#[cfg(test)]
+mod launch_benchmark;
 pub mod rack_grooves;
 mod rack_sequencers;
 mod bus_outputs;
@@ -2539,7 +2541,7 @@ impl App {
                 effect_plocks: bus
                     .effect_slots
                     .iter()
-                    .map(|slot| slot.plocks.clone())
+                    .map(|slot| slot.plocks.to_vec())
                     .collect(),
                 effect_defaults: bus
                     .effect_slots
@@ -2560,9 +2562,8 @@ impl App {
         for bus in &mut self.buses {
             let Some(saved) = snapshot.iter().find(|saved| saved.id == bus.id) else {
                 for slot in &mut bus.effect_slots {
-                    slot.plocks = (0..MAX_STEPS)
-                        .map(|_| vec![None; slot.num_params as usize])
-                        .collect();
+                    slot.plocks.clear();
+                    slot.plock_param_ids.clear();
                 }
                 continue;
             };
@@ -2598,31 +2599,17 @@ impl App {
                     }
                 }
                 let Some(saved_plocks) = saved.effect_plocks.get(slot_idx) else {
-                    slot.plocks = (0..MAX_STEPS)
-                        .map(|_| vec![None; slot.num_params as usize])
-                        .collect();
+                    slot.plocks.clear();
+                    slot.plock_param_ids.clear();
                     continue;
                 };
                 let param_count = slot.num_params as usize;
-                slot.plocks = (0..MAX_STEPS)
-                    .map(|step| {
-                        let mut values = vec![None; param_count];
-                        if let Some(saved_step) = saved_plocks.get(step) {
-                            for (param_idx, value) in saved_step.iter().copied().enumerate() {
-                                if param_idx < values.len() {
-                                    values[param_idx] = value.map(|value| {
-                                        restored_bus_effect_default(
-                                            descriptors.get(slot_idx),
-                                            param_idx,
-                                            value,
-                                        )
-                                    });
-                                }
-                            }
-                        }
-                        values
-                    })
+                slot.plocks = saved_plocks.iter().take(MAX_STEPS)
+                    .map(|row| row.iter().copied().take(param_count).enumerate().map(|(param_idx, value)| {
+                        value.map(|value| restored_bus_effect_default(descriptors.get(slot_idx), param_idx, value))
+                    }).collect())
                     .collect();
+                slot.rebuild_lock_param_ids();
             }
         }
         self.publish_bus_effect_runtime();

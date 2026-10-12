@@ -5585,9 +5585,9 @@
             .expect("rack state");
         let slot = &after.slots[0].effect_slots[effect_slot];
         assert_eq!(slot.defaults[1], default);
-        assert_eq!(slot.plocks[2][1], Some(0.75));
-        assert_eq!(slot.plocks[3][1], Some(0.75));
-        assert!(slot.plock_param_ids[2][1].is_some());
+        assert_eq!(slot.plocks.cell(2, 1).copied(), Some(0.75));
+        assert_eq!(slot.plocks.cell(3, 1).copied(), Some(0.75));
+        assert!(slot.plock_param_ids.cell(2, 1).copied().is_some());
         graph.process_block();
     }
 

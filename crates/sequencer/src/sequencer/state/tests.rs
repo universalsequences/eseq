@@ -314,7 +314,7 @@
                     }
                 })
                 .collect(),
-            plock_param_ids: vec![vec![None, None]; MAX_STEPS],
+            plock_param_ids: vec![vec![None, None]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![id as u32, id as u32 + 10],
@@ -734,8 +734,8 @@
                 snapshot.track_bits[0][0] = 10 + scene as u64;
                 snapshot.step_data[0][0][0] = 0.25 + scene as f32;
                 snapshot.track_params[0].volume = 0.4 + scene as f32 * 0.1;
-                snapshot.effect_slots[0][0].plocks[scene][0] = Some(100.0 + scene as f32);
-                snapshot.instrument_slots[0].plocks[scene][0] = Some(0.1 + scene as f32);
+                snapshot.effect_slots[0][0].plocks.set(scene, 0, Some(100.0 + scene as f32));
+                snapshot.instrument_slots[0].plocks.set(scene, 0, Some(0.1 + scene as f32));
                 snapshot.instrument_slots[0]
                     .key_locks
                     .insert(60 + scene as u8, vec![Some(0.5), None]);
@@ -1077,8 +1077,8 @@
             let patch = pool.sounds.patches.get_mut(&id).unwrap();
             assert_eq!(std::sync::Arc::strong_count(patch), 1);
             let slot = &mut std::sync::Arc::make_mut(patch).rack_track.as_mut().unwrap().slots[0].instrument_slot;
-            slot.plocks[3][0] = Some(0.7);
-            slot.plock_param_ids[3][0] = None;
+            slot.plocks.set(3, 0, Some(0.7));
+            slot.plock_param_ids.set(3, 0, None);
             id
         });
         assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &[(desc.clone(), 44, 45)]));
@@ -1750,14 +1750,14 @@
         second.midi_fx_slots[0][0] = sample_effect_slot_snapshot(21);
         first.rack_tracks[0] = Some(sample_rack_track_snapshot());
         second.rack_tracks[0] = Some(sample_rack_track_snapshot());
-        second.effect_slots[0][0].plocks[5][1] = Some(555.0);
-        second.midi_fx_slots[0][0].plocks[6][1] = Some(666.0);
+        second.effect_slots[0][0].plocks.set(5, 1, Some(555.0));
+        second.midi_fx_slots[0][0].plocks.set(6, 1, Some(666.0));
         second.instrument_slots[0]
             .key_locks
             .insert(60, vec![Some(777.0), None]);
         second.rack_tracks[0].as_mut().unwrap().slots[0]
             .instrument_slot
-            .plocks[7][1] = Some(888.0);
+            .plocks.set(7, 1, Some(888.0));
         state.replace_pattern_repository(vec![first, second], 0);
 
         state.pattern.effect_chains[0][0].defaults.set(0, 91.0);
@@ -1818,8 +1818,8 @@
             // ...but slot p-locks do not.
             assert_eq!(rack_slot.param_plocks.rows[3][0], None);
         }
-        assert_eq!(patterns[1].effect_slots[0][0].plocks[5][1], Some(555.0));
-        assert_eq!(patterns[1].midi_fx_slots[0][0].plocks[6][1], Some(666.0));
+        assert_eq!(patterns[1].effect_slots[0][0].plocks.cell(5, 1).copied(), Some(555.0));
+        assert_eq!(patterns[1].midi_fx_slots[0][0].plocks.cell(6, 1).copied(), Some(666.0));
         assert_eq!(
             patterns[1].instrument_slots[0].key_locks[&60][0],
             Some(777.0)
@@ -1827,7 +1827,7 @@
         assert_eq!(
             patterns[1].rack_tracks[0].as_ref().unwrap().slots[0]
                 .instrument_slot
-                .plocks[7][1],
+                .plocks.cell(7, 1).copied(),
             Some(888.0)
         );
     }
@@ -2938,11 +2938,11 @@
         assert_eq!(snapshot.effect_slots[0][0].node_id, 100);
         assert_eq!(snapshot.effect_slots[0][1].node_id, 102);
         assert_eq!(snapshot.effect_slots[0][1].defaults, vec![2.0, 2.5]);
-        assert_eq!(snapshot.effect_slots[0][1].plocks[2][0], Some(2.0));
+        assert_eq!(snapshot.effect_slots[0][1].plocks.cell(2, 0).copied(), Some(2.0));
         assert_eq!(snapshot.effect_slots[0][2].node_id, 0);
         assert_eq!(snapshot.effect_slots[0][2].num_params, 0);
         assert!(snapshot.effect_slots[0][2].defaults.is_empty());
-        assert!(snapshot.effect_slots[0][2].plocks[2].is_empty());
+        assert!(snapshot.effect_slots[0][2].plocks.is_empty());
     }
 
     #[test]
@@ -3043,9 +3043,9 @@
                     plocks: {
                         let mut plocks = (0..MAX_STEPS).map(|_| vec![None]).collect::<Vec<_>>();
                         plocks[0][0] = Some(2.0);
-                        plocks
+                        plocks.into()
                     },
-                    plock_param_ids: vec![vec![None]; MAX_STEPS],
+                    plock_param_ids: vec![vec![None]; MAX_STEPS].into(),
                     key_locks: std::collections::BTreeMap::new(),
                     key_lock_param_ids: std::collections::BTreeMap::new(),
                     param_node_indices: vec![0],
@@ -3100,7 +3100,7 @@
         remap_snapshot_sidechain_references_after_track_delete(&mut snapshot, &descriptors, 2, 4);
 
         assert_eq!(snapshot.effect_slots[1][0].defaults[0], 2.0);
-        assert_eq!(snapshot.effect_slots[1][0].plocks[0][0], Some(0.0));
+        assert_eq!(snapshot.effect_slots[1][0].plocks.cell(0, 0).copied(), Some(0.0));
     }
 
     /// Note ids (kind-bindings spec §14.2j): each chord note gets its own
@@ -6839,8 +6839,8 @@
         assert!(!Arc::ptr_eq(&before.tracks[0], &after.tracks[0]));
         assert!(Arc::ptr_eq(&before.tracks[1], &after.tracks[1]));
         assert!(after.tracks[0].steps[3].active);
-        assert_eq!(after.tracks[0].effect_slots[0].plocks[3][0], Some(0.75));
-        assert_eq!(after.tracks[0].instrument_slot.plocks[3][0], Some(0.25));
+        assert_eq!(after.tracks[0].effect_slots[0].plocks.cell(3, 0).copied(), Some(0.75));
+        assert_eq!(after.tracks[0].instrument_slot.plocks.cell(3, 0).copied(), Some(0.25));
     }
 
     /// Bead eseq-sj01: `start_playback`/`stop_playback`/`toggle_play` mutate

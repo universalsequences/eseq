@@ -10475,7 +10475,7 @@ fn replay_bus_effect_values_patch(
     scene_bus.effect_defaults.resize_with(slot + 1, Vec::new);
     scene_bus.effect_plocks.resize_with(slot + 1, Vec::new);
     scene_bus.effect_defaults[slot] = values.defaults.clone();
-    scene_bus.effect_plocks[slot] = values.plocks.clone();
+    scene_bus.effect_plocks[slot] = values.plocks.to_vec();
     app.state.replace_bus_pattern_repository(repository, &live_all);
 
     if app.state.current_scene_index() == scene_idx {

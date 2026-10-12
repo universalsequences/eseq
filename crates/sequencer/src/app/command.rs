@@ -2155,10 +2155,10 @@ mod tests {
             slot.defaults[8], 44_100.0,
             "editing selected rack sampler steps must not overwrite the default sample rate"
         );
-        assert_eq!(slot.plocks[2][8], Some(22_050.0));
-        assert_eq!(slot.plocks[3][8], Some(22_050.0));
+        assert_eq!(slot.plocks.cell(2, 8).copied(), Some(22_050.0));
+        assert_eq!(slot.plocks.cell(3, 8).copied(), Some(22_050.0));
         assert!(
-            slot.plock_param_ids[2][8].is_some(),
+            slot.plock_param_ids.cell(2, 8).copied().is_some(),
             "rack sampler p-locks need node identity for scheduler/audio resolution"
         );
         assert!(rack.slots[0].track_sound_state.dirty);
@@ -2180,7 +2180,7 @@ mod tests {
         let plocks = |app: &App| {
             let racks = app.state.pattern.rack_tracks.lock().unwrap();
             let slot = &racks[0].as_ref().unwrap().slots[0].instrument_slot;
-            (slot.plocks[2][8], slot.plocks[3][8], slot.plocks[4][8])
+            (slot.plocks.cell(2, 8).copied(), slot.plocks.cell(3, 8).copied(), slot.plocks.cell(4, 8).copied())
         };
         // The set's coalescing entry closes before the clear.
         crate::app::edit::finish_active_gesture(&mut app);
@@ -2343,8 +2343,8 @@ mod tests {
 
         let slot = &app.buses[0].effect_slots[0];
         assert_eq!(slot.defaults, defaults_before);
-        assert_eq!(slot.plocks[3][2], Some(1.0), "value is descriptor-clamped");
-        assert_eq!(slot.plocks[3][1], Some(1.0), "mod-active lock is synced");
+        assert_eq!(slot.plocks.cell(3, 2).copied(), Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks.cell(3, 1).copied(), Some(1.0), "mod-active lock is synced");
     }
 
     #[test]
@@ -2385,13 +2385,13 @@ mod tests {
             before.slots[0].instrument_slot.defaults,
             "instrument defaults stay unchanged",
         );
-        assert_eq!(slot.instrument_slot.plocks[3][8], Some(44_100.0));
+        assert_eq!(slot.instrument_slot.plocks.cell(3, 8).copied(), Some(44_100.0));
         assert_eq!(
             slot.effect_slots[0].defaults,
             before.slots[0].effect_slots[0].defaults,
             "effect defaults stay unchanged",
         );
-        assert_eq!(slot.effect_slots[0].plocks[3][2], Some(1.0));
+        assert_eq!(slot.effect_slots[0].plocks.cell(3, 2).copied(), Some(1.0));
         assert_eq!(rack.macros[0].value, before.macros[0].value);
         assert_eq!(rack.macros[0].plocks[3], Some(1.0));
     }
@@ -2954,7 +2954,7 @@ mod tests {
         app.buses[0].effect_slots[0].defaults[0] = 0.2;
         app.state
             .replace_bus_pattern_repository(vec![origin.clone(), target], &origin);
-        app.buses[0].effect_slots[0].plocks[0][0] = Some(0.33);
+        app.buses[0].effect_slots[0].plocks.set(0, 0, Some(0.33));
         app.graph.bus_node_ids.push(crate::app::BusNodeIds {
             id: app.buses[0].id,
             pdc_id: 0,
@@ -2982,7 +2982,7 @@ mod tests {
         {
             let runtime = app.graph.bus_effect_runtime.lock().unwrap();
             assert!((runtime[0].effect_slots[0].defaults[0] - 0.8).abs() < 1.0e-6);
-            assert_eq!(runtime[0].effect_slots[0].plocks[0][0], Some(0.33));
+            assert_eq!(runtime[0].effect_slots[0].plocks.cell(0, 0).copied(), Some(0.33));
         }
 
         app.set_scene_push_value(0.5);
@@ -3127,13 +3127,13 @@ mod tests {
 
         let slot = &app.buses[0].effect_slots[0];
         assert_eq!(slot.defaults[1], 1.0);
-        assert_eq!(slot.plocks[step][1], Some(0.0));
+        assert_eq!(slot.plocks.cell(step, 1).copied(), Some(0.0));
 
         app.set_bus_effect_plock(0, 0, step, 3, 0.5)
             .expect("second bus depth p-lock should update");
 
         let slot = &app.buses[0].effect_slots[0];
-        assert_eq!(slot.plocks[step][1], Some(1.0));
+        assert_eq!(slot.plocks.cell(step, 1).copied(), Some(1.0));
     }
 
     #[test]

@@ -357,7 +357,7 @@ fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
     assert!(slot.set_plock(3, 1, 0.75));
     assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), 0.75);
 
-    slot.plock_param_ids[3][1] = None;
+    slot.plock_param_ids.set(3, 1, None);
     assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), default);
 }
 

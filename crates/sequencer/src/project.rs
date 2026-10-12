@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot, StepLockRows, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
     normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
@@ -2420,8 +2420,8 @@ pub struct ProjectTrackSend {
 pub struct ProjectEffectSlot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
-    pub plocks: Vec<Vec<Option<f32>>>,
-    pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub plocks: StepLockRows<f32>,
+    pub plock_param_ids: StepLockRows<ParamNodeId>,
     pub key_locks: std::collections::BTreeMap<u8, Vec<Option<f32>>>,
     pub key_lock_param_ids: std::collections::BTreeMap<u8, Vec<Option<ParamNodeId>>>,
     pub tensor_params: Vec<TensorParamSnapshot>,
@@ -4344,8 +4344,10 @@ struct DenseProjectEffectSlot {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ProjectEffectSlotRepr {
-    Sparse(SparseProjectEffectSlot),
+    // Dense has required legacy fields; try it before the sparse form whose
+    // optional fields would otherwise accept and silently discard dense locks.
     Dense(DenseProjectEffectSlot),
+    Sparse(SparseProjectEffectSlot),
     Empty(()),
 }
 
@@ -4473,12 +4475,12 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
         let repr = ProjectEffectSlotRepr::deserialize(deserializer)?;
         Ok(match repr {
             ProjectEffectSlotRepr::Sparse(slot) => {
-                let mut plocks = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
-                let mut plock_param_ids = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
+                let mut plocks = StepLockRows::default();
+                let mut plock_param_ids = StepLockRows::default();
                 for entry in slot.plocks_sparse {
-                    if entry.step < plocks.len() && entry.param < slot.defaults.len() {
-                        plocks[entry.step][entry.param] = Some(entry.value);
-                        plock_param_ids[entry.step][entry.param] = entry.param_id;
+                    if entry.step < MAX_STEPS && entry.param < slot.defaults.len() {
+                        plocks.set(entry.step, entry.param, Some(entry.value));
+                        plock_param_ids.set(entry.step, entry.param, entry.param_id);
                     }
                 }
                 let mut key_locks = std::collections::BTreeMap::new();
@@ -4515,29 +4517,39 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     sampler_slice_edits: slot.sampler_slice_edits,
                 }
             }
-            ProjectEffectSlotRepr::Dense(slot) => Self {
-                num_params: slot.num_params,
-                defaults: slot.defaults,
-                plocks: slot.plocks,
-                plock_param_ids: slot.plock_param_ids,
-                key_locks: slot.key_locks,
-                key_lock_param_ids: slot.key_lock_param_ids,
-                tensor_params: slot
-                    .tensor_params
-                    .into_iter()
-                    .map(tensor_snapshot_from_sparse)
-                    .collect(),
-                param_node_indices: slot.param_node_indices,
-                param_node_spans: slot.param_node_spans,
-                ir: slot.ir,
-                table: slot.table,
-                sampler_slice_edits: slot.sampler_slice_edits,
+            ProjectEffectSlotRepr::Dense(slot) => {
+                let plocks: StepLockRows<f32> = slot.plocks.into();
+                // Old dense files may stamp an identity on every absent cell.
+                // Preserve metadata only where there is an authored value.
+                let plock_param_ids = plocks.iter().enumerate().map(|(step, row)| {
+                    row.iter().enumerate().map(|(param, value)| {
+                        value.and_then(|_| slot.plock_param_ids.get(step)?.get(param).copied().flatten())
+                    }).collect()
+                }).collect();
+                Self {
+                    num_params: slot.num_params,
+                    defaults: slot.defaults,
+                    plocks,
+                    plock_param_ids,
+                    key_locks: slot.key_locks,
+                    key_lock_param_ids: slot.key_lock_param_ids,
+                    tensor_params: slot
+                        .tensor_params
+                        .into_iter()
+                        .map(tensor_snapshot_from_sparse)
+                        .collect(),
+                    param_node_indices: slot.param_node_indices,
+                    param_node_spans: slot.param_node_spans,
+                    ir: slot.ir,
+                    table: slot.table,
+                    sampler_slice_edits: slot.sampler_slice_edits,
+                }
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
                 defaults: Vec::new(),
-                plocks: vec![Vec::new(); MAX_STEPS],
-                plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                plocks: StepLockRows::default(),
+                plock_param_ids: StepLockRows::default(),
                 key_locks: std::collections::BTreeMap::new(),
                 key_lock_param_ids: std::collections::BTreeMap::new(),
                 tensor_params: Vec::new(),
@@ -4995,8 +5007,8 @@ mod tests {
                     ProjectEffectSlot {
                         num_params: 2,
                         defaults: vec![0.1, 0.2],
-                        plocks: vec![vec![None, Some(0.8)]; 256],
-                        plock_param_ids: vec![vec![None, None]; 256],
+                        plocks: vec![vec![None, Some(0.8)]; 256].into(),
+                        plock_param_ids: vec![vec![None, None]; 256].into(),
                         key_locks: std::collections::BTreeMap::new(),
                         key_lock_param_ids: std::collections::BTreeMap::new(),
                         param_node_indices: vec![0, 1],
@@ -5009,8 +5021,8 @@ mod tests {
                     ProjectEffectSlot {
                         num_params: 0,
                         defaults: vec![],
-                        plocks: vec![vec![]; 256],
-                        plock_param_ids: vec![vec![]; 256],
+                        plocks: vec![vec![]; 256].into(),
+                        plock_param_ids: vec![vec![]; 256].into(),
                         key_locks: std::collections::BTreeMap::new(),
                         key_lock_param_ids: std::collections::BTreeMap::new(),
                         param_node_indices: vec![],
@@ -7292,6 +7304,30 @@ mod tests {
     }
 
     #[test]
+    fn dense_effect_slot_load_keeps_values_and_discards_unused_identity_cells() {
+        let id = ParamNodeId { logical_id: 42, node_param_idx: 1 };
+        let mut locks = vec![vec![None; 2]; MAX_STEPS];
+        locks[255][1] = Some(0.75);
+        let json = serde_json::json!({
+            "num_params": 2, "defaults": [0.1, 0.2], "param_node_indices": [0, 1],
+            "plocks": locks, "plock_param_ids": vec![vec![Some(id); 2]; MAX_STEPS],
+        });
+        let slot: ProjectEffectSlot = serde_json::from_value(json).unwrap();
+        assert_eq!(slot.plocks.cell(255, 1), Some(&0.75));
+        assert_eq!(slot.plock_param_ids.cell(255, 1), Some(&id));
+        assert_eq!(slot.plock_param_ids.iter().flatten().flatten().count(), 1);
+        assert_eq!(slot.plock_param_ids.cell(0, 0), None);
+        let saved = serde_json::to_value(&slot).unwrap();
+        assert!(saved.get("plocks").is_none());
+        assert_eq!(saved["plocks_sparse"].as_array().unwrap().len(), 1);
+        let roundtrip: ProjectEffectSlot = serde_json::from_value(saved).unwrap();
+        assert_eq!(roundtrip.plocks, slot.plocks);
+        assert_eq!(roundtrip.plock_param_ids, slot.plock_param_ids);
+        let empty: ProjectEffectSlot = serde_json::from_str("null").unwrap();
+        assert_eq!(empty.plocks.retained_bytes() + empty.plock_param_ids.retained_bytes(), 0);
+    }
+
+    #[test]
     fn sparse_effect_slot_deserializes() {
         let json = r#"{
             "num_params": 2,
@@ -7304,8 +7340,8 @@ mod tests {
         let slot: ProjectEffectSlot = serde_json::from_str(json).expect("deserialize sparse slot");
         assert_eq!(slot.num_params, 2);
         assert_eq!(slot.defaults, vec![0.1, 0.2]);
-        assert_eq!(slot.plocks[3][1], Some(0.8));
-        assert_eq!(slot.plocks[0][1], None);
+        assert_eq!(slot.plocks.cell(3, 1).copied(), Some(0.8));
+        assert_eq!(slot.plocks.cell(0, 1).copied(), None);
         assert_eq!(slot.key_locks[&69][0], Some(0.45));
         assert_eq!(
             slot.key_lock_param_ids[&69][0],
@@ -8125,8 +8161,8 @@ mod tests {
         let slot = ProjectEffectSlot {
             num_params: 2,
             defaults: vec![0.35, 1.0],
-            plocks: vec![Vec::new(); MAX_STEPS],
-            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            plocks: StepLockRows::default(),
+            plock_param_ids: StepLockRows::default(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![10, 11],
@@ -8195,8 +8231,8 @@ mod tests {
         let slot = ProjectEffectSlot {
             num_params: 2,
             defaults: vec![0.1, 0.2],
-            plocks: vec![Vec::new(); MAX_STEPS],
-            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            plocks: StepLockRows::default(),
+            plock_param_ids: StepLockRows::default(),
             key_locks,
             key_lock_param_ids,
             param_node_indices: vec![10, 11],
@@ -8229,8 +8265,8 @@ mod tests {
         let slot = ProjectEffectSlot {
             num_params: 0,
             defaults: Vec::new(),
-            plocks: vec![Vec::new(); MAX_STEPS],
-            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            plocks: StepLockRows::default(),
+            plock_param_ids: StepLockRows::default(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: Vec::new(),

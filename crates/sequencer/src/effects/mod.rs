@@ -54,6 +54,9 @@ pub(crate) mod silence;
 #[allow(dead_code)]
 pub(crate) mod tape;
 
+mod step_lock_rows;
+pub use step_lock_rows::StepLockRows;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -989,30 +992,64 @@ mod tests {
         let descriptor = EffectDescriptor::builtin_sampler();
         let slot = EffectSlotState::new(&descriptor, 7);
         let mut base = EffectSlotSnapshot::capture_authoring_values(&slot);
-        base.plocks = vec![vec![None; 4]; 2];
+        base.plocks = super::StepLockRows::default();
         // The drag moved cell (0, 1) and added key locks on note 60.
         let mut from = base.clone();
-        from.plocks[0][1] = Some(1.0);
+        from.plocks.set(0, 1, Some(1.0));
         from.key_locks.insert(60, vec![Some(0.5); base.num_params]);
         // The edit moved cell (0, 2) and added key locks on note 62.
         let mut to = from.clone();
-        to.plocks[0][2] = Some(2.0);
+        to.plocks.set(0, 2, Some(2.0));
+        to.plocks.set(255, 3, Some(-0.0));
         to.key_locks.insert(62, vec![Some(0.25); base.num_params]);
         let rebased =
             super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &to).expect("disjoint");
         assert_eq!(
-            rebased.plocks[0][1], None,
+            rebased.plocks.cell(0, 1).copied(), None,
             "the drag's cell stays the base's"
         );
-        assert_eq!(rebased.plocks[0][2], Some(2.0), "the edit's cell");
+        assert_eq!(rebased.plocks.cell(0, 2).copied(), Some(2.0), "the edit's cell");
+        assert_eq!(rebased.plocks.cell(255, 3).unwrap().to_bits(), (-0.0f32).to_bits());
         assert_eq!(
             rebased.key_locks.keys().copied().collect::<Vec<_>>(),
             vec![62]
         );
         // The edit moved the drag's own cell: a conflict.
         let mut clash = from.clone();
-        clash.plocks[0][1] = Some(3.0);
+        clash.plocks.set(0, 1, Some(3.0));
         assert!(super::EffectSlotValuesSnapshot::rebase_edit(&base, &from, &clash).is_none());
+    }
+
+    #[test]
+    fn compact_snapshot_restore_clears_omitted_cells_and_clones_edit_independently() {
+        let desc = EffectDescriptor::builtin_filter();
+        let live = EffectSlotState::new(&desc, 42);
+        let mut saved = EffectSlotSnapshot::capture(&live);
+        assert_eq!(saved.plocks.retained_bytes(), 0);
+        assert_eq!(saved.plock_param_ids.retained_bytes(), 0);
+        saved.sync_to_descriptor(&desc, 42);
+        assert_eq!(saved.plocks.retained_bytes(), 0);
+        assert_eq!(saved.plock_param_ids.retained_bytes(), 0);
+        saved.set_plock(3, 0, 0.7);
+        let mut edited = saved.clone();
+        edited.set_plock(255, 1, 0.9);
+        edited.clear_plock(3, 0);
+        assert_eq!(saved.explicit_plock_value(3, 0), Some(0.7));
+        assert_eq!(saved.explicit_plock_value(255, 1), None);
+        edited.restore(&live);
+        // Stale locks both beyond the saved row width and beyond its last step.
+        live.set_plock(3, 1, 0.2);
+        saved.restore(&live);
+        assert_eq!(live.plocks.get(3, 0), Some(0.7));
+        assert_eq!(live.plocks.get(3, 1), None);
+        assert_eq!(live.plocks.get(255, 1), None);
+        assert_eq!(live.plocks.get_id(255, 1), None);
+        assert!(EffectSlotSnapshot::capture(&live).authoring_values().bit_exact_eq(&saved.authoring_values()));
+        saved.clear_step_plocks(3);
+        saved.restore(&live);
+        assert!(!live.plocks.has_any_plock());
+        assert_eq!(saved.plocks.retained_bytes(), 0);
+        assert_eq!(saved.plock_param_ids.retained_bytes(), 0);
     }
 
     #[test]
@@ -1080,13 +1117,13 @@ mod tests {
             (0..crate::sequencer::MAX_STEPS)
             .map(|_| vec![None; desc.params.len()])
             .collect();
-        loaded.plocks[3][SLOT_PARAM_SLICE_MODE] = Some(1.0);
+        loaded.plocks.set(3, SLOT_PARAM_SLICE_MODE, Some(1.0));
         assert_eq!(loaded.node_id, 0, "a freshly deserialized slot is unbound");
 
         loaded.sync_to_descriptor(&desc, 200);
 
         assert_eq!(
-            loaded.plocks[3][SLOT_PARAM_SLICE_MODE],
+            loaded.plocks.cell(3, SLOT_PARAM_SLICE_MODE).copied(),
             Some(1.0),
             "a saved slice p-lock must survive the load-time sync"
         );
@@ -1462,7 +1499,7 @@ mod tests {
         slot.set_plock(3, 0, 0.7);
         slot.sync_to_descriptor_with_modulator(&desc, 42, 43);
         assert_eq!(slot.defaults[1], 0.0);
-        assert_eq!(slot.plocks[3][1], Some(1.0));
+        assert_eq!(slot.plocks.cell(3, 1).copied(), Some(1.0));
         assert!(slot.is_synced_to_descriptor_with_modulator(&desc, 42, 43));
         let storage = slot.plocks[3].as_ptr();
         slot.sync_to_descriptor_with_modulator(&desc, 42, 43);
@@ -1471,15 +1508,15 @@ mod tests {
         // Node identity alone is insufficient: loaded snapshots can carry
         // stale mappings, incomplete rows, or out-of-date modulation flags.
         let mutations: &[fn(&mut EffectSlotSnapshot)] = &[
-            |s| s.plock_param_ids[3][0] = None,
-            |s| { s.plocks[4].pop(); },
-            |s| { s.plock_param_ids.pop(); },
+            |s| s.plock_param_ids.set(3, 0, None),
+            |s| s.plocks.set(4, s.num_params as usize, Some(0.9)),
+            |s| s.plock_param_ids.clear(),
             |s| s.param_node_spans[0] += 1,
             |s| s.param_node_indices[0] += 1,
             |s| s.modulator_node_id += 1,
             |s| s.node_id += 1,
             |s| s.defaults[1] = 1.0,
-            |s| s.plocks[3][1] = None,
+            |s| s.plocks.set(3, 1, None),
             |s| { s.key_locks.insert(60, vec![None; s.num_params as usize]); },
         ];
         for (case, mutate) in mutations.iter().enumerate() {
@@ -1488,15 +1525,15 @@ mod tests {
             assert!(!candidate.is_synced_to_descriptor_with_modulator(&desc, 42, 43));
             candidate.sync_to_descriptor_with_modulator(&desc, 42, 43);
             assert!(candidate.is_synced_to_descriptor_with_modulator(&desc, 42, 43), "case {case}");
-            assert_eq!(candidate.plocks[3][0], Some(0.7));
-            assert_eq!(candidate.plocks[3][1], Some(1.0));
+            assert_eq!(candidate.plocks.cell(3, 0).copied(), Some(0.7));
+            assert_eq!(candidate.plocks.cell(3, 1).copied(), Some(1.0));
         }
         let mut changed = desc.clone();
         changed.params[0].node_param_idx += 1;
         assert!(!slot.is_synced_to_descriptor_with_modulator(&changed, 42, 43));
         slot.sync_to_descriptor_with_modulator(&changed, 42, 43);
         assert!(slot.is_synced_to_descriptor_with_modulator(&changed, 42, 43));
-        assert_eq!(slot.plocks[3][0], Some(0.7));
+        assert_eq!(slot.plocks.cell(3, 0).copied(), Some(0.7));
     }
 
     #[test]
@@ -1551,17 +1588,17 @@ mod tests {
             table: None,
             sampler_slice_edits: None,
         };
-        snapshot.plocks[3][0] = Some(0.9);
-        snapshot.plock_param_ids[3][0] = Some(ParamNodeId {
+        snapshot.plocks.set(3, 0, Some(0.9));
+        snapshot.plock_param_ids.set(3, 0, Some(ParamNodeId {
             logical_id: 10,
             node_param_idx: 15,
-        });
+        }));
 
         snapshot.sync_to_descriptor(&desc, 42);
 
-        assert_eq!(snapshot.plocks[3][0], Some(0.9));
+        assert_eq!(snapshot.plocks.cell(3, 0).copied(), Some(0.9));
         assert_eq!(
-            snapshot.plock_param_ids[3][0],
+            snapshot.plock_param_ids.cell(3, 0).copied(),
             Some(ParamNodeId {
                 logical_id: 42,
                 node_param_idx: 15,
@@ -1587,17 +1624,17 @@ mod tests {
         assert_eq!(slot.explicit_plock_value(3, 0), Some(0.7));
         // Identity metadata on an empty cell must still resolve as a default,
         // never as an off-step parameter change.
-        slot.plock_param_ids[3][1] = slot.param_node_id(1);
+        slot.plock_param_ids.set(3, 1, slot.param_node_id(1));
         assert_eq!(slot.explicit_plock_value(3, 1), None);
         assert_eq!(slot.explicit_plock_value(4, 0), None);
         assert_eq!(slot.explicit_plock_value(usize::MAX, 0), None);
         assert_eq!(slot.explicit_plock_value(3, usize::MAX), None);
         assert_eq!(slot.resolved_param_value(3, 1, -1.0), slot.defaults[1]);
 
-        slot.plock_param_ids[3][0].as_mut().unwrap().logical_id = 42;
+        slot.plock_param_ids.set(3, 0, Some(ParamNodeId { logical_id: 42, node_param_idx: slot.param_node_id(0).unwrap().node_param_idx }));
         assert_eq!(slot.explicit_plock_value(3, 0), None, "stale node identity");
         assert_eq!(slot.resolved_param_value(3, 0, -1.0), slot.defaults[0]);
-        slot.plock_param_ids[3][0] = None;
+        slot.plock_param_ids.set(3, 0, None);
         assert_eq!(slot.explicit_plock_value(3, 0), None, "missing identity");
     }
 
@@ -2739,13 +2776,13 @@ mod tests {
             table: None,
             sampler_slice_edits: None,
         };
-        snapshot.plocks[2][1] = Some(0.8);
+        snapshot.plocks.set(2, 1, Some(0.8));
 
         snapshot.sync_to_descriptor(&desc, 7);
 
         assert_eq!(snapshot.num_params as usize, desc.params.len());
         assert_eq!(&snapshot.defaults[..5], &[0.6, 0.45, 0.9, 0.1, 1.0]);
-        assert_eq!(snapshot.plocks[2][1], Some(0.8));
+        assert_eq!(snapshot.plocks.cell(2, 1).copied(), Some(0.8));
         for (i, value) in crate::effects::reverb::LEGACY_BYPASS_DEFAULTS.iter().enumerate() {
             assert_eq!(snapshot.defaults[5 + i], *value, "{}", desc.params[5 + i].name);
         }
@@ -9177,10 +9214,16 @@ impl SlotPLockData {
             return;
         }
         if let Some(cells) = self.cells() {
-            for idx in 0..cells.data.len() {
-                cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
-                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            // Empty stored snapshots are common on immediate scene changes.
+            // Do not sweep MAX_STEPS * max_params for a handful of old locks.
+            for step in 0..MAX_STEPS {
+                if self.step_count(step) == 0 { continue; }
+                let base = step * self.max_params;
+                for idx in base..base + self.max_params {
+                    cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                    cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                    cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                }
             }
         }
         self.plock_count.store(0, Ordering::Relaxed);
@@ -9286,14 +9329,14 @@ impl SlotPLockData {
     pub fn capture_rows(
         &self,
         num_params: usize,
-    ) -> (Vec<Vec<Option<f32>>>, Vec<Vec<Option<ParamNodeId>>>) {
+    ) -> (StepLockRows<f32>, StepLockRows<ParamNodeId>) {
         if !self.has_any_plock() {
             // No plocks anywhere: empty row sets denote "all None" and avoid
             // allocating MAX_STEPS * num_params Options per slot.
-            return (Vec::new(), Vec::new());
+            return (StepLockRows::default(), StepLockRows::default());
         }
         let Some(cells) = self.cells() else {
-            return (Vec::new(), Vec::new());
+            return (StepLockRows::default(), StepLockRows::default());
         };
         let read_np = num_params.min(self.max_params);
         let mut plocks = Vec::with_capacity(MAX_STEPS);
@@ -9329,13 +9372,11 @@ impl SlotPLockData {
             plocks.push(row);
             plock_param_ids.push(id_row);
         }
-        (plocks, plock_param_ids)
+        (plocks.into(), plock_param_ids.into())
     }
 
-    /// Bulk restore matching EffectSlotSnapshot::restore semantics: values
-    /// present in the snapshot rows are written (with their param ids), `None`
-    /// entries are cleared, and steps/params missing from the snapshot are
-    /// left untouched.
+    /// Restore a complete lock snapshot. Missing rows/cells mean no lock,
+    /// including steps/params after the last stored cell.
     pub fn restore_rows(
         &self,
         plocks: &[Vec<Option<f32>>],
@@ -9361,7 +9402,8 @@ impl SlotPLockData {
             }
         };
         let np = num_params.min(self.max_params);
-        for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
+        for step in 0..MAX_STEPS {
+            let row = plocks.get(step).map_or(&[][..], Vec::as_slice);
             if row.is_empty() {
                 // Empty row means "all None" at this step (see capture_rows):
                 // clear it, which is a no-op when the step holds nothing.
@@ -9375,9 +9417,9 @@ impl SlotPLockData {
             }
             let base = step * self.max_params;
             let id_row = plock_param_ids.get(step);
-            for p in 0..np.min(row.len()) {
+            for p in 0..np {
                 let idx = base + p;
-                match row[p] {
+                match row.get(p).copied().flatten() {
                     Some(val) => {
                         let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
                         let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
@@ -10836,7 +10878,7 @@ fn unique_param_index_by_name(desc: &EffectDescriptor, name: &str) -> Option<usi
 pub struct EffectSlotValuesSnapshot {
     pub num_params: usize,
     pub defaults: Vec<f32>,
-    pub plocks: Vec<Vec<Option<f32>>>,
+    pub plocks: StepLockRows<f32>,
     pub key_locks: BTreeMap<u8, Vec<Option<f32>>>,
     pub tensor_params: Vec<TensorParamSnapshot>,
     pub ir: Option<String>,
@@ -10907,7 +10949,7 @@ impl EffectSlotValuesSnapshot {
         } = self;
         std::mem::size_of::<Self>()
             + defaults.capacity() * std::mem::size_of::<f32>()
-            + optional_f32_rows_retained_bytes(plocks)
+            + plocks.retained_bytes()
             + key_locks
                 .iter()
                 .map(|(_, values)| {
@@ -11020,6 +11062,28 @@ pub fn rebase_optional_f32_rows(
     })
 }
 
+/// Missing compact cells are absent locks, not a change to the device schema.
+/// Merge the union of stored cells so independent edits still rebase when one
+/// side introduces/removes a row or extends its last parameter.
+fn rebase_step_lock_rows(
+    base: &StepLockRows<f32>,
+    from: &StepLockRows<f32>,
+    to: &StepLockRows<f32>,
+) -> Option<StepLockRows<f32>> {
+    let mut result = base.clone();
+    for step in 0..from.len().max(to.len()) {
+        let width = from.get(step).map_or(0, Vec::len).max(to.get(step).map_or(0, Vec::len));
+        for param in 0..width {
+            let before = from.cell(step, param).copied();
+            let after = to.cell(step, param).copied();
+            if optional_f32_bits_eq(&before, &after) { continue; }
+            if !optional_f32_bits_eq(&base.cell(step, param).copied(), &before) { return None; }
+            result.set(step, param, after);
+        }
+    }
+    Some(result)
+}
+
 impl EffectSlotValuesSnapshot {
     /// `base` with the components an edit moved from `from` to `to`
     /// ([`rebase_snapshot_component`]): param base values one by one,
@@ -11034,7 +11098,7 @@ impl EffectSlotValuesSnapshot {
             rebase_snapshot_elements(&base.defaults, &from.defaults, &to.defaults, |l, r| {
                 l.to_bits() == r.to_bits()
             })?;
-        let plocks = rebase_optional_f32_rows(&base.plocks, &from.plocks, &to.plocks)?;
+        let plocks = rebase_step_lock_rows(&base.plocks, &from.plocks, &to.plocks)?;
         let mut key_locks = BTreeMap::new();
         let notes: std::collections::BTreeSet<u8> = base
             .key_locks
@@ -11197,14 +11261,6 @@ fn tensor_snapshots_bits_eq(
         })
 }
 
-fn optional_f32_rows_retained_bytes(rows: &[Vec<Option<f32>>]) -> usize {
-    rows.len() * std::mem::size_of::<Vec<Option<f32>>>()
-        + rows
-            .iter()
-            .map(|row| row.capacity() * std::mem::size_of::<Option<f32>>())
-            .sum::<usize>()
-}
-
 fn tensor_snapshot_retained_bytes(tensor: &TensorParamSnapshot) -> usize {
     let TensorParamSnapshot {
         name,
@@ -11233,8 +11289,8 @@ pub struct EffectSlotSnapshot {
     pub modulator_node_id: u32,
     pub num_params: u32,
     pub defaults: Vec<f32>,
-    pub plocks: Vec<Vec<Option<f32>>>,
-    pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub plocks: StepLockRows<f32>,
+    pub plock_param_ids: StepLockRows<ParamNodeId>,
     pub key_locks: BTreeMap<u8, Vec<Option<f32>>>,
     pub key_lock_param_ids: BTreeMap<u8, Vec<Option<ParamNodeId>>>,
     pub tensor_params: Vec<TensorParamSnapshot>,
@@ -11339,7 +11395,7 @@ impl EffectSlotSnapshot {
         Ok(())
     }
 
-    fn rebuild_lock_param_ids(&mut self) {
+    pub(crate) fn rebuild_lock_param_ids(&mut self) {
         let param_ids = (0..self.num_params as usize)
             .map(|param_idx| self.param_node_id(param_idx))
             .collect::<Vec<_>>();
@@ -11509,7 +11565,7 @@ impl EffectSlotSnapshot {
     ) -> Self {
         let np = desc.params.len();
         let defaults: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
-        let plocks: Vec<Vec<Option<f32>>> = (0..MAX_STEPS).map(|_| vec![None; np]).collect();
+        let plocks = StepLockRows::default();
         let param_node_indices: Vec<u32> = desc.params.iter().map(|p| p.node_param_idx).collect();
         let param_node_spans: Vec<u32> = desc
             .params
@@ -11534,7 +11590,7 @@ impl EffectSlotSnapshot {
             num_params: np as u32,
             defaults,
             plocks,
-            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
+            plock_param_ids: StepLockRows::default(),
             key_locks: BTreeMap::new(),
             key_lock_param_ids: BTreeMap::new(),
             tensor_params,
@@ -11556,8 +11612,8 @@ impl EffectSlotSnapshot {
             modulator_node_id: 0,
             num_params: 0,
             defaults: Vec::new(),
-            plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-            plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            plocks: StepLockRows::default(),
+            plock_param_ids: StepLockRows::default(),
             key_locks: BTreeMap::new(),
             key_lock_param_ids: BTreeMap::new(),
             tensor_params: Vec::new(),
@@ -11599,32 +11655,10 @@ impl EffectSlotSnapshot {
         ParamNodeId::from_slot_param(self.node_id, self.modulator_node_id, raw_idx)
     }
 
-    fn ensure_plock_row_capacity(&mut self, step: usize, num_params: usize) -> bool {
-        if step >= MAX_STEPS {
-            return false;
-        }
-        while self.plocks.len() <= step {
-            self.plocks.push(Vec::new());
-        }
-        while self.plock_param_ids.len() <= step {
-            self.plock_param_ids.push(Vec::new());
-        }
-        if self.plocks[step].len() < num_params {
-            self.plocks[step].resize(num_params, None);
-        }
-        if self.plock_param_ids[step].len() < num_params {
-            self.plock_param_ids[step].resize(num_params, None);
-        }
-        true
-    }
-
     pub fn set_plock(&mut self, step: usize, param_idx: usize, value: f32) -> bool {
-        let num_params = self.num_params as usize;
-        if param_idx >= num_params || !self.ensure_plock_row_capacity(step, num_params) {
-            return false;
-        }
-        self.plocks[step][param_idx] = Some(value);
-        self.plock_param_ids[step][param_idx] = self.param_node_id(param_idx);
+        if param_idx >= self.num_params as usize || step >= MAX_STEPS { return false; }
+        self.plocks.set(step, param_idx, Some(value));
+        self.plock_param_ids.set(step, param_idx, self.param_node_id(param_idx));
         true
     }
 
@@ -11654,36 +11688,15 @@ impl EffectSlotSnapshot {
     }
 
     pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {
-        if step >= MAX_STEPS {
-            return false;
-        }
-        if let Some(step_plocks) = self.plocks.get_mut(step) {
-            if param_idx < step_plocks.len() {
-                step_plocks[param_idx] = None;
-            }
-        }
-        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
-            if param_idx < step_ids.len() {
-                step_ids[param_idx] = None;
-            }
-        }
+        if step >= MAX_STEPS { return false; }
+        self.plocks.set(step, param_idx, None);
+        self.plock_param_ids.set(step, param_idx, None);
         true
     }
 
     pub fn clear_step_plocks(&mut self, step: usize) {
-        if step >= MAX_STEPS {
-            return;
-        }
-        if let Some(step_plocks) = self.plocks.get_mut(step) {
-            for value in step_plocks {
-                *value = None;
-            }
-        }
-        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
-            for value in step_ids {
-                *value = None;
-            }
-        }
+        self.plocks.clear_step(step);
+        self.plock_param_ids.clear_step(step);
     }
 
     fn ensure_key_lock_row_capacity(&mut self, note: u8, num_params: usize) {
@@ -11878,7 +11891,6 @@ impl EffectSlotSnapshot {
             || !self.param_node_spans.iter().copied().eq(desc.params.iter().map(|p| p.node_param_span.max(1)))
             || self.instrument_voice_controls != instrument_voice::InstrumentVoiceControls::from_descriptor(desc)
             || self.transport_phase_param_idx != desc.transport_phase_param_idx().unwrap_or(NO_TRANSPORT_PHASE_PARAM)
-            || self.plocks.len() != MAX_STEPS || self.plock_param_ids.len() != MAX_STEPS
             || self.tensor_params.len() != desc.tensor_params.len()
             || !self.tensor_params.iter().zip(&desc.tensor_params)
                 .all(|(saved, expected)| saved.same_identity_as_descriptor(expected)
@@ -11888,9 +11900,12 @@ impl EffectSlotSnapshot {
         }
         let identities: Vec<_> = desc.params.iter().map(|p|
             ParamNodeId::from_slot_param(node_id, modulator_node_id, p.node_param_idx)).collect();
-        if !self.plocks.iter().zip(&self.plock_param_ids).all(|(row, ids)| {
-            row.len() == n && ids.len() == n
-                && *ids == identities
+        if !(0..self.plocks.len().max(self.plock_param_ids.len())).all(|step| {
+            let row = self.plocks.get(step).map_or(&[][..], Vec::as_slice);
+            let ids = self.plock_param_ids.get(step).map_or(&[][..], Vec::as_slice);
+            row.len() <= n && ids.len() <= n && (0..row.len().max(ids.len())).all(|i| {
+                ids.get(i).copied().flatten() == row.get(i).copied().flatten().and_then(|_| identities[i])
+            })
         }) || self.key_locks.len() != self.key_lock_param_ids.len()
             || !self.key_locks.iter().all(|(note, row)| {
                 row.len() == n && row.iter().any(Option::is_some)
@@ -11906,7 +11921,7 @@ impl EffectSlotSnapshot {
         Self::modulation_active_groups(desc).iter().all(|(active, depths)| {
             *active >= n || (self.defaults[*active] == self.modulation_active_value(depths, None).unwrap()
                 && self.plocks.iter().enumerate().all(|(step, row)| {
-                    row[*active] == self.modulation_active_value(depths, Some(step))
+                    row.get(*active).copied().flatten() == self.modulation_active_value(depths, Some(step))
                 }))
         })
     }
@@ -11976,12 +11991,8 @@ impl EffectSlotSnapshot {
         self.transport_phase_param_idx = desc
             .transport_phase_param_idx()
             .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
-        self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
-        // Normalize every column, including newly introduced or missing rows.
-        // Empty cells still carry no value; their identity cannot create a lock.
-        let identities: Vec<_> = self.param_node_indices.iter().map(|raw_idx|
-            ParamNodeId::from_slot_param(node_id, modulator_node_id, *raw_idx)).collect();
-        self.plock_param_ids = (0..MAX_STEPS).map(|_| identities.clone()).collect();
+        self.plocks = StepLockRows::default();
+        self.plock_param_ids = StepLockRows::default();
         self.key_locks = BTreeMap::new();
         self.key_lock_param_ids = BTreeMap::new();
         self.tensor_params = desc
@@ -12034,7 +12045,9 @@ impl EffectSlotSnapshot {
                         // mode, rewriting start/end and muting it outright.
                         continue;
                     }
-                    self.plocks[step][param_idx] = saved_step[param_idx];
+                    if let Some(value) = saved_step[param_idx] {
+                        self.set_plock(step, param_idx, value);
+                    }
                 }
             }
         }
@@ -12079,8 +12092,9 @@ impl EffectSlotSnapshot {
             self.defaults[active_idx] = self.modulation_active_value(&depths, None).unwrap();
             for step in 0..MAX_STEPS {
                 let value = self.modulation_active_value(&depths, Some(step));
-                if let Some(cell) = self.plocks.get_mut(step).and_then(|row| row.get_mut(active_idx)) {
-                    *cell = value;
+                match value {
+                    Some(value) => { self.set_plock(step, active_idx, value); }
+                    None => { self.clear_plock(step, active_idx); }
                 }
             }
         }

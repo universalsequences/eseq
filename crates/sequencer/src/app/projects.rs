@@ -481,8 +481,8 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
     project::ProjectEffectSlot {
         num_params: num_params as u32,
         defaults: desc.params.iter().map(|param| param.default).collect(),
-        plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
-        plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        plocks: crate::effects::StepLockRows::default(),
+        plock_param_ids: crate::effects::StepLockRows::default(),
         key_locks: std::collections::BTreeMap::new(),
         key_lock_param_ids: std::collections::BTreeMap::new(),
         tensor_params: desc
@@ -587,11 +587,11 @@ fn migrate_legacy_dgen_effect_slot(
             }
         }
     }
-    for row in &mut slot.plock_param_ids {
-        for param_id in row {
-            migrate_param_id(&shifted_sources, param_id);
+    slot.plock_param_ids.for_each_value_mut(|param_id| {
+        if shifted_sources.contains(&param_id.node_param_idx) {
+            param_id.node_param_idx += legacy_dgen_header_delta();
         }
-    }
+    });
     for row in slot.key_lock_param_ids.values_mut() {
         for param_id in row {
             migrate_param_id(&shifted_sources, param_id);
@@ -850,12 +850,8 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         }
     }
 
-    let mut plocks = (0..MAX_STEPS)
-        .map(|_| vec![None; new_np])
-        .collect::<Vec<_>>();
-    let mut plock_param_ids = (0..MAX_STEPS)
-        .map(|_| vec![None; new_np])
-        .collect::<Vec<_>>();
+    let mut plocks = crate::effects::StepLockRows::default();
+    let mut plock_param_ids = crate::effects::StepLockRows::default();
     let mut key_locks = std::collections::BTreeMap::new();
     let mut key_lock_param_ids = std::collections::BTreeMap::new();
     for step in 0..MAX_STEPS {
@@ -870,9 +866,9 @@ fn project_custom_instrument_slot_into_synced_snapshot(
                 .copied()
                 .flatten()
             {
-                plocks[step][new_idx] = Some(value);
-                plock_param_ids[step][new_idx] =
-                    ParamNodeId::from_slot_param(node_id, modulator_node_id, param.node_param_idx);
+                plocks.set(step, new_idx, Some(value));
+                plock_param_ids.set(step, new_idx,
+                    ParamNodeId::from_slot_param(node_id, modulator_node_id, param.node_param_idx));
             }
         }
     }
@@ -988,8 +984,8 @@ fn project_bus_pattern_snapshot_from_ui(
                 crate::project::ProjectEffectSlot {
                     num_params,
                     defaults,
-                    plocks: plocks.clone(),
-                    plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+                    plocks: plocks.clone().into(),
+                    plock_param_ids: crate::effects::StepLockRows::default(),
                     key_locks: std::collections::BTreeMap::new(),
                     key_lock_param_ids: std::collections::BTreeMap::new(),
                     tensor_params: Vec::new(),
@@ -1016,7 +1012,7 @@ fn project_bus_pattern_snapshot_to_ui(snapshot: ProjectBusPatternSnapshot) -> Bu
         effect_plocks: snapshot
             .effect_slots
             .into_iter()
-            .map(|slot| slot.plocks)
+            .map(|slot| slot.plocks.to_vec())
             .collect(),
     }
 }
@@ -5364,31 +5360,8 @@ impl App {
                                     graph_slot.instrument_slot.defaults.clone();
                             }
                             let num_params = slot.instrument_slot.num_params as usize;
-                            slot.instrument_slot.plocks.resize_with(MAX_STEPS, Vec::new);
-                            slot.instrument_slot
-                                .plock_param_ids
-                                .resize_with(MAX_STEPS, Vec::new);
-                            for step in 0..MAX_STEPS {
-                                slot.instrument_slot.plocks[step].resize(num_params, None);
-                                slot.instrument_slot.plock_param_ids[step].resize(num_params, None);
-                                for param_idx in 0..num_params {
-                                    if slot.instrument_slot.plocks[step][param_idx].is_none() {
-                                        slot.instrument_slot.plock_param_ids[step][param_idx] =
-                                            None;
-                                        continue;
-                                    }
-                                    slot.instrument_slot.plock_param_ids[step][param_idx] = slot
-                                        .instrument_slot
-                                        .node_param_idx(param_idx)
-                                        .and_then(|raw_idx| {
-                                            ParamNodeId::from_slot_param(
-                                                slot.instrument_slot.node_id,
-                                                slot.instrument_slot.modulator_node_id,
-                                                raw_idx,
-                                            )
-                                        });
-                                }
-                            }
+                            slot.instrument_slot.plocks.truncate_params(num_params);
+                            slot.instrument_slot.rebuild_lock_param_ids();
                         }
                         InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
                     }
@@ -5697,8 +5670,8 @@ impl App {
                                 crate::project::ProjectEffectSlot {
                                     num_params: 0,
                                     defaults: Vec::new(),
-                                    plocks: vec![Vec::new(); MAX_STEPS],
-                                    plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                    plocks: crate::effects::StepLockRows::default(),
+                                    plock_param_ids: crate::effects::StepLockRows::default(),
                                     key_locks: std::collections::BTreeMap::new(),
                                     key_lock_param_ids: std::collections::BTreeMap::new(),
                                     tensor_params: Vec::new(),
@@ -5753,8 +5726,8 @@ impl App {
                                 modulator_node_id,
                                 num_params: defaults.len() as u32,
                                 defaults,
-                                plocks: vec![Vec::new(); MAX_STEPS],
-                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                plocks: crate::effects::StepLockRows::default(),
+                                plock_param_ids: crate::effects::StepLockRows::default(),
                                 key_locks: std::collections::BTreeMap::new(),
                                 key_lock_param_ids: std::collections::BTreeMap::new(),
                                 tensor_params: Vec::new(),
@@ -5783,8 +5756,8 @@ impl App {
                             crate::project::ProjectEffectSlot {
                                 num_params: 0,
                                 defaults: Vec::new(),
-                                plocks: vec![Vec::new(); MAX_STEPS],
-                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                plocks: crate::effects::StepLockRows::default(),
+                                plock_param_ids: crate::effects::StepLockRows::default(),
                                 key_locks: std::collections::BTreeMap::new(),
                                 key_lock_param_ids: std::collections::BTreeMap::new(),
                                 tensor_params: Vec::new(),
@@ -6420,7 +6393,7 @@ mod tests {
         let mut slot = project::ProjectEffectSlot {
             num_params: 4,
             defaults: vec![1.0, 0.5, 0.25, 0.7],
-            plocks: vec![vec![None; 4]; 2],
+            plocks: vec![vec![None; 4]; 2].into(),
             plock_param_ids: vec![
                 vec![
                     None,
@@ -6437,7 +6410,7 @@ mod tests {
                     }),
                 ],
                 vec![None; 4],
-            ],
+            ].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::from([(
                 60,
@@ -6467,14 +6440,14 @@ mod tests {
             vec![4, 10, 13, crate::instruments::voice_modulator::MOD_PARAM_BASE + 3]
         );
         assert_eq!(
-            slot.plock_param_ids[0][1],
+            slot.plock_param_ids.cell(0, 1).copied(),
             Some(ParamNodeId {
                 logical_id: 11,
                 node_param_idx: 10,
             })
         );
         assert_eq!(
-            slot.plock_param_ids[0][3],
+            slot.plock_param_ids.cell(0, 3).copied(),
             Some(ParamNodeId {
                 logical_id: 12,
                 node_param_idx: 64,
@@ -6718,8 +6691,8 @@ mod tests {
             modulator_node_id,
             num_params: num_params as u32,
             defaults: vec![0.0; num_params],
-            plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
-            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            plocks: crate::effects::StepLockRows::default(),
+            plock_param_ids: crate::effects::StepLockRows::default(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices,
@@ -6991,7 +6964,7 @@ mod tests {
             crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0);
         saved_slot.defaults[0] = 0.0;
         saved_slot.defaults[1] = 1.0;
-        saved_slot.plocks[3][1] = Some(0.0);
+        saved_slot.plocks.set(3, 1, Some(0.0));
 
         restore_saved_bus_effect_slot_runtime_ids(&mut live_slot, saved_slot);
 
@@ -6999,7 +6972,7 @@ mod tests {
         assert_eq!(live_slot.modulator_node_id, 202);
         assert_eq!(live_slot.defaults[0], 0.0);
         assert_eq!(live_slot.defaults[1], 1.0);
-        assert_eq!(live_slot.plocks[3][1], Some(0.0));
+        assert_eq!(live_slot.plocks.cell(3, 1).copied(), Some(0.0));
     }
 
     #[test]
@@ -7017,18 +6990,14 @@ mod tests {
         let mut saved_slot =
             crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0);
         saved_slot.defaults[1] = 7.0;
-        saved_slot.plocks[3][2] = Some(0.25);
+        saved_slot.plocks.set(3, 2, Some(0.25));
         let saved_len = desc.params.len() - 3;
         saved_slot.num_params = saved_len as u32;
         saved_slot.defaults.truncate(saved_len);
         saved_slot.param_node_indices.truncate(saved_len);
         saved_slot.param_node_spans.truncate(saved_len);
-        for step in &mut saved_slot.plocks {
-            step.truncate(saved_len);
-        }
-        for step in &mut saved_slot.plock_param_ids {
-            step.truncate(saved_len);
-        }
+        saved_slot.plocks.truncate_params(saved_len);
+        saved_slot.plock_param_ids.truncate_params(saved_len);
 
         restore_saved_bus_effect_slot(&mut live_slot, saved_slot, &desc);
 
@@ -7037,7 +7006,7 @@ mod tests {
         assert_eq!(live_slot.num_params as usize, desc.params.len());
         assert_eq!(live_slot.defaults.len(), desc.params.len());
         assert_eq!(live_slot.defaults[1], 7.0);
-        assert_eq!(live_slot.plocks[3][2], Some(0.25));
+        assert_eq!(live_slot.plocks.cell(3, 2).copied(), Some(0.25));
         assert_eq!(live_slot.defaults[spring_idx], desc.params[spring_idx].default);
         assert_eq!(live_slot.param_node_indices.len(), desc.params.len());
     }
@@ -7047,10 +7016,10 @@ mod tests {
         let desc = EffectDescriptor::builtin_insert("Filter").expect("filter descriptor");
         let mut track_slot = default_project_effect_slot(&desc);
         track_slot.defaults[0] = 0.25;
-        track_slot.plocks[2][0] = Some(0.75);
+        track_slot.plocks.set(2, 0, Some(0.75));
         let mut bus_slot = default_project_effect_slot(&desc);
         bus_slot.defaults[0] = 0.5;
-        bus_slot.plocks[3][0] = Some(0.125);
+        bus_slot.plocks.set(3, 0, Some(0.125));
 
         let project_name = EffectDescriptor::builtin_insert_project_name("Filter")
             .expect("filter should have a persisted builtin name");
@@ -7221,8 +7190,8 @@ mod tests {
         let shimmer_slot = project::ProjectEffectSlot {
             num_params: shimmer_values.len() as u32,
             defaults: shimmer_values.clone(),
-            plocks: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
-            plock_param_ids: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
+            plocks: vec![vec![None; shimmer_values.len()]; MAX_STEPS].into(),
+            plock_param_ids: vec![vec![None; shimmer_values.len()]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 4],
@@ -7264,8 +7233,8 @@ mod tests {
         let old_slot = project::ProjectEffectSlot {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
-            plocks,
-            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![
@@ -7310,8 +7279,8 @@ mod tests {
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, 5);
         assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 0.56, 0.78]);
-        assert_eq!(restored.plocks[7][3], Some(0.33));
-        assert_eq!(restored.plocks[7][2], None);
+        assert_eq!(restored.plocks.cell(7, 3).copied(), Some(0.33));
+        assert_eq!(restored.plocks.cell(7, 2).copied(), None);
         assert_eq!(
             restored.param_node_indices,
             vec![
@@ -7332,8 +7301,8 @@ mod tests {
         let old_slot = project::ProjectEffectSlot {
             num_params: 4,
             defaults: vec![0.12, 0.34, 8.0, 9.0],
-            plocks,
-            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![
@@ -7372,8 +7341,8 @@ mod tests {
         let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 5.0]);
-        assert_eq!(restored.plocks[7][2], None);
-        assert_eq!(restored.plocks[7][3], None);
+        assert_eq!(restored.plocks.cell(7, 2).copied(), None);
+        assert_eq!(restored.plocks.cell(7, 3).copied(), None);
         assert_eq!(
             restored.param_node_indices,
             vec![
@@ -7393,8 +7362,8 @@ mod tests {
         let old_slot = project::ProjectEffectSlot {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
-            plocks,
-            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![10, 14, 18, 22],
@@ -7433,9 +7402,9 @@ mod tests {
             restored.defaults,
             vec![0.12, 0.0, 0.0, 0.34, 0.0, 0.0, 0.56, 0.78]
         );
-        assert_eq!(restored.plocks[3][6], Some(0.91));
-        assert_eq!(restored.plocks[3][1], None);
-        assert_eq!(restored.plocks[3][2], None);
+        assert_eq!(restored.plocks.cell(3, 6).copied(), Some(0.91));
+        assert_eq!(restored.plocks.cell(3, 1).copied(), None);
+        assert_eq!(restored.plocks.cell(3, 2).copied(), None);
     }
 
     #[test]
@@ -7489,8 +7458,8 @@ mod tests {
         let saved_slot = project::ProjectEffectSlot {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
-            plocks,
-            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS].into(),
             key_locks,
             key_lock_param_ids,
             param_node_indices: desc
@@ -7518,8 +7487,8 @@ mod tests {
             restored.defaults,
             vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78]
         );
-        assert_eq!(restored.plocks[3][2], Some(0.91));
-        assert_eq!(restored.plocks[4][5], Some(-0.42));
+        assert_eq!(restored.plocks.cell(3, 2).copied(), Some(0.91));
+        assert_eq!(restored.plocks.cell(4, 5).copied(), Some(-0.42));
         assert_eq!(restored.key_locks[&69][2], Some(0.73));
         assert_eq!(restored.key_locks[&69][5], Some(-0.31));
         assert_eq!(
@@ -7574,8 +7543,8 @@ mod tests {
         let saved_slot = project::ProjectEffectSlot {
             num_params: 4,
             defaults: vec![0.12, 1.0, 0.31, 5.0],
-            plocks,
-            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::from([(66, vec![Some(0.5), None, Some(0.7), None])]),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: vec![10, 14, 18, crate::instruments::voice_modulator::MOD_PARAM_BASE],
@@ -7590,7 +7559,7 @@ mod tests {
             project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 5.0]);
-        assert_eq!(restored.plocks[3][2], Some(0.91));
+        assert_eq!(restored.plocks.cell(3, 2).copied(), Some(0.91));
         assert_eq!(restored.key_locks[&66][0], Some(0.5));
         assert_eq!(restored.key_locks[&66][2], Some(0.7));
         assert_eq!(
@@ -7619,8 +7588,8 @@ mod tests {
         let saved_slot = project::ProjectEffectSlot {
             num_params: desc.params.len() as u32,
             defaults: vec![0.5, 7400.0, 0.0, 0.0],
-            plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
-            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            plocks: vec![vec![None; desc.params.len()]; MAX_STEPS].into(),
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: desc
@@ -7668,8 +7637,8 @@ mod tests {
         let saved_slot = project::ProjectEffectSlot {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
-            plocks,
-            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            plocks: plocks.into(),
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS].into(),
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices: desc
@@ -7704,8 +7673,8 @@ mod tests {
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 2.0, -0.27]);
-        assert_eq!(restored.plocks[3][2], Some(0.75));
-        assert_eq!(restored.plocks[4][4], Some(-0.25));
+        assert_eq!(restored.plocks.cell(3, 2).copied(), Some(0.75));
+        assert_eq!(restored.plocks.cell(4, 4).copied(), Some(-0.25));
         assert_eq!(
             restored.param_node_indices,
             renamed_desc
