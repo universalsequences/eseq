@@ -1419,6 +1419,9 @@ impl App {
         if project.version > project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
+        // In-memory captures (bounce) arrive compact; parsed files already
+        // expanded during deserialization.
+        project.expand_compact_patterns();
         migrate_dgen_builtin_effect_names(&mut project);
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
@@ -3029,18 +3032,7 @@ impl ProjectCapture {
                                 chunk_id.0
                             )
                         })?;
-                    let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
-                    snapshot.set_track_pattern_data(track, data);
-                    let mut sample_paths = vec![None; num_tracks];
-                    let mut sample_names = vec![String::new(); num_tracks];
-                    (sample_paths[track], sample_names[track]) =
-                        self.sample_paths.sampler_source(&snapshot, track)?;
-                    chunks.push(ProjectPattern::from_snapshot(
-                        &snapshot,
-                        sample_paths,
-                        sample_names,
-                        Vec::new(),
-                    ));
+                    chunks.push(self.compact_pattern(vec![(track, data)], num_tracks)?);
                 }
                 file_takes.push(crate::project::ProjectTake {
                     id: take.id.0,
@@ -3159,21 +3151,10 @@ impl ProjectCapture {
                     "Track {} sound references patch {} and mix {} that cannot be resolved",
                     track + 1, refs.patch, refs.mix,
                 ))?;
-                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
-                snapshot.set_track_pattern_data(track, data);
-                let mut sample_paths = vec![None; num_tracks];
-                let mut sample_names = vec![String::new(); num_tracks];
-                (sample_paths[track], sample_names[track]) =
-                    self.sample_paths.sampler_source(&snapshot, track)?;
                 orphan_sounds.push(crate::project::ProjectOrphanSound {
                     patch: refs.patch,
                     mix: refs.mix,
-                    data: ProjectPattern::from_snapshot(
-                        &snapshot,
-                        sample_paths,
-                        sample_names,
-                        Vec::new(),
-                    ),
+                    data: self.compact_pattern(vec![(track, data)], num_tracks)?,
                 });
             }
             // §17.11 display metadata for every entity this file names —
@@ -3291,9 +3272,38 @@ impl ProjectCapture {
         })
     }
 
+    /// A carrier pattern holding only `lanes` (track, data): lane `i` is
+    /// track `lanes[i].0`, recorded in `lane_tracks` so the loader can widen
+    /// it back ([`ProjectPattern::expand_compact`]). With no lanes it is the
+    /// full-width default, since an empty `lane_tracks` means full width.
+    fn compact_pattern(
+        &self,
+        lanes: Vec<(usize, crate::sequencer::TrackPatternData)>,
+        num_tracks: usize,
+    ) -> Result<ProjectPattern, String> {
+        if lanes.is_empty() {
+            return Ok(ProjectPattern::default_width(num_tracks));
+        }
+        let mut snapshot = PatternSnapshot::new_default(lanes.len(), &[]);
+        let mut lane_tracks = Vec::with_capacity(lanes.len());
+        for (lane, (track, data)) in lanes.into_iter().enumerate() {
+            snapshot.set_track_pattern_data(lane, data);
+            lane_tracks.push(track);
+        }
+        let (sample_paths, sample_names) = (0..lane_tracks.len())
+            .map(|lane| self.sample_paths.sampler_source(&snapshot, lane))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .unzip();
+        let mut pattern =
+            ProjectPattern::from_snapshot(&snapshot, sample_paths, sample_names, Vec::new());
+        pattern.lane_tracks = lane_tracks;
+        Ok(pattern)
+    }
+
     /// Serialize every rack's clip bank (rack-clips spec 3). A clip's member
-    /// lanes ride in ONE full-width `ProjectPattern` in which only the rack's
-    /// member tracks are meaningful — the same wire form take chunks use, so
+    /// lanes ride in ONE compact `ProjectPattern` (see
+    /// [`Self::compact_pattern`]) — the same wire form take chunks use, so
     /// clip content reuses the scene pattern conversion and sample resolution
     /// unchanged. Returns the per-rack banks and the per-scene pointers.
     #[allow(clippy::type_complexity)]
@@ -3312,9 +3322,7 @@ impl ProjectCapture {
         for bank in scenes.rack_banks() {
             let mut clips = Vec::with_capacity(bank.clips.len());
             for clip in &bank.clips {
-                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
-                let mut sample_paths = vec![None; num_tracks];
-                let mut sample_names = vec![String::new(); num_tracks];
+                let mut lanes = Vec::with_capacity(clip.cells.len());
                 let mut members = Vec::with_capacity(clip.cells.len());
                 for (position, cell) in clip.cells.iter().enumerate() {
                     let track = bank.members.get(position).copied();
@@ -3328,21 +3336,14 @@ impl ProjectCapture {
                     if track >= num_tracks {
                         continue;
                     }
-                    snapshot.set_track_pattern_data(track, data);
-                    (sample_paths[track], sample_names[track]) =
-                        self.sample_paths.sampler_source(&snapshot, track)?;
+                    lanes.push((track, data));
                 }
                 clips.push(crate::project::ProjectRackClip {
                     id: clip.id,
                     name: clip.name.clone(),
                     color: clip.color,
                     members,
-                    pattern: ProjectPattern::from_snapshot(
-                        &snapshot,
-                        sample_paths,
-                        sample_names,
-                        Vec::new(),
-                    ),
+                    pattern: self.compact_pattern(lanes, num_tracks)?,
                     graph_overrides: clip.graph_overrides.clone(),
                     scene_slots: clip.scene_slots.values().clone(),
                     bus_chain: None,
@@ -5360,6 +5361,11 @@ impl App {
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
         strict_samples: bool,
     ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
+        // Columns are read positionally as tracks; a compact pattern must
+        // be widened first (`ProjectFile::expand_compact_patterns`).
+        if !pattern.lane_tracks.is_empty() {
+            return Err("internal: a compact project pattern reached the loader unexpanded".into());
+        }
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut fallback_count = 0;
@@ -5481,6 +5487,7 @@ impl App {
             project_process_chain,
             plock_variant_registries,
             key_lock_variant_registries,
+            lane_tracks: _,
         } = pattern;
         let bus_patterns = bus_patterns
             .into_iter()
@@ -6834,6 +6841,7 @@ mod tests {
                 project_process_chain: crate::process::TrackProcessChain::default(),
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
+                lane_tracks: Vec::new(),
             }],
             macros: Vec::new(),
             next_macro_id: 1,

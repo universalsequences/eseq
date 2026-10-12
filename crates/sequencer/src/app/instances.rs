@@ -1318,18 +1318,12 @@ pub fn rekey_reserved_instance_ids(project: &mut crate::project::ProjectFile) ->
         rekey_slots(&mut pattern.scene_slots);
     };
     project.patterns.iter_mut().for_each(rekey_pattern);
+    project.carrier_patterns_mut().for_each(rekey_pattern);
     for rack in project.groups.iter_mut().filter_map(|group| group.rack.as_mut()) {
         for clip in &mut rack.clips {
             rekey_overrides(&mut clip.graph_overrides);
             rekey_slots(&mut clip.scene_slots);
-            rekey_pattern(&mut clip.pattern);
         }
-    }
-    for take in project.take_pools.iter_mut().flat_map(|pool| &mut pool.takes) {
-        take.chunks.iter_mut().for_each(rekey_pattern);
-    }
-    for orphan in project.track_sounds.iter_mut().flat_map(|sounds| &mut sounds.orphan_sounds) {
-        rekey_pattern(&mut orphan.data);
     }
     notes
 }

@@ -100,7 +100,14 @@ pub use crate::groove::{
 //  16 - arrangement rack lanes (docs/arrangement-rack-lanes-spec.md):
 //       `ProjectArrangement::rack_lanes`, one lane of rack-clip spans per
 //       clip-bearing rack. Older files have none and play exactly as before.
-const PROJECT_FILE_VERSION: u32 = 16;
+//  17 - compact files (eseq-a9rf): rack clips, orphan sounds and take chunks
+//       carry only their own tracks' lanes (`ProjectPattern::lane_tracks`),
+//       and large per-track lane values are stored once in a top-level
+//       `lane_table` that pattern columns index (`project::lane_table`).
+//       Both expand on load; older files carry neither and load unchanged.
+//       Older builds must refuse these files: they would read the indexed
+//       columns as missing.
+const PROJECT_FILE_VERSION: u32 = 17;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -533,9 +540,10 @@ fn default_sound_meta_color() -> i32 {
 }
 
 /// One carrier: the entity pair's file-local ids plus their content, composed
-/// onto an empty sequence and stored as a full-width `ProjectPattern` (only
-/// the owning track's lane is meaningful) — the same wire format and
-/// load-time sample resolution as take chunks.
+/// onto an empty sequence and stored as a `ProjectPattern` holding only the
+/// owning track's lane (`lane_tracks`; files before version 17 spell out
+/// every track) — the same wire format and load-time sample resolution as
+/// take chunks.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectOrphanSound {
     pub patch: u64,
@@ -552,10 +560,10 @@ pub struct ProjectTrackTakePool {
     pub next_take_id: u64,
 }
 
-/// Serialized `TrackTake`. Each chunk is stored as a full-width
-/// `ProjectPattern` (only the owning track's lane is meaningful) so chunk
-/// content reuses the scene-pattern wire format and load-time sample
-/// resolution unchanged.
+/// Serialized `TrackTake`. Each chunk is stored as a `ProjectPattern` holding
+/// only the owning track's lane (`lane_tracks`; files before version 17 spell
+/// out every track, the loader widens both) so chunk content reuses the
+/// scene-pattern wire format and load-time sample resolution unchanged.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectTake {
     pub id: u64,
@@ -621,6 +629,38 @@ struct ProjectFileWire {
     grooves: Vec<ProjectGroove>,
 }
 
+impl ProjectFile {
+    /// The patterns that carry per-entity content beside the scene bank:
+    /// orphan sounds, rack clips and take chunks.
+    pub fn carrier_patterns_mut(&mut self) -> impl Iterator<Item = &mut ProjectPattern> {
+        let orphans = self
+            .track_sounds
+            .iter_mut()
+            .flat_map(|sounds| sounds.orphan_sounds.iter_mut().map(|orphan| &mut orphan.data));
+        let clips = self
+            .groups
+            .iter_mut()
+            .filter_map(|group| group.rack.as_mut())
+            .flat_map(|rack| rack.clips.iter_mut().map(|clip| &mut clip.pattern));
+        let chunks = self
+            .take_pools
+            .iter_mut()
+            .flat_map(|pool| pool.takes.iter_mut())
+            .flat_map(|take| take.chunks.iter_mut());
+        orphans.chain(clips).chain(chunks)
+    }
+
+    /// Widen every compact carrier pattern (see [`ProjectPattern::lane_tracks`])
+    /// to the project's track count, so everything past loading sees
+    /// full-width patterns only.
+    pub fn expand_compact_patterns(&mut self) {
+        let num_tracks = self.tracks.len();
+        for pattern in self.carrier_patterns_mut() {
+            pattern.expand_compact(num_tracks);
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ProjectFile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -662,6 +702,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             instances: wire.instances,
             grooves: wire.grooves,
         };
+        project.expand_compact_patterns();
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
         migrate_legacy_process_class_names(&mut project);
@@ -1508,10 +1549,11 @@ pub type RackClipId = u64;
 ///
 /// `members` is positional over `group.members` and its length is the
 /// invariant the join/leave funnels maintain; `true` means that member sounds
-/// in this clip. The member LANES themselves ride in `pattern`, one full-width
-/// `ProjectPattern` in which only the rack's member tracks are meaningful --
-/// the same wire form take chunks use, so clip content reuses the scene
-/// pattern conversion and load-time sample resolution unchanged.
+/// in this clip. The member LANES themselves ride in `pattern`, one
+/// `ProjectPattern` holding only the sounding members' lanes (`lane_tracks`;
+/// files before version 17 spell out every track) -- the same wire form take
+/// chunks use, so clip content reuses the scene pattern conversion and
+/// load-time sample resolution unchanged.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectRackClip {
     pub id: RackClipId,
@@ -2178,12 +2220,16 @@ pub struct ProjectPattern {
         deserialize_with = "deserialize_step_data"
     )]
     pub step_data: Vec<Vec<[f32; NUM_PARAMS]>>,
+    #[serde(serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub track_params: Vec<ProjectTrackParams>,
+    #[serde(serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub effect_slots: Vec<Vec<ProjectEffectSlot>>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub midi_fx_slots: Vec<Vec<ProjectEffectSlot>>,
+    #[serde(serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub instrument_slots: Vec<ProjectEffectSlot>,
     pub instrument_base_note_offsets: Vec<f32>,
+    #[serde(serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub track_sound_states: Vec<ProjectTrackSoundState>,
     #[serde(
         serialize_with = "serialize_chord_snapshots",
@@ -2225,7 +2271,7 @@ pub struct ProjectPattern {
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
     pub swing_resolution_plock_snapshots: Vec<Vec<Option<u32>>>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub track_send_plock_snapshots: Vec<Vec<Vec<ProjectTrackSend>>>,
     #[serde(default)]
     pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
@@ -2242,18 +2288,24 @@ pub struct ProjectPattern {
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub process_chains: Vec<crate::process::TrackProcessChain>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub project_process_lane_overrides: Vec<crate::process::ProjectLaneOverrides>,
     #[serde(default)]
     pub project_process_chain: crate::process::TrackProcessChain,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub plock_variant_registries: Vec<PlockVariantRegistry>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "lane_table::serialize", deserialize_with = "lane_table::deserialize")]
     pub key_lock_variant_registries: Vec<PlockVariantRegistry>,
+    /// Empty for a full-width pattern. A compact one (a rack clip, orphan
+    /// sound or take chunk) holds only these tracks' lanes, lane `i` being
+    /// track `lane_tracks[i]`, in every per-track column;
+    /// [`ProjectPattern::expand_compact`] widens it back on load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lane_tracks: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2534,7 +2586,150 @@ pub struct ProjectBusPatternSnapshot {
     pub effect_slots: Vec<ProjectEffectSlot>,
 }
 
+/// The fields of a [`ProjectPattern`] that are not per-track columns.
+struct PatternWide {
+    bus_patterns: Vec<ProjectBusPatternSnapshot>,
+    mod_connections: Vec<ProjectModConnection>,
+    neural_networks: Vec<ProjectNeuralNetwork>,
+    graph_overrides: Vec<ProjectGraphOverrides>,
+    scene_slots: std::collections::BTreeMap<String, crate::process::ProcessLiteral>,
+    project_process_chain: crate::process::TrackProcessChain,
+}
+
 impl ProjectPattern {
+    /// The default pattern `num_tracks` wide.
+    pub fn default_width(num_tracks: usize) -> Self {
+        Self::from_snapshot(
+            &PatternSnapshot::new_default(num_tracks, &[]),
+            vec![None; num_tracks],
+            vec![String::new(); num_tracks],
+            Vec::new(),
+        )
+    }
+
+    /// Lift a compact pattern into a full-width one: per-track column entry
+    /// `lane` lands on track `lane_to_track[lane]` (`None` drops it), every
+    /// other track keeps the default lane. Pattern-wide fields are left at
+    /// their defaults.
+    ///
+    /// The base is a full-width default pattern, which is what guarantees
+    /// every per-track vector is exactly `num_tracks` long: the loader
+    /// consumes several of them verbatim, so a short one would yield a short
+    /// snapshot.
+    pub fn expand_lanes(self, lane_to_track: &[Option<usize>], num_tracks: usize) -> Self {
+        self.widen(lane_to_track, num_tracks).0
+    }
+
+    /// Widen a pattern written with [`Self::lane_tracks`] to `num_tracks`,
+    /// keeping its pattern-wide fields; a full-width pattern is unchanged.
+    pub fn expand_compact(&mut self, num_tracks: usize) {
+        if self.lane_tracks.is_empty() {
+            return;
+        }
+        let lane_to_track: Vec<Option<usize>> =
+            std::mem::take(&mut self.lane_tracks).into_iter().map(Some).collect();
+        let compact = std::mem::replace(self, Self::default_width(0));
+        let (mut full, wide) = compact.widen(&lane_to_track, num_tracks);
+        full.bus_patterns = wide.bus_patterns;
+        full.mod_connections = wide.mod_connections;
+        full.neural_networks = wide.neural_networks;
+        full.graph_overrides = wide.graph_overrides;
+        full.scene_slots = wide.scene_slots;
+        full.project_process_chain = wide.project_process_chain;
+        *self = full;
+    }
+
+    /// [`Self::expand_lanes`], also handing back the pattern-wide fields.
+    /// The destructure is exhaustive so a new per-track column cannot be
+    /// left out of the widening silently.
+    fn widen(self, lane_to_track: &[Option<usize>], num_tracks: usize) -> (Self, PatternWide) {
+        let Self {
+            track_bits,
+            neural_reset_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            midi_fx_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            chord_duration_snapshots,
+            chord_delay_snapshots,
+            timebase_plock_snapshots,
+            bar_transpose_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
+            bus_patterns,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            scene_slots,
+            instrument_types,
+            instrument_run_modes,
+            sample_paths,
+            sample_names,
+            rack_tracks,
+            process_chains,
+            project_process_lane_overrides,
+            project_process_chain,
+            plock_variant_registries,
+            key_lock_variant_registries,
+            lane_tracks: _,
+        } = self;
+        let mut full = Self::default_width(num_tracks);
+        macro_rules! place {
+            ($($field:ident),* $(,)?) => {$(
+                for (lane, value) in $field.into_iter().enumerate() {
+                    let Some(Some(track)) = lane_to_track.get(lane) else {
+                        continue;
+                    };
+                    if let Some(slot) = full.$field.get_mut(*track) {
+                        *slot = value;
+                    }
+                }
+            )*};
+        }
+        place!(
+            track_bits,
+            neural_reset_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            midi_fx_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            chord_duration_snapshots,
+            chord_delay_snapshots,
+            timebase_plock_snapshots,
+            bar_transpose_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
+            instrument_types,
+            instrument_run_modes,
+            sample_paths,
+            sample_names,
+            rack_tracks,
+            process_chains,
+            project_process_lane_overrides,
+            plock_variant_registries,
+            key_lock_variant_registries,
+        );
+        let wide = PatternWide {
+            bus_patterns,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            scene_slots,
+            project_process_chain,
+        };
+        (full, wide)
+    }
+
     pub fn from_snapshot(
         snapshot: &PatternSnapshot,
         sample_paths: Vec<Option<String>>,
@@ -2649,6 +2844,7 @@ impl ProjectPattern {
             project_process_chain: snapshot.project_process_chain.clone(),
             plock_variant_registries: snapshot.plock_variant_registries.clone(),
             key_lock_variant_registries: snapshot.key_lock_variant_registries.clone(),
+            lane_tracks: Vec::new(),
         }
     }
 }
@@ -3359,7 +3555,7 @@ pub fn save_project(name: &str, project: &ProjectFile) -> std::io::Result<PathBu
     let partial = dir.join(format!(".{file_name}.json.partial"));
     let written = (|| {
         let mut writer = std::io::BufWriter::new(std::fs::File::create(&partial)?);
-        serde_json::to_writer(&mut writer, project).map_err(|error| {
+        lane_table::write_project(&mut writer, project).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to serialize project '{}': {error}", path.display()),
@@ -3381,7 +3577,7 @@ pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
 
 pub fn load_project_from_path(path: &Path) -> std::io::Result<ProjectFile> {
     let src = std::fs::read_to_string(path)?;
-    serde_json::from_str(&src).map_err(|error| {
+    lane_table::read_project(&src).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Failed to parse project '{}': {error}", path.display()),
@@ -3466,6 +3662,7 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
     Ok(sound)
 }
 
+mod lane_table;
 mod rack_preset_catalog;
 
 fn rack_preset_catalog() -> std::sync::MutexGuard<'static, rack_preset_catalog::RackPresetCatalog> {
@@ -4981,6 +5178,7 @@ mod tests {
                 },
                 plock_variant_registries: Vec::new(),
                 key_lock_variant_registries: Vec::new(),
+                lane_tracks: Vec::new(),
             }],
             macros: Vec::new(),
             next_macro_id: 1,
@@ -5484,6 +5682,60 @@ mod tests {
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("take_pools"), "empty take pools are skipped");
         assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    /// File version 17 (eseq-a9rf): a compact carrier (one track's lanes)
+    /// and the shared lane table both come back as the full-width patterns
+    /// older files spelled out.
+    #[test]
+    fn compact_carriers_and_lane_table_round_trip_to_full_width() {
+        let mut project = sample_project();
+        let full = project.patterns[0].clone();
+        // Track 1's lanes alone, as save writes a carrier for track 1 ...
+        let mut compact = full.clone().expand_lanes(&[None, Some(0)], 1);
+        compact.lane_tracks = vec![1];
+        // ... and what the loader must rebuild: track 1 kept, track 0 default.
+        let expected = serde_json::to_value(full.clone().expand_lanes(&[None, Some(1)], 2))
+            .expect("encode expected");
+        project.take_pools = vec![
+            ProjectTrackTakePool::default(),
+            ProjectTrackTakePool {
+                takes: vec![ProjectTake {
+                    id: 1,
+                    name: "Take 1".to_string(),
+                    total_len_steps: 16,
+                    chunks: vec![compact.clone()],
+                }],
+                next_take_id: 2,
+            },
+        ];
+        project.track_sounds = vec![
+            ProjectTrackSounds::default(),
+            ProjectTrackSounds {
+                orphan_sounds: vec![ProjectOrphanSound { patch: 1, mix: 1, data: compact }],
+                ..ProjectTrackSounds::default()
+            },
+        ];
+        // Many identical scenes, as a real set has: their large lanes share.
+        project.patterns = vec![full.clone(); 8];
+
+        let mut bytes = Vec::new();
+        lane_table::write_project(&mut bytes, &project).expect("write project");
+        let json = String::from_utf8(bytes).expect("utf-8");
+        assert!(json.contains("\"lane_table\"") && json.contains("\"lane_tracks\""));
+        assert!(
+            json.len() < serde_json::to_string(&project).unwrap().len(),
+            "shared lanes make the file smaller"
+        );
+
+        let restored = lane_table::read_project(&json).expect("read project");
+        let encode = |pattern: &ProjectPattern| serde_json::to_value(pattern).unwrap();
+        assert_eq!(encode(&restored.take_pools[1].takes[0].chunks[0]), expected);
+        assert_eq!(encode(&restored.track_sounds[1].orphan_sounds[0].data), expected);
+        assert_eq!(restored.patterns.len(), 8);
+        for pattern in &restored.patterns {
+            assert_eq!(encode(pattern), encode(&full));
+        }
     }
 
     #[test]

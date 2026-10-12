@@ -306,17 +306,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    let source = match std::fs::read_to_string(&input) {
-        Ok(source) => source,
-        Err(error) => {
-            eprintln!("failed to read '{}': {error}", input.display());
-            std::process::exit(1);
-        }
-    };
-    let mut project = match serde_json::from_str::<ProjectFile>(&source) {
+    // The project reader, not plain serde: version 17 files index their
+    // large lanes into a shared table only it resolves.
+    let mut project = match sequencer::project::load_project_from_path(&input) {
         Ok(project) => project,
         Err(error) => {
-            eprintln!("failed to parse '{}': {error}", input.display());
+            eprintln!("failed to read '{}': {error}", input.display());
             std::process::exit(1);
         }
     };

@@ -2,6 +2,10 @@
 //! (capture + serialize + write) a few times and report each phase.
 //!
 //! `cargo run --release --bin project_save_probe -- <project-name>`
+//!
+//! `SAVE_PROBE_RUNS=n` sets the number of saves (default 3) and
+//! `SAVE_PROBE_KEEP=1` keeps the last one as `zz-save-probe-<pid>`;
+//! `-- <project-name> --dump-to <path>` writes a project back inline instead.
 
 use std::path::Path;
 use std::time::Instant;
@@ -19,6 +23,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     std::env::set_current_dir(manifest_dir)?;
 
+    // `--dump-to <path>`: write the project back inline, as the loader sees
+    // it, and stop. Diffing dumps of saves from two builds checks that a
+    // format change is lossless.
+    let mut args = std::env::args().skip(2);
+    if args.next().as_deref() == Some("--dump-to") {
+        let dump = args.next().ok_or("--dump-to needs a path")?;
+        std::fs::write(dump, serde_json::to_vec(&project::load_project(&name)?)?)?;
+        return Ok(());
+    }
     let started = Instant::now();
     let file = project::load_project(&name)?;
     eprintln!("[save-probe] parse {:?}", started.elapsed());

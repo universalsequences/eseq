@@ -994,66 +994,17 @@ fn load_form_path(source: &str) -> Option<String> {
 
 /// Lift a kit clip's PAD-space pattern into a full-width project pattern whose
 /// meaningful lanes sit on the member tracks the loader just built.
-///
-/// The base is a full-width default pattern, which is what guarantees every
-/// per-track vector is exactly `num_tracks` long — `project_pattern_into_
-/// snapshot_with_policy` consumes several of them verbatim, so a short one
-/// would yield a short snapshot.
 fn expand_kit_clip_pattern(
     compact: ProjectPattern,
     pad_to_position: &[Option<usize>],
     members: &[usize],
     num_tracks: usize,
 ) -> ProjectPattern {
-    let mut full = ProjectPattern::from_snapshot(
-        &PatternSnapshot::new_default(num_tracks, &[]),
-        vec![None; num_tracks],
-        vec![String::new(); num_tracks],
-        Vec::new(),
-    );
     let pad_to_track: Vec<Option<usize>> = pad_to_position
         .iter()
         .map(|position| position.and_then(|position| members.get(position).copied()))
         .collect();
-    macro_rules! place {
-        ($field:ident) => {{
-            for (pad, value) in compact.$field.into_iter().enumerate() {
-                let Some(Some(track)) = pad_to_track.get(pad) else {
-                    continue;
-                };
-                if let Some(slot) = full.$field.get_mut(*track) {
-                    *slot = value;
-                }
-            }
-        }};
-    }
-    place!(track_bits);
-    place!(neural_reset_bits);
-    place!(step_data);
-    place!(track_params);
-    place!(effect_slots);
-    place!(midi_fx_slots);
-    place!(instrument_slots);
-    place!(instrument_base_note_offsets);
-    place!(track_sound_states);
-    place!(chord_snapshots);
-    place!(chord_duration_snapshots);
-    place!(chord_delay_snapshots);
-    place!(timebase_plock_snapshots);
-    place!(bar_transpose_snapshots);
-    place!(swing_plock_snapshots);
-    place!(swing_resolution_plock_snapshots);
-    place!(track_send_plock_snapshots);
-    place!(instrument_types);
-    place!(instrument_run_modes);
-    place!(sample_paths);
-    place!(sample_names);
-    place!(rack_tracks);
-    place!(process_chains);
-    place!(project_process_lane_overrides);
-    place!(plock_variant_registries);
-    place!(key_lock_variant_registries);
-    full
+    compact.expand_lanes(&pad_to_track, num_tracks)
 }
 
 #[cfg(test)]
