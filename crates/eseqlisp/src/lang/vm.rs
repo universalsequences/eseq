@@ -16,9 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 mod instances;
+mod subtree_inputs;
 mod view_buffers;
 #[cfg(test)]
 mod lambda_list_tests;
+#[cfg(test)]
+mod subtree_cache_tests;
 pub use instances::{
     CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
     HostFieldReader, INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId,
@@ -31,6 +34,7 @@ pub(crate) use instances::{
     FIELD_TYPES_HINT, builtin_field_message, builtin_fields_for, host_entry_shape_message,
     host_option_message, nil_default_message, state_entry_shape_message,
 };
+use subtree_inputs::SubtreeInputs;
 pub use view_buffers::BoundView;
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
@@ -521,10 +525,9 @@ struct SubtreeRenderCache {
     /// this memo.
     annotation: Option<CachedWidgetAnnotation>,
     chunk_idx: usize,
-    /// Deep-cloned captured upvalues from render time. Live cells can be
-    /// mutated in place by reactive writes, so the snapshot must not share
-    /// Rcs with the closure.
-    upvalues: Vec<Value>,
+    /// Exact, compact observations of captured inputs. None means an opaque
+    /// or cyclic input prevents reuse; annotation caching still applies.
+    inputs: Option<SubtreeInputs>,
     parent_root_id: Option<u64>,
     /// Every reactive field read during the render, descendants included,
     /// replayed into the enclosing effect capture on reuse.
@@ -545,54 +548,6 @@ struct WidgetAnnotationContext {
 struct CachedWidgetAnnotation {
     context: WidgetAnnotationContext,
     value: Value,
-}
-
-/// Equality for cached subtree captured inputs. Deliberately stricter than
-/// `Value::PartialEq`: callables compare by chunk index only there, which
-/// would treat two closures over different data as equal, so any callable
-/// (or otherwise opaque value) makes the inputs "changed" and forces a
-/// fresh render.
-fn subtree_input_value_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Nil, Value::Nil) => true,
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Symbol(x), Value::Symbol(y)) => x == y,
-        (Value::Keyword(x), Value::Keyword(y)) => x == y,
-        (Value::NodeRef(x), Value::NodeRef(y)) => x == y,
-        (Value::Instance(x), Value::Instance(y)) => x == y,
-        (Value::List(x), Value::List(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
-                    .all(|(a, b)| subtree_input_value_equal(&a.borrow(), &b.borrow()))
-        }
-        (Value::Map(x), Value::Map(y)) => {
-            x.len() == y.len()
-                && x.iter().all(|(key, a)| {
-                    y.get(key)
-                        .is_some_and(|b| subtree_input_value_equal(&a.borrow(), &b.borrow()))
-                })
-        }
-        (
-            Value::ReactiveRef {
-                namespace: a_ns,
-                field: a_field,
-                index: a_index,
-                kind: a_kind,
-                ..
-            },
-            Value::ReactiveRef {
-                namespace: b_ns,
-                field: b_field,
-                index: b_index,
-                kind: b_kind,
-                ..
-            },
-        ) => a_ns == b_ns && a_field == b_field && a_index == b_index && a_kind == b_kind,
-        _ => false,
-    }
 }
 
 /// Sentinel "index" recorded when a dependent reads a list's length.
@@ -7706,6 +7661,9 @@ impl VM {
     ) -> Result<Value, VMError> {
         let removed_descendants = self.dag.remove_descendant_subtree_effects(owner.root_id);
         if !removed_descendants.is_empty() {
+            for root in &removed_descendants {
+                self.subtree_render_cache.remove(root);
+            }
             self.pending_widget_trees.retain(|pending| match pending {
                 PendingUiUpdate::ReplaceSubtree {
                     subtree_root_id, ..
@@ -7801,14 +7759,7 @@ impl VM {
         let Value::Closure(chunk_idx, upvalues) = callable else {
             return None;
         };
-        if *chunk_idx != cached.chunk_idx || upvalues.len() != cached.upvalues.len() {
-            return None;
-        }
-        if !upvalues
-            .iter()
-            .zip(cached.upvalues.iter())
-            .all(|(live, snapshot)| subtree_input_value_equal(&live.borrow(), snapshot))
-        {
+        if *chunk_idx != cached.chunk_idx || !cached.inputs.as_ref()?.matches(upvalues) {
             return None;
         }
         let value = cached.value.clone();
@@ -7868,10 +7819,7 @@ impl VM {
             self.subtree_render_cache.remove(&owner.root_id);
             return;
         };
-        let upvalues = upvalues
-            .iter()
-            .map(|cell| cell.borrow().deep_clone())
-            .collect();
+        let inputs = SubtreeInputs::capture(upvalues);
         // Stable-id annotation memoizes this graph by cell identity. Sealing
         // makes that identity meaningful in release builds too: VM field
         // writes cannot mutate a cached render behind the memo.
@@ -7882,7 +7830,7 @@ impl VM {
                 value: rendered.clone(),
                 annotation: None,
                 chunk_idx: *chunk_idx,
-                upvalues,
+                inputs,
                 parent_root_id: owner.parent_root_id,
                 reactive_reads,
                 symbol_reads,
