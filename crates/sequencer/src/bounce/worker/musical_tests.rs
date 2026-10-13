@@ -339,3 +339,41 @@ fn saved_scene_routing_changes_preserve_compensated_audio_and_tail() {
     let closed = render(folder.path(), "removed-send", &project, None, 0.1);
     assert_audio_matches(&closed[30_000 * 2..32_000 * 2], &reference[30_000 * 2..32_000 * 2]);
 }
+
+#[test]
+fn saved_kind_instance_plays_after_the_worker_registers_its_scratch_kind() {
+    // The live UI registers kinds by evaluating Lisp; a fresh worker process
+    // starts with an empty registry and must register them itself.
+    const DEF_KIND: &str = "(def-kind pulse :generator (:resolution :4 :tick (seq-emit :track 0 :at 0 :vel 1 :dur 0.25)))";
+    let folder = tempfile::tempdir().unwrap();
+    let mut project = saved_song(folder.path(), |app| {
+        let mut runtime = eseqlisp::Runtime::new();
+        crate::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&app.state));
+        runtime.eval_str(DEF_KIND).unwrap();
+        app.create_instance_recorded("scratch:pulse", crate::project::ProjectInstanceOwner::Project, None)
+            .unwrap();
+        app.state.set_scratch_source(format!("{DEF_KIND}\n"));
+    });
+    assert_eq!(project.instances.list.len(), 1);
+    crate::lisp_host::clear_kind_registry();
+    let audio = render(folder.path(), "kind-instance", &project, None, 0.0);
+    // The pattern's only step is beat 0; the :4 generator also fires on beat 1.
+    let beat_one = FRAMES_PER_BEAT * 2..(FRAMES_PER_BEAT + 4_000) * 2;
+    assert!(peak(&audio[beat_one]) > 0.01, "the instance's beat-1 note is missing");
+
+    // Without the defining source the kind never registers: fail loudly
+    // instead of exporting the song without that sequencer's notes.
+    crate::lisp_host::clear_kind_registry();
+    project.scratch = Default::default();
+    let path = folder.path().join("kind-missing.json");
+    serde_json::to_writer(File::create(&path).unwrap(), &project).unwrap();
+    let options = ExportOptions {
+        project: path, destination: folder.path().join("kind-missing.wav"),
+        sample_rate: SAMPLE_RATE, tail_seconds: 0.0, selection: None,
+        replace: false, cancel_path: None,
+    };
+    let error = export_project(&options, &BounceCancellation::default(), |_| {}).unwrap_err();
+    assert_eq!(error.stage(), ExportStage::Preparation);
+    assert!(error.to_string().contains("scratch:pulse"), "{error}");
+}
+

@@ -32,6 +32,7 @@ use {
 #[allow(unused_imports)]
 pub(crate) use load_meter::{scheduler_load, SchedulerLoad};
 pub use worker::spawn_scheduler_thread;
+pub(crate) use lookahead::build_scheduler_scratch_runtime;
 pub(crate) use worker::{SchedulerDriver, SchedulerInput};
 
 use std::cell::RefCell;

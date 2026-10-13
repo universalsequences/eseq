@@ -210,7 +210,7 @@ pub(super) fn scene_slots_for_chunk(
         .unwrap_or_else(|| Arc::new(chunk.scene_slots.clone()))
 }
 
-pub(super) fn build_scheduler_scratch_runtime(
+pub(crate) fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
     debug_accum: bool,

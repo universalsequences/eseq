@@ -2,9 +2,12 @@
 //! analysis, song preflight and compensation before any output file is created.
 use super::*;
 use super::worker::{check_cancel_file, ExportOptions};
-use crate::app::{App, LatencyPlan};
+use crate::app::{import_forms, App, LatencyPlan};
 use crate::audio::{engine, offline::OfflineAudioSession};
-use crate::sequencer::{AudibleSongRowApplied, SongPlaybackNotice};
+use crate::lisp_host::{kind_is_registered, scheduler_scratch_runtime_with_fallbacks};
+use crate::paths::user_init_path;
+use crate::scheduler::build_scheduler_scratch_runtime;
+use crate::sequencer::{AudibleSongRowApplied, SequencerState, SongPlaybackNotice};
 use std::{collections::VecDeque, sync::Arc};
 
 /// Graph teardown follows all App/session state, including on preparation errors.
@@ -58,6 +61,7 @@ impl PreparedExport {
             .end_beat;
         app.sample_analysis.require_complete().map_err(io::Error::other)?;
         app.publish_all_sampler_analysis_runtime();
+        publish_instance_sequencers(&app, &engine.state)?;
         app.start_bounce_playback(options.selection.map(|(_, end)| end).unwrap_or(end_beat))
             .map_err(io::Error::other)?;
         let latency = unsafe { app.prepare_bounce_latency() }.map_err(io::Error::other)?;
@@ -130,4 +134,56 @@ impl PreparedExport {
             |update| progress(update),
         )
     }
+}
+
+/// Kind instances (neural sequencers etc.) publish only once Lisp has
+/// evaluated their `def-kind`. The live UI republishes them whenever the kind
+/// registry moves; this worker has no UI loop, so register the kinds the
+/// project imports (its scratch, then the user's init.lisp imports) and
+/// publish every instance before playback starts. An instance whose kind
+/// still did not register fails the export rather than silently dropping
+/// its notes.
+fn publish_instance_sequencers(app: &App, state: &Arc<SequencerState>) -> io::Result<()> {
+    let any_unregistered = || {
+        app.instances.list.iter().any(|instance| !kind_is_registered(&instance.kind))
+    };
+    let mut errors = Vec::new();
+    if any_unregistered() {
+        // The scheduler's own runtime build: library sources, then the scratch.
+        let (runtime, scratch_errors) =
+            build_scheduler_scratch_runtime(Arc::clone(state), &state.scratch_source(), false);
+        errors.extend(scratch_errors);
+        let mut runtime = runtime
+            .unwrap_or_else(|| scheduler_scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0));
+        if any_unregistered() {
+            // init.lisp also configures the UI, so load only its package imports.
+            let init = user_init_path()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .unwrap_or_default();
+            let mut seen = std::collections::HashSet::new();
+            for (module, _) in import_forms(&init) {
+                if seen.insert(module.clone()) {
+                    if let Err(error) = runtime.eval(&format!("(import {module})")) {
+                        errors.push(format!("init.lisp import {module}: {error}"));
+                    }
+                }
+            }
+        }
+    }
+    app.publish_instance_sequencers();
+    let missing: Vec<String> = app.instances.list.iter()
+        .filter(|instance| !kind_is_registered(&instance.kind))
+        .map(|instance| format!("{} ({})", instance.label, instance.kind))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "Export cannot play sequencers whose package is not attached: {}",
+        missing.join(", "),
+    );
+    if !errors.is_empty() {
+        message.push_str(&format!(" ({})", errors.join("; ")));
+    }
+    Err(io::Error::other(message))
 }
