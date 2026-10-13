@@ -154,4 +154,44 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
     assert_eq!(toast.kind, eseqlisp::ToastKind::Error);
     assert!(toast.message.starts_with("Save failed: "), "{}", toast.message);
     assert!(editor.minibuffer.as_deref().is_some_and(|m| m.starts_with("Error saving project")));
+
+    // File > Save (Cmd+S) on a named project passes an empty `:then`; that
+    // must start a background save, not wait for the write on the UI thread.
+    let name = format!("zz-cmd-s-background-{}", std::process::id());
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _cleanup = RemoveOnDrop(
+        sequencer::app_paths::app_paths()
+            .projects_dir()
+            .join(format!("{name}.json")),
+    );
+    app.current_project_name = Some(name.clone());
+    let mut payload = std::collections::HashMap::new();
+    payload.insert(
+        "then".to_string(),
+        Rc::new(RefCell::new(Value::String(String::new()))),
+    );
+    let mut ctx = LoopCtx {
+        sessions: &mut sessions,
+        meters: &mut meters,
+        frame: &mut frame,
+        gesture: &mut gesture,
+        track_names: &mut track_names,
+        shared: &shared,
+    };
+    super::super::file_menu::handle(
+        "project-save-open",
+        Value::Map(payload),
+        &mut app,
+        &mut editor,
+        &mut ctx,
+    );
+    assert!(app.project_save_in_flight(), "Cmd+S waited for the write");
+    for outcome in app.wait_for_project_saves() {
+        outcome.result.expect("background save");
+    }
 }

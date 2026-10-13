@@ -317,10 +317,11 @@ pub(super) fn handle(
             };
             // `:then "new-project"` / `:then "quit"` chain the unsaved-changes
             // prompt's Save; they run only after the write succeeded so a
-            // failed save never discards the project.
+            // failed save never discards the project. An empty `:then` (File >
+            // Save forwards one, the save dialog defaults to one) chains nothing.
             let then = if let Value::Map(ref map) = payload {
                 map.get("then").and_then(|cell| match &*cell.borrow() {
-                    Value::String(name) => Some(name.clone()),
+                    Value::String(name) if !name.is_empty() => Some(name.clone()),
                     _ => None,
                 })
             } else {
