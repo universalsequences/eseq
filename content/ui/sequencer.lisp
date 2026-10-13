@@ -3012,8 +3012,9 @@
 ;; Slot i's slider: a linear step param binds its field, so an edit only
 ;; repaints. A curved one (its slider position is a curve of the value)
 ;; reads its value in a subtree of its own, so an edit re-runs that slot; a
-;; lane slot reads an element of `lane.values` the same way, so a lane edit
-;; re-runs every lane slot (all sixteen read the one list).
+;; lane slot reads its element of `lane.values` the same way (`nth` on a
+;; list field depends on that element alone), so a lane edit re-runs only
+;; the slots whose values it changed.
 (def slot-slider (t s mode lane look i)
   (if (or (not s) (and (tp/seqv-process-lane-mode? mode) (not lane)))
     (slot-vslider t s mode i look 0 0 (if s #'s.active false))

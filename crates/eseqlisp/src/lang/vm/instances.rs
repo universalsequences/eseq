@@ -2070,7 +2070,7 @@ impl VM {
             .instances
             .keyed_id(kind, &[index])
             .map_or(Value::Nil, Value::Instance);
-        self.track_instance_source_read(namespace, &index.to_string(), &value);
+        self.track_instance_source_read(namespace, &index.to_string(), &value, None);
         Ok(value)
     }
 
@@ -2150,7 +2150,7 @@ impl VM {
                 Value::Instance(id)
             }
         };
-        self.track_instance_source_read(namespace, &field, &value);
+        self.track_instance_source_read(namespace, &field, &value, None);
         Ok(value)
     }
 
@@ -2739,6 +2739,18 @@ impl VM {
         id: InstanceId,
         field: &str,
     ) -> Result<Value, VMError> {
+        self.read_instance_field_nth_tracked(id, field, None)
+    }
+
+    /// [`Self::read_instance_field_tracked`] for `(nth x.field index)`: a
+    /// list field's dependency covers element `index` alone (the whole
+    /// field for `None`, or when the value is not a list).
+    pub(super) fn read_instance_field_nth_tracked(
+        &mut self,
+        id: InstanceId,
+        field: &str,
+        index: Option<usize>,
+    ) -> Result<Value, VMError> {
         if self.active_expander.is_some() {
             return Err(self.expansion_error("instance field read"));
         }
@@ -2764,7 +2776,8 @@ impl VM {
         } else {
             self.instances.value_of(id, &resolved)
         };
-        self.track_instance_source_read(&instance_namespace(id), field, &value);
+        let index = index.filter(|_| matches!(value, Value::List(_)));
+        self.track_instance_source_read(&instance_namespace(id), field, &value, index);
         Ok(value)
     }
 
@@ -2886,11 +2899,20 @@ impl VM {
     /// Record a read of the store-backed source `(namespace, field)`, whose
     /// current value is `value`: the effect/subtree read set and, while
     /// something is being tracked, a DAG edge from the source to it.
-    fn track_instance_source_read(&mut self, namespace: &str, field: &str, value: &Value) {
+    fn track_instance_source_read(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        value: &Value,
+        index: Option<usize>,
+    ) {
         self.record_reactive_read(namespace, field);
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             let source_id = self.get_or_create_instance_source_node(namespace, field, value);
-            self.dag.add_edge(source_id, ctx_id);
+            match index {
+                Some(index) => self.dag.add_edge_indexed(source_id, ctx_id, index),
+                None => self.dag.add_edge(source_id, ctx_id),
+            }
             self.note_rerender_read_site(source_id, ctx_id);
             self.instance_observer_epoch += 1;
         }

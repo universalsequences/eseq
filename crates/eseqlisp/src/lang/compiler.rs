@@ -355,6 +355,7 @@ pub enum OpCode {
     LoadReactiveLen(usize, usize), // namespace idx, field idx; pushes list length
     StoreReactive(usize, usize),   // namespace idx, field idx
     GetField(usize),               // pop a map, push map[strings[idx]]
+    GetFieldNth(usize),            // pop an index and a map/instance, push (nth x.field index)
     EmitTree,                      // pop widget tree from stack and route it to the runtime
     Return,
     Jump(usize),
@@ -3797,12 +3798,11 @@ impl<'a> Compiler<'a> {
             && !self.derived_bindings.contains_key(target)
         {
             let parts: Vec<&str> = target.splitn(2, '.').collect();
-            if parts.len() == 2
+            let well_formed = parts.len() == 2
                 && !parts[0].is_empty()
                 && !parts[1].is_empty()
-                && !parts[1].contains('.')
-                && self.reactive_namespaces.contains(parts[0])
-            {
+                && !parts[1].contains('.');
+            if well_formed && self.reactive_namespaces.contains(parts[0]) {
                 let ns_idx = self.use_string_constant(parts[0]);
                 let field_idx = self.use_string_constant(parts[1]);
                 if head == "nth" {
@@ -3811,6 +3811,20 @@ impl<'a> Compiler<'a> {
                 } else {
                     self.emit(OpCode::LoadReactiveLen(ns_idx, field_idx));
                 }
+                return Ok(());
+            }
+            // (nth x.field idx) on an instance records a dependency on that
+            // element alone, so a list field edit reruns only the readers of
+            // the elements it changed.
+            if head == "nth"
+                && well_formed
+                && !super::modules::is_qualified(target)
+                && self.removed_namespace_head(parts[0]).is_none()
+            {
+                self.emit_symbol_load(parts[0]);
+                self.compile_expression(&list[2])?;
+                let field_idx = self.use_string_constant(parts[1]);
+                self.emit(OpCode::GetFieldNth(field_idx));
                 return Ok(());
             }
         }

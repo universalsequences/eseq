@@ -9758,6 +9758,39 @@ impl VM {
                         None => return Err(VMError::StackUnderflow),
                     }
                 }
+                OpCode::GetFieldNth(idx) => {
+                    let key = self.chunks[self.current_chunk].strings[idx].clone();
+                    let (Some(index_value), Some(val)) = (stack.pop(), stack.pop()) else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let index_value = self.binding_ref_operand(index_value)?;
+                    let val = self.binding_ref_operand(val)?;
+                    // The element the dependency covers; `core_nth` decides
+                    // the value, so this stays the `nth` native exactly.
+                    let index = match &*index_value.borrow() {
+                        Value::Number(index) if *index >= 0.0 => Some(*index as usize),
+                        _ => None,
+                    };
+                    let instance = match &*val.borrow() {
+                        Value::Instance(id) => Some(*id),
+                        _ => None,
+                    };
+                    let result = match instance {
+                        Some(id) => {
+                            let field = self.read_instance_field_nth_tracked(id, &key, index)?;
+                            core_nth(&[&field, &*index_value.borrow()])
+                        }
+                        // A plain map: index the shared list in place.
+                        None => match &*val.borrow() {
+                            Value::Map(m) => m.get(&key).map_or(Value::Nil, |field| {
+                                core_nth(&[&*field.borrow(), &*index_value.borrow()])
+                            }),
+                            _ => return Err(VMError::IncorrectType),
+                        },
+                    };
+                    stack.push(Rc::new(RefCell::new(result)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
                         self.drop_render_caches_after_sealed_violation();

@@ -218,6 +218,29 @@ fn reading_a_ref_in_a_render_records_a_dependency() {
 }
 
 #[test]
+fn an_nth_read_of_a_list_field_depends_on_that_element_alone() {
+    let mut vm = vm();
+    eval(
+        &mut vm,
+        r#"
+        (def-kind lst :key () :state ((vals (list-of :number) :default (list 1 2 3))))
+        (effect-buffer "*first*" (label (str (nth lst.vals 0))))
+        (effect-buffer "*second*" (label (str (nth lst.vals (+ 0 1)))))
+        (effect-buffer "*all*" (label (str (len lst.vals))))
+        "#,
+    );
+    assert_eq!(rendered_targets(&mut vm), vec!["*all*", "*first*", "*second*"]);
+    eval(&mut vm, "(set! lst.vals (list 1 5 3))");
+    assert_eq!(rendered_targets(&mut vm), vec!["*all*", "*second*"]);
+    eval(&mut vm, "(set! lst.vals (list 1 5 3))");
+    assert!(rendered_targets(&mut vm).is_empty());
+    assert_eq!(eval(&mut vm, "(nth lst.vals 1)"), Value::Number(5.0));
+    assert_eq!(eval(&mut vm, "(nth lst.vals 9)"), Value::Nil);
+    assert_eq!(eval(&mut vm, "(nth lst.vals -1)"), Value::Nil);
+    assert_eq!(eval(&mut vm, "(let ((m (dict :vals (list 7 8)))) (nth m.vals 1))"), Value::Number(8.0));
+}
+
+#[test]
 fn unknown_and_value_only_fields_are_errors_naming_the_bindable_fields() {
     let mut vm = vm();
     assert_eq!(
