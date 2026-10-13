@@ -268,6 +268,11 @@ fn a_capture_in_flight_draws_provisional_items() {
     assert_eq!(get(item, "id"), Value::Nil, "provisional content is inert");
     assert_eq!(get(item, "start"), Value::Number(2.0), "from the punch-in");
     assert_eq!(
+        get(item, "grow"),
+        Value::Bool(true),
+        "the timeline stretches it to the playhead between head pushes"
+    );
+    assert_eq!(
         h.eval("(len (eseq.arrangement/track-clips 0))"),
         Value::Number(0.0),
         "nothing is committed yet"
@@ -738,4 +743,54 @@ fn select_all_then_delete_empties_the_track_and_rack_lanes() {
     let arrangement = h.app.state.committed_arrangement().expect("arrangement");
     assert!(arrangement.rack_lanes.values().all(Vec::is_empty), "rack lanes cleared");
     assert!(arrangement.track_lanes.iter().all(Vec::is_empty), "track lanes cleared");
+}
+
+/// The view scrolls with the playhead while the song runs, holding it a
+/// third of the way in (`follow-anchor`); a hand scroll pauses
+/// that for `arrangement-follow-cooloff` seconds, and the off switch stops it.
+#[test]
+fn the_view_follows_the_playhead_until_a_hand_scroll() {
+    let mut h = distro();
+    h.app.set_arrangement_view_visible(true);
+    h.app.song_transport_play(true).expect("capture starts");
+    let head = |h: &mut Harness, beat: f64| {
+        h.app.state.transport.record_clock.publish(beat, Instant::now());
+        h.settle();
+    };
+    let start = |h: &mut Harness| match h.arr_field("arr-view", "start") {
+        Value::Number(n) => n,
+        other => panic!("start {other:?}"),
+    };
+
+    // The head at `beat` sits `follow-anchor` of the 64-beat window in.
+    let anchored = |beat: f64| beat - 0.33 * 64.0;
+    head(&mut h, 8.0);
+    assert_eq!(start(&mut h), 0.0, "rests at 0 until the head passes the anchor");
+    head(&mut h, 200.0);
+    let at = start(&mut h);
+    assert!((at - anchored(200.0)).abs() < 1.0, "travels with the head: {at}");
+    head(&mut h, 201.0);
+    let next = start(&mut h);
+    assert!((next - at - 1.0).abs() < 0.5, "smoothly, beat by beat: {at} -> {next}");
+
+    // A hand scroll holds the view where the user put it.
+    h.eval("(setopt eseq.arrangement/arrangement-follow-cooloff 0.2)");
+    h.settle();
+    h.eval("(eseq.arrangement/view-action (dict :type :scroll-view :view-start 0))");
+    head(&mut h, 300.0);
+    assert_eq!(start(&mut h), 0.0, "paused by the hand scroll");
+
+    // A spent cooloff resumes following on the next head push alone: the
+    // paused run must still have subscribed to the position.
+    std::thread::sleep(Duration::from_millis(300));
+    head(&mut h, 400.0);
+    let at = start(&mut h);
+    assert!((at - anchored(400.0)).abs() < 1.0, "following again: {at}");
+
+    // Off: the view stays put.
+    h.eval("(setopt eseq.arrangement/arrangement-follow-playhead false)");
+    h.eval("(eseq.arrangement/view-action (dict :type :scroll-view :view-start 0))");
+    head(&mut h, 600.0);
+    assert_eq!(start(&mut h), 0.0, "follow is off");
+    h.app.song_capture_cancel().expect("cancel");
 }

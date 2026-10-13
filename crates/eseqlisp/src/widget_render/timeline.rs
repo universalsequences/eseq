@@ -89,6 +89,10 @@ struct TimelineItem {
     /// The color identifies the patch (§17.11 palette semantics); hosts pass
     /// `(r g b)` or `true` for the name-only gray fallback.
     sound_dot: Option<crate::backend::Color>,
+    /// `:grow`: the item is still being recorded and its host-side end lags
+    /// the record head (floored to a step), so the widget stretches it to the
+    /// playhead at paint time ([`TimelineView::grow_items_to_playhead`]).
+    grow: bool,
 }
 
 /// What kind of clip an item represents (docs/arrangement-timeline-ui-spec.md
@@ -2566,7 +2570,36 @@ impl TimelineView {
         };
         view.lane_scroll = view.clamp_lane_scroll(view.lane_scroll);
         view.apply_bound_channels(props);
+        view.grow_items_to_playhead();
         view
+    }
+
+    /// Stretch each `:grow` item's end to the playhead when the playhead is
+    /// past it. The host pushes a growing item's end in coarse steps (one
+    /// Lisp rerun per step), while the playhead is a bound field that
+    /// repaints every frame; extending here keeps the recording's edge glued
+    /// to the playhead line instead of trailing it in jumps. Content keeps
+    /// its absolute placement exactly as an end-edge resize ghost does: the
+    /// cycle is rescaled by old span / new span.
+    fn grow_items_to_playhead(&mut self) {
+        let Some(playhead) = self.playhead_time else {
+            return;
+        };
+        for item in self.items.iter_mut().filter(|item| item.grow) {
+            if playhead <= item.end {
+                continue;
+            }
+            let old_span = (item.end - item.start).max(1e-9);
+            item.end = playhead;
+            let new_span = (item.end - item.start).max(1e-9);
+            match item.content.as_mut() {
+                Some(TimelineItemContent::Dots { cycle, .. })
+                | Some(TimelineItemContent::Rings { cycle, .. }) => {
+                    *cycle = (*cycle * old_span / new_span).max(1e-9);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Per-lane bound float channels (UI_PERFORMANCE_TUNING.md ownership
@@ -4495,6 +4528,7 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                 kind: map.get("kind").and_then(parse_item_kind),
                 content: map.get("content").and_then(parse_item_content),
                 sound_dot: map.get("sound-dot").and_then(parse_sound_dot),
+                grow: map.get("grow").and_then(as_bool).unwrap_or(false),
             })
         })
         .collect()
@@ -4906,6 +4940,68 @@ mod tests {
         let map = get_map(&action).unwrap();
         assert_eq!(map.get("type"), Some(&keyword(":place-item")));
         assert_eq!(map.get("time"), Some(&Value::Number(8.0)));
+    }
+
+    /// A `:grow` item (a recording in flight) stretches to the playhead at
+    /// paint time, its dots keeping their beat positions; it never shrinks
+    /// below its pushed end, and items without the flag are left alone.
+    #[test]
+    fn grow_items_stretch_to_the_playhead() {
+        let item = |id: f64, grow: bool| {
+            map_value_raw(vec![
+                ("id", number_value(id)),
+                ("lane", number_value(0.0)),
+                ("start", number_value(8.0)),
+                ("end", number_value(16.0)),
+                ("grow", Value::Bool(grow)),
+                (
+                    "content",
+                    map_value_raw(vec![
+                        (
+                            "dots",
+                            list_value_raw(vec![map_value_raw(vec![
+                                ("offset", number_value(0.0)),
+                                ("value", number_value(0.5)),
+                            ])]),
+                        ),
+                        ("cycle", number_value(0.5)),
+                    ]),
+                ),
+            ])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let view_at = |playhead: f64| {
+            let props = HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![item(1.0, true), item(2.0, false)]),
+                ),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(64.0)),
+                ("playhead-time".to_string(), number_value(playhead)),
+            ]);
+            TimelineView::from_props(&props, rect)
+        };
+        let cycle = |item: &TimelineItem| match &item.content {
+            Some(TimelineItemContent::Dots { cycle, .. }) => *cycle,
+            _ => panic!("dots content"),
+        };
+
+        let view = view_at(16.2);
+        assert_eq!(view.items[0].end, 16.2, "glued to the playhead");
+        // 4 beats per cycle before (0.5 of 8) and after.
+        assert!((cycle(&view.items[0]) * (16.2 - 8.0) - 4.0).abs() < 1e-9);
+        assert_eq!(view.items[1].end, 16.0, "no flag, no stretch");
+        assert_eq!(cycle(&view.items[1]), 0.5);
+
+        let view = view_at(12.0);
+        assert_eq!(view.items[0].end, 16.0, "never shrinks below its end");
+        assert_eq!(cycle(&view.items[0]), 0.5);
     }
 
     /// The bound ghost channels must reproduce the arrangement's Lisp ghost

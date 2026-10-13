@@ -96,6 +96,21 @@
           (cursor-time 0)
           (cursor-track -1)))
 
+;; Playhead follow: while the song plays, the view scrolls smoothly with the
+;; playhead. A hand scroll or zoom pauses it for a cooloff,
+;; so you can look elsewhere without being dragged back mid-glance.
+(defcustom arrangement-follow-playhead true
+  :type :bool
+  :doc "Scroll the arrangement to keep the playhead in view while the song plays.")
+
+(defcustom arrangement-follow-cooloff 10
+  :type :number :min 0 :max 120 :step 1
+  :doc "Seconds playhead follow stays paused after you scroll or zoom the arrangement yourself.")
+
+;; now-ms of the last hand scroll/zoom, or nil: plain module state, not a
+;; kind field, so pausing never repaints anything.
+(def follow-paused-ms nil)
+
 ;; The click selection. `scenes` are the scene lane's selected events (their
 ;; start beats) and `rect` its marquee echo while a drag is live. Track-clip
 ;; selection (spec 9.2 extension): `clips` are the clicked lane's clip ids;
@@ -367,6 +382,29 @@
   (set! arr-view.start
     (max 0 (min (max-view-start duration) start))))
 
+;; Where in the window the followed playhead sits (0 left edge, 1 right):
+;; a third in, so more of what is coming is on screen than what has passed.
+(def follow-anchor 0.33)
+
+;; Scroll the view continuously so the playhead holds its anchor point,
+;; unless follow is off or a hand scroll is still inside its cooloff. Near
+;; the song start the view rests at 0 until the playhead reaches the anchor.
+;; It bypasses set-view-start's extent clamp on purpose: that clamp ends the
+;; view a padding past the playhead, which would pin the playhead to the
+;; right edge instead of letting the view travel with it.
+(def follow-playhead ()
+  ;; Read the position FIRST, unconditionally: the subtree reruns only on
+  ;; what its last run read, so a run that bailed inside the cooloff before
+  ;; reading it would never run again and follow would never come back.
+  (let ((pos song.position))
+    (when (and arrangement-follow-playhead
+            (not (= song.mode "stopped"))
+            (or (= follow-paused-ms nil)
+              (>= (- (now-ms) follow-paused-ms)
+                (* 1000 arrangement-follow-cooloff))))
+      (set! arr-view.start
+        (max 0 (- pos (* follow-anchor arr-view.duration)))))))
+
 ;; Zoom by the event's factor around its anchor time, which keeps its place
 ;; on screen.
 (def set-zoom (event)
@@ -400,6 +438,7 @@
 ;; over. `:lane-scroll`/`:delta-lanes` are ignored per spec 4.2 — vertical
 ;; navigation belongs to the track scroll container.
 (def view-action (event)
+  (set! follow-paused-ms (now-ms))
   (match event.type
     :scroll-view
     ;; An absolute start (0 included) wins over a delta.
@@ -775,6 +814,8 @@
         :kind :midi
         :label "Take"
         :content (pending-content lane)
+        ;; A take runs to the record head until stop (see pending-span-items).
+        :grow true
         :color color)
       (filter |lane| (on-lane? lane i) song.pending-lanes))))
 
@@ -804,13 +845,17 @@
     song.pending-head))
 
 ;; The captured launches `rows` as items, `(item row end)` each; a launch
-;; the record head has not passed yet has nothing to draw.
+;; the record head has not passed yet has nothing to draw. The last one ends
+;; at the record head, so it is marked `:grow`: the head is floored to a
+;; 16th, and the timeline stretches a growing item to the playhead at paint
+;; time so its edge travels smoothly with the playhead instead of in steps.
 (def pending-span-items (rows item)
   (filter |x| (not (= x nil))
     (map |index|
       (let ((row (nth rows index))
             (end (pending-end rows index)))
-        (when (> end row.start) (item row end)))
+        (when (> end row.start)
+          (merge (item row end) :grow (= (+ index 1) (len rows)))))
       (range 0 (len rows)))))
 
 (def pending-launch-items (i)
@@ -2029,6 +2074,7 @@
           :kind :midi
           :label (get c :name)
           :color (rack-clip-color g c)
+          :grow (get span :grow)
           :content (rack-span-content span)))
     (append (rack-spans g) (pending-rack-spans g))))
 
@@ -2055,6 +2101,7 @@
       :lane 0
       :start start
       :end (get span :end)
+      :grow (get span :grow)
       :kind :midi
       :label (pattern-label (get member :pid))
       :color (clip-color i)
@@ -2574,6 +2621,11 @@
       (do (sync-lanes) (nothing)))
     (subtree :key "arr-content-length"
       (do (set! arr-view.content-length (content-length)) (nothing)))
+    ;; Reads song.position, so it reruns per playhead push like the
+    ;; content-length sync above (one field write; the lanes bind
+    ;; arr-view.start with #', so they repaint without rerunning).
+    (subtree :key "arr-follow-playhead"
+      (do (follow-playhead) (nothing)))
     ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
     ;; arrangement always exists, so there is no mode to explain.
     (subtree :key "arr-scene-context-menu"
