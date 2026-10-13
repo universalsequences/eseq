@@ -235,7 +235,7 @@
 ;; look, 0 squares every corner. `radius` is the multiplier every
 ;; `:corner-radius` / `:border-radius` literal in those views goes through.
 (defcustom corner-radius-scale 1
-  :type :number :min 0 :max 1 :step 0.05
+  :type :number :min 0 :max 1.5 :step 0.05
   :doc "Rounded-corner amount for the sequencer and mixer chrome: 1 is fully rounded, 0 is square.")
 
 (def radius (r)

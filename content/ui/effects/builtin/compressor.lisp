@@ -121,14 +121,14 @@
 ;; ── Sidechain section ──
 
 (def sidechain-box (fx sc-source-p sc-on-p sc-gain-p listen-p
-                     filter-on-p type-p freq-p res-p)
+    filter-on-p type-p freq-p res-p)
   (box :width 9.6 :height 9.7 :padding 0.30
-       :background-color :fx-inner-panel-bg :corner-radius 7
+    :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (h-stack :gap 0.22 :align :center
-        (label "Sidechain" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
-        (parameter-toggle fx sc-on-p "SC" 2.0)
-        (parameter-toggle fx listen-p "Ear" 2.0))
+        (parameter-toggle fx sc-on-p "Sidechain" 6.0)
+        ;(parameter-toggle fx listen-p "Ear" 2.0)
+        )
       (option fx sc-source-p 7.6)
       (mini-number fx "Gain" sc-gain-p 1 4.2)
       (parameter-toggle fx filter-on-p "SC Filter" 5.4)

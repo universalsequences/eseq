@@ -836,7 +836,7 @@
         ;; ── sequencer-level config (on top) ──
         (box
           ;; Rack-owned: room for the corner chip past the spectrogram.
-          :width (if g.owner 112 90.5)
+          :width (if g.owner 85 90.5)
           :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
           (h-stack
             (v-stack
@@ -904,22 +904,6 @@
                 :background :bg
                 :width 16
                 :height 7))
-            (spectrogram
-              :key "graph-variable-reset-master-spectrogram"
-              :source :master
-              :mode :waterfall
-              :freq-scale :log
-              :fft-size 2048
-              :time-slices 180
-              :min-db -64
-              :max-db 0
-              :smoothing 0.68
-              :width 20
-              :height 7.0
-              :background-color :bg
-              :min-color (rgba 0.05 0.05 0.11 1)
-              :mid-color (rgba 0.16 0.66 0.88 1)
-              :max-color (rgba 1.0 0.72 0.28 1))
             ;; Top-right corner of the config block, past the spectrogram.
             (box :flex 1 :height 1.0)
             (gvr-owner-rack-badge g)
