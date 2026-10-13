@@ -32,6 +32,8 @@ const FIELD_RADIUS_PX: f32 = 18.0;
 /// sounds) draws taller two-line rows so the glyph reads.
 const ROW_HEIGHT: f32 = 1.42;
 const GLYPH_ROW_HEIGHT: f32 = 3.1;
+/// Virtual pixels across a row's glyph.
+const GLYPH_PIXELS: f64 = 12.0;
 /// The glyph's side, as a share of its row's height.
 const GLYPH_SIDE: f32 = 0.84;
 const FIELD_HEIGHT: f32 = 1.7;
@@ -198,6 +200,17 @@ thread_local! {
 /// The geometry of the palette drawn last (`None` once it stops drawing).
 pub fn hit_map() -> Option<PaletteHitMap> {
     HIT_MAP.with(std::cell::Cell::get)
+}
+
+/// A row's `sound-glyph` props: pixelated, as the mixer's clip cells are
+/// (`:pixelate`, a virtual-pixel grid across the glyph), so a small glyph
+/// reads as a clean blocky image rather than gooey noise.
+fn glyph_props(source: &str) -> std::collections::HashMap<String, crate::vm::Value> {
+    use crate::vm::Value;
+    std::collections::HashMap::from([
+        ("source".to_string(), Value::String(source.to_string())),
+        ("pixelate".to_string(), Value::Number(GLYPH_PIXELS)),
+    ])
 }
 
 /// How many rows of the given height fit `available` rows of list.
@@ -500,10 +513,7 @@ fn glyph_row_body(
         stable_key: None,
         widget_type: "sound-glyph".to_string(),
         rect: tile,
-        props: std::collections::HashMap::from([(
-            "source".to_string(),
-            crate::vm::Value::String(glyph.to_string()),
-        )]),
+        props: glyph_props(glyph),
         children: Vec::new(),
         focusable: false,
         animation: Default::default(),

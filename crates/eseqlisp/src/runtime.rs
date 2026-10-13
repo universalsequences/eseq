@@ -993,6 +993,10 @@ pub struct CommandChoice {
     /// False for a choice with `:search false`: kept out of the palette's
     /// search across `:searchable` commands (a per-instrument "Default").
     pub searchable: bool,
+    /// True for a choice with `:search :parent`: search lists it as the
+    /// pick before it (an instrument's "Default" preset is the instrument),
+    /// ranked above that pick's deeper choices.
+    pub stands_for_parent: bool,
     /// A `sound-glyph` source key (`:glyph`): the row draws that glyph.
     pub glyph: Option<String>,
 }
@@ -4036,12 +4040,14 @@ impl Runtime {
                     Some(Value::Nil) | None => None,
                     Some(other) => Some(self.format_value(&other)),
                 };
-                let searchable = !matches!(field("search"), Some(Value::Bool(false)));
+                let search = field("search");
+                let searchable = !matches!(search, Some(Value::Bool(false)));
+                let stands_for_parent = matches!(&search, Some(Value::Keyword(key)) if key == "parent");
                 let glyph = match field("glyph") {
                     Some(Value::String(key)) if !key.is_empty() => Some(key),
                     _ => None,
                 };
-                CommandChoice { label, value, detail, searchable, glyph }
+                CommandChoice { label, value, detail, searchable, stands_for_parent, glyph }
             })
             .collect())
     }

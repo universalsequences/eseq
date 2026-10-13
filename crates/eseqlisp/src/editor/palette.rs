@@ -31,6 +31,9 @@ const RECENT_SHOWN: usize = 5;
 const MATCH_LIMIT: usize = 200;
 /// The section uncurated M-x names list under while typing.
 const FUNCTIONS_SECTION: &str = "Functions";
+/// What a `:search :parent` leaf adds to its match score: more than any
+/// plain leaf match scores, so instruments list above their presets.
+const PARENT_LEAF_BOOST: i32 = 1100;
 /// Choices one `:searchable` command contributes to search, at most.
 const SEARCH_LEAF_LIMIT: usize = 20_000;
 /// Live previews closer together than this wait for the highlight to
@@ -128,6 +131,9 @@ struct PaletteEntry {
     /// A `:searchable` command's final choice: runs `name` with these
     /// arguments, and matches on its label.
     args: Option<Vec<Value>>,
+    /// A final choice listed as the pick before it (`:search :parent`): it
+    /// ranks above that pick's deeper choices.
+    stands_for_parent: bool,
 }
 
 impl PaletteEntry {
@@ -150,6 +156,7 @@ impl PaletteEntry {
             glyph: None,
             curated,
             args: None,
+            stands_for_parent: false,
         }
     }
 
@@ -213,8 +220,11 @@ impl Stage {
                     let by_name = match_score(&entry.name_lower, &query).map(|score| score - 50);
                     by_label.max(by_name).map(|score| score + 2000)
                 } else if entry.args.is_some() {
-                    // A searchable choice: by its label, as a substring.
-                    substring_score(&entry.label_lower, &query)
+                    // A searchable choice: by its label, as a substring; one
+                    // standing for its parent pick (an instrument) above
+                    // every deeper choice (its presets).
+                    let boost = if entry.stands_for_parent { PARENT_LEAF_BOOST } else { 0 };
+                    substring_score(&entry.label_lower, &query).map(|score| score + boost)
                 } else {
                     // A subsequence over thousands of names is mostly
                     // noise: uncurated names match as substrings only.
@@ -605,6 +615,7 @@ impl Editor {
             entry.group = Some(leaf.title.clone());
             entry.detail = leaf.detail.clone().or_else(|| (!crumbs.is_empty()).then(|| crumbs.join(" › ")));
             entry.args = Some(leaf.args);
+            entry.stands_for_parent = leaf.stands_for_parent;
             stage.entries.push(entry);
             if let Some(icon) = &leaf.icon {
                 state.group_icons.entry(leaf.title.clone()).or_insert_with(|| icon.clone());
@@ -634,6 +645,7 @@ impl Editor {
                 labels: Vec::new(),
                 details: Vec::new(),
                 detail: None,
+                stands_for_parent: false,
             };
             let mut own = Vec::new();
             self.collect_search_leaves(&sources, leaf, &mut own);
@@ -662,6 +674,16 @@ impl Editor {
             }
             let mut next = at.clone();
             next.args.push(choice.value);
+            if choice.stands_for_parent {
+                // Listed as the pick before it, with that pick's detail.
+                if at.labels.is_empty() || next.args.len() < sources.len() {
+                    continue;
+                }
+                next.detail = at.details.last().cloned().flatten();
+                next.stands_for_parent = true;
+                out.push(next);
+                continue;
+            }
             next.labels.push(choice.label);
             next.details.push(choice.detail.clone());
             if next.args.len() < sources.len() {
@@ -1259,6 +1281,8 @@ pub(super) struct SearchLeaf {
     /// same label from different folders are different leaves.
     details: Vec<Option<String>>,
     detail: Option<String>,
+    /// A `:search :parent` choice: `labels` end at the pick it stands for.
+    stands_for_parent: bool,
 }
 
 enum CurrentDisplay {
@@ -1565,6 +1589,53 @@ mod tests {
         }
         editor.handle_key(key(KeyCode::Enter));
         assert_eq!(ran(&editor), Some(Value::String("snares/Clap Snare".into())));
+    }
+
+    #[test]
+    fn a_parent_standin_lists_the_first_pick_above_deeper_choices() {
+        let mut editor = palette_editor();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(def pal-instruments () (list (dict :label "Bass Synth" :value "bass" :detail "Factory")
+                                                 (dict :label "Keys" :value "keys")))
+                   (def pal-presets (instrument)
+                     (if (= instrument "keys")
+                       (list (dict :label "Default" :value "" :search :parent) "Synth Bass Pluck")
+                       (list (dict :label "Default" :value "" :search :parent) "Warm")))
+                   (def pal-add-inst (instrument preset) :command "Add Instrument"
+                     :choices (instrument pal-instruments preset pal-presets) :searchable true
+                     (set! ran (str instrument "/" preset)))"#,
+            )
+            .unwrap();
+        editor.run_command(COMMAND_PALETTE);
+        type_text(&mut editor, "synth");
+        let all = rows(&editor);
+        let section = all.iter().position(|row| row == "# Add Instrument").expect("a section");
+        assert_eq!(
+            all[section + 1..section + 3],
+            ["Bass Synth", "Synth Bass Pluck"],
+            "the instrument (a mid-word match) ranks above a preset's prefix match"
+        );
+        let frame = editor.palette_frame().unwrap();
+        let bass = frame.rows.iter().find(|row| row.label == "Bass Synth").unwrap();
+        assert_eq!(bass.detail.as_deref(), Some("Factory"), "the stand-in shows its pick's detail");
+
+        editor.handle_key(key(KeyCode::Esc));
+        editor.run_command(COMMAND_PALETTE);
+        type_text(&mut editor, "default");
+        assert!(!labels(&editor).iter().any(|row| row == "Default"), "a stand-in is not listed by its own label");
+
+        editor.handle_key(key(KeyCode::Esc));
+        editor.run_command(COMMAND_PALETTE);
+        type_text(&mut editor, "bass synth");
+        let at = rows(&editor).iter().position(|row| row == "Bass Synth").unwrap();
+        let selected = editor.palette_frame().unwrap().selected.unwrap();
+        for _ in selected..at {
+            editor.handle_key(key(KeyCode::Down));
+        }
+        editor.handle_key(key(KeyCode::Enter));
+        assert_eq!(ran(&editor), Some(Value::String("bass/".into())), "runs with the stand-in's own value");
     }
 
     #[test]

@@ -17,7 +17,7 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
-(import eseq.view-kit :refer (open-menu! menu-of listed?))
+(import eseq.view-kit :refer (open-menu! menu-of listed? find))
 (import eseq.preview-strip :refer (sync-preview! toggle-preview! preview-strip))
 (import eseq.kinds :refer (track tracks scenes groups project selection browser editor))
 
@@ -1107,30 +1107,38 @@
     (swap-track-builtin-instrument (current-index) name false)
     (add-builtin-instrument-track name)))
 
-;; The palette's "Add Instrument" choices: every instrument row of the
-;; Instruments tab tree (factory, library, packages, builtins), flattened, each
-;; labelled with the folder it sits in.
-(def palette-instrument-entries (items folder)
+;; A browser tab's tree as palette choices: every row whose :kind is one of
+;; `kinds`, flattened, each labelled with the folder it sits in.
+(def palette-tree-entries (items folder kinds)
   (reduce
     (lambda (acc item)
-      (let ((kind (get item :kind)))
-        (if (or (= kind "instrument") (= kind "builtin-instrument"))
-          (append acc (list (dict :label (get item :label) :value item :detail folder)))
-          (let ((children (get item :children)))
-            (if children
-              (append acc (palette-instrument-entries children (get item :label)))
-              acc)))))
+      (if (listed? (get item :kind) kinds)
+        (append acc (list (dict :label (get item :label) :value item :detail folder)))
+        (let ((children (get item :children)))
+          (if children
+            (append acc (palette-tree-entries children (get item :label) kinds))
+            acc))))
     (list)
     items))
 
+;; The palette's "Add Instrument" choices: the Instruments tab's instruments
+;; (factory, library, packages, builtins). The tab's "Engines" section
+;; repeats the project's instruments without a folder (under their
+;; tier-qualified, versioned engine ids): one also listed in a folder under
+;; the same name keeps only that row.
 (def palette-instrument-choices ()
-  (palette-instrument-entries (seq-saved-instrument-tree "" browser.engines "" false) nil))
+  (let ((entries (palette-tree-entries (seq-saved-instrument-tree "" browser.engines "" false) nil
+                   (list "instrument" "builtin-instrument"))))
+    (filter
+      |e| (or (get e :detail)
+              (not (find |other| (and (get other :detail) (= (get other :label) (get e :label))) entries)))
+      entries)))
 
 ;; The second step: an instrument's presets, after a "Default" that loads
-;; none (kept out of search, where every instrument would list one).
+;; none. Search lists the Default as the instrument itself, above presets.
 (def palette-preset-choices (instrument)
   (append
-    (list (dict :label "Default" :value "" :search false))
+    (list (dict :label "Default" :value "" :search :parent))
     (if (= (get instrument :kind) "instrument")
       (seq-instrument-preset-names (get instrument :name))
       (list))))
@@ -1139,7 +1147,7 @@
   :doc "Add a new track playing an instrument at one of its presets.
 Lists factory, library, package and builtin instruments (sampler, rack,
 modulator) from the Instruments tab, then the instrument's presets. Search
-finds a preset by name inside its instrument."
+finds an instrument by name, then a preset by name inside its instrument."
   :command "Add Instrument"
   :icon :piano
   :pinned true
@@ -1149,6 +1157,36 @@ finds a preset by name inside its instrument."
     (if (= (get instrument :kind) "builtin-instrument")
       (add-builtin-instrument-track name)
       (add-instrument-track name preset))))
+
+;; The palette's "Add Effect" / "Add MIDI Effect": the Audio FX and MIDI FX
+;; tabs' effects, added to the selected track (or bus) as those tabs do.
+(def palette-audio-effect-choices ()
+  (palette-tree-entries (seq-audio-effect-tree "") nil
+    (list "builtin-audio-effect" "custom-audio-effect")))
+
+(def palette-midi-effect-choices ()
+  (palette-tree-entries (seq-midi-effect-tree "") nil (list "midi-effect")))
+
+(def add-audio-effect (effect)
+  :doc "Add an audio effect to the selected track's chain.
+Lists the built-in and custom effects from the Audio FX tab. With a bus
+selected, the effect goes on the bus."
+  :command "Add Effect"
+  :icon :audio-fx
+  :pinned true
+  :searchable true
+  :prompt "Effect"
+  :choices palette-audio-effect-choices
+  (activate-audio-effect effect))
+
+(def add-midi-effect (effect)
+  :doc "Add a MIDI effect to the selected track."
+  :command "Add MIDI Effect"
+  :icon :midi-fx
+  :searchable true
+  :prompt "MIDI Effect"
+  :choices palette-midi-effect-choices
+  (activate-midi-effect effect))
 
 ;; The palette's "Load Preset": the selected track's instrument presets,
 ;; previewed live as the highlight moves.

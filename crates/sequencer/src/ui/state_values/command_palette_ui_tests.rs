@@ -93,7 +93,7 @@ fn the_home_list_is_everyday_commands_flat() {
     assert!(frame.rows.iter().all(|row| !row.header), "no sections before typing");
     let rows = row_labels(&editor);
     assert_eq!(rows.first().map(String::as_str), Some("Apply Sound"), "ranked first: {rows:?}");
-    for expected in ["Change Theme", "Add Instrument", "Load Preset", "Play", "Set Tempo", "Show Browser"] {
+    for expected in ["Change Theme", "Add Instrument", "Add Effect", "Load Preset", "Play", "Set Tempo"] {
         assert!(rows.iter().any(|row| row == expected), "{expected} missing from {rows:?}");
     }
     for absent in ["Quit eseq", "About eseq", "Export Package…"] {

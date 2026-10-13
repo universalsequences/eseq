@@ -1,6 +1,6 @@
 # Command Palette + Definition Docs — spec rev 1
 
-Status: rev 4, 2026-10-11 (rev 1 2026-10-10). Phases 1–5 COMMITTED 2026-10-10. Follow-up: eseq-cmdp.6 (:preview, multi-parameter stages). Epic: see `bd show` for the `command-palette` epic.
+Status: rev 5, 2026-10-12 (rev 1 2026-10-10). Phases 1–5 COMMITTED 2026-10-10. Follow-up: eseq-cmdp.6 (:preview, multi-parameter stages). Epic: see `bd show` for the `command-palette` epic.
 
 ## 1. Goal
 
@@ -185,6 +185,14 @@ One list, three tiers (`editor/palette.rs`):
   as its value; a choice dict's `:search false` keeps it out; identical
   breadcrumbs are listed once. Add Instrument uses it, so typing a preset
   name finds it inside its instrument.
+- A choice dict's `:search :parent` lists it in that search as the pick
+  before it, ranked above every deeper choice (rev 5). Add Instrument's
+  per-instrument "Default" preset carries it, so typing an instrument's
+  name finds the instrument (Enter adds it at its default) above presets.
+- **Add Effect** (`eseq.browser/add-audio-effect`, pinned) and **Add MIDI
+  Effect** (`add-midi-effect`) list the Audio FX / MIDI FX tabs' effects,
+  searchable, and add one as the tab's Enter does (the selected track, or
+  the selected bus) (rev 5).
 
 ### 6.3 Apply Sound: the sound pool as a command (rev 4)
 
@@ -203,7 +211,8 @@ overlay's click (`apply-sound!`).
   the typed input and the highlighted value.
 - A choice dict's `:glyph` names a `sound-glyph` source key; a list with
   any glyph draws taller two-line rows (glyph, title, detail beneath) and
-  pages by that height.
+  pages by that height. Row glyphs draw pixelated (`:pixelate 12`), as the
+  mixer's clip cells do (rev 5).
 - `:pinned N` ranks a command into a fixed block at the top of the home
   list, above the recently run ones.
 
