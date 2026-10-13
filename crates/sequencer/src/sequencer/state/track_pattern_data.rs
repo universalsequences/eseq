@@ -62,10 +62,11 @@ impl TrackPatternData {
                 step[param.index()] = param.default_value();
             }
         }
+        let chord = &mut *self.chord_snapshot;
         for lane in [
-            &mut self.chord_snapshot.steps,
-            &mut self.chord_snapshot.durations,
-            &mut self.chord_snapshot.delays,
+            &mut chord.steps,
+            &mut chord.durations,
+            &mut chord.delays,
         ] {
             for step in lane.iter_mut() {
                 step.clear();
@@ -101,10 +102,11 @@ impl TrackPatternData {
                 params[param.index()] = param.default_value();
             }
         }
+        let chord = &mut *self.chord_snapshot;
         for lane in [
-            &mut self.chord_snapshot.steps,
-            &mut self.chord_snapshot.durations,
-            &mut self.chord_snapshot.delays,
+            &mut chord.steps,
+            &mut chord.durations,
+            &mut chord.delays,
         ] {
             if let Some(notes) = lane.get_mut(step) {
                 notes.clear();
@@ -158,10 +160,11 @@ impl TrackPatternData {
         {
             *dst = *src_row;
         }
+        let chord = &mut *self.chord_snapshot;
         for (dst_lane, src_lane) in [
-            (&mut self.chord_snapshot.steps, &src.chord_snapshot.steps),
-            (&mut self.chord_snapshot.durations, &src.chord_snapshot.durations),
-            (&mut self.chord_snapshot.delays, &src.chord_snapshot.delays),
+            (&mut chord.steps, &src.chord_snapshot.steps),
+            (&mut chord.durations, &src.chord_snapshot.durations),
+            (&mut chord.delays, &src.chord_snapshot.delays),
         ] {
             if let Some(dst) = dst_lane.get_mut(dst_step) {
                 *dst = src_lane.get(src_step).cloned().unwrap_or_default();

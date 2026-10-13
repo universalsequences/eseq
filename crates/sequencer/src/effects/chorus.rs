@@ -165,7 +165,7 @@ pub fn descriptor() -> EffectDescriptor {
             });
         }
     }
-    EffectDescriptor {
+    crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "Chorus".to_string(),
         params,
         tensor_params: Vec::new(),
@@ -179,7 +179,7 @@ pub fn descriptor() -> EffectDescriptor {
             .collect(),
         instrument_modulation_targets: targets,
         declared_latency_samples: None,
-    }
+    })
 }
 
 /// Standard topology-preserving state-variable filter, Butterworth Q.

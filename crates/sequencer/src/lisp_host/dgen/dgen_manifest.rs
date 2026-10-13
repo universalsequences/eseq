@@ -840,6 +840,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
         }
     }
 
+    let desc = &mut **desc;
     for target in &desc.instrument_modulation_targets {
         if let Some(active_param_idx) = target.active_param_idx {
             let active = desc

@@ -1563,7 +1563,7 @@ mod tests {
     use crate::app::{App, AudioBuses};
 
     fn effect_mod_test_descriptor() -> EffectDescriptor {
-        EffectDescriptor {
+        crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "modded effect".to_string(),
             input_channels: 6,
             output_channels: 2,
@@ -1648,7 +1648,7 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        }
+        })
     }
 
     #[test]
@@ -1746,7 +1746,7 @@ mod tests {
     }
 
     fn tensor_instrument_descriptor() -> EffectDescriptor {
-        EffectDescriptor {
+        crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "tensor instrument".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1762,7 +1762,7 @@ mod tests {
                 max: 1.0,
             }],
             params: Vec::new(),
-        }
+        })
     }
 
     fn test_app_with_bus_effect_descriptor(desc: EffectDescriptor) -> App {
@@ -2512,7 +2512,7 @@ mod tests {
             mapping.target,
             ParamTarget::EffectParam {
                 slot: 0,
-                effect: desc.name,
+                effect: desc.name.clone(),
                 param: desc.params[0].name.clone(),
                 param_id: Some(ParamNodeId {
                     logical_id: 41,

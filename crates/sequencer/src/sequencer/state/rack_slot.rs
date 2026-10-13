@@ -87,48 +87,27 @@ impl RackSlotParam {
 
 #[derive(Clone, Debug)]
 pub struct RackSlotParamPlocks {
-    pub rows: Vec<Vec<Option<f32>>>,
+    pub rows: crate::effects::StepLockRows<f32>,
 }
 
 impl RackSlotParamPlocks {
     pub fn new() -> Self {
         Self {
-            rows: (0..MAX_STEPS)
-                .map(|_| vec![None; RACK_SLOT_PARAM_COUNT])
-                .collect(),
+            rows: crate::effects::StepLockRows::default(),
         }
     }
 
     pub fn from_rows(mut rows: Vec<Vec<Option<f32>>>) -> Self {
         rows.truncate(MAX_STEPS);
-        while rows.len() < MAX_STEPS {
-            rows.push(Vec::new());
-        }
         for row in &mut rows {
             row.truncate(RACK_SLOT_PARAM_COUNT);
-            if row.len() < RACK_SLOT_PARAM_COUNT {
-                row.resize(RACK_SLOT_PARAM_COUNT, None);
-            }
             for param in RackSlotParam::ALL {
                 if let Some(Some(value)) = row.get_mut(param.index()) {
                     *value = param.clamp(*value);
                 }
             }
         }
-        Self { rows }
-    }
-
-    pub(super) fn ensure_step(&mut self, step: usize) -> bool {
-        if step >= MAX_STEPS {
-            return false;
-        }
-        while self.rows.len() <= step {
-            self.rows.push(vec![None; RACK_SLOT_PARAM_COUNT]);
-        }
-        if self.rows[step].len() < RACK_SLOT_PARAM_COUNT {
-            self.rows[step].resize(RACK_SLOT_PARAM_COUNT, None);
-        }
-        true
+        Self { rows: rows.into() }
     }
 
     pub fn get(&self, step: usize, param: RackSlotParam) -> Option<f32> {
@@ -140,10 +119,10 @@ impl RackSlotParamPlocks {
     }
 
     pub fn set(&mut self, step: usize, param: RackSlotParam, value: f32) -> bool {
-        if !self.ensure_step(step) {
+        if step >= MAX_STEPS {
             return false;
         }
-        self.rows[step][param.index()] = Some(param.clamp(value));
+        self.rows.set(step, param.index(), Some(param.clamp(value)));
         true
     }
 
@@ -151,20 +130,12 @@ impl RackSlotParamPlocks {
         if step >= MAX_STEPS {
             return false;
         }
-        if let Some(row) = self.rows.get_mut(step) {
-            if let Some(value) = row.get_mut(param.index()) {
-                *value = None;
-            }
-        }
+        self.rows.set(step, param.index(), None);
         true
     }
 
     pub fn clear_step(&mut self, step: usize) {
-        if let Some(row) = self.rows.get_mut(step) {
-            for value in row.iter_mut().take(RACK_SLOT_PARAM_COUNT) {
-                *value = None;
-            }
-        }
+        self.rows.clear_step(step);
     }
 
     pub fn step_has_plock(&self, step: usize) -> bool {
@@ -177,5 +148,28 @@ impl RackSlotParamPlocks {
 impl Default for RackSlotParamPlocks {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rack_control_locks_normalize_share_and_edit_independently() {
+        let mut rows = vec![vec![None; RACK_SLOT_PARAM_COUNT]; MAX_STEPS];
+        rows[255][RackSlotParam::Gain.index()] = Some(9.0);
+        let mut locks = RackSlotParamPlocks::from_rows(rows);
+        assert_eq!(locks.get(255, RackSlotParam::Gain), Some(2.0));
+        let saved = locks.clone();
+        assert_eq!(locks.rows.as_ptr(), saved.rows.as_ptr());
+        locks.clear_step(255);
+        assert_eq!(locks.rows.retained_bytes(), 0);
+        assert_eq!(saved.get(255, RackSlotParam::Gain), Some(2.0));
+        assert!(locks.set(4, RackSlotParam::Pan, -0.0));
+        assert_eq!(locks.get(4, RackSlotParam::Pan).unwrap().to_bits(), (-0.0f32).to_bits());
+        locks.clear(4, RackSlotParam::Pan);
+        assert_eq!(locks.rows.retained_bytes(), 0);
+        assert!(!locks.set(MAX_STEPS, RackSlotParam::Gain, 1.0));
     }
 }

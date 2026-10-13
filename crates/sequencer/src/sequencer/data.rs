@@ -177,6 +177,10 @@ impl TrackSendPLockData {
         self.steps.lock().unwrap().clone()
     }
 
+    pub fn step_snapshot(&self, step: usize) -> Vec<TrackSendSnapshot> {
+        self.steps.lock().unwrap().get(step).cloned().unwrap_or_default()
+    }
+
     pub fn restore(&self, snapshot: &[Vec<TrackSendSnapshot>]) {
         let mut steps = self.steps.lock().unwrap();
         for (step, row) in steps.iter_mut().enumerate() {
@@ -1759,7 +1763,22 @@ impl ChordData {
 }
 
 #[derive(Clone, Debug)]
-pub struct ChordSnapshot {
+pub struct ChordSnapshot(Arc<ChordSnapshotData>);
+
+impl std::ops::Deref for ChordSnapshot {
+    type Target = ChordSnapshotData;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl std::ops::DerefMut for ChordSnapshot {
+    fn deref_mut(&mut self) -> &mut Self::Target { Arc::make_mut(&mut self.0) }
+}
+
+/// Captured note lanes are shared by stored patterns, launch composition and
+/// history. Editing a lane detaches the complete set, preserving note identity
+/// and timing together in every previously captured pattern.
+#[derive(Clone, Debug)]
+pub struct ChordSnapshotData {
     pub steps: Vec<Vec<f32>>,
     pub durations: Vec<Vec<f32>>,
     pub delays: Vec<Vec<f32>>,
@@ -1770,6 +1789,15 @@ pub struct ChordSnapshot {
 }
 
 impl ChordSnapshot {
+    pub fn from_lanes(
+        steps: Vec<Vec<f32>>,
+        durations: Vec<Vec<f32>>,
+        delays: Vec<Vec<f32>>,
+        ids: Vec<Vec<NoteId>>,
+    ) -> Self {
+        Self(Arc::new(ChordSnapshotData { steps, durations, delays, ids }))
+    }
+
     pub fn capture(cd: &ChordData) -> Self {
         let mut steps = Vec::with_capacity(MAX_STEPS);
         let mut durations = Vec::with_capacity(MAX_STEPS);
@@ -1792,12 +1820,7 @@ impl ChordSnapshot {
             delays.push(note_delays);
             ids.push(note_ids);
         }
-        Self {
-            steps,
-            durations,
-            delays,
-            ids,
-        }
+        Self::from_lanes(steps, durations, delays, ids)
     }
 
     /// Step `step`'s note ids, beside its notes (`0`: none).
@@ -1877,12 +1900,13 @@ impl ChordSnapshot {
     }
 
     pub fn new_default() -> Self {
-        Self {
-            steps: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-            durations: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-            delays: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-            ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-        }
+        static EMPTY: std::sync::OnceLock<ChordSnapshot> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(|| Self::from_lanes(
+            vec![Vec::new(); MAX_STEPS],
+            vec![Vec::new(); MAX_STEPS],
+            vec![Vec::new(); MAX_STEPS],
+            vec![Vec::new(); MAX_STEPS],
+        )).clone()
     }
 }
 

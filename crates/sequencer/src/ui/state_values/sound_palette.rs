@@ -1713,7 +1713,7 @@ mod glyph_fingerprint_tests {
     }
 
     fn descriptor(params: Vec<ParamDescriptor>) -> EffectDescriptor {
-        EffectDescriptor {
+        EffectDescriptor::new(sequencer::effects::EffectDescriptorData {
             name: "test-instrument".to_string(),
             params,
             tensor_params: Vec::new(),
@@ -1722,7 +1722,7 @@ mod glyph_fingerprint_tests {
             instrument_modulators: Vec::new(),
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
-        }
+        })
     }
 
     fn fingerprint(descriptor: &EffectDescriptor) -> u64 {

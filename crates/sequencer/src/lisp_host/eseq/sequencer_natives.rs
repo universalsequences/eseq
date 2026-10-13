@@ -1707,7 +1707,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                     .iter()
                     .find(|entry| entry.name.eq_ignore_ascii_case(label))
                 {
-                    let desc = EffectDescriptor {
+                    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
                         name: entry.name.clone(),
                         params: entry.params.clone(),
                         input_channels: 0,
@@ -1716,7 +1716,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                         declared_latency_samples: None,
                         instrument_modulation_targets: Vec::new(),
                         tensor_params: Vec::new(),
-                    };
+                    });
                     state_for_use_midi_fx.pattern.midi_fx_slots[track_idx][slot_idx]
                         .sync_descriptor(&desc, 0);
                 }

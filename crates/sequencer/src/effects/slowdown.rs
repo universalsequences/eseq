@@ -337,7 +337,7 @@ pub fn descriptor() -> EffectDescriptor {
             ui_metadata: None,
         });
     }
-    EffectDescriptor {
+    crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "Slowdown".to_string(),
         params,
         tensor_params: Vec::new(),
@@ -351,7 +351,7 @@ pub fn descriptor() -> EffectDescriptor {
             .collect(),
         declared_latency_samples: None,
         instrument_modulation_targets: targets,
-    }
+    })
 }
 
 fn finite(value: f32, min: f32, max: f32, default: f32) -> f32 {

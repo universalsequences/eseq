@@ -314,7 +314,7 @@ pub fn mod_out_tap_vtable() -> NodeVTable {
 }
 
 pub fn descriptor() -> EffectDescriptor {
-    EffectDescriptor {
+    crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "Modulator".to_string(),
         input_channels: 0,
         output_channels: 0,
@@ -355,7 +355,7 @@ pub fn descriptor() -> EffectDescriptor {
                 ui_metadata: None,
             },
         ],
-    }
+    })
 }
 
 #[cfg(test)]

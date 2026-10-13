@@ -675,10 +675,30 @@ mod tests {
     use crate::neural::ParamNodeId;
 
     #[test]
+    fn shared_descriptors_detach_on_edit_and_keep_published_layouts() {
+        let original = EffectDescriptor::builtin_sampler();
+        let mut edited = original.clone();
+        assert!(std::sync::Arc::ptr_eq(&original.0, &edited.0));
+        let old_default = original.params[0].default;
+        let old_node = original.params[0].node_param_idx;
+        edited.params[0].default = old_default + 1.0;
+        edited.params[0].node_param_idx = 987;
+        edited.name.push_str(" edited");
+        assert!(!std::sync::Arc::ptr_eq(&original.0, &edited.0));
+        assert_eq!(original.params[0].default, old_default);
+        assert_eq!(original.params[0].node_param_idx, old_node);
+        let next = EffectDescriptor::builtin_sampler();
+        assert!(std::sync::Arc::ptr_eq(&original.0, &next.0));
+        assert_eq!(next.name, original.name);
+        assert_eq!(edited.into_data().params[0].node_param_idx, 987);
+    }
+
+    #[test]
     fn a_percent_param_is_a_fraction_shown_times_100() {
         let param = |name: &str, effect: &str| {
             EffectDescriptor::builtin_insert(effect)
                 .unwrap()
+                .into_data()
                 .params
                 .into_iter()
                 .find(|param| param.name == name)
@@ -708,18 +728,18 @@ mod tests {
                 .iter()
                 .map(|name| {
                     let desc = EffectDescriptor::builtin_insert(name).unwrap();
-                    (name.to_string(), desc.params)
+                    (name.to_string(), desc.into_data().params)
                 })
                 .collect();
         descriptors.extend([
             (
                 "Dynamics".into(),
-                EffectDescriptor::builtin_dynamics().params,
+                EffectDescriptor::builtin_dynamics().into_data().params,
             ),
-            ("Sampler".into(), EffectDescriptor::builtin_sampler().params),
+            ("Sampler".into(), EffectDescriptor::builtin_sampler().into_data().params),
             (
                 "track modulator".into(),
-                crate::instruments::track_modulator::descriptor().params,
+                crate::instruments::track_modulator::descriptor().into_data().params,
             ),
             (
                 "voice modulator".into(),
@@ -964,7 +984,7 @@ mod tests {
                 ui_metadata: None,
             })
             .collect();
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -973,7 +993,7 @@ mod tests {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        };
+        });
 
         let slot = EffectSlotState::new(&desc, 100);
         slot.defaults.set(149, 7.5);
@@ -1131,7 +1151,7 @@ mod tests {
 
     #[test]
     fn sync_descriptor_restamps_lock_identity_under_the_new_node_id() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "synth".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1152,7 +1172,7 @@ mod tests {
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         let slot = EffectSlotState::new(&desc, 100);
         slot.set_plock(3, 0, -4.25);
         slot.set_key_lock(60, 0, 2.5);
@@ -1190,7 +1210,7 @@ mod tests {
     /// passing the staleness guards at trigger resolution.
     #[test]
     fn adopt_identity_and_restamp_rebinds_restored_lock_ids_to_the_live_node() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "synth".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1211,7 +1231,7 @@ mod tests {
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         // A stored Patch stamped under node 100 (it missed a rebuild sweep)…
         let stale = EffectSlotState::new(&desc, 100);
         stale.set_plock(3, 0, -4.25);
@@ -1274,7 +1294,7 @@ mod tests {
 
     #[test]
     fn slot_tensor_params_capture_restore_defaults_and_whole_matrix_plocks() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "tensor instrument".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1290,7 +1310,7 @@ mod tests {
                 max: 1.0,
             }],
             params: Vec::new(),
-        };
+        });
         let slot = EffectSlotState::new(&desc, 10);
 
         let edited = slot
@@ -1337,6 +1357,13 @@ mod tests {
             restored.tensor_params.plock_values(7, 0).unwrap(),
             vec![0.1, 0.2, 0.95, 0.4]
         );
+        restored.tensor_params.clear();
+        restored.tensor_params.clear();
+        assert!(!restored.tensor_params.has_any_plock());
+        assert_eq!(restored.tensor_params.default_values(0), None);
+        restored.tensor_params.apply_descriptor(&desc.tensor_params);
+        assert_eq!(restored.tensor_params.plock_values(7, 0), None);
+        assert_eq!(restored.tensor_params.default_values(0), Some(vec![0.1, 0.2, 0.3, 0.4]));
     }
 
     #[test]
@@ -1399,7 +1426,7 @@ mod tests {
     // knob values into device state slots such as Space Echo's sample rate.
     #[test]
     fn restoring_a_snapshot_without_a_layout_keeps_the_live_node_param_mapping() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1420,7 +1447,7 @@ mod tests {
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         let live = EffectSlotState::new(&desc, 42);
 
         let mut stale = EffectSlotSnapshot::capture(&live);
@@ -1453,7 +1480,7 @@ mod tests {
                 ui_metadata: None,
             })
             .collect();
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1462,7 +1489,7 @@ mod tests {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        };
+        });
         let live = EffectSlotState::new(&desc, 42);
 
         // A stale snapshot claiming 20 params while carrying no layout at all.
@@ -1538,7 +1565,7 @@ mod tests {
 
     #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_and_key_lock_ids_to_live_node_id() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1559,7 +1586,7 @@ mod tests {
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         let mut snapshot = EffectSlotSnapshot {
             node_id: 10,
             modulator_node_id: 0,
@@ -1655,7 +1682,7 @@ mod tests {
                 ui_metadata: None,
             })
             .collect();
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -1664,7 +1691,7 @@ mod tests {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        };
+        });
 
         let slot = EffectSlotState::empty();
         slot.apply_descriptor(&desc, 100);
@@ -1678,7 +1705,7 @@ mod tests {
 
     #[test]
     fn sync_descriptor_preserves_existing_defaults_and_plocks() {
-        let original = EffectDescriptor {
+        let original = EffectDescriptor::new(super::EffectDescriptorData {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1714,8 +1741,8 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
-        let rebound = EffectDescriptor {
+        });
+        let rebound = EffectDescriptor::new(super::EffectDescriptorData {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1751,7 +1778,7 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
 
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 0.42);
@@ -1772,7 +1799,7 @@ mod tests {
 
     #[test]
     fn sync_descriptor_by_param_name_preserves_reordered_compatible_values() {
-        let original = EffectDescriptor {
+        let original = EffectDescriptor::new(super::EffectDescriptorData {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1810,8 +1837,8 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
-        let rebound = EffectDescriptor {
+        });
+        let rebound = EffectDescriptor::new(super::EffectDescriptorData {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1849,7 +1876,7 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
 
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 880.0);
@@ -1870,7 +1897,7 @@ mod tests {
 
     #[test]
     fn sync_descriptor_by_param_name_drops_wrong_or_out_of_range_values() {
-        let original = EffectDescriptor {
+        let original = EffectDescriptor::new(super::EffectDescriptorData {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1908,8 +1935,8 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
-        let rebound = EffectDescriptor {
+        });
+        let rebound = EffectDescriptor::new(super::EffectDescriptorData {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -1947,7 +1974,7 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
 
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 2.0);
@@ -1965,7 +1992,7 @@ mod tests {
 
     #[test]
     fn force_enabled_default_sets_enabled_without_disturbing_other_params() {
-        let desc = EffectDescriptor {
+        let desc = EffectDescriptor::new(super::EffectDescriptorData {
             name: "custom".to_string(),
             input_channels: 0,
             output_channels: 1,
@@ -2001,7 +2028,7 @@ mod tests {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         let slot = EffectSlotState::new(&desc, 100);
         slot.defaults.set(0, 0.77);
         slot.defaults.set(1, 0.0);
@@ -3533,7 +3560,23 @@ fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
 }
 
 #[derive(Clone, Debug)]
-pub struct EffectDescriptor {
+pub struct EffectDescriptor(Arc<EffectDescriptorData>);
+
+/// Descriptor metadata is shared across live state, patterns and scheduler
+/// snapshots. Editing a descriptor detaches its data so published snapshots
+/// retain the layout they were prepared with.
+impl std::ops::Deref for EffectDescriptor {
+    type Target = EffectDescriptorData;
+
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl std::ops::DerefMut for EffectDescriptor {
+    fn deref_mut(&mut self) -> &mut Self::Target { Arc::make_mut(&mut self.0) }
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectDescriptorData {
     /// Immutable host metadata, resolved when compiling at the instance rate.
     /// None preserves legacy builtin per-node latency providers.
     pub declared_latency_samples: Option<u32>,
@@ -3547,6 +3590,10 @@ pub struct EffectDescriptor {
 }
 
 impl EffectDescriptor {
+    pub fn new(data: EffectDescriptorData) -> Self { Self(Arc::new(data)) }
+
+    pub fn into_data(self) -> EffectDescriptorData { Arc::unwrap_or_clone(self.0) }
+
     pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
 
     /// Hidden tempo input for native effects, shared by track, bus and rack chains.
@@ -3833,7 +3880,7 @@ impl EffectDescriptor {
             ));
         }
 
-        Self {
+        Self::new(EffectDescriptorData {
             name: "EQ8".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -3842,12 +3889,12 @@ impl EffectDescriptor {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        }
+        })
     }
 
     /// Built-in filter effect descriptor.
     pub fn builtin_filter() -> Self {
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Filter".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -4108,7 +4155,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
         let cutoff_idx = desc
@@ -4160,7 +4207,7 @@ impl EffectDescriptor {
 
     /// Built-in delay effect descriptor.
     pub fn builtin_delay() -> Self {
-        Self {
+        Self::new(EffectDescriptorData {
             name: "Delay".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -4253,7 +4300,7 @@ impl EffectDescriptor {
                 },
                 Self::enabled_param(crate::effects::delay::DELAY_PARAM_ENABLED as u32, 1.0),
             ],
-        }
+        })
     }
 
     pub fn builtin_str8_delay() -> Self {
@@ -4272,7 +4319,7 @@ impl EffectDescriptor {
                 "1".to_string(),
             ]
         };
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Str8 Delay".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -4511,7 +4558,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -4663,7 +4710,7 @@ impl EffectDescriptor {
             "11: heads 2+3 + rev".to_string(),
             "12: reverb only".to_string(),
         ];
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Space Echo".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -4882,7 +4929,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -5151,7 +5198,7 @@ impl EffectDescriptor {
             "Free", "1", "1.5", "2", "3", "4", "5", "6", "8", "9", "12", "16",
         ];
 
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Filterbank".to_string(),
             // 0/1 audio, 2..5 ext-mod sources, 6/7 FM/AM sidechains.
             input_channels: 2
@@ -5464,7 +5511,7 @@ impl EffectDescriptor {
                     fb::FILTERBANK_PARAM_F2_MODE,
                 ),
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -5721,7 +5768,7 @@ impl EffectDescriptor {
     /// BBD-voiced delay lines with an inverted stereo crossmix, compander,
     /// and band-limited wet path. No feedback anywhere.
     pub fn builtin_dimension() -> Self {
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Dimension".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -5906,7 +5953,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -5985,7 +6032,7 @@ impl EffectDescriptor {
     }
 
     pub fn builtin_phaser_flanger() -> Self {
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Phaser-Flanger".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -6320,7 +6367,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -6762,7 +6809,7 @@ impl EffectDescriptor {
             ));
         }
 
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Roar".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -6776,7 +6823,7 @@ impl EffectDescriptor {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -6869,7 +6916,7 @@ impl EffectDescriptor {
     }
 
     pub fn builtin_dj_mixer() -> Self {
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "DJ Mixer".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -6974,7 +7021,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -7124,7 +7171,7 @@ impl EffectDescriptor {
         let lin = ParamScaling::Linear;
         let exp = ParamScaling::Exponential;
 
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Reverb".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -7260,7 +7307,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         debug_assert_eq!(desc.params.len(), rv::BASE_PARAM_COUNT);
 
         // ── appended (21..): four-slot voice modulator, the Multiverb pattern ──
@@ -7388,7 +7435,7 @@ impl EffectDescriptor {
             }
         }
 
-        let mut desc = Self {
+        let mut desc = Self::new(EffectDescriptorData {
             name: "Multiverb".to_string(),
             input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
@@ -7523,7 +7570,7 @@ impl EffectDescriptor {
                     1.0,
                 ),
             ],
-        };
+        });
         desc.params
             .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
@@ -7637,7 +7684,7 @@ impl EffectDescriptor {
         output_db: f32,
         mix: f32,
     ) -> Self {
-        Self {
+        Self::new(EffectDescriptorData {
             name: name.to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -7831,7 +7878,7 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        }
+        })
     }
 
     /// SP-404-inspired compressor: sustain, level, and post-compression color.
@@ -7914,7 +7961,7 @@ impl EffectDescriptor {
             }
         }
 
-        Self {
+        Self::new(EffectDescriptorData {
             name: "Compressor".to_string(),
             // Inputs 0/1 carry the track signal; input 2 is the external
             // sidechain the host routes via the `sidechain` param below.
@@ -8060,7 +8107,7 @@ impl EffectDescriptor {
                 },
                 Self::enabled_param(comp::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
             ],
-        }
+        })
     }
 
     /// OTT-style 3-band upward+downward compressor.
@@ -8243,7 +8290,7 @@ impl EffectDescriptor {
             Self::enabled_param(ott::OTT_PARAM_ENABLED as u32, 1.0),
         ]);
 
-        Self {
+        Self::new(EffectDescriptorData {
             name: "OTT".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -8252,12 +8299,12 @@ impl EffectDescriptor {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
-        }
+        })
     }
 
     /// General-purpose lookahead limiter.
     pub fn builtin_limiter() -> Self {
-        Self {
+        Self::new(EffectDescriptorData {
             name: "Limiter".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -8328,12 +8375,12 @@ impl EffectDescriptor {
                 },
                 Self::enabled_param(crate::effects::limiter::LIMITER_PARAM_ENABLED as u32, 1.0),
             ],
-        }
+        })
     }
 
     /// Analog tape emulation built on Jiles–Atherton hysteresis.
     pub fn builtin_tape() -> Self {
-        Self {
+        Self::new(EffectDescriptorData {
             name: "Tape".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -8468,7 +8515,7 @@ impl EffectDescriptor {
                 },
                 Self::enabled_param(crate::effects::tape::TAPE_PARAM_ENABLED as u32, 1.0),
             ],
-        }
+        })
     }
 
     /// Back-compat alias for projects created while the generic prototype existed.
@@ -8478,6 +8525,11 @@ impl EffectDescriptor {
 
     /// Built-in sampler instrument descriptor.
     pub fn builtin_sampler() -> Self {
+        static SAMPLER: OnceLock<EffectDescriptor> = OnceLock::new();
+        SAMPLER.get_or_init(Self::build_sampler_descriptor).clone()
+    }
+
+    fn build_sampler_descriptor() -> Self {
         let mut params = vec![
             ParamDescriptor {
                 name: "attack".to_string(),
@@ -8882,7 +8934,7 @@ impl EffectDescriptor {
         ]);
         // Strict extension: newer modulator params land after the slice tail.
         params.extend(deferred_mod_params);
-        Self {
+        Self::new(EffectDescriptorData {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -8896,7 +8948,7 @@ impl EffectDescriptor {
             declared_latency_samples: None,
             tensor_params: Vec::new(),
             params,
-        }
+        })
     }
     /// Default fixed effect chain descriptors.
     pub fn default_chain() -> Vec<Self> {
@@ -8914,7 +8966,7 @@ impl EffectDescriptor {
 
     /// Empty custom slot placeholder (name is empty, no params).
     pub fn empty_custom_slot() -> Self {
-        Self {
+        Self::new(EffectDescriptorData {
             name: String::new(),
             params: Vec::new(),
             tensor_params: Vec::new(),
@@ -8923,7 +8975,7 @@ impl EffectDescriptor {
             instrument_modulators: Vec::new(),
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
-        }
+        })
     }
 
     /// Resolves a serialized parameter identity against this descriptor.
@@ -9110,7 +9162,7 @@ impl EffectDescriptor {
             crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
             1.0,
         ));
-        Self {
+        Self::new(EffectDescriptorData {
             name: name.to_string(),
             params: descriptors,
             tensor_params: Vec::new(),
@@ -9119,7 +9171,7 @@ impl EffectDescriptor {
             instrument_modulators: Vec::new(),
             declared_latency_samples,
             instrument_modulation_targets: Vec::new(),
-        }
+        })
     }
 }
 
@@ -9959,6 +10011,9 @@ impl SlotTensorParamData {
     }
 
     pub fn clear(&self) {
+        // No tensor can be written without a descriptor. Empty slots need
+        // no reset of the full reserved tensor capacity on every launch.
+        if self.num_params() == 0 { return; }
         *self.metadata() = Vec::new();
         self.num_params.store(0, Ordering::Relaxed);
         for idx in 0..MAX_SLOT_TENSOR_PARAMS {
@@ -11065,7 +11120,7 @@ pub fn rebase_optional_f32_rows(
 /// Missing compact cells are absent locks, not a change to the device schema.
 /// Merge the union of stored cells so independent edits still rebase when one
 /// side introduces/removes a row or extends its last parameter.
-fn rebase_step_lock_rows(
+pub(crate) fn rebase_step_lock_rows(
     base: &StepLockRows<f32>,
     from: &StepLockRows<f32>,
     to: &StepLockRows<f32>,

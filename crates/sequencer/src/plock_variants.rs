@@ -283,9 +283,53 @@ pub fn live_track_variant_keys(
     state: &SequencerState,
     track: usize,
 ) -> Vec<Option<PlockVariantKey>> {
-    (0..MAX_STEPS)
-        .map(|step| live_track_variant_key(state, track, step))
-        .collect()
+    if track >= state.pattern.instrument_slots.len() { return vec![None; MAX_STEPS]; }
+    let mut entries = vec![Vec::new(); MAX_STEPS];
+    for (step, row) in entries.iter_mut().enumerate() {
+        collect_track_entries(row, state, track, step);
+    }
+    if let Some(chain) = state.pattern.midi_fx_slots.get(track) {
+        for (slot_idx, slot) in chain.iter().enumerate() {
+            collect_live_slot_variants(&mut entries, slot,
+                PlockVariantDomain::MidiEffect, PlockVariantDomain::MidiEffectTensor, slot_idx);
+        }
+    }
+    collect_live_slot_variants(&mut entries, &state.pattern.instrument_slots[track],
+        PlockVariantDomain::Instrument, PlockVariantDomain::InstrumentTensor, 0);
+    if let Some(chain) = state.pattern.effect_chains.get(track) {
+        for (slot_idx, slot) in chain.iter().enumerate() {
+            collect_live_slot_variants(&mut entries, slot,
+                PlockVariantDomain::Effect, PlockVariantDomain::EffectTensor, slot_idx);
+        }
+    }
+    if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
+        for (step, row) in entries.iter_mut().enumerate() {
+            collect_rack_entries(row, rack, step);
+        }
+    }
+    entries.into_iter().map(PlockVariantKey::new).collect()
+}
+
+/// Whole-pattern capture visits each slot once and only scans parameters on
+/// steps present in its scalar/tensor lock masks. The single-step reader below
+/// remains the source of entry semantics for both paths.
+fn collect_live_slot_variants(
+    entries: &mut [Vec<PlockVariantEntry>],
+    slot: &EffectSlotState,
+    scalar_domain: PlockVariantDomain,
+    tensor_domain: PlockVariantDomain,
+    slot_idx: usize,
+) {
+    let mut mask = [0; MAX_STEPS / 64];
+    slot.plocks.or_step_plock_mask(&mut mask, slot.num_params.load(Ordering::Relaxed) as usize);
+    slot.tensor_params.or_step_plock_mask(&mut mask);
+    for (word, mut bits) in mask.into_iter().enumerate() {
+        while bits != 0 {
+            let step = word * 64 + bits.trailing_zeros() as usize;
+            collect_live_slot_entries(&mut entries[step], slot, step, scalar_domain, tensor_domain, slot_idx);
+            bits &= bits - 1;
+        }
+    }
 }
 
 pub fn live_track_variant_key(
@@ -336,23 +380,31 @@ pub fn live_track_variant_key(
     }
 
     if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
-        for rack_macro in &rack.macros {
-            if let Some(value) = rack_macro.plocks.get(step).copied().flatten() {
-                entries.push(PlockVariantEntry {
-                    domain: PlockVariantDomain::RackMacro,
-                    slot: 0,
-                    param: rack_macro.id.index(),
-                    cell: None,
-                    value_bits: value.to_bits(),
-                });
-            }
-        }
-        for (slot_idx, slot) in rack.slots.iter().enumerate() {
-            collect_rack_slot_entries(&mut entries, slot, step, slot_idx);
-        }
+        collect_rack_entries(&mut entries, rack, step);
     }
 
     PlockVariantKey::new(entries)
+}
+
+fn collect_rack_entries(
+    entries: &mut Vec<PlockVariantEntry>,
+    rack: &crate::sequencer::RackTrackSnapshot,
+    step: usize,
+) {
+    for rack_macro in &rack.macros {
+        if let Some(value) = rack_macro.plocks.get(step).copied().flatten() {
+            entries.push(PlockVariantEntry {
+                domain: PlockVariantDomain::RackMacro,
+                slot: 0,
+                param: rack_macro.id.index(),
+                cell: None,
+                value_bits: value.to_bits(),
+            });
+        }
+    }
+    for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        collect_rack_slot_entries(entries, slot, step, slot_idx);
+    }
 }
 
 fn collect_track_entries(
@@ -441,7 +493,8 @@ fn collect_live_slot_entries(
     slot_idx: usize,
 ) {
     let num_params = (slot.num_params.load(Ordering::Relaxed) as usize).min(MAX_SLOT_PARAMS);
-    for param_idx in 0..num_params {
+    let scalar_count = if slot.plocks.step_has_any_plock(step, num_params) { num_params } else { 0 };
+    for param_idx in 0..scalar_count {
         if let Some(value) = slot.plocks.get(step, param_idx) {
             out.push(PlockVariantEntry {
                 domain: scalar_domain,
@@ -453,7 +506,10 @@ fn collect_live_slot_entries(
         }
     }
 
-    for tensor_idx in 0..slot.tensor_params.num_params() {
+    let tensor_count = if slot.tensor_params.step_has_any_plock(step) {
+        slot.tensor_params.num_params()
+    } else { 0 };
+    for tensor_idx in 0..tensor_count {
         if let Some(values) = slot.tensor_params.plock_values(step, tensor_idx) {
             for (cell_idx, value) in values.into_iter().enumerate() {
                 out.push(PlockVariantEntry {
@@ -617,6 +673,54 @@ mod tests {
         let key = live_track_variant_key(&state, 0, 4).expect("timebase should define a variant");
         assert_eq!(key.param_count(), 1);
         assert_eq!(key.entries[0].domain, PlockVariantDomain::TrackTimebase);
+    }
+
+    #[test]
+    fn batched_variants_match_individual_steps_across_mask_words_and_domains() {
+        let mut desc = EffectDescriptor::builtin_filter();
+        desc.tensor_params.push(crate::effects::TensorParamDescriptor {
+            name: "matrix".into(), shape: vec![2], cell_offset: 12,
+            default: vec![0.0; 2], min: 0.0, max: 1.0,
+        });
+        let state = SequencerState::new(1, vec![vec![EffectSlotState::new(&desc, 1)]]);
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 2);
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&desc, 3);
+        let mut rack = crate::sequencer::RackTrackSnapshot::new(Vec::new(), crate::sequencer::default_rack_macros());
+        rack.macros[0].plocks[255] = Some(0.75);
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(rack);
+        for step in [0, 63, 64, 255] {
+            state.pattern.effect_chains[0][0].set_plock(step, 0, 220.0);
+            state.pattern.instrument_slots[0].set_plock(step, 1, 0.25);
+            state.pattern.midi_fx_slots[0][0].set_plock(step, 0, 440.0);
+            state.pattern.effect_chains[0][0].tensor_params.set_plock(step, 0, &[0.25, 0.75]);
+            state.pattern.timebase_plocks[0].set(step, crate::sequencer::Timebase::Eighth);
+        }
+        let individual: Vec<_> = (0..MAX_STEPS).map(|step| live_track_variant_key(&state, 0, step)).collect();
+        assert_eq!(live_track_variant_keys(&state, 0), individual);
+        state.pattern.effect_chains[0][0].plocks.clear_all();
+        let individual: Vec<_> = (0..MAX_STEPS).map(|step| live_track_variant_key(&state, 0, step)).collect();
+        assert_eq!(live_track_variant_keys(&state, 0), individual);
+    }
+
+    #[test]
+    fn tensor_only_steps_keep_variants_after_clear_and_restore() {
+        let mut desc = EffectDescriptor::empty_custom_slot();
+        desc.tensor_params.push(crate::effects::TensorParamDescriptor {
+            name: "matrix".into(), shape: vec![2], cell_offset: 12,
+            default: vec![0.0; 2], min: 0.0, max: 1.0,
+        });
+        let state = SequencerState::new(1, vec![vec![EffectSlotState::new(&desc, 1)]]);
+        let slot = &state.pattern.effect_chains[0][0];
+        assert!(slot.tensor_params.set_plock(255, 0, &[0.25, 0.75]));
+        let key = live_track_variant_key(&state, 0, 255).unwrap();
+        assert_eq!(key.entries.len(), 2);
+        assert!(key.entries.iter().all(|entry| entry.domain == PlockVariantDomain::EffectTensor));
+        assert!(live_track_variant_key(&state, 0, 254).is_none());
+        let saved = EffectSlotSnapshot::capture(slot);
+        slot.tensor_params.clear();
+        assert!(live_track_variant_key(&state, 0, 255).is_none());
+        saved.restore(slot);
+        assert_eq!(live_track_variant_key(&state, 0, 255), Some(key));
     }
 
     #[test]

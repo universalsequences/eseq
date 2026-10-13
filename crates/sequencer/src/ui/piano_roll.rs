@@ -608,10 +608,11 @@ fn live_set_note_entries(
 fn data_set_note_entries(data: &mut TrackPatternData, step: usize, notes: &[PianoRollNote]) {
     let word = step / 64;
     let mask = 1u64 << (step % 64);
+    let chord = &mut *data.chord_snapshot;
     for lane in [
-        &mut data.chord_snapshot.steps,
-        &mut data.chord_snapshot.durations,
-        &mut data.chord_snapshot.delays,
+        &mut chord.steps,
+        &mut chord.durations,
+        &mut chord.delays,
     ] {
         if let Some(cell) = lane.get_mut(step) {
             cell.clear();

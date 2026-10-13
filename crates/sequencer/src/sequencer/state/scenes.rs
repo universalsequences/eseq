@@ -229,7 +229,13 @@ impl TrackPatternPool {
         };
         let (seq, patch, mix) = data.split();
         let sound = stored.sound;
-        Arc::make_mut(stored).seq = seq;
+        // A full replacement need not clone the outgoing sequence just to
+        // discard it when a history snapshot shares this stored pattern.
+        if let Some(stored) = Arc::get_mut(stored) {
+            stored.seq = seq;
+        } else {
+            *stored = Arc::new(StoredPattern { seq, sound });
+        }
         self.sounds.patches.insert(sound.patch, Arc::new(patch));
         self.sounds.mixes.insert(sound.mix, Arc::new(mix));
         true

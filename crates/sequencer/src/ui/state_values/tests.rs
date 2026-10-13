@@ -41156,7 +41156,7 @@ use panel_kinds_seed::*;
             map.get(key).map(|value| value.borrow())
         }
 
-        let desc = sequencer::effects::EffectDescriptor {
+        let desc = sequencer::effects::EffectDescriptor::new(sequencer::effects::EffectDescriptorData {
             name: "sidechain".to_string(),
             input_channels: 7,
             output_channels: 2,
@@ -41196,7 +41196,7 @@ use panel_kinds_seed::*;
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         let state = Arc::new(SequencerState::new(
             1,
             vec![sequencer::sequencer::default_empty_effect_chain()],

@@ -210,7 +210,7 @@ impl App {
             .into_iter()
             .filter_map(|i| desc.params.get(i).cloned())
             .collect::<Vec<_>>();
-        Some(EffectDescriptor {
+        Some(crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "Mod".to_string(),
             params,
             input_channels: 0,
@@ -219,7 +219,7 @@ impl App {
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-        })
+        }))
     }
 
     pub(super) fn current_source_descriptor(&self) -> Option<EffectDescriptor> {
@@ -236,7 +236,7 @@ impl App {
                 p
             })
             .collect::<Vec<_>>();
-        Some(EffectDescriptor {
+        Some(crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "Sources".to_string(),
             params,
             input_channels: 0,
@@ -245,7 +245,7 @@ impl App {
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-        })
+        }))
     }
 
     pub(super) fn synth_row_display_value(&self, track: usize, row_idx: usize) -> Option<f32> {

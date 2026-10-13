@@ -26,8 +26,8 @@ fn mapped_rack() -> RackTrackSnapshot {
             }
         }
     }
-    rack.slots[0].param_plocks.rows[4][RackSlotParam::Gain.index()] = Some(0.37);
-    rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = Some(0.0);
+    rack.slots[0].param_plocks.rows.set(4, RackSlotParam::Gain.index(), Some(0.37));
+    rack.slots[1].param_plocks.rows.set(4, RackSlotParam::Solo.index(), Some(0.0));
     for slot in &mut rack.slots {
         slot.instrument_slot.set_plock(4, 0, 42.0);
         slot.instrument_slot.set_plock(4, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 1.0);

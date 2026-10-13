@@ -420,7 +420,7 @@ impl RackSlotValuesSnapshot {
                 eq,
             )?,
             param_plocks: RackSlotParamPlocks {
-                rows: crate::effects::rebase_optional_f32_rows(
+                rows: crate::effects::rebase_step_lock_rows(
                     &base.param_plocks.rows,
                     &from.param_plocks.rows,
                     &to.param_plocks.rows,
@@ -479,13 +479,7 @@ impl RackSlotValuesSnapshot {
 
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
-            + self.param_plocks.rows.capacity() * std::mem::size_of::<Vec<Option<f32>>>()
-            + self
-                .param_plocks
-                .rows
-                .iter()
-                .map(|row| row.capacity() * std::mem::size_of::<Option<f32>>())
-                .sum::<usize>()
+            + self.param_plocks.rows.retained_bytes()
             + self.instrument_slot.retained_bytes()
             + self
                 .effect_slots

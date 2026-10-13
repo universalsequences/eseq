@@ -1156,7 +1156,7 @@
     }
 
     fn sample_sidechain_descriptor() -> EffectDescriptor {
-        EffectDescriptor {
+        crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "duck".to_string(),
             params: vec![ParamDescriptor {
                 name: "sidechain".to_string(),
@@ -1184,11 +1184,11 @@
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-        }
+        })
     }
 
     fn step_tensor_descriptor() -> EffectDescriptor {
-        EffectDescriptor {
+        crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "step tensor fixture".to_string(),
             params: vec![ParamDescriptor {
                 name: "amount".to_string(),
@@ -1216,7 +1216,7 @@
                 min: 0.0,
                 max: 1.0,
             }],
-        }
+        })
     }
 
     #[test]
@@ -1778,7 +1778,7 @@
         live_rack.slots[0].mute = true;
         live_rack.slots[0].solo = false;
         live_rack.slots[0].choke_group = Some(2);
-        live_rack.slots[0].param_plocks.rows[3][0] = Some(9.0);
+        live_rack.slots[0].param_plocks.rows.set(3, 0, Some(9.0));
         state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
 
         // 2 other scene patterns + the track-sound carrier.
@@ -1816,7 +1816,7 @@
             assert!(!rack_slot.solo);
             assert_eq!(rack_slot.choke_group, Some(2));
             // ...but slot p-locks do not.
-            assert_eq!(rack_slot.param_plocks.rows[3][0], None);
+            assert_eq!(rack_slot.param_plocks.rows.cell(3, 0), None);
         }
         assert_eq!(patterns[1].effect_slots[0][0].plocks.cell(5, 1).copied(), Some(555.0));
         assert_eq!(patterns[1].midi_fx_slots[0][0].plocks.cell(6, 1).copied(), Some(666.0));
@@ -3205,6 +3205,40 @@
         let data = ChordData::new();
         chord.restore(&data);
         assert!((0..4).all(|n| data.get_id(0, n) != 0));
+    }
+
+    #[test]
+    fn shared_chord_snapshots_preserve_note_timing_and_history_on_edit() {
+        let mut original = ChordSnapshot::new_default();
+        original.push_note(255, 7.0, 0.75, 0.125);
+        let mut edited = original.clone();
+        assert_eq!(original.steps.as_ptr(), edited.steps.as_ptr());
+        edited.durations[255][0] = 0.5;
+        edited.push_note(255, 12.0, 1.0, 0.25);
+        assert_ne!(original.steps.as_ptr(), edited.steps.as_ptr());
+        assert_eq!(original.steps[255], vec![7.0]);
+        assert_eq!(original.durations[255], vec![0.75]);
+        assert_eq!(original.delays[255], vec![0.125]);
+        assert_eq!(original.id(255, 0), edited.id(255, 0));
+        let live = ChordData::new();
+        original.restore(&live);
+        assert_eq!(live.count(255), 1);
+        assert_eq!(live.get_duration(255, 0), 0.75);
+        assert_eq!(live.get_id(255, 0), original.id(255, 0));
+
+        let initial = PatternSnapshot::new_default(1, &[]).track_pattern_data(0).unwrap();
+        let mut pool = TrackPatternPool::default();
+        let id = pool.insert(initial);
+        let history = pool.clone();
+        let mut replacement = pool.get(id).unwrap();
+        replacement.chord_snapshot = edited;
+        replacement.track_params.volume = 0.25;
+        assert!(pool.store(id, replacement));
+        assert_eq!(pool.refs(id), history.refs(id));
+        assert!(history.get(id).unwrap().chord_snapshot.steps[255].is_empty());
+        assert_eq!(pool.get(id).unwrap().chord_snapshot.steps[255], vec![7.0, 12.0]);
+        assert_eq!(pool.get(id).unwrap().track_params.volume, 0.25);
+        assert_ne!(history.get(id).unwrap().track_params.volume, 0.25);
     }
 
     #[test]
@@ -7871,7 +7905,7 @@
             // by nothing, it must not veto or receive the replacement.
             pool.sounds.insert_patch(Patch::new_default());
         });
-        let descriptor = EffectDescriptor {
+        let descriptor = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "arp2".to_string(),
             params: Vec::new(),
             input_channels: 0,
@@ -7880,7 +7914,7 @@
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-        };
+        });
         state
             .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
             .expect("an unreferenced orphan entity must not veto the replacement");
@@ -7929,7 +7963,7 @@
         });
         // Replacement validates every referenced entity — a bare cell whose
         // chain drifted would veto it forever.
-        let descriptor = EffectDescriptor {
+        let descriptor = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "arp2".to_string(),
             params: Vec::new(),
             input_channels: 0,
@@ -7938,7 +7972,7 @@
             declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
-        };
+        });
         state
             .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
             .expect("a bare cell's sound must not veto the replacement");

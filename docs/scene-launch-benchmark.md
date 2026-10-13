@@ -217,3 +217,65 @@ same evidence directory. Runtime source/content hashes remained unchanged during
 candidate measurement. The original baseline and candidate binaries have their
 build/measurement manifests recorded separately; both executables loaded the
 same current runtime Lisp and assets for the adjacent comparison.
+
+## Immediate launch copy reduction, 2026-10-12
+
+The compact-memory implementation above was committed as `a7f541e5d` before
+this work. `eseq-7q0c` targets an additional 10× reduction from that implementation,
+not from the original dense-grid outlier. **That additional target is not met.**
+
+The candidate removes the quadratic send-row copy from scheduler capture,
+shares immutable descriptor and chord data with copy-on-write editing, reuses
+registered instrument metadata, and stores rack control locks in `StepLockRows`.
+Whole-pattern variant capture visits live slot masks once instead of scanning
+every parameter on every empty step. Replacing a stored pattern no longer clones
+the outgoing sequence just to overwrite it when undo history shares that pattern.
+Launch save-back, history, graph synchronization, default pushes, and scheduler
+publication remain in the timed path. No launch expansion was deferred.
+
+Three old/new pairs ran sequentially with the frozen Gotham fixture and no
+concurrent compiler or profiler: 900 launches per executable, 1,193 scheduled
+events per process. The baseline is the pinned compact-memory executable. Both
+executables loaded the same current runtime assets. Pooled control times:
+
+| Immediate control work | Compact median / p95 / max | Candidate median / p95 / max | Max reduction |
+| --- | ---: | ---: | ---: |
+| Full scene | 7.29 / 7.78 / 8.46 ms | 1.88 / 2.21 / 2.99 ms | 2.83× |
+| Jungle-ology clip | 8.56 / 9.07 / 9.74 ms | 2.05 / 2.45 / 3.33 ms | 2.93× |
+| Gotham Piano clip | 8.54 / 9.04 / 9.57 ms | 1.93 / 2.28 / 2.82 ms | 3.39× |
+
+All nine before/after comparisons passed: 648 metric checks, zero alarms, and
+identical per-launch scheduler frontiers and event counts. Candidate scheduler
+refill p95 was 0.84 / 0.80 / 1.14 ms; the maximum was 1.52 ms across categories.
+These are observed headless control/scheduler measurements, not a bound on live
+audio callback latency or launches requiring different graph topology.
+
+A separate candidate memory probe completed another 300 launches: physical
+footprint after setup was 660.9 MiB, peak at the probe 1.4 GiB, and maximum RSS
+over the run 1,517,813,760 bytes. The previous compact-memory probe was 757.5 MiB
+after setup. Probe timings are excluded from the latency table.
+
+The final focused release validation passed 57 tests, including chord identity
+and timing, independent edits to shared data, compact rack serialization and
+history rebasing, rack launch history, scheduler routing, and snapshot handoff.
+An additional exact project note-delay round-trip test passed (58 final tests
+total). All library and binary test targets passed `cargo check`; the release
+`metal_seq` and `instrument_probe` binaries built successfully. The DPRO Wave V2
+instrument probe rendered 4,096 frames with peak 0.11065, RMS 0.03885, and no
+non-finite samples or state slots. Earlier stages also passed their
+descriptor/tensor and launch regressions.
+Source and runtime-content hashes did not change during the final build and
+measurement series.
+
+Evidence is in `.local/benchmarks/scene-launch-fast-gotham-2026-10-12/`:
+`final-{before,after}-{a,b,c}.json`, `final-summary.json`,
+`final-comparisons.json`, `final-memory.*`, `stage4-tests.log`, source hashes,
+and pinned stage executables. The `profile-*` and `traced-*` runs are diagnostic
+only; process attachment causes pauses, so their latency samples are excluded.
+
+Remaining work in `eseq-7q0c` is the additional 10× target. Profiling still shows
+outgoing live-state capture, incoming pattern composition/restore, and playback
+snapshot capture on each launch. The next architectural avenue is an
+authoritative immutable pattern representation with a complete account of live
+edit ownership; an ad hoc cache that misses a recording or device edit would
+silently lose data. Live deadline and rare-tail attribution remain `eseq-nacy`.

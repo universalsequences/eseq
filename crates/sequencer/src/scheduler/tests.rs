@@ -423,7 +423,7 @@
             host_control: None,
             ui_metadata: None,
         };
-        let effect = EffectDescriptor {
+        let effect = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "filter".to_string(),
             input_channels: 2,
             output_channels: 2,
@@ -432,7 +432,7 @@
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![descriptor.clone()],
-        };
+        });
         let state = SequencerState::new(
             1,
             vec![vec![crate::effects::EffectSlotState::new(&effect, 11)]],
@@ -11068,7 +11068,7 @@
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         let step = 3;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "off-step effect".to_string(),
             input_channels: 6,
             output_channels: 2,
@@ -11104,7 +11104,7 @@
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 0);
         state.pattern.effect_chains[track][0].set_plock(step, 0, 200.0);
 
@@ -11625,7 +11625,7 @@
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         let step = 3;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "modded effect".to_string(),
             input_channels: 6,
             output_channels: 2,
@@ -11664,7 +11664,7 @@
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
         state.pattern.effect_chains[track][0].set_plock(step, 0, 0.75);
         state.pattern.effect_chains[track][0].set_plock(step, 1, 1.0);
@@ -11730,7 +11730,7 @@
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         let step = 3;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "space echo-ish".to_string(),
             input_channels: 6,
             output_channels: 2,
@@ -11753,7 +11753,7 @@
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
         state.pattern.effect_chains[track][0].set_plock(step, 0, 0.75);
 
@@ -11864,7 +11864,7 @@
     fn neuron_effect_output_overrides_match_modulator_identity() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "modded effect".to_string(),
             input_channels: 6,
             output_channels: 2,
@@ -11888,7 +11888,7 @@
                 host_control: None,
                 ui_metadata: None,
             }],
-        };
+        });
         state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
         let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
         let mut neuron = ProjectNeuron::default();
@@ -12242,7 +12242,7 @@
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         let step = 3;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "custom".to_string(),
             input_channels: 0,
             output_channels: 1,
@@ -12280,7 +12280,7 @@
                     ui_metadata: None,
                 },
             ],
-        };
+        });
         state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
         state.pattern.instrument_slots[track].set_plock(step, 0, 9155.0);
         state.pattern.instrument_slots[track].set_plock(step, 1, 1.0);
@@ -12312,7 +12312,7 @@
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         let step = 9;
-        let desc = EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "tensor instrument".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -12328,7 +12328,7 @@
                 max: 1.0,
             }],
             params: Vec::new(),
-        };
+        });
         state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
         state.pattern.instrument_slots[track]
             .tensor_params

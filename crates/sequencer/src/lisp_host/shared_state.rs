@@ -959,7 +959,7 @@ impl ScratchControlRuntime {
             .ok_or_else(|| "registered MIDI FX out of range".to_string())?;
         let midi_fx_slot = if midi_fx_slot.num_params == 0 && !entry.params.is_empty() {
             EffectSlotSnapshot::new_default(
-                &EffectDescriptor {
+                &crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
                     name: entry.name.clone(),
                     params: entry.params.clone(),
                     input_channels: 0,
@@ -968,7 +968,7 @@ impl ScratchControlRuntime {
                     declared_latency_samples: None,
                     instrument_modulation_targets: Vec::new(),
                     tensor_params: Vec::new(),
-                },
+                }),
                 0,
             )
         } else {

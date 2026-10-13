@@ -623,7 +623,7 @@ pub(super) fn midi_fx_process_target(
         })?;
     Ok(sequencer::process::ParamTarget::MidiFxParam {
         slot: slot_idx,
-        fx: desc.name,
+        fx: desc.name.clone(),
         param,
     })
 }

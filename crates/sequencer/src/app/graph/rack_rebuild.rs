@@ -129,11 +129,11 @@ impl GraphController<'_> {
                             slot_idx + 1
                         )
                     })?;
-                    let engine_descriptor = self
+                    let instrument_descriptor = self
                         .app
                         .editor
                         .engine_registry
-                        .get(engine_id)
+                        .get_instrument_descriptor(engine_id)
                         .ok_or_else(|| {
                             format!(
                                 "Rack instrument layer {} references missing engine {}",
@@ -155,10 +155,7 @@ impl GraphController<'_> {
                             )
                         })?;
                     (
-                        lisp_host::instrument_descriptor_from_manifest(
-                            &engine_descriptor.name,
-                            &engine_descriptor.manifest,
-                        ),
+                        instrument_descriptor.clone(),
                         first_graph_node_identity(&engine.synth_ids),
                         first_graph_node_identity(&engine.modulator_ids),
                     )

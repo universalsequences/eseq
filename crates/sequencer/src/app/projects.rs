@@ -7250,7 +7250,7 @@ mod tests {
             sampler_slice_edits: None,
         };
 
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7272,7 +7272,7 @@ mod tests {
                     crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
                 ),
             ],
-        };
+        });
 
         let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
@@ -7318,7 +7318,7 @@ mod tests {
             sampler_slice_edits: None,
         };
 
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7336,7 +7336,7 @@ mod tests {
                     crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
                 ),
             ],
-        };
+        });
 
         let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
@@ -7374,7 +7374,7 @@ mod tests {
             sampler_slice_edits: None,
         };
 
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7392,7 +7392,7 @@ mod tests {
                 test_param("cutoff", 0.03, 34),
                 test_param("gain", 0.04, 38),
             ],
-        };
+        });
 
         let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
@@ -7409,7 +7409,7 @@ mod tests {
 
     #[test]
     fn custom_instrument_project_restore_preserves_saved_generated_host_mod_lanes() {
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7427,7 +7427,7 @@ mod tests {
                 test_param("cutoff", 0.03, 34),
                 test_param("gain", 0.04, 38),
             ],
-        };
+        });
         let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
         plocks[3][2] = Some(0.91);
         plocks[4][5] = Some(-0.42);
@@ -7519,7 +7519,7 @@ mod tests {
         // Saved against a DSP whose cells started at 10; the new revision put
         // a table ahead of every param (Digi FM, markovic-2).
         let shift = 917_504;
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7537,7 +7537,7 @@ mod tests {
                     crate::instruments::voice_modulator::MOD_PARAM_BASE,
                 ),
             ],
-        };
+        });
         let mut plocks = vec![vec![None; 4]; MAX_STEPS];
         plocks[3][2] = Some(0.91);
         let saved_slot = project::ProjectEffectSlot {
@@ -7570,7 +7570,7 @@ mod tests {
 
     #[test]
     fn custom_instrument_project_restore_refreshes_stale_param_spans() {
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7584,7 +7584,7 @@ mod tests {
                 test_param("__dgen_mod_active__cutoff", 0.0, 15),
                 test_param("mod cutoff slot 1 amt", 0.0, 16),
             ],
-        };
+        });
         let saved_slot = project::ProjectEffectSlot {
             num_params: desc.params.len() as u32,
             defaults: vec![0.5, 7400.0, 0.0, 0.0],
@@ -7614,7 +7614,7 @@ mod tests {
 
     #[test]
     fn custom_instrument_project_restore_preserves_plocks_by_node_idx_when_lane_names_change() {
-        let desc = crate::effects::EffectDescriptor {
+        let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
@@ -7629,7 +7629,7 @@ mod tests {
                 test_param("mod cutoff lane 2 src", 2.0, 22),
                 test_param("mod cutoff lane 2 amt", -0.5, 26),
             ],
-        };
+        });
         let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
         plocks[3][2] = Some(0.75);
         plocks[4][4] = Some(-0.25);
@@ -7657,7 +7657,7 @@ mod tests {
             sampler_slice_edits: None,
         };
 
-        let renamed_desc = crate::effects::EffectDescriptor {
+        let renamed_desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
             params: vec![
                 test_param("cutoff", 0.01, 10),
                 test_param("mod filter cutoff lane 1 src", 1.0, 14),
@@ -7665,8 +7665,8 @@ mod tests {
                 test_param("mod filter cutoff lane 2 src", 2.0, 22),
                 test_param("mod filter cutoff lane 2 amt", -0.5, 26),
             ],
-            ..desc
-        };
+            ..desc.into_data()
+        });
 
         let restored =
             project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42, 0);

@@ -2032,15 +2032,15 @@ mod off_step_solo_tests {
         let mut rack = RackTrackSnapshot::new(vec![slot(), slot()], default_rack_macros());
         assert!(!off_step_solo_state_changed(&rack, Some(4), &[]));
 
-        rack.slots[1].param_plocks.rows[4][RackSlotParam::Gain.index()] = Some(0.5);
+        rack.slots[1].param_plocks.rows.set(4, RackSlotParam::Gain.index(), Some(0.5));
         assert!(!off_step_solo_state_changed(&rack, Some(4), &[]), "gain lock is slot-local");
 
-        rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = Some(0.0);
+        rack.slots[1].param_plocks.rows.set(4, RackSlotParam::Solo.index(), Some(0.0));
         assert!(off_step_solo_state_changed(&rack, Some(4), &[]), "solo lock (even off) is cross-slot");
         assert!(!off_step_solo_state_changed(&rack, Some(5), &[]));
 
-        rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = None;
-        rack.slots[1].param_plocks.rows[4][RackSlotParam::Mute.index()] = Some(1.0);
+        rack.slots[1].param_plocks.rows.set(4, RackSlotParam::Solo.index(), None);
+        rack.slots[1].param_plocks.rows.set(4, RackSlotParam::Mute.index(), Some(1.0));
         assert!(off_step_solo_state_changed(&rack, Some(4), &[]), "mute lock is cross-slot too");
         assert!(!off_step_solo_state_changed(&rack, None, &[]), "live updates ignore source locks");
 

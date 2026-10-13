@@ -715,7 +715,7 @@ fn custom_pitch_midi_note_uses_c4_zero_and_base_offset() {
 #[test]
 fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
     let state = SequencerState::new(1, Vec::new());
-    let desc = EffectDescriptor {
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "key-lock-test".to_string(),
         input_channels: 0,
         output_channels: 2,
@@ -727,7 +727,7 @@ fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
             audio_test_param("cutoff", 100.0, 0),
             audio_test_param("detune", 0.0, 1),
         ],
-    };
+    });
     let slot = &state.pattern.instrument_slots[0];
     slot.apply_descriptor(&desc, 42);
     slot.defaults.set(0, 100.0);
@@ -805,7 +805,7 @@ fn live_keyboard_defaults_use_macro_effective_scheduler_snapshot() {
 #[test]
 fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
     let state = SequencerState::new(1, Vec::new());
-    let desc = EffectDescriptor {
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "key-lock-precedence-test".to_string(),
         input_channels: 0,
         output_channels: 2,
@@ -817,7 +817,7 @@ fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
             audio_test_param("cutoff", 100.0, 0),
             audio_test_param("detune", 0.0, 1),
         ],
-    };
+    });
     let slot = &state.pattern.instrument_slots[0];
     slot.apply_descriptor(&desc, 42);
     slot.defaults.set(0, 100.0);
@@ -850,7 +850,7 @@ fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
 #[test]
 fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
     let state = SequencerState::new(1, Vec::new());
-    let desc = EffectDescriptor {
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "key-lock-stale-id-test".to_string(),
         input_channels: 0,
         output_channels: 2,
@@ -859,7 +859,7 @@ fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
         instrument_modulation_targets: Vec::new(),
         tensor_params: Vec::new(),
         params: vec![audio_test_param("cutoff", 100.0, 0)],
-    };
+    });
     let slot = &state.pattern.instrument_slots[0];
     slot.apply_descriptor(&desc, 42);
     slot.defaults.set(0, 100.0);
@@ -1777,7 +1777,7 @@ fn mute_group_winner_ignores_off_and_other_groups() {
 #[test]
 fn instrument_sound_fingerprint_changes_for_tensor_default_and_plock_values() {
     let state = SequencerState::new(1, Vec::new());
-    let desc = EffectDescriptor {
+    let desc = crate::effects::EffectDescriptor::new(crate::effects::EffectDescriptorData {
         name: "tensor instrument".to_string(),
         input_channels: 0,
         output_channels: 2,
@@ -1793,7 +1793,7 @@ fn instrument_sound_fingerprint_changes_for_tensor_default_and_plock_values() {
             max: 1.0,
         }],
         params: Vec::new(),
-    };
+    });
     state.pattern.instrument_slots[0].apply_descriptor(&desc, 42);
 
     let default_fingerprint = instrument_sound_fingerprint(&state, 0, 5, None);

@@ -60,7 +60,7 @@ pub(crate) struct DeviceDescriptor {
 
 impl DeviceDescriptor {
     pub(super) fn of(desc: Option<&EffectDescriptor>, sampler_depths: bool) -> Self {
-        let desc = desc.cloned().unwrap_or_else(|| EffectDescriptor {
+        let desc = desc.cloned().unwrap_or_else(|| EffectDescriptor::new(sequencer::effects::EffectDescriptorData {
             declared_latency_samples: None,
             name: String::new(),
             params: Vec::new(),
@@ -69,7 +69,7 @@ impl DeviceDescriptor {
             output_channels: 0,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
-        });
+        }));
         Self {
             desc,
             sampler_depths,

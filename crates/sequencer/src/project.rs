@@ -3420,7 +3420,7 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             solo: value.solo,
             enabled: value.enabled,
             max_polyphony: value.max_polyphony,
-            param_plocks: value.param_plocks.rows,
+            param_plocks: value.param_plocks.rows.to_vec(),
             instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
             effect_slots: value
                 .effect_slots
@@ -4567,12 +4567,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
     let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
     let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
-    ChordSnapshot {
-        steps,
-        durations,
-        delays,
-        ids: Vec::new(),
-    }
+    ChordSnapshot::from_lanes(steps, durations, delays, Vec::new())
     .with_fresh_ids()
 }
 
@@ -4593,12 +4588,7 @@ pub fn chord_snapshot_from_steps_durations_and_delays(
             );
         }
     }
-    ChordSnapshot {
-        steps,
-        durations,
-        delays,
-        ids: Vec::new(),
-    }
+    ChordSnapshot::from_lanes(steps, durations, delays, Vec::new())
     .with_fresh_ids()
 }
 
@@ -7691,8 +7681,25 @@ mod tests {
         value.as_object_mut().unwrap().remove("enabled");
         let legacy: ProjectRackSlotPattern = serde_json::from_value(value).unwrap();
         assert!(legacy.enabled, "legacy files load every slot enabled");
-        let snapshot = RackSlotSnapshot::from(restored);
+        let mut snapshot = RackSlotSnapshot::from(restored);
         assert!(!snapshot.enabled);
+        snapshot.param_plocks.set(255, crate::sequencer::RackSlotParam::Gain, 0.75);
+        let encoded = serde_json::to_string(&ProjectRackSlotPattern::from(snapshot.clone())).unwrap();
+        let decoded: ProjectRackSlotPattern = serde_json::from_str(&encoded).unwrap();
+        let round_trip = RackSlotSnapshot::from(decoded);
+        assert_eq!(round_trip.param_plocks.get(255, crate::sequencer::RackSlotParam::Gain), Some(0.75));
+        assert_eq!(round_trip.param_plocks.get(254, crate::sequencer::RackSlotParam::Gain), None);
+
+        let from = snapshot.authoring_values();
+        let mut base = from.clone();
+        let mut to = from.clone();
+        base.param_plocks.set(4, crate::sequencer::RackSlotParam::Pan, -0.25);
+        to.param_plocks.clear_step(255);
+        to.param_plocks.set(3, crate::sequencer::RackSlotParam::Mute, 1.0);
+        let rebased = crate::sequencer::RackSlotValuesSnapshot::rebase_edit(&base, &from, &to).unwrap();
+        assert_eq!(rebased.param_plocks.get(4, crate::sequencer::RackSlotParam::Pan), Some(-0.25));
+        assert_eq!(rebased.param_plocks.get(3, crate::sequencer::RackSlotParam::Mute), Some(1.0));
+        assert_eq!(rebased.param_plocks.get(255, crate::sequencer::RackSlotParam::Gain), None);
     }
 
     #[test]

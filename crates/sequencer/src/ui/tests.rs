@@ -13729,7 +13729,7 @@
                 mod_mode: Default::default(),
             }
         };
-        EffectDescriptor {
+        EffectDescriptor::new(sequencer::effects::EffectDescriptorData {
             name: sequencer::effects::filter_table::NAME.to_string(),
             params,
             tensor_params: Vec::new(),
@@ -13738,7 +13738,7 @@
             instrument_modulators: Vec::new(),
             declared_latency_samples: None,
             instrument_modulation_targets: vec![target(0, 1, 4, 3), target(1, 2, 6, 5)],
-        }
+        })
     }
 
     /// End of the eseq-dtx.13 chain, generalized in eseq-hpc: modulator-node

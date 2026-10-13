@@ -1667,7 +1667,7 @@ pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
     let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
         .into_iter()
-        .map(|desc| desc.name)
+        .map(|desc| desc.name.clone())
         .collect();
     names.sort();
     let items: Vec<Value> = filter_effect_names(names, &query_lower)

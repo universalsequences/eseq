@@ -701,7 +701,7 @@ mod tests {
             .expect("sampler speed listed");
         assert!(speed.detail.contains(" · "), "detail {:?}", speed.detail);
 
-        let filter_name = EffectDescriptor::builtin_filter().name;
+        let filter_name = EffectDescriptor::builtin_filter().name.clone();
         let fx = group(&words, &format!("FX 1 · {filter_name}"));
         let mode = format!("fx1:{filter_name}:mode");
         assert!(fx.items.iter().any(|item| item.word == mode), "{:?}", fx.items);
@@ -733,7 +733,7 @@ mod tests {
         let state = state_with_sampler_and_filter();
         let snapshot = state.latest_scheduler_snapshot();
         let words = build_track_param_words(&snapshot, &snapshot.tracks[0]);
-        let filter_name = EffectDescriptor::builtin_filter().name;
+        let filter_name = EffectDescriptor::builtin_filter().name.clone();
         let spec = |word: &str| words.num_spec(word).unwrap_or_else(|| panic!("no rails for {word}"));
         let rails = |spec: NumSpec| (spec.min, spec.max, spec.step, spec.decimals);
 
@@ -865,7 +865,7 @@ mod tests {
         let state = state_with_sampler_and_filter();
         let mut runtime = Runtime::new();
         register_param_word_source(&mut runtime, Arc::clone(&state));
-        let filter_name = EffectDescriptor::builtin_filter().name;
+        let filter_name = EffectDescriptor::builtin_filter().name.clone();
         let mode = format!("fx1:{filter_name}:mode");
         fn valid(runtime: &mut Runtime, word: &str) -> Value {
             runtime

@@ -40,6 +40,16 @@ pub struct SequencerStepSnapshot {
 
 impl SequencerStepSnapshot {
     pub(super) fn capture(state: &SequencerState, track: usize, step: usize) -> Self {
+        Self::capture_with_sends(state, track, step,
+            state.pattern.track_send_plocks[track].step_snapshot(step))
+    }
+
+    fn capture_with_sends(
+        state: &SequencerState,
+        track: usize,
+        step: usize,
+        track_send_plocks: Vec<TrackSendSnapshot>,
+    ) -> Self {
         let mut params = [0.0f32; NUM_PARAMS];
         for param in StepParam::ALL {
             params[param.index()] = state.pattern.step_data[track].get(step, param);
@@ -63,10 +73,7 @@ impl SequencerStepSnapshot {
             timebase_override: state.pattern.timebase_plocks[track].get(step),
             swing_override: state.pattern.swing_plocks[track].get(step),
             swing_resolution_override: state.pattern.swing_resolution_plocks[track].get(step),
-            track_send_plocks: state.pattern.track_send_plocks[track].snapshot()
-                .get(step)
-                .cloned()
-                .unwrap_or_default(),
+            track_send_plocks,
         }
     }
 }
@@ -484,8 +491,8 @@ fn capture_live_track(
             &instrument_descriptor,
         );
     let bar_transposes = state.pattern.bar_transposes[track].snapshot();
-    let steps = (0..MAX_STEPS)
-        .map(|step| SequencerStepSnapshot::capture(state, track, step))
+    let steps = state.pattern.track_send_plocks[track].snapshot().into_iter().enumerate()
+        .map(|(step, sends)| SequencerStepSnapshot::capture_with_sends(state, track, step, sends))
         .collect();
     let process_chain = compose_track_process_chain(
         project_process_chain,
@@ -749,6 +756,30 @@ fn track_pattern_bit(bits: [u64; super::data::TRACK_PATTERN_WORDS], step: usize)
     let bit = step % 64;
     bits.get(word)
         .is_some_and(|word_bits| (word_bits & (1u64 << bit)) != 0)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn track_and_step_capture_keep_send_rows_independent() {
+        let state = SequencerState::new(1, vec![]);
+        let sends = &state.pattern.track_send_plocks[0];
+        sends.set(0, BusId(3), 0.25);
+        sends.set(MAX_STEPS - 1, BusId(7), 0.75);
+        let snapshot = SequencerSnapshot::capture(&state);
+        assert_eq!(snapshot.tracks[0].steps.len(), MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            assert_eq!(snapshot.tracks[0].steps[step].track_send_plocks,
+                SequencerStepSnapshot::capture(&state, 0, step).track_send_plocks);
+        }
+        sends.clear_step(0);
+        sends.set(MAX_STEPS - 1, BusId(7), 0.5);
+        assert_eq!(snapshot.tracks[0].steps[0].track_send_plocks[0].amount, 0.25);
+        assert_eq!(snapshot.tracks[0].steps[MAX_STEPS - 1].track_send_plocks[0].amount, 0.75);
+        assert!(SequencerStepSnapshot::capture(&state, 0, 0).track_send_plocks.is_empty());
+    }
 }
 
 #[cfg(test)]
